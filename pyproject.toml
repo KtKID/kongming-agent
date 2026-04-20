@@ -1,0 +1,251 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kongming-agent"
+version = "0.1.0"
+description = "宿主无关、最小可运行、可继续扩展成通用 agent 的基础内核"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "kongming-agent contributors" }]
+keywords = ["agent", "llm", "openai-compatible", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "typing-extensions>=4.11",
+    "click>=8.1",
+    "prompt-toolkit>=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "import-linter>=2.0",
+]
+
+[project.scripts]
+kongming = "cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/kongming-agent/kongming-agent"
+Repository = "https://github.com/kongming-agent/kongming-agent"
+
+# ---------------------------------------------------------------------------
+# 构建（hatchling）
+# ---------------------------------------------------------------------------
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "src/core",
+    "src/tools",
+    "src/context",
+    "src/executors",
+    "src/host",
+    "src/cli",
+    "src/safety",
+    "src/observability",
+    "src/config_loader",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/core",
+    "src/tools",
+    "src/context",
+    "src/executors",
+    "src/host",
+    "src/cli",
+    "src/safety",
+    "src/observability",
+    "src/config_loader",
+    "config",
+    "README.md",
+    "pyproject.toml",
+]
+
+# ---------------------------------------------------------------------------
+# Ruff（lint + format）
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+    "other",
+    ".venv",
+    "dist",
+    "build",
+    ".kongming",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "E501",   # 行长度交给 formatter 处理
+    "RUF001", # ambiguous-unicode-character-string：中文标点在字符串里是正常的
+    "RUF002", # ambiguous-unicode-character-docstring：中文文档
+    "RUF003", # ambiguous-unicode-character-comment：中文注释
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B", "SIM"]
+"__init__.py" = ["F401", "RUF022"]
+# tool input_schema 是数据定义，RUF012 建议不适用
+"src/tools/base.py" = ["RUF012"]
+"src/tools/file_tools.py" = ["RUF012"]
+"src/tools/shell_tool.py" = ["RUF012", "SIM105"]
+# 其他风格级提示不是硬错误
+"src/core/runner.py" = ["SIM108"]
+"src/safety/chain.py" = ["SIM103"]
+"src/config_loader/models.py" = ["SIM103"]
+"src/context/session_store.py" = ["SIM108"]
+"src/executors/agent_runtime/native_runtime.py" = ["SIM108"]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "core",
+    "tools",
+    "context",
+    "executors",
+    "host",
+    "cli",
+    "safety",
+    "observability",
+    "config_loader",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+skip-magic-trailing-comma = false
+
+# ---------------------------------------------------------------------------
+# mypy
+# ---------------------------------------------------------------------------
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+strict = false
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unused_configs = true
+show_error_codes = true
+ignore_missing_imports = true
+exclude = [
+    "other/",
+    "build/",
+    "dist/",
+    ".venv/",
+    ".kongming/",
+]
+
+# core/ 是跨模块共享语言真源，先在这里开启严格模式。
+[[tool.mypy.overrides]]
+module = ["core.*"]
+strict = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+warn_return_any = true
+warn_unreachable = true
+
+# 测试目录不要求严格类型
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+ignore_errors = true
+
+# 第三方包类型
+[[tool.mypy.overrides]]
+module = [
+    "httpx.*",
+    "pydantic.*",
+    "yaml.*",
+    "click.*",
+    "prompt_toolkit.*",
+]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+markers = [
+    "unit: 单元测试（模块内部职责与边界）",
+    "e2e: 端到端测试（主调用链闭环）",
+    "contract: 契约一致性测试（同协议多实现）",
+    "smoke: 最小启动烟囱测试",
+    "slow: 需要较长时间或依赖外部服务",
+]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+# ---------------------------------------------------------------------------
+# coverage
+# ---------------------------------------------------------------------------
+
+[tool.coverage.run]
+branch = true
+source = [
+    "core",
+    "tools",
+    "context",
+    "executors",
+    "host",
+    "cli",
+    "safety",
+    "observability",
+]
+omit = [
+    "tests/*",
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]

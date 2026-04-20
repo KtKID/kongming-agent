@@ -1,0 +1,35 @@
+# 参考项目源码（用于借鉴，不纳入版本控制）
+other/
+
+# macOS
+.DS_Store
+
+# 工具产物
+.rtk/
+.serena/
+.kongming/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Env
+.env
+.env.local

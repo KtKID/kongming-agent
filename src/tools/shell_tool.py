@@ -1,0 +1,188 @@
+"""最小 shell builtin tool。
+
+:class:`ShellTool` 提供一个 "运行一条 shell 命令，拿回 stdout/stderr/exit code"
+的最小工具。使用 :func:`asyncio.create_subprocess_shell` 实现，不会阻塞
+async 主链路。
+
+安全边界（重要）：
+
+- 本模块**不**维护任何 command 黑名单 / 白名单。命令是否允许执行，全部
+  由上层 :mod:`safety.capability_policy` + :mod:`safety.permission_policy` +
+  :class:`core.contracts.ApprovalProvider` 串联决定。
+- 本模块**不 import** ``safety/`` 下任何内部 policy 组件（硬约束，
+  import-linter 会红）。
+- tool 层的设计原则是"能做的事尽量做对"，安全判断交给 safety 层。
+
+运行策略：
+
+- 默认超时 30 秒，可由参数 ``timeout`` 覆盖。超时后先 ``terminate``，仍不退出
+  再 ``kill``，并抛 :class:`TimeoutError`（被基类包成结构化失败）。
+- stdout 和 stderr 各自最多保留 8000 字节，超过时截断并标注 ``truncated=True``。
+- 默认工作目录来自当前进程；参数 ``cwd`` 可覆盖。
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from typing import Any
+
+from core.contracts import Tool, ToolContext
+from tools.base import BaseBuiltinTool
+
+# 默认参数统一收到这里，便于测试/调试时一眼看清。
+_DEFAULT_TIMEOUT_SECONDS = 30.0
+_MAX_STREAM_BYTES = 8000
+_TERMINATE_GRACE_SECONDS = 2.0
+
+
+class ShellTool(BaseBuiltinTool):
+    """在当前机器上执行一条 shell 命令。
+
+    参数：
+
+    - ``command`` (必填)：要执行的 shell 命令字符串，原样交给 ``/bin/sh -c``
+      （或平台等价物）。
+    - ``timeout`` (可选)：秒，默认 30；超时后 kill 并返回失败。
+    - ``cwd`` (可选)：工作目录；不存在时抛错。
+
+    返回 ``content`` 是一段简短的文本概览（方便模型阅读），``data`` 结构化字段：
+
+    - ``stdout``: str（可能被截断）
+    - ``stderr``: str（可能被截断）
+    - ``return_code``: int
+    - ``truncated``: bool
+    - ``command``: 原始 command 字符串
+    - ``cwd``: 实际使用的工作目录；未指定时为 ``None``
+    """
+
+    name = "run_shell"
+    description = (
+        "Execute a shell command via /bin/sh -c (or platform equivalent) "
+        "and return stdout/stderr/exit code."
+    )
+    input_schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": "Shell command string to execute.",
+            },
+            "timeout": {
+                "type": "number",
+                "description": "Timeout in seconds. Defaults to 30.",
+            },
+            "cwd": {
+                "type": "string",
+                "description": "Working directory for the command. Defaults to the caller's cwd.",
+            },
+        },
+        "required": ["command"],
+    }
+
+    async def _run(
+        self,
+        args: dict[str, Any],
+        ctx: ToolContext,
+    ) -> tuple[str, dict[str, Any] | None]:
+        command = args["command"]
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError("'command' must be a non-empty string")
+
+        timeout = args.get("timeout", _DEFAULT_TIMEOUT_SECONDS)
+        if not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise ValueError("'timeout' must be a positive number")
+
+        raw_cwd = args.get("cwd")
+        cwd_str: str | None = None
+        if raw_cwd is not None:
+            if not isinstance(raw_cwd, str) or not raw_cwd:
+                raise ValueError("'cwd' must be a non-empty string if provided")
+            cwd_path = Path(raw_cwd).expanduser().resolve()
+            if not cwd_path.exists():
+                raise FileNotFoundError(f"cwd not found: {cwd_path}")
+            if not cwd_path.is_dir():
+                raise NotADirectoryError(f"cwd is not a directory: {cwd_path}")
+            cwd_str = str(cwd_path)
+
+        process = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd_str,
+        )
+
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                process.communicate(),
+                timeout=timeout,
+            )
+        except TimeoutError as exc:
+            # 尽量优雅地收尾：先 terminate 给几秒缓冲，不行再 kill。
+            if process.returncode is None:
+                try:
+                    process.terminate()
+                    await asyncio.wait_for(
+                        process.wait(),
+                        timeout=_TERMINATE_GRACE_SECONDS,
+                    )
+                except TimeoutError:
+                    process.kill()
+                    try:
+                        await process.wait()
+                    except Exception:
+                        pass
+                except ProcessLookupError:
+                    pass
+            raise TimeoutError(
+                f"shell command timed out after {timeout} seconds: {command!r}"
+            ) from exc
+
+        stdout_text, stdout_truncated = _clip(stdout_bytes)
+        stderr_text, stderr_truncated = _clip(stderr_bytes)
+        truncated = stdout_truncated or stderr_truncated
+        return_code = int(process.returncode or 0)
+
+        data: dict[str, Any] = {
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+            "return_code": return_code,
+            "truncated": truncated,
+            "command": command,
+            "cwd": cwd_str,
+        }
+
+        summary_lines = [f"exit={return_code}"]
+        if stdout_text:
+            summary_lines.append(f"stdout:\n{stdout_text}")
+        if stderr_text:
+            summary_lines.append(f"stderr:\n{stderr_text}")
+        if truncated:
+            summary_lines.append(f"[truncated to {_MAX_STREAM_BYTES} bytes per stream]")
+        return "\n".join(summary_lines), data
+
+
+def _clip(raw: bytes) -> tuple[str, bool]:
+    """把一段 bytes 截断到 :data:`_MAX_STREAM_BYTES`，返回 (文本, 是否截断)。"""
+    truncated = len(raw) > _MAX_STREAM_BYTES
+    payload = raw[:_MAX_STREAM_BYTES] if truncated else raw
+    return payload.decode("utf-8", errors="replace"), truncated
+
+
+def build_shell_tool(enabled: bool = True) -> list[Tool]:
+    """构造 v1-mini 第一版 shell 工具集。
+
+    Args:
+        enabled: ``False`` 时返回空列表，对应 ``config.tool.shell.enabled = false``。
+
+    Returns:
+        只包含一个 :class:`ShellTool` 实例的列表；保留列表形状是为了后续
+        扩展（例如补一个 ``BashOutputTool`` / ``BashKillTool`` 之类）时
+        调用方签名不用改。
+    """
+    if not enabled:
+        return []
+    return [ShellTool()]
+
+
+__all__ = ["ShellTool", "build_shell_tool"]

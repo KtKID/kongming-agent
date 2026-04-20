@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-test:
+    name: fmt + lint + typecheck + unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (uv sync --all-extras)
+        run: uv sync --all-extras
+
+      - name: Format check (ruff format --check)
+        run: make fmt-check
+
+      - name: Lint (ruff check + import-linter)
+        run: make lint
+
+      - name: Typecheck (mypy)
+        run: make typecheck
+
+      - name: Unit tests
+        run: make test-unit
+
+# 注意：e2e 测试需要本地 OpenAI-compatible 模型服务（http://127.0.0.1:1234 +
+# gemma-4-e4b-it），CI 默认不提供，因此此处不跑。若后续引入 stub/mock provider
+# 覆盖的 e2e，可以再拆一个 e2e-stub 的 job 进来。

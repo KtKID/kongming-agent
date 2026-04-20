@@ -1,0 +1,221 @@
+"""JSONL trace sink —— v1-mini 唯一的 :class:`core.contracts.EventSink` 实现。
+
+设计要点（对齐 ``docs/kongming-agent-v1-minimal/10-contracts.md``
+"Observability / EventSink 边界"）：
+
+- :class:`JsonlTraceSink` **不是**一个新的 Protocol，而是
+  :class:`core.contracts.EventSink` Protocol 的具体实现类。
+  全部事件 kind（``run.start`` / ``turn.*`` / ``llm.*`` / ``tool.call.*`` /
+  ``approval.*`` / ``error`` / …）都写进同一份 JSONL。
+- fan-out 是 runner 的职责（runner 持有 ``list[EventSink]``）；
+  本文件的 sink 实现不负责把事件再分发给别的 sink。
+- v0.2+ 追加的 ``UsageSink`` / ``AuditSink`` 是**并列注册**的兄弟实现，
+  不替换 :class:`JsonlTraceSink`，也不新增事件协议。
+
+运行时契约：
+
+- 全链路 async：:meth:`JsonlTraceSink.emit` 是 ``async``。
+- 每次 ``emit`` 是一次独立的 ``open / append / flush / close``，
+  避免长期持有 FD 在崩溃时丢事件。文件写入用 :func:`asyncio.to_thread`
+  放到线程池，以免阻塞事件循环。
+- 并发写入用 :class:`asyncio.Lock` 串行化，防止多协程交错写出半行 JSON。
+- 序列化走 :func:`json.dumps`，``ensure_ascii=False`` 保中文可读；
+  对 :class:`~pathlib.Path` / :class:`~datetime.datetime` / dataclass 等
+  默认不可 JSON 序列化的值，用 :func:`_json_default` 做降级转换，
+  保证任何 :class:`~core.contracts.Event` 都能落盘成一行合法 JSON。
+
+零外部依赖：只用 stdlib（``asyncio`` / ``json`` / ``pathlib`` /
+``dataclasses`` / ``datetime``）。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+import json
+from datetime import date, datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # 仅用于类型标注；运行时不强制存在，避免触发循环 import。
+    # ``JsonlTraceSink`` 通过鸭子类型实现 EventSink Protocol，
+    # 不继承、不在本文件重定义该 Protocol。
+    from config_loader.models import Config
+    from core.contracts import Event
+
+
+class JsonlTraceSink:
+    """Write every :class:`~core.contracts.Event` as one JSON line.
+
+    首版是 v1 唯一的 :class:`~core.contracts.EventSink` 实现。所有事件 kind
+    都写进同一份 append-only JSONL，作为 v0.2+ usage / audit 派生能力的上游
+    事实源。
+
+    本类通过**鸭子类型**实现 ``EventSink`` Protocol：只保证存在
+    ``async def emit(event) -> None``，不继承也不在本模块重新定义该 Protocol。
+
+    Attributes:
+        output_path: JSONL 落盘路径。父目录会在首次 ``emit`` 时按需创建。
+        auto_flush: 每次写入后是否立即 ``flush``。默认 ``True``，牺牲少量吞吐
+            换取崩溃场景下最小丢行窗口。
+    """
+
+    def __init__(
+        self,
+        output_path: str | Path,
+        *,
+        auto_flush: bool = True,
+    ) -> None:
+        self._output_path = Path(output_path)
+        self._auto_flush = auto_flush
+        # 串行化文件写入，避免多协程交错写出半行 JSON。
+        self._lock = asyncio.Lock()
+        # lazy init：父目录与空文件在首次 emit 时创建，
+        # 构造函数只做参数登记，不做任何 I/O。
+        self._init_done = False
+
+    @property
+    def output_path(self) -> Path:
+        """当前 sink 的 JSONL 路径（只读）。"""
+        return self._output_path
+
+    # ------------------------------------------------------------------
+    # EventSink Protocol 实现
+    # ------------------------------------------------------------------
+
+    async def emit(self, event: Event) -> None:
+        """把一条事件写成一行 JSON 追加到 ``output_path``。
+
+        失败策略：本方法内部不吞异常。runner 在 fan-out 层
+        （``core/runner.py`` ``_emit``）已经做了"sink 异常不污染主链路"的兜底，
+        所以这里允许抛出 ``OSError`` / ``TypeError`` 等，让 runner 统一处理。
+        """
+        await self._ensure_init()
+        line = self._serialize(event)
+        async with self._lock:
+            await asyncio.to_thread(self._append_line_sync, line)
+
+    async def close(self) -> None:
+        """Placeholder：当前实现每次 ``emit`` 独立开关文件，无需 close。
+
+        保留此方法是为了未来切换到"长期持有 FD + 批量 flush"模式时，
+        调用方（host / native_runtime / tests）可以统一调用，不必改接线。
+        """
+        return None
+
+    # ------------------------------------------------------------------
+    # 内部工具
+    # ------------------------------------------------------------------
+
+    async def _ensure_init(self) -> None:
+        """首次 emit 时在磁盘上创建父目录和空文件（double-check + lock）。"""
+        if self._init_done:
+            return
+        async with self._lock:
+            if self._init_done:
+                return
+            await asyncio.to_thread(self._init_sync)
+            self._init_done = True
+
+    def _init_sync(self) -> None:
+        """真正的文件系统初始化，在线程池里跑以免阻塞事件循环。"""
+        self._output_path.parent.mkdir(parents=True, exist_ok=True)
+        self._output_path.touch(exist_ok=True)
+
+    def _append_line_sync(self, line: str) -> None:
+        """在线程池里以 append 模式写一行 JSON。"""
+        with self._output_path.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+            if self._auto_flush:
+                f.flush()
+
+    def _serialize(self, event: Event) -> str:
+        """把 :class:`~core.contracts.Event` 转成单行 JSON 字符串。
+
+        - 优先 :func:`dataclasses.asdict` 把 Event 及其嵌套 dataclass 展开；
+          如果传入的 event 不是 dataclass（比如测试用自定义对象），
+          退化到读取公共字段。
+        - :func:`json.dumps` 走 ``ensure_ascii=False`` 保留中文；
+          非默认可序列化的值通过 :func:`_json_default` 降级。
+        """
+        payload = _event_to_dict(event)
+        return json.dumps(payload, ensure_ascii=False, default=_json_default)
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+
+def build_jsonl_trace_sink(config: Config) -> JsonlTraceSink:
+    """按统一配置构造 :class:`JsonlTraceSink`。
+
+    只读 :attr:`config.trace.output_path`，不读环境变量、不碰其它配置项。
+    装配层（``native_runtime.build``）负责把返回的 sink 注册进 runner 的
+    ``list[EventSink]``；本函数本身不做注册。
+    """
+    return JsonlTraceSink(config.trace.output_path)
+
+
+# ---------------------------------------------------------------------------
+# 序列化辅助
+# ---------------------------------------------------------------------------
+
+
+def _event_to_dict(event: Any) -> dict[str, Any]:
+    """把 Event 对象转成 JSON-safe dict。
+
+    三档兜底：
+
+    1. dataclass → :func:`dataclasses.asdict`
+    2. 有 ``__dict__`` 的普通对象 → 取实例字典
+    3. 其它情况 → 按 Event Protocol 已知字段（kind / run_id / turn /
+       payload / timestamp_ms）逐一 ``getattr``
+
+    这里刻意**不**假设一定是 ``core.contracts.Event``，以便单元测试传轻量
+    替身对象时也能落盘。
+    """
+    if dataclasses.is_dataclass(event) and not isinstance(event, type):
+        return dataclasses.asdict(event)
+    if hasattr(event, "__dict__"):
+        # 过滤掉私有字段（下划线开头），避免把实现细节写进 trace。
+        return {k: v for k, v in vars(event).items() if not k.startswith("_")}
+    return {
+        "kind": getattr(event, "kind", None),
+        "run_id": getattr(event, "run_id", None),
+        "turn": getattr(event, "turn", None),
+        "payload": getattr(event, "payload", {}),
+        "timestamp_ms": getattr(event, "timestamp_ms", None),
+    }
+
+
+def _json_default(o: Any) -> Any:
+    """:func:`json.dumps` 的兜底序列化器。
+
+    负责把 dataclass / :class:`~pathlib.Path` / :class:`~datetime.datetime` /
+    :class:`~datetime.date` / ``set`` / ``bytes`` 等常见非 JSON 原生类型降级成
+    可序列化值；无法识别的类型降级成 ``repr(o)``，保证 ``emit`` 永远不会因为
+    payload 里冒出一个奇怪对象而抛 :class:`TypeError`。
+    """
+    if dataclasses.is_dataclass(o) and not isinstance(o, type):
+        return dataclasses.asdict(o)
+    if isinstance(o, Path):
+        return str(o)
+    if isinstance(o, (datetime, date)):
+        return o.isoformat()
+    if isinstance(o, set):
+        return sorted(o, key=repr)
+    if isinstance(o, (bytes, bytearray)):
+        try:
+            return o.decode("utf-8")
+        except UnicodeDecodeError:
+            return o.hex()
+    # 最后的降级：用 repr，不抛异常。
+    return repr(o)
+
+
+__all__ = [
+    "JsonlTraceSink",
+    "build_jsonl_trace_sink",
+]

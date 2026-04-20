@@ -1,0 +1,85 @@
+; import-linter 配置
+;
+; 参考：docs/kongming-agent-v1-minimal/10-contracts.md
+;
+; 依赖方向的核心要求：
+;   - 所有模块都可以 import `core`
+;   - `core` 不允许 import 任何 sibling 模块
+;   - 跨模块共享协议只能来自 `core/contracts.py`
+;   - Tool Runtime 不直接 import safety 内部 policy，由运行时装配层组装
+
+[importlinter]
+root_packages =
+    core
+    tools
+    context
+    executors
+    host
+    cli
+    safety
+    observability
+    config_loader
+source_paths = src
+include_external_packages = True
+
+; ---------------------------------------------------------------------------
+; Contract 1: core 不允许反向依赖任何 sibling 模块
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:core-no-sibling-imports]
+name = core must not import sibling modules
+type = forbidden
+source_modules =
+    core
+forbidden_modules =
+    tools
+    context
+    executors
+    host
+    cli
+    safety
+    observability
+
+; Contract 2（"context 不允许重定义 Session Protocol"）由 pytest 架构合约测试
+; 实现，见 tests/unit/test_arch_contracts.py::test_context_does_not_define_session_protocol
+; 原因：import-linter 的 forbidden_modules 不支持 "symbol 级" 禁止
+; （typing_extensions.Protocol 是符号，不是子包）。
+
+; ---------------------------------------------------------------------------
+; Contract 3: 整体分层依赖方向
+;   core < (tools / context / executors / observability) < safety < host < cli
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:layered-dependency-direction]
+name = kongming-agent layered dependency direction
+type = layers
+layers =
+    cli
+    host
+    safety
+    tools | context | executors | observability
+    config_loader
+    core
+containers =
+; Exception: 运行时装配层 ``executors/agent_runtime/native_runtime.py`` 跨层
+; 引用 ``safety`` / ``context`` 是 v1-mini 的刻意设计——Safety Baseline 和
+; HistoryCompactor 默认装配都由它承担（详见 docs/kongming-agent-v1-minimal/
+; 10-contracts.md "Native Runtime 边界"）。仅放行真实存在的这两条 import；
+; 其他任何跨层 import 仍被合约阻止。
+ignore_imports =
+    executors.agent_runtime.native_runtime -> safety
+    executors.agent_runtime.native_runtime -> context
+
+; ---------------------------------------------------------------------------
+; Contract 4: tools 不允许直接 import safety 内部 policy
+;             Tool Runtime 只消费装配层串好的高层判定结果
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:tools-no-direct-safety-policy]
+name = tools must not import safety internal policies directly
+type = forbidden
+source_modules =
+    tools
+forbidden_modules =
+    safety.capability_policy
+    safety.permission_policy
