@@ -42,6 +42,12 @@ uv sync --all-extras
 
 首次会自动下载 Python 3.11、34 个包，几十秒完成。
 
+也可以直接用统一入口脚本：
+
+```bash
+./start.sh install
+```
+
 ### 2. 启动本地模型服务（任选其一）
 
 CLI 默认连 `http://127.0.0.1:1234`，模型名 `gemma-4-e4b-it`。
@@ -94,6 +100,14 @@ kongming >
 
 按 `Ctrl+D` 退出；`Ctrl+C` 中断当前输入。
 
+统一入口写法：
+
+```bash
+./start.sh cli
+./start.sh cli --verbose
+./start.sh cli-file-session --session-id demo
+```
+
 ### 5. 看到中间发生了什么
 
 ```bash
@@ -102,7 +116,25 @@ uv run python -m cli.main --verbose
 
 每轮都会打 `turn.start` / `tool.call.start` / `approval.decision` / `llm.response` 等事件进度，排障友好。
 
-### 6. 换模型 / 换后端
+### 6. 密钥管理（.env）
+
+**远端模型的 API key 绝不写进 `config/default.yaml`**——那样会 commit 进 Git。
+项目用 `python-dotenv` 自动读取项目根的 `.env`：
+
+```bash
+cp .env.example .env
+# 编辑 .env 填入真实 key：
+#   KONGMING_MODEL_API_KEY=sk-your-real-key
+```
+
+`.env` 已被 `.gitignore` 排除，不会进仓库。`load_config()` 在读 YAML 前会先
+`load_dotenv()` 把 `.env` 注入 `os.environ`，再走 `KONGMING_*` 覆盖链接入
+Config——所以填进 `.env` 的变量和直接 `export` 同效。
+
+生产/CI 部署不需要 `.env` 文件，直接从 secret store 注入 env 变量即可（真实
+env 优先于 `.env`，`.env` 永远不覆盖已设值）。
+
+### 7. 换模型 / 换后端
 
 **不改 YAML，用环境变量覆盖**（16 个统一配置项，见 `config/README.md`）：
 
@@ -178,17 +210,34 @@ KONGMING_TOOL_FILE_ENABLED=false uv run python -m cli.main
 也可以用 `make` 入口：
 
 ```bash
-make install      # uv sync --all-extras
-make cli          # 启动 CLI（本地模型基线）
-make smoke        # 冒烟验证
-make fmt          # ruff format
-make lint         # ruff check + lint-imports（架构边界）
-make typecheck    # mypy
-make test-unit    # 98 个单元测试
-make test-e2e     # 40 个 e2e（含 1 个 opt-in 真模型用例，默认 skip）
-make test         # unit + e2e 都跑
-make clean        # 清缓存
+make install        # uv sync --all-extras
+make install-hooks  # 启用 pre-commit（首次 clone 后跑一次，commit 前自动软编译）
+make cli            # 启动 CLI（本地模型基线）
+make smoke          # 冒烟验证
+make fmt            # ruff format
+make lint           # ruff check + lint-imports（架构边界）
+make typecheck      # mypy
+make precommit      # 手动跑一次 pre-commit 全仓扫描
+make test-unit      # 98 个单元测试
+make test-e2e       # 40 个 e2e（含 1 个 opt-in 真模型用例，默认 skip）
+make test           # unit + e2e 都跑
+make clean          # 清缓存
 ```
+
+也可以用统一入口脚本：
+
+```bash
+./start.sh help
+./start.sh lint
+./start.sh typecheck
+./start.sh test-unit
+./start.sh test-e2e
+./start.sh smoke
+```
+
+> **软编译门槛**：`make install-hooks` 启用后，每次 `git commit` 前会自动跑
+> `ruff check --fix` + `ruff format` + `lint-imports` + `mypy src` + `pytest tests/unit`。
+> 不通过直接拒签。紧急情况用 `git commit --no-verify` 绕开，但不建议成为习惯。
 
 ### 验证当前仓库健康状态
 
@@ -205,6 +254,27 @@ make install && make lint && make typecheck && make test
 ```bash
 KONGMING_E2E_REAL_MODEL=1 uv run pytest tests/e2e/test_local_model_config.py::test_local_model_real_request_roundtrip -v
 ```
+
+### 看 LLM provider 原始 request / response 全貌
+
+开 env 开关后，每次 provider 调用会在 `.kongming/debug/raw-llm-<timestamp>.json`
+落下一份完整 JSON —— 含 request payload、request headers（Authorization 脱敏）、
+response status、response headers、**完整 response body**（gzip 自动解压、结构化）。
+
+```bash
+# 跑 CLI 时开启
+KONGMING_TRACE_RAW_LLM=1 uv run python -m cli.main
+
+# 看最近一次调用的完整响应
+ls -t .kongming/debug/raw-llm-*.json | head -1 | xargs jq '.response.body'
+
+# 看 tool_calls 的原始格式（id / arguments / function）
+ls -t .kongming/debug/raw-llm-*.json | head -1 \
+  | xargs jq '.response.body.choices[0].message.tool_calls'
+```
+
+默认关；不开不落盘（对生产 / 隐私友好）。**Authorization header 始终脱敏**，
+即便 dump 文件被意外 share 也不会泄 API key。
 
 ---
 

@@ -1,0 +1,55 @@
+# pre-commit hooks —— 在每次 `git commit` 前强制跑软编译。
+#
+# 启用：一次性跑 `make install-hooks`（或 `uv run pre-commit install`）。
+# 手工全仓扫描：`make precommit`（或 `uv run pre-commit run --all-files`）。
+# 临时跳过（仅紧急情况）：`git commit --no-verify`。
+#
+# 设计：
+# - ruff 用官方 pre-commit repo（独立隔离 venv，速度快）
+# - lint-imports / mypy / pytest-unit 必须看项目完整依赖闭包，用 local hook
+#   通过 `uv run` 调用，统一复用 .venv
+# - e2e 不进 pre-commit（含 opt-in 真模型测试，慢且环境依赖高）—— 留 CI 跑
+
+default_language_version:
+  python: python3.11
+
+repos:
+  # ---------------------------------------------------------------------------
+  # ruff —— lint + format（自动修 9 类常见问题）
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.11
+    hooks:
+      - id: ruff
+        name: ruff check --fix
+        args: [--fix]
+      - id: ruff-format
+        name: ruff format
+
+  # ---------------------------------------------------------------------------
+  # local hooks —— 依赖项目 .venv（通过 uv run 调度）
+  # ---------------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: lint-imports
+        name: lint-imports (架构边界合约)
+        entry: uv run lint-imports --config .importlinter
+        language: system
+        pass_filenames: false
+        # 合约基于包级依赖图，任何 .py 改动都可能影响图
+        files: \.py$
+
+      - id: mypy
+        name: mypy (类型检查)
+        entry: uv run mypy src
+        language: system
+        pass_filenames: false
+        files: ^src/.*\.py$
+
+      - id: pytest-unit
+        name: pytest tests/unit (单元测试)
+        entry: uv run pytest tests/unit -q
+        language: system
+        pass_filenames: false
+        # 任何 src/ 或 tests/unit/ 改动都需要跑
+        files: ^(src|tests/unit)/.*\.py$

@@ -26,6 +26,7 @@ dependencies = [
     "typing-extensions>=4.11",
     "click>=8.1",
     "prompt-toolkit>=3.0",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -36,6 +37,7 @@ dev = [
     "ruff>=0.5",
     "mypy>=1.10",
     "import-linter>=2.0",
+    "pre-commit>=3.7",
 ]
 
 [project.scripts]

@@ -69,6 +69,7 @@ containers =
 ignore_imports =
     executors.agent_runtime.native_runtime -> safety
     executors.agent_runtime.native_runtime -> context
+    executors.agent_runtime.native_runtime -> context.history_compactor
 
 ; ---------------------------------------------------------------------------
 ; Contract 4: tools 不允许直接 import safety 内部 policy

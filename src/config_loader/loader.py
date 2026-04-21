@@ -4,7 +4,7 @@
 
 1. 若 ``path`` 参数显式传入，使用该路径。
 2. 否则若环境变量 ``KONGMING_CONFIG`` 存在，使用它。
-3. 否则使用仓库内的 ``config/default.yaml``（相对 :data:`_REPO_ROOT`）。
+3. 否则使用仓库内的 ``config/setting.yaml``（相对 :data:`_REPO_ROOT`）。
 
 读完 YAML 之后，用 ``KONGMING_<SECTION>_<FIELD>``（全大写）格式的环境变量覆
 盖单字段。例如：
@@ -35,9 +35,9 @@ from pydantic import ValidationError
 from config_loader.errors import ConfigLoadError, ConfigValidationError
 from config_loader.models import Config
 
-# 仓库根。config_loader/loader.py → config_loader/ → <repo root>。
-_REPO_ROOT: Path = Path(__file__).resolve().parent.parent
-_DEFAULT_CONFIG_PATH: Path = _REPO_ROOT / "config" / "default.yaml"
+# 仓库根。src/config_loader/loader.py → src/config_loader/ → src/ → <repo root>。
+_REPO_ROOT: Path = Path(__file__).resolve().parents[2]
+_DEFAULT_CONFIG_PATH: Path = _REPO_ROOT / "config" / "setting.yaml"
 
 # 环境变量前缀。任何以 ``KONGMING_`` 开头、且按 ``_`` 切分后能落到有效 section
 # path 的变量都会参与覆盖。
@@ -59,13 +59,30 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("runner", "max_turns"),
     ("session", "backend"),
     ("session", "store_path"),
+    ("session", "file_store_path"),
     ("trace", "output_path"),
+    ("trace", "auto_flush"),
+    ("trace", "raw_llm"),
     ("logging", "level"),
     ("host", "kind"),
     ("approval", "mode"),
     ("tool", "shell", "enabled"),
+    ("tool", "shell", "timeout_seconds"),
+    ("tool", "shell", "max_stream_bytes"),
+    ("tool", "shell", "terminate_grace_seconds"),
     ("tool", "file", "enabled"),
+    ("tool", "file", "read_max_bytes"),
+    ("compactor", "max_messages"),
+    ("compactor", "keep_recent"),
+    ("compactor", "keep_system"),
+    ("compactor", "tool_result_max_chars"),
+    ("retry", "max_retries"),
+    ("retry", "retry_backoff"),
 )
+
+# per-module YAML 文件名 → 合并到 Config 的顶层 key。
+# 所有配置已合并到 setting.yaml，per-module 文件不再使用。保留空 map 以兼容旧路径。
+_MODULE_YAML_MAP: dict[str, str] = {}
 
 
 def _resolve_config_path(explicit: str | Path | None) -> Path:
@@ -138,12 +155,84 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-def load_config(path: str | Path | None = None) -> Config:
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """递归合并两个 dict，override 值覆盖 base。
+
+    仅处理 dict-in-dict 嵌套；遇到 list / 标量直接替换。
+    返回新 dict，不就地修改入参。
+    """
+    result = dict(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _load_module_yamls(config_dir: Path, data: dict[str, Any]) -> dict[str, Any]:
+    """扫描 config_dir 下的 per-module YAML 文件并合并到 data。
+
+    只加载 :data:`_MODULE_YAML_MAP` 中列出的已知文件；其它文件不碰。
+    文件不存在时静默跳过（per-module 文件是可选的）。
+    """
+    merged = dict(data)
+    for filename, top_key in _MODULE_YAML_MAP.items():
+        module_path = config_dir / filename
+        if not module_path.exists():
+            continue
+        module_data = _load_yaml(module_path)
+        if not module_data:
+            continue
+        # 模块文件可能顶层就是目标 dict，也可能包了一层与 top_key 同名的 key。
+        # 如果顶层有 top_key，取其子 dict；否则整个 module_data 视为目标。
+        section = module_data.get(top_key, module_data)
+        if not isinstance(section, dict):
+            continue
+        existing = merged.get(top_key, {})
+        if not isinstance(existing, dict):
+            existing = {}
+        merged[top_key] = _deep_merge(existing, section)
+    return merged
+
+
+def _maybe_load_env_file() -> None:
+    """尝试加载项目根的 ``.env`` 文件到 ``os.environ``。
+
+    这一层的存在是为了把敏感配置（如 API key）从 YAML 代码库剥离——开发者把
+    真实值写进本地 ``.env``（gitignored），运行时由 :mod:`python-dotenv` 注入
+    进程环境变量，再走已有的 ``KONGMING_*`` env 覆盖链接入 Config。
+
+    语义：
+
+    - ``.env`` 不存在 → 静默跳过
+    - ``python-dotenv`` 未安装 → 静默跳过（不应发生；它是 runtime dep）
+    - **不覆盖**已设置的 env 变量（``override=False``）—— 真实 env 优先于 .env，
+      让 CI / 容器部署可以用 env 覆盖 .env 而无需删文件
+
+    .env 搜索路径由 :func:`dotenv.load_dotenv` 默认逻辑决定：cwd 及其祖先目录。
+    这样无论从仓库根还是子目录启动都能找到。
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(override=False)
+
+
+def load_config(
+    path: str | Path | None = None,
+    *,
+    load_env_file: bool = True,
+) -> Config:
     """加载并校验整体配置。
 
     Args:
         path: 显式配置文件路径；为 ``None`` 时走 ``KONGMING_CONFIG`` 环境变量，
-            再 fallback 到仓库内 ``config/default.yaml``。
+            再 fallback 到仓库内 ``config/setting.yaml``。
+        load_env_file: 是否在加载配置前先把项目根 ``.env`` 注入进程环境变量。
+            默认 ``True``——生产体验优先。测试想断言"纯 yaml 默认值"行为时
+            显式传 ``False`` 可关闭。
 
     Returns:
         校验通过的 :class:`Config` 实例。
@@ -152,9 +241,15 @@ def load_config(path: str | Path | None = None) -> Config:
         ConfigLoadError: 路径不存在、无法读取、YAML 解析失败。
         ConfigValidationError: 字段类型 / 约束 / 跨字段规则不满足。
     """
+    if load_env_file:
+        _maybe_load_env_file()
+
     resolved = _resolve_config_path(path)
     raw_data = _load_yaml(resolved)
-    merged = _apply_env_overrides(raw_data)
+    # 加载 per-module YAML 文件（context.yaml / tools.yaml / llm.yaml / observability.yaml）
+    config_dir = resolved.parent
+    with_modules = _load_module_yamls(config_dir, raw_data)
+    merged = _apply_env_overrides(with_modules)
 
     try:
         return Config.model_validate(merged)

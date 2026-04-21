@@ -17,18 +17,22 @@
 
 from __future__ import annotations
 
+from context.file_session import FileSession
 from context.history_compactor import CompactorConfig, HistoryCompactor
 from context.input_assembler import AssembledInput, InputAssembler
 from context.instruction_loader import InstructionLoader, InstructionSource
+from context.session_bootstrap import SessionBootstrap
 from context.session_store import SQLiteSession, build_session
 
 __all__ = [
     "AssembledInput",
     "CompactorConfig",
+    "FileSession",
     "HistoryCompactor",
     "InputAssembler",
     "InstructionLoader",
     "InstructionSource",
+    "SessionBootstrap",
     "SQLiteSession",
     "build_session",
 ]

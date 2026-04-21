@@ -7,4 +7,4 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-uv run python -m cli.main --config config/local-model.yaml "$@"
+uv run python -m cli.main --config config/setting.yaml "$@"

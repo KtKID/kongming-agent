@@ -21,11 +21,13 @@ from config_loader.errors import ConfigLoadError, ConfigValidationError
 from config_loader.loader import load_config
 from config_loader.models import (
     ApprovalConfig,
+    CompactorConfig,
     Config,
     FileToolConfig,
     HostConfig,
     LoggingConfig,
     ModelConfig,
+    RetryConfig,
     RunnerConfig,
     SessionConfig,
     ShellToolConfig,
@@ -35,6 +37,7 @@ from config_loader.models import (
 
 __all__ = [
     "ApprovalConfig",
+    "CompactorConfig",
     "Config",
     "ConfigLoadError",
     "ConfigValidationError",
@@ -42,6 +45,7 @@ __all__ = [
     "HostConfig",
     "LoggingConfig",
     "ModelConfig",
+    "RetryConfig",
     "RunnerConfig",
     "SessionConfig",
     "ShellToolConfig",

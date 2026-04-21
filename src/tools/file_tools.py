@@ -39,7 +39,7 @@ class ReadFileTool(BaseBuiltinTool):
     参数：
 
     - ``path`` (必填)：要读取的文件路径；会被 :meth:`Path.resolve` 解析成绝对路径。
-    - ``max_bytes`` (可选)：读取上限，默认 64KiB；超过则截断并在返回文本里注明。
+    - ``max_bytes`` (可选)：读取上限，默认取构造参数 ``default_max_bytes``；超过则截断。
 
     返回 ``content`` 是文件文本本体；``data`` 结构化字段包含：
 
@@ -66,6 +66,9 @@ class ReadFileTool(BaseBuiltinTool):
         "required": ["path"],
     }
 
+    def __init__(self, *, default_max_bytes: int = _DEFAULT_READ_MAX_BYTES) -> None:
+        self._default_max_bytes = default_max_bytes
+
     async def _run(
         self,
         args: dict[str, Any],
@@ -75,7 +78,7 @@ class ReadFileTool(BaseBuiltinTool):
         if not isinstance(raw_path, str) or not raw_path:
             raise ValueError("'path' must be a non-empty string")
 
-        max_bytes = args.get("max_bytes", _DEFAULT_READ_MAX_BYTES)
+        max_bytes = args.get("max_bytes", self._default_max_bytes)
         if not isinstance(max_bytes, int) or max_bytes <= 0:
             raise ValueError("'max_bytes' must be a positive integer if provided")
 
@@ -248,18 +251,23 @@ class ListDirTool(BaseBuiltinTool):
         return content_text, data
 
 
-def build_file_tools(enabled: bool = True) -> list[Tool]:
+def build_file_tools(
+    enabled: bool = True,
+    *,
+    read_max_bytes: int = _DEFAULT_READ_MAX_BYTES,
+) -> list[Tool]:
     """构造 v1-mini 第一批文件工具。
 
     Args:
         enabled: ``False`` 时返回空列表，对应 ``config.tool.file.enabled = false``。
+        read_max_bytes: ReadFileTool 默认读取上限字节数。
 
     Returns:
         可以直接塞进 :class:`tools.registry.ToolRegistry` 的工具列表。
     """
     if not enabled:
         return []
-    return [ReadFileTool(), WriteFileTool(), ListDirTool()]
+    return [ReadFileTool(default_max_bytes=read_max_bytes), WriteFileTool(), ListDirTool()]
 
 
 __all__ = [

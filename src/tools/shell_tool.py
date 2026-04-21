@@ -43,7 +43,7 @@ class ShellTool(BaseBuiltinTool):
 
     - ``command`` (必填)：要执行的 shell 命令字符串，原样交给 ``/bin/sh -c``
       （或平台等价物）。
-    - ``timeout`` (可选)：秒，默认 30；超时后 kill 并返回失败。
+    - ``timeout`` (可选)：秒，默认取构造参数 ``default_timeout``；超时后 kill 并返回失败。
     - ``cwd`` (可选)：工作目录；不存在时抛错。
 
     返回 ``content`` 是一段简短的文本概览（方便模型阅读），``data`` 结构化字段：
@@ -80,6 +80,17 @@ class ShellTool(BaseBuiltinTool):
         "required": ["command"],
     }
 
+    def __init__(
+        self,
+        *,
+        default_timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+        max_stream_bytes: int = _MAX_STREAM_BYTES,
+        terminate_grace_seconds: float = _TERMINATE_GRACE_SECONDS,
+    ) -> None:
+        self._default_timeout = default_timeout
+        self._max_stream_bytes = max_stream_bytes
+        self._terminate_grace_seconds = terminate_grace_seconds
+
     async def _run(
         self,
         args: dict[str, Any],
@@ -89,7 +100,7 @@ class ShellTool(BaseBuiltinTool):
         if not isinstance(command, str) or not command.strip():
             raise ValueError("'command' must be a non-empty string")
 
-        timeout = args.get("timeout", _DEFAULT_TIMEOUT_SECONDS)
+        timeout = args.get("timeout", self._default_timeout)
         if not isinstance(timeout, (int, float)) or timeout <= 0:
             raise ValueError("'timeout' must be a positive number")
 
@@ -124,7 +135,7 @@ class ShellTool(BaseBuiltinTool):
                     process.terminate()
                     await asyncio.wait_for(
                         process.wait(),
-                        timeout=_TERMINATE_GRACE_SECONDS,
+                        timeout=self._terminate_grace_seconds,
                     )
                 except TimeoutError:
                     process.kill()
@@ -138,8 +149,8 @@ class ShellTool(BaseBuiltinTool):
                 f"shell command timed out after {timeout} seconds: {command!r}"
             ) from exc
 
-        stdout_text, stdout_truncated = _clip(stdout_bytes)
-        stderr_text, stderr_truncated = _clip(stderr_bytes)
+        stdout_text, stdout_truncated = _clip(stdout_bytes, self._max_stream_bytes)
+        stderr_text, stderr_truncated = _clip(stderr_bytes, self._max_stream_bytes)
         truncated = stdout_truncated or stderr_truncated
         return_code = int(process.returncode or 0)
 
@@ -158,22 +169,31 @@ class ShellTool(BaseBuiltinTool):
         if stderr_text:
             summary_lines.append(f"stderr:\n{stderr_text}")
         if truncated:
-            summary_lines.append(f"[truncated to {_MAX_STREAM_BYTES} bytes per stream]")
+            summary_lines.append(f"[truncated to {self._max_stream_bytes} bytes per stream]")
         return "\n".join(summary_lines), data
 
 
-def _clip(raw: bytes) -> tuple[str, bool]:
-    """把一段 bytes 截断到 :data:`_MAX_STREAM_BYTES`，返回 (文本, 是否截断)。"""
-    truncated = len(raw) > _MAX_STREAM_BYTES
-    payload = raw[:_MAX_STREAM_BYTES] if truncated else raw
+def _clip(raw: bytes, max_bytes: int = _MAX_STREAM_BYTES) -> tuple[str, bool]:
+    """把一段 bytes 截断到 max_bytes，返回 (文本, 是否截断)。"""
+    truncated = len(raw) > max_bytes
+    payload = raw[:max_bytes] if truncated else raw
     return payload.decode("utf-8", errors="replace"), truncated
 
 
-def build_shell_tool(enabled: bool = True) -> list[Tool]:
+def build_shell_tool(
+    enabled: bool = True,
+    *,
+    default_timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    max_stream_bytes: int = _MAX_STREAM_BYTES,
+    terminate_grace_seconds: float = _TERMINATE_GRACE_SECONDS,
+) -> list[Tool]:
     """构造 v1-mini 第一版 shell 工具集。
 
     Args:
         enabled: ``False`` 时返回空列表，对应 ``config.tool.shell.enabled = false``。
+        default_timeout: 命令默认超时秒数。
+        max_stream_bytes: stdout/stderr 各自最多保留的字节数。
+        terminate_grace_seconds: 超时后 terminate 到 kill 之间的等待秒数。
 
     Returns:
         只包含一个 :class:`ShellTool` 实例的列表；保留列表形状是为了后续
@@ -182,7 +202,13 @@ def build_shell_tool(enabled: bool = True) -> list[Tool]:
     """
     if not enabled:
         return []
-    return [ShellTool()]
+    return [
+        ShellTool(
+            default_timeout=default_timeout,
+            max_stream_bytes=max_stream_bytes,
+            terminate_grace_seconds=terminate_grace_seconds,
+        )
+    ]
 
 
 __all__ = ["ShellTool", "build_shell_tool"]

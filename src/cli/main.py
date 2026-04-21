@@ -38,6 +38,13 @@ from host.session_bridge import SessionBridge
 from observability import JsonlTraceSink
 from tools import build_default_approval, build_default_registry
 
+_CLI_SESSION_ID_HEX_LEN = 12
+
+
+def _generate_cli_session_id() -> str:
+    """生成默认 CLI session id。"""
+    return f"cli-{uuid.uuid4().hex[:_CLI_SESSION_ID_HEX_LEN]}"
+
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option(
@@ -46,12 +53,12 @@ from tools import build_default_approval, build_default_registry
     "config_path",
     type=click.Path(dir_okay=False, path_type=Path),
     default=None,
-    help="配置文件路径（缺省走 KONGMING_CONFIG 环境变量或 config/default.yaml）",
+    help="配置文件路径（缺省走 KONGMING_CONFIG 环境变量或 config/setting.yaml）",
 )
 @click.option(
     "--session-id",
     default=None,
-    help="复用会话 ID（缺省随机生成一个 cli-<hex8>）",
+    help="复用会话 ID（缺省随机生成一个 cli-<hex12>）",
 )
 @click.option(
     "--verbose",
@@ -122,13 +129,17 @@ async def _run(
     # 的所有 sink，顺序不敏感。
     event_sinks: list[EventSink] = []
     if trace_enabled:
-        event_sinks.append(JsonlTraceSink(cfg.trace.output_path))
+        event_sinks.append(JsonlTraceSink(cfg.trace.output_path, auto_flush=cfg.trace.auto_flush))
     if verbose:
         event_sinks.append(CLIEventSink(verbose=True))
 
     registry = build_default_registry(
         file_enabled=cfg.tool.file.enabled,
         shell_enabled=cfg.tool.shell.enabled,
+        shell_timeout_seconds=cfg.tool.shell.timeout_seconds,
+        shell_max_stream_bytes=cfg.tool.shell.max_stream_bytes,
+        shell_terminate_grace_seconds=cfg.tool.shell.terminate_grace_seconds,
+        file_read_max_bytes=cfg.tool.file.read_max_bytes,
     )
     enabled_tool_names = registry.names()
 
@@ -139,12 +150,28 @@ async def _run(
 
     # instructions 装配：用 InstructionLoader 把 agent_spec 基础文本 + 外部文件
     # + KONGMING_EXTRA_INSTRUCTIONS 合成一段带来源标注的 system prompt。
-    instructions = await _assemble_instructions(instructions_files)
+    instructions, instruction_origins = await _assemble_instructions(instructions_files)
+
+    # session bootstrap：收集 CLI 阶段可得的稳定元数据，file backend 需要它。
+    import hashlib
+    import time
+
+    from context import SessionBootstrap
+
+    bootstrap = SessionBootstrap(
+        agent_name="kongming-agent",
+        model_name=cfg.model.name,
+        instruction_sources=instruction_origins,
+        instruction_text_hash=f"sha256:{hashlib.sha256(instructions.encode()).hexdigest()}",
+        created_at=time.time(),
+        cwd=str(Path.cwd()),
+        app_version=None,
+    )
 
     # session 工厂：按 cfg.session.backend 调 build_session()。memory 走
     # InMemorySession（进程内），sqlite 走 SQLiteSession（持久化、可跨进程恢复）。
     def _session_factory(sid: str):  # type: ignore[no-untyped-def]
-        return build_session(cfg, sid)
+        return build_session(cfg, sid, bootstrap=bootstrap)
 
     runtime = NativeRuntime.build(
         cfg,
@@ -160,7 +187,7 @@ async def _run(
         await _run_smoke(runtime, session_id)
         return
 
-    resolved_session_id = session_id or f"cli-{uuid.uuid4().hex[:8]}"
+    resolved_session_id = session_id or _generate_cli_session_id()
     bridge = SessionBridge(
         runtime=runtime,
         adapter=adapter,
@@ -177,8 +204,11 @@ async def _run(
     await bridge.run_loop()
 
 
-async def _assemble_instructions(instructions_files: list[Path]) -> str:
+async def _assemble_instructions(instructions_files: list[Path]) -> tuple[str, list[str]]:
     """用 InstructionLoader 合成最终 system prompt 文本。
+
+    Returns:
+        (rendered_text, instruction_origins) — 渲染后的完整文本和来源 origin 列表。
 
     - 基础来源是 "You are kongming agent."
     - extra_files 来自 CLI ``--instructions-file`` 参数
@@ -186,7 +216,9 @@ async def _assemble_instructions(instructions_files: list[Path]) -> str:
     """
     loader = InstructionLoader(extra_files=instructions_files, include_env=True)
     sources = await loader.load(agent_instructions="You are kongming agent.")
-    return loader.render(sources)
+    rendered = loader.render(sources)
+    origins = [s.origin for s in sources]
+    return rendered, origins
 
 
 async def _run_smoke(runtime: NativeRuntime, session_id: str | None) -> None:

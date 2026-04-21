@@ -1,0 +1,73 @@
+# kongming-agent 统一配置
+#
+# 单一配置文件，覆盖所有模块的全部可配置项。
+# 切换远端模型：在 .env 中设置 KONGMING_MODEL_BASE_URL 和 KONGMING_MODEL_API_KEY。
+
+model:
+  # provider: openai_compatible（默认）或 anthropic
+  #
+  # openai_compatible — OpenAI Chat Completions 格式，适用于：
+  #   本地 LM Studio / Ollama: base_url=http://127.0.0.1:1234/v1
+  #   智谱 BigModel:            base_url=https://open.bigmodel.cn/api/paas/v4
+  #   OpenAI 官方:              base_url=https://api.openai.com/v1
+  #   base_url 需包含版本段，代码直接拼 /chat/completions。
+  #
+  # anthropic — 原生 Anthropic Messages API，适用于 Claude 系列模型：
+  #   base_url=https://api.anthropic.com（代码拼 /v1/messages）
+  #   name=claude-sonnet-4-5  （或其他 claude-* 模型名）
+  #   api_key 在 .env 中填写 KONGMING_MODEL_API_KEY=sk-ant-...
+  provider: openai_compatible
+  name: gemma-4-e4b-it
+  base_url: http://127.0.0.1:1234/v1
+  # 本地模型留空；远端模型在 .env 中填写 KONGMING_MODEL_API_KEY。
+  api_key: ""
+  timeout: 60
+  max_tokens: 4096
+  temperature: 0.7
+
+runner:
+  max_turns: 10
+
+session:
+  # memory | sqlite | file
+  backend: file
+  store_path: .kongming/sessions.db
+  file_store_path: .kongming/sessions
+
+trace:
+  output_path: .kongming/trace.jsonl
+  auto_flush: true
+  # 是否 dump 每次 LLM 交互到 .kongming/debug/raw-llm-*.json（含完整 request+response）
+  # 调试用，默认 false；开启后每次对话都会落盘，磁盘会增长
+  # 临时启用不改本文件：`KONGMING_TRACE_RAW_LLM=1 uv run python -m cli.main`
+  raw_llm: false
+
+logging:
+  level: INFO
+
+host:
+  kind: cli
+
+approval:
+  # interactive | auto_allow | auto_deny
+  mode: interactive
+
+tool:
+  shell:
+    enabled: true
+    timeout_seconds: 30.0
+    max_stream_bytes: 8000
+    terminate_grace_seconds: 2.0
+  file:
+    enabled: true
+    read_max_bytes: 65536
+
+compactor:
+  max_messages: 50
+  keep_recent: 20
+  keep_system: true
+  tool_result_max_chars: 2000
+
+retry:
+  max_retries: 3
+  retry_backoff: 1.0

@@ -22,17 +22,21 @@ from config_loader.models import Config, ModelConfig
 from executors.agent_runtime.native_runtime import NativeRuntime
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-LOCAL_MODEL_YAML = REPO_ROOT / "config" / "local-model.yaml"
+LOCAL_MODEL_YAML = REPO_ROOT / "config" / "setting.yaml"
 
 
 @pytest.mark.e2e
 def test_local_model_config_loads_from_yaml() -> None:
-    """``config/local-model.yaml`` 应该能被 load_config 成功解析。"""
-    cfg = load_config(LOCAL_MODEL_YAML)
+    """``config/setting.yaml`` 应该能被 load_config 成功解析。"""
+    import yaml
+
+    raw = yaml.safe_load(LOCAL_MODEL_YAML.read_text(encoding="utf-8"))
+    # load_env_file=False：隔离本地 .env，只测 YAML 结构本身
+    cfg = load_config(LOCAL_MODEL_YAML, load_env_file=False)
     assert isinstance(cfg, Config)
-    assert cfg.model.provider == "openai_compatible"
-    assert cfg.model.name == "gemma-4-e4b-it"
-    assert cfg.model.base_url == "http://127.0.0.1:1234"
+    assert cfg.model.provider == raw["model"]["provider"]
+    assert cfg.model.name == raw["model"]["name"]
+    assert cfg.model.base_url.rstrip("/") == raw["model"]["base_url"].rstrip("/")
     assert cfg.model.api_key == ""
     assert cfg.model.is_local is True
 
@@ -112,7 +116,7 @@ def test_load_config_env_override_api_key(
     """``KONGMING_MODEL_API_KEY`` 环境变量应当覆盖 YAML 中的 api_key 字段。"""
     monkeypatch.setenv("KONGMING_MODEL_API_KEY", "override-key-123")
     try:
-        cfg = load_config(LOCAL_MODEL_YAML)
+        cfg = load_config(LOCAL_MODEL_YAML, load_env_file=False)
     finally:
         # monkeypatch fixture 会自动 undo，这里无需手动清理。
         pass

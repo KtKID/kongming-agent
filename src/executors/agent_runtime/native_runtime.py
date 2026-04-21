@@ -38,6 +38,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 from config_loader.models import Config
 from context import HistoryCompactor
+from context.history_compactor import CompactorConfig
 from core.agent_spec import AgentSpec
 from core.contracts import (
     ApprovalDecision,
@@ -53,6 +54,7 @@ from core.contracts import (
 from core.result import Result
 from core.runner import Runner
 from core.session import InMemorySession
+from executors.llm.anthropic_messages import AnthropicMessagesProvider
 from executors.llm.openai_responses import OpenAIResponsesProvider
 from safety import (
     CapabilityPolicy,
@@ -196,7 +198,19 @@ class NativeRuntime:
         Returns:
             装配好的 :class:`NativeRuntime`，直接 ``await runtime.run(...)`` 即可。
         """
-        llm = OpenAIResponsesProvider(model_config=config.model)
+        if config.model.provider == "anthropic":
+            llm: LLMProvider = AnthropicMessagesProvider(
+                model_config=config.model,
+                max_retries=config.retry.max_retries,
+                retry_backoff=config.retry.retry_backoff,
+            )
+        else:
+            llm = OpenAIResponsesProvider(
+                model_config=config.model,
+                max_retries=config.retry.max_retries,
+                retry_backoff=config.retry.retry_backoff,
+                enable_raw_dump=config.trace.raw_llm,
+            )
 
         resolved_tools: ToolLookup
         if tools is None:
@@ -235,7 +249,14 @@ class NativeRuntime:
             max_turns=config.runner.max_turns,
         )
 
-        resolved_compactor: MessageCompactor = message_compactor or HistoryCompactor()
+        resolved_compactor: MessageCompactor = message_compactor or HistoryCompactor(
+            config=CompactorConfig(
+                max_messages=config.compactor.max_messages,
+                keep_recent=config.compactor.keep_recent,
+                keep_system=config.compactor.keep_system,
+                tool_result_max_chars=config.compactor.tool_result_max_chars,
+            )
+        )
 
         runner = Runner(
             event_sinks=resolved_event_sinks,

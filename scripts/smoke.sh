@@ -9,4 +9,4 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-uv run python -m cli.main --config config/default.yaml --smoke
+KONGMING_SESSION_BACKEND=memory uv run python -m cli.main --smoke

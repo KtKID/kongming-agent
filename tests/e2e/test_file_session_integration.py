@@ -1,0 +1,149 @@
+"""FileSession 集成测试（TC10, TC11, TC12）。"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from config_loader import Config
+from context.file_session import FileSession
+from context.session_bootstrap import SessionBootstrap
+from context.session_store import build_session
+from core.agent_spec import AgentSpec
+from core.message import Message
+from core.run_state import RunState
+from core.runner import Runner
+
+
+def _bootstrap(**overrides) -> SessionBootstrap:
+    defaults = dict(
+        agent_name="test-agent",
+        model_name="test-model",
+        instruction_sources=["test-source"],
+        instruction_text_hash="sha256:abc123",
+        created_at=1000000.0,
+        cwd="/test",
+        app_version="0.1.1",
+    )
+    defaults.update(overrides)
+    return SessionBootstrap(**defaults)
+
+
+def _default_config(
+    backend: str = "memory",
+    store_path: str = ".kongming/test-sessions.db",
+    file_store_path: str = ".kongming/test-sessions",
+) -> Config:
+    return Config(
+        model={"name": "test-model", "base_url": "http://127.0.0.1:1234"},
+        session={"backend": backend, "store_path": store_path, "file_store_path": file_store_path},
+    )
+
+
+@pytest.fixture
+def store_path(tmp_path: Path) -> str:
+    return str(tmp_path / "sessions")
+
+
+# ---------------------------------------------------------------------------
+# TC10: Runner 首次只注入一条 system
+# ---------------------------------------------------------------------------
+
+
+class TestTC10SeedSystem:
+    async def test_only_one_system_on_first_run(self, store_path: str) -> None:
+        """_seed_messages + FileSession：首次运行只注入一条 system + 一条 user。"""
+        bootstrap = _bootstrap()
+        fs = FileSession("test-session", bootstrap, store_path)
+
+        runner = Runner()
+        agent_spec = AgentSpec(
+            name="test-agent",
+            instructions="You are a test agent.",
+            default_model="test-model",
+        )
+        state = RunState(run_id="run-1", session_id="test-session")
+
+        await runner._seed_messages(fs, agent_spec, "hello", state)
+
+        history = await fs.history()
+        assert len(history) == 2
+        assert history[0].role == "system"
+        assert history[0].content == "You are a test agent."
+        assert history[1].role == "user"
+        assert history[1].content == "hello"
+
+
+# ---------------------------------------------------------------------------
+# TC11: resume 后不重复注入 system
+# ---------------------------------------------------------------------------
+
+
+class TestTC11ResumeNoDuplicateSystem:
+    async def test_no_duplicate_system_on_resume(self, store_path: str) -> None:
+        """已有 system 时跳过，只写 user+后续。"""
+        bootstrap = _bootstrap()
+        sid = "resume-session"
+
+        # 第一轮：注入 system + user
+        fs1 = FileSession(sid, bootstrap, store_path)
+        runner = Runner()
+        agent_spec = AgentSpec(
+            name="test-agent",
+            instructions="You are a test agent.",
+            default_model="test-model",
+        )
+        state1 = RunState(run_id="run-1", session_id=sid)
+        await runner._seed_messages(fs1, agent_spec, "hello", state1)
+
+        # 第二轮：用新 FileSession 实例恢复
+        fs2 = FileSession(sid, bootstrap, store_path)
+        state2 = RunState(run_id="run-2", session_id=sid)
+        await runner._seed_messages(fs2, agent_spec, "next question", state2)
+
+        history = await fs2.history()
+        # 应该有 3 条：system, user(hello), user(next question)
+        assert len(history) == 3
+        system_msgs = [m for m in history if m.role == "system"]
+        assert len(system_msgs) == 1
+        assert history[2].role == "user"
+        assert history[2].content == "next question"
+
+
+# ---------------------------------------------------------------------------
+# TC12: backend 切换不影响 memory/sqlite
+# ---------------------------------------------------------------------------
+
+
+class TestTC12BackendSwitch:
+    async def test_memory_backend_still_works(self) -> None:
+        """memory backend 不受影响。"""
+        cfg = _default_config("memory")
+        session = build_session(cfg, "mem-test", bootstrap=_bootstrap())
+        await session.append(Message.user("hello"))
+        history = await session.history()
+        assert len(history) == 1
+        assert history[0].content == "hello"
+
+    async def test_sqlite_backend_still_works(self, tmp_path: Path) -> None:
+        """sqlite backend 不受影响。"""
+        db_path = str(tmp_path / "test.db")
+        cfg = _default_config(
+            "sqlite", store_path=db_path, file_store_path=str(tmp_path / "sessions")
+        )
+        session = build_session(cfg, "sqlite-test")
+        await session.append(Message.user("hello"))
+        history = await session.history()
+        assert len(history) == 1
+        assert history[0].content == "hello"
+
+    async def test_file_backend_works(self, store_path: str) -> None:
+        """file backend 正常工作。"""
+        bootstrap = _bootstrap()
+        cfg = _default_config("file", file_store_path=store_path)
+        session = build_session(cfg, "file-test", bootstrap=bootstrap)
+        await session.append(Message.user("hello"))
+        history = await session.history()
+        assert len(history) == 1
+        assert history[0].content == "hello"

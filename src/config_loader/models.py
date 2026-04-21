@@ -1,6 +1,6 @@
 """统一配置模型。
 
-对应 :file:`config/default.yaml` 与 :file:`config/local-model.yaml` 的全部字段。
+对应 :file:`config/setting.yaml` 的全部字段。
 
 **严格约束**：
 
@@ -64,7 +64,7 @@ class ModelConfig(BaseModel):
     """模型 / provider 配置。
 
     Attributes:
-        provider: provider 名。第一版仅支持 ``openai_compatible``。
+        provider: provider 名。``openai_compatible``（默认）或 ``anthropic``。
         name: 模型名，透传给 provider 的 ``model`` 字段。
         base_url: provider HTTP 服务根地址。本地模型（LM Studio / Ollama /
             vLLM 兼容层）也走这个字段，不区分特殊分支。
@@ -76,7 +76,7 @@ class ModelConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["openai_compatible"] = "openai_compatible"
+    provider: Literal["openai_compatible", "anthropic"] = "openai_compatible"
     name: str
     base_url: str
     api_key: str = ""
@@ -143,16 +143,20 @@ class SessionConfig(BaseModel):
 
     Attributes:
         backend: ``memory`` 使用 :class:`core.session.InMemorySession`；
-            ``sqlite`` 交给 ``context/session_store.py`` 的工程化实现承接（v1
-            后续批次落地）。
-        store_path: sqlite 后端的持久化路径。memory 后端会忽略此项，
-            但仍保留默认值，便于"切到 sqlite 不改配置"。
+            ``sqlite`` 交给 ``context/session_store.py`` 的工程化实现承接；
+            ``file`` 使用 append-only JSONL 文件持久化（v0.1.1 新增）。
+        store_path: sqlite 后端的持久化数据库文件路径。
+            memory 和 file 后端忽略此项。
+        file_store_path: file 后端的 session 目录父路径。
+            每个 session 会在该目录下创建 ``<session_id>/`` 子目录。
+            仅 file 后端使用。
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    backend: Literal["memory", "sqlite"] = "memory"
+    backend: Literal["memory", "sqlite", "file"] = "memory"
     store_path: str = ".kongming/sessions.db"
+    file_store_path: str = ".kongming/sessions"
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +170,11 @@ class TraceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     output_path: str = ".kongming/trace.jsonl"
+    auto_flush: bool = True
+    # 是否 dump 每次 LLM provider 的完整 request/response 到 .kongming/debug/raw-llm-*.json。
+    # 调试用；默认关。开启后磁盘会随对话持续增长，生产不建议常开。
+    # 环境变量 KONGMING_TRACE_RAW_LLM=1 可临时覆盖本配置。
+    raw_llm: bool = False
 
 
 class LoggingConfig(BaseModel):
@@ -203,28 +212,66 @@ class ApprovalConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Compactor
+# ---------------------------------------------------------------------------
+
+
+class CompactorConfig(BaseModel):
+    """历史压缩策略参数。
+
+    对应 :mod:`context.history_compactor` 的同名 dataclass，这里用 pydantic
+    模型做校验，装配层按需转成 dataclass 传给 HistoryCompactor。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_messages: int = Field(default=50, gt=0)
+    keep_recent: int = Field(default=20, gt=0)
+    keep_system: bool = True
+    tool_result_max_chars: int = Field(default=2000, gt=0)
+
+
+# ---------------------------------------------------------------------------
+# LLM Retry
+# ---------------------------------------------------------------------------
+
+
+class RetryConfig(BaseModel):
+    """LLM provider 重试与退避参数。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_retries: int = Field(default=3, ge=0)
+    retry_backoff: float = Field(default=1.0, gt=0)
+
+
+# ---------------------------------------------------------------------------
 # Tool
 # ---------------------------------------------------------------------------
 
 
 class ShellToolConfig(BaseModel):
-    """shell builtin tool 启用开关。"""
+    """shell builtin tool 启用开关与运行限制。"""
 
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
+    timeout_seconds: float = Field(default=30.0, gt=0)
+    max_stream_bytes: int = Field(default=8000, gt=0)
+    terminate_grace_seconds: float = Field(default=2.0, ge=0)
 
 
 class FileToolConfig(BaseModel):
-    """file builtin tool 启用开关。"""
+    """file builtin tool 启用开关与运行限制。"""
 
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
+    read_max_bytes: int = Field(default=65536, gt=0)
 
 
 class ToolConfig(BaseModel):
-    """builtin tool 集合开关。"""
+    """builtin tool 集合开关与运行参数。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -254,15 +301,19 @@ class Config(BaseModel):
     host: HostConfig = Field(default_factory=HostConfig)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     tool: ToolConfig = Field(default_factory=ToolConfig)
+    compactor: CompactorConfig = Field(default_factory=CompactorConfig)
+    retry: RetryConfig = Field(default_factory=RetryConfig)
 
 
 __all__ = [
     "ApprovalConfig",
+    "CompactorConfig",
     "Config",
     "FileToolConfig",
     "HostConfig",
     "LoggingConfig",
     "ModelConfig",
+    "RetryConfig",
     "RunnerConfig",
     "SessionConfig",
     "ShellToolConfig",

@@ -5,17 +5,19 @@
 
 SHELL := /usr/bin/env bash
 
-.PHONY: help install fmt fmt-check lint typecheck \
-        test test-unit test-e2e smoke cli clean
+.PHONY: help install install-hooks fmt fmt-check lint typecheck \
+        precommit test test-unit test-e2e smoke cli clean
 
 help:
 	@echo "kongming-agent Makefile"
 	@echo ""
 	@echo "  make install       安装依赖（uv sync --all-extras）"
+	@echo "  make install-hooks 启用 pre-commit hook（commit 前自动跑软编译）"
 	@echo "  make fmt           ruff format ."
 	@echo "  make fmt-check     ruff format --check ."
 	@echo "  make lint          ruff check . + import-linter"
 	@echo "  make typecheck     mypy 所有模块"
+	@echo "  make precommit     手动跑一次 pre-commit 全仓扫描"
 	@echo "  make test-unit     pytest tests/unit -v"
 	@echo "  make test-e2e      pytest tests/e2e -v"
 	@echo "  make test          test-unit + test-e2e"
@@ -25,6 +27,12 @@ help:
 
 install:
 	bash scripts/dev-setup.sh
+
+install-hooks:
+	uv run pre-commit install
+
+precommit:
+	uv run pre-commit run --all-files
 
 fmt:
 	bash scripts/fmt.sh

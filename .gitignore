@@ -30,6 +30,8 @@ htmlcov/
 .vscode/
 *.swp
 
-# Env
+# Env —— 本地环境变量（含 API key 等 secret），不入仓
 .env
 .env.local
+.env.*
+!.env.example

@@ -44,23 +44,39 @@ def build_default_registry(
     *,
     file_enabled: bool = True,
     shell_enabled: bool = True,
+    shell_timeout_seconds: float = 30.0,
+    shell_max_stream_bytes: int = 8000,
+    shell_terminate_grace_seconds: float = 2.0,
+    file_read_max_bytes: int = 65536,
 ) -> ToolRegistry:
     """按 v1-mini 默认工具集组装一个 :class:`ToolRegistry`。
 
     装配层（例如 ``executors/agent_runtime/native_runtime.py``）只需要读配置
-    里的 ``tool.file.enabled`` / ``tool.shell.enabled``，然后把这两个布尔值
-    喂进来即可，不用在别的地方再写第二份"默认工具清单"。
+    里的 ``tool.file.enabled`` / ``tool.shell.enabled`` 以及运行参数，
+    然后把它们喂进来即可，不用在别的地方再写第二份"默认工具清单"。
 
     Args:
         file_enabled: 是否注册文件类工具。对应 ``config.tool.file.enabled``。
         shell_enabled: 是否注册 shell 工具。对应 ``config.tool.shell.enabled``。
+        shell_timeout_seconds: shell 命令默认超时秒数。
+        shell_max_stream_bytes: stdout/stderr 各自最大字节数。
+        shell_terminate_grace_seconds: 超时后 terminate 到 kill 之间等待秒数。
+        file_read_max_bytes: ReadFileTool 默认读取上限字节数。
 
     Returns:
         已经注册好 builtin 工具的 :class:`ToolRegistry`。
     """
     tools = [
-        *build_file_tools(enabled=file_enabled),
-        *build_shell_tool(enabled=shell_enabled),
+        *build_file_tools(
+            enabled=file_enabled,
+            read_max_bytes=file_read_max_bytes,
+        ),
+        *build_shell_tool(
+            enabled=shell_enabled,
+            default_timeout=shell_timeout_seconds,
+            max_stream_bytes=shell_max_stream_bytes,
+            terminate_grace_seconds=shell_terminate_grace_seconds,
+        ),
     ]
     return ToolRegistry(tools)
 

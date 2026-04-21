@@ -46,6 +46,7 @@ from core.message import Message, ToolCall
 
 if TYPE_CHECKING:
     from config_loader.models import Config
+    from context.session_bootstrap import SessionBootstrap
 
 
 # ---------------------------------------------------------------------------
@@ -280,11 +281,17 @@ class SQLiteSession:
 # ---------------------------------------------------------------------------
 
 
-def build_session(config: Config, session_id: str) -> Session:
+def build_session(
+    config: Config,
+    session_id: str,
+    *,
+    bootstrap: SessionBootstrap | None = None,
+) -> Session:
     """按 ``config.session.backend`` 建合适的 :class:`core.contracts.Session` 实现。
 
     - ``memory`` → :class:`core.session.InMemorySession`
     - ``sqlite`` → :class:`SQLiteSession`，写入 ``config.session.store_path``
+    - ``file`` → :class:`FileSession`，写入 ``config.session.file_store_path`` 子目录
 
     返回值结构性满足 :class:`core.contracts.Session` Protocol（``runtime_checkable``）。
     上层调用点只认 Protocol 签名，不关心具体实现。
@@ -292,6 +299,8 @@ def build_session(config: Config, session_id: str) -> Session:
     Args:
         config: 统一配置对象，至少含 ``session.backend`` / ``session.store_path``。
         session_id: 此次运行绑定的 session 标识。
+        bootstrap: CLI 阶段产出的稳定元数据，file backend 需要。
+            memory / sqlite 后端忽略此参数。
 
     Raises:
         ValueError: 当 backend 取了协议未声明的值时抛出。
@@ -305,6 +314,12 @@ def build_session(config: Config, session_id: str) -> Session:
         return InMemorySession(session_id)
     if backend == "sqlite":
         return SQLiteSession(session_id, config.session.store_path)
+    if backend == "file":
+        if bootstrap is None:
+            raise ValueError("file backend requires bootstrap")
+        from context.file_session import FileSession
+
+        return FileSession(session_id, bootstrap, config.session.file_store_path)
     raise ValueError(f"unknown session backend: {backend!r}")
 
 
