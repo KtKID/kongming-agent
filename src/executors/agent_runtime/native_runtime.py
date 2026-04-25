@@ -236,6 +236,7 @@ class NativeRuntime:
                 max_retries=config.retry.max_retries,
                 retry_backoff=config.retry.retry_backoff,
                 enable_raw_dump=config.trace.raw_llm,
+                stream_read_timeout=config.stream.read_timeout,
             )
 
         resolved_tools: ToolLookup
@@ -322,6 +323,8 @@ class NativeRuntime:
             instruction_sources=agent_instruction_sources,
             prompt_debug_sink=prompt_debug_sink,
             instruction_origins=instruction_origins,
+            stream_enabled=config.stream.enabled,
+            suppress_content_after_tool_call=config.stream.suppress_content_after_tool_call,
         )
 
         return cls(
@@ -378,6 +381,16 @@ class NativeRuntime:
     @property
     def agent_spec(self) -> AgentSpec:
         return self._agent_spec
+
+    @property
+    def llm(self) -> LLMProvider:
+        """暴露 provider 实例。
+
+        host 装配层（如 ``cli/main.py``）需要它来探测 ``SupportsLLMStream`` 能力，
+        以决定是否在 ``SessionBridge`` 中跳过 final.content 重复输出（流式路径下
+        ``CLIStreamSink`` 已渲染过完整正文）。
+        """
+        return self._llm
 
     def add_event_sink(self, sink: EventSink) -> None:
         """追加事件 sink 到底层 runner。"""

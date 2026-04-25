@@ -36,12 +36,18 @@ class SessionBridge:
         runtime: NativeRuntime,
         adapter: HostAdapter,
         session_id: str,
+        echo_final_content: bool = True,
     ) -> None:
         if not session_id:
             raise ValueError("session_id must not be empty")
         self._runtime = runtime
         self._adapter = adapter
         self._session_id = session_id
+        # 流式路径下 CLIStreamSink 已经实时打印过完整 content（打字机效果），
+        # 此处再 write_output(final.content) 会造成视觉双重输出。
+        # cli/main.py 在装配时按 `cfg.stream.enabled and isinstance(runtime.llm,
+        # SupportsLLMStream)` 计算后传入 False；非流式或 fallback 路径默认 True。
+        self._echo_final_content = echo_final_content
 
     # ------------------------------------------------------------------
     # 访问器
@@ -72,7 +78,7 @@ class SessionBridge:
         result = await self._runtime.run(user_input, session_id=self._session_id)
 
         final = result.final_message
-        if final is not None and final.content:
+        if self._echo_final_content and final is not None and final.content:
             await self._adapter.write_output(final.content)
 
         if result.error is not None:

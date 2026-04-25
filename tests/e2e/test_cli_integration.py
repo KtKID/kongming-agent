@@ -429,8 +429,15 @@ async def test_cli_run_persists_instruction_metadata_to_file_manifest(
             return None
 
     class _DummyBridge:
-        def __init__(self, *, runtime, adapter, session_id: str) -> None:
-            del adapter
+        def __init__(
+            self,
+            *,
+            runtime,
+            adapter,
+            session_id: str,
+            echo_final_content: bool = True,
+        ) -> None:
+            del adapter, echo_final_content
             self._runtime = runtime
             self.session_id = session_id
 

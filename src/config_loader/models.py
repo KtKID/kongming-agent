@@ -280,6 +280,43 @@ class ApprovalConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Stream
+# ---------------------------------------------------------------------------
+
+
+class StreamConfig(BaseModel):
+    """LLM 流式响应配置。
+
+    顶层挂在 :class:`Config.stream`（**非** :class:`ModelConfig` 子节），因为
+    流式跨 observability / runtime / provider 三层职责，不归属单一模块。
+
+    Attributes:
+        enabled: 是否启用流式。装配层用此开关 + ``isinstance(llm, SupportsLLMStream)``
+            能力探测共同决定是否走流式路径。默认 ``True``：出厂即用打字机效果，
+            可通过 ``--no-stream`` flag 或 ``KONGMING_STREAM_ENABLED=0`` 关闭。
+        read_timeout: 流式响应的读超时（秒）。流式心跳期间不计入此超时；
+            本地 endpoint 由 provider 装配层根据 :attr:`ModelConfig.is_local`
+            自动上调（详见 B#4）。
+        suppress_content_after_tool_call: 流中出现 tool_call 后，runner 是否
+            屏蔽继续到达的 ``content.delta``（避免 CLI 在 tool 调用前夹带乱文本）。
+            默认 ``True``，可在 reasoning-style 模型场景下关闭。
+        delta_sampling: ``JsonlTraceSink`` 对 ``content.delta`` / ``reasoning.delta``
+            的采样策略：``none`` 不写（默认，防爆磁盘）/ ``periodic`` 按
+            ``periodic_batch_size`` 抽样 / ``full`` 全写（仅 debug）。
+        periodic_batch_size: ``delta_sampling="periodic"`` 时的采样批大小，
+            每 N 个 delta 取 1 个落盘。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    read_timeout: float = Field(default=120.0, gt=0)
+    suppress_content_after_tool_call: bool = True
+    delta_sampling: Literal["none", "periodic", "full"] = "none"
+    periodic_batch_size: int = Field(default=20, gt=0)
+
+
+# ---------------------------------------------------------------------------
 # Compactor
 # ---------------------------------------------------------------------------
 
@@ -418,6 +455,7 @@ class Config(BaseModel):
     retry: RetryConfig = Field(default_factory=RetryConfig)
     cli: CliConfig = Field(default_factory=CliConfig)
     evolution: EvolutionConfig = Field(default_factory=EvolutionConfig)
+    stream: StreamConfig = Field(default_factory=StreamConfig)
 
 
 __all__ = [
@@ -436,6 +474,7 @@ __all__ = [
     "RunnerConfig",
     "SessionConfig",
     "ShellToolConfig",
+    "StreamConfig",
     "ToolConfig",
     "TraceConfig",
 ]

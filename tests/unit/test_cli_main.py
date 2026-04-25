@@ -67,8 +67,15 @@ async def test_run_prefers_explicit_session_id(monkeypatch) -> None:
             return []
 
     class _DummyBridge:
-        def __init__(self, *, runtime, adapter, session_id: str) -> None:
-            del runtime, adapter
+        def __init__(
+            self,
+            *,
+            runtime,
+            adapter,
+            session_id: str,
+            echo_final_content: bool = True,
+        ) -> None:
+            del runtime, adapter, echo_final_content
             captured["session_id"] = session_id
             self.session_id = session_id
 
@@ -115,8 +122,15 @@ async def test_run_reasoning_effort_overrides_config(monkeypatch) -> None:
             return []
 
     class _DummyBridge:
-        def __init__(self, *, runtime, adapter, session_id: str) -> None:
-            del runtime, adapter, session_id
+        def __init__(
+            self,
+            *,
+            runtime,
+            adapter,
+            session_id: str,
+            echo_final_content: bool = True,
+        ) -> None:
+            del runtime, adapter, session_id, echo_final_content
             self.session_id = "x"
 
         async def run_loop(self) -> None:
@@ -181,8 +195,15 @@ async def test_run_debug_passes_prompt_debug_sink(monkeypatch) -> None:
             return []
 
     class _DummyBridge:
-        def __init__(self, *, runtime, adapter, session_id: str) -> None:
-            del runtime, adapter, session_id
+        def __init__(
+            self,
+            *,
+            runtime,
+            adapter,
+            session_id: str,
+            echo_final_content: bool = True,
+        ) -> None:
+            del runtime, adapter, session_id, echo_final_content
             self.session_id = "x"
 
         async def run_loop(self) -> None:

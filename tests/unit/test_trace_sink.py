@@ -240,3 +240,129 @@ async def test_build_jsonl_trace_sink_reads_only_output_path(tmp_path):
     )
     sink = build_jsonl_trace_sink(cfg)
     assert sink.output_path == Path(str(tmp_path / "out.jsonl"))
+
+
+# ---------------------------------------------------------------------------
+# D#5：delta_sampling 采样策略（content.delta / reasoning.delta）
+# ---------------------------------------------------------------------------
+
+
+def _read_lines(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+@pytest.mark.asyncio
+async def test_delta_sampling_none_drops_all_deltas(tmp_path):
+    """D#5：delta_sampling='none' 时 content.delta / reasoning.delta 都不写盘。"""
+    from core.contracts import Event
+
+    path = tmp_path / "trace.jsonl"
+    sink = JsonlTraceSink(path, delta_sampling="none")
+    await sink.emit(Event(kind="content.delta", run_id="r1", payload={"delta": "a"}))
+    await sink.emit(Event(kind="content.delta", run_id="r1", payload={"delta": "b"}))
+    await sink.emit(Event(kind="reasoning.delta", run_id="r1", payload={"delta": "x"}))
+    # 非 delta 事件应该照常写入
+    await sink.emit(Event(kind="llm.chunk.first", run_id="r1", payload={"elapsed_ms": 100}))
+    lines = _read_lines(path)
+    assert len(lines) == 1
+    assert lines[0]["kind"] == "llm.chunk.first"
+
+
+@pytest.mark.asyncio
+async def test_delta_sampling_full_writes_all_deltas(tmp_path):
+    """D#5：delta_sampling='full' 时所有 delta 全写。"""
+    from core.contracts import Event
+
+    path = tmp_path / "trace.jsonl"
+    sink = JsonlTraceSink(path, delta_sampling="full")
+    for i in range(5):
+        await sink.emit(Event(kind="content.delta", run_id="r1", payload={"delta": str(i)}))
+    lines = _read_lines(path)
+    assert len(lines) == 5
+
+
+@pytest.mark.asyncio
+async def test_delta_sampling_periodic_writes_one_per_batch(tmp_path):
+    """D#5：delta_sampling='periodic' + batch_size=3 → 第 1/4/7/... 个 delta 写盘。"""
+    from core.contracts import Event
+
+    path = tmp_path / "trace.jsonl"
+    sink = JsonlTraceSink(path, delta_sampling="periodic", periodic_batch_size=3)
+    for i in range(7):
+        await sink.emit(Event(kind="content.delta", run_id="r1", payload={"delta": str(i)}))
+    lines = _read_lines(path)
+    # 第 1、4、7 个写盘 → 3 行
+    assert len(lines) == 3
+    assert [line["payload"]["delta"] for line in lines] == ["0", "3", "6"]
+
+
+@pytest.mark.asyncio
+async def test_delta_sampling_periodic_separates_content_and_reasoning_counters(tmp_path):
+    """D#5：periodic 模式下 content.delta 和 reasoning.delta 计数器互不影响。"""
+    from core.contracts import Event
+
+    path = tmp_path / "trace.jsonl"
+    sink = JsonlTraceSink(path, delta_sampling="periodic", periodic_batch_size=2)
+    # 交错发送 content / reasoning：每个 kind 独立按 batch_size=2 采样
+    await sink.emit(Event(kind="content.delta", run_id="r1", payload={"delta": "c1"}))
+    await sink.emit(Event(kind="reasoning.delta", run_id="r1", payload={"delta": "r1"}))
+    await sink.emit(Event(kind="content.delta", run_id="r1", payload={"delta": "c2"}))
+    await sink.emit(Event(kind="reasoning.delta", run_id="r1", payload={"delta": "r2"}))
+    await sink.emit(Event(kind="content.delta", run_id="r1", payload={"delta": "c3"}))
+    await sink.emit(Event(kind="reasoning.delta", run_id="r1", payload={"delta": "r3"}))
+    lines = _read_lines(path)
+    # 每 kind 取第 1/3 个 → 共 4 行：c1、r1、c3、r3
+    deltas = [line["payload"]["delta"] for line in lines]
+    assert deltas == ["c1", "r1", "c3", "r3"]
+
+
+@pytest.mark.asyncio
+async def test_delta_sampling_periodic_batch_size_1_writes_all(tmp_path):
+    """边界 fix：periodic + batch_size=1 时所有 delta 全写（等价 full 模式）。
+
+    历史 bug：旧判定 ``n % batch_size == 1`` 在 batch_size=1 时永真为 0（never 1）→
+    所有 delta 被丢弃。新判定 ``(n-1) % batch_size == 0`` 修正这个直觉错位。
+    """
+    from core.contracts import Event
+
+    path = tmp_path / "trace.jsonl"
+    sink = JsonlTraceSink(path, delta_sampling="periodic", periodic_batch_size=1)
+    for i in range(5):
+        await sink.emit(Event(kind="content.delta", run_id="r1", payload={"delta": str(i)}))
+    lines = _read_lines(path)
+    # 5 个 delta 应该全部写入
+    assert len(lines) == 5
+    assert [line["payload"]["delta"] for line in lines] == ["0", "1", "2", "3", "4"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_delta_sampling_value_raises(tmp_path):
+    """D#5：delta_sampling 必须是 none/periodic/full 之一，否则 ValueError。"""
+    with pytest.raises(ValueError):
+        JsonlTraceSink(tmp_path / "trace.jsonl", delta_sampling="invalid")
+
+
+@pytest.mark.asyncio
+async def test_invalid_periodic_batch_size_raises(tmp_path):
+    """D#5：periodic_batch_size 必须 > 0，否则 ValueError。"""
+    with pytest.raises(ValueError):
+        JsonlTraceSink(tmp_path / "trace.jsonl", periodic_batch_size=0)
+
+
+@pytest.mark.asyncio
+async def test_build_jsonl_trace_sink_passes_stream_config(tmp_path):
+    """D#5：build_jsonl_trace_sink 把 cfg.stream.delta_sampling / periodic_batch_size 传入 sink。"""
+    from config_loader.models import Config, ModelConfig, StreamConfig, TraceConfig
+    from core.contracts import Event
+
+    cfg = Config(
+        model=ModelConfig(name="m", base_url="http://localhost:1234"),
+        trace=TraceConfig(output_path=str(tmp_path / "out.jsonl")),
+        stream=StreamConfig(delta_sampling="full", periodic_batch_size=5),
+    )
+    sink = build_jsonl_trace_sink(cfg)
+    # 通过实际 emit 验证 full 模式生效（5 条 delta 全部写入）
+    for i in range(5):
+        await sink.emit(Event(kind="content.delta", run_id="r1", payload={"delta": str(i)}))
+    lines = _read_lines(tmp_path / "out.jsonl")
+    assert len(lines) == 5

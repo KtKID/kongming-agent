@@ -76,14 +76,18 @@ def confirm_yn(prompt_text: str, *, default: bool = False) -> bool:
     return answer in {"y", "yes"}
 
 
-def print_streaming_chunk(chunk: str) -> None:  # pragma: no cover - 流式未接入
-    """流式输出占位。
+def print_streaming_chunk(chunk: str) -> None:
+    """流式片段直接打到 stdout 并 flush。
 
-    v1-mini 当前为非流式；保留这个入口避免未来流式接入时满 CLI 搜
-    ``sys.stdout.write``。真正接入时再把 ``chunk`` 写到 stdout 并 flush。
+    v0.2 起，CLI 的流式打字机效果由 :class:`host.CLIStreamSink` 通过
+    ``content.delta`` / ``reasoning.delta`` 事件渲染（在 ``cli/main.py`` 装配）。
+    本函数保留作为简易便捷入口，可被脚本/调试场景直接调用，但生产 CLI
+    路径不再依赖它。
     """
-    # 故意为空：首版非流式。
-    del chunk
+    if not chunk:
+        return
+    sys.stdout.write(chunk)
+    sys.stdout.flush()
 
 
 __all__ = ["AsyncPrompt", "confirm_yn", "print_streaming_chunk"]

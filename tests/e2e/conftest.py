@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import pytest
 
 from config_loader.models import ApprovalConfig, Config, ModelConfig, RunnerConfig
@@ -28,6 +30,7 @@ from core.contracts import (
     Event,
     LLMRequest,
     LLMResponse,
+    LLMStreamChunk,
 )
 from core.message import Message, ToolCall
 
@@ -84,6 +87,74 @@ class StubLLMProvider:
         )
         finish = "tool_calls" if tool_calls_tuple else "stop"
         return LLMResponse(message=msg, finish_reason=finish)
+
+
+# ---------------------------------------------------------------------------
+# Stub Streaming LLM Provider（v0.2 流式接入）
+# ---------------------------------------------------------------------------
+
+
+class StubLLMStreamProvider:
+    """脚本化流式 :class:`SupportsLLMStream` 实现 + 同时满足 `LLMProvider`.
+
+    用同一份 chunks 喂两路：
+    - :meth:`stream` yield 整串 :class:`LLMStreamChunk`
+    - :meth:`complete` 把 message.done chunk 的 message / finish_reason / usage /
+      provider_metadata 拼成等价 :class:`LLMResponse`
+
+    这样**同一个 stub** 可被流式与非流式双轨复用，等价性测试不需要构造两份脚本。
+
+    用法：
+
+        stub = StubLLMStreamProvider()
+        stub.script_chunks([
+            LLMStreamChunk(kind="content.delta", delta="Hi", index=0),
+            LLMStreamChunk(kind="message.done", message=msg, finish_reason="stop"),
+        ])
+
+    可多次 ``script_chunks`` 排队多轮（每次 ``stream`` / ``complete`` 弹出队首一组）。
+    """
+
+    def __init__(self) -> None:
+        self._scripts: list[list[LLMStreamChunk]] = []
+        self.calls: list[LLMRequest] = []
+
+    def script_chunks(self, chunks: list[LLMStreamChunk]) -> None:
+        """排队一组 chunks，下一次 ``stream`` / ``complete`` 弹出消费。"""
+        self._scripts.append(list(chunks))
+
+    def _next_chunks(self, request: LLMRequest) -> list[LLMStreamChunk]:
+        self.calls.append(request)
+        if not self._scripts:
+            # 默认终止：返回最小 message.done chunk
+            return [
+                LLMStreamChunk(
+                    kind="message.done",
+                    message=Message(role="assistant", content=""),
+                    finish_reason="stop",
+                )
+            ]
+        return self._scripts.pop(0)
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamChunk]:
+        chunks = self._next_chunks(request)
+        for c in chunks:
+            yield c
+
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        """从同一份脚本拿 chunks，找 message.done 拼装 LLMResponse。"""
+        chunks = self._next_chunks(request)
+        for c in chunks:
+            if c.kind == "message.done":
+                if c.message is None:
+                    raise ValueError("message.done chunk missing message")
+                return LLMResponse(
+                    message=c.message,
+                    finish_reason=c.finish_reason or "stop",
+                    usage=dict(c.usage),
+                    provider_metadata=dict(c.provider_metadata),
+                )
+        raise ValueError("scripted chunks ended without message.done")
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +216,22 @@ def stub_llm() -> StubLLMProvider:
 
 
 @pytest.fixture
+def stub_stream_llm() -> StubLLMStreamProvider:
+    """一个空的 :class:`StubLLMStreamProvider`，测试自己 ``script_chunks(...)`` 排队。"""
+    return StubLLMStreamProvider()
+
+
+@pytest.fixture
 def memory_sink() -> MemoryEventSink:
+    return MemoryEventSink()
+
+
+# RecordingEventSink 是 MemoryEventSink 的别名（语义对齐 plan.md 的命名约定）
+RecordingEventSink = MemoryEventSink
+
+
+@pytest.fixture
+def recording_event_sink() -> MemoryEventSink:
     return MemoryEventSink()
 
 
@@ -175,5 +261,7 @@ def local_model_config() -> Config:
 __all__ = [
     "MemoryEventSink",
     "RecordingApproval",
+    "RecordingEventSink",
     "StubLLMProvider",
+    "StubLLMStreamProvider",
 ]

@@ -37,7 +37,7 @@ from context import (
     build_session,
     materialize_and_load_prompts,
 )
-from core.contracts import EventSink
+from core.contracts import EventSink, SupportsLLMStream
 from executors.agent_runtime.native_runtime import NativeRuntime
 from host.cli_adapter import CLIAdapter, CLIEventSink
 from host.session_bridge import SessionBridge
@@ -114,6 +114,12 @@ def _generate_cli_session_id() -> str:
     default=False,
     help="保存每轮 system prompt 和完整 history 到 .kongming/debug/。",
 )
+@click.option(
+    "--stream/--no-stream",
+    "stream_flag",
+    default=None,
+    help="启用/关闭 LLM 流式响应（覆盖 config.stream.enabled）。",
+)
 def main(
     config_path: Path | None,
     session_id: str | None,
@@ -124,6 +130,7 @@ def main(
     reasoning_effort: str | None,
     show_reasoning: bool | None,
     prompt_debug: bool,
+    stream_flag: bool | None,
 ) -> None:
     """kongming-agent CLI"""
     try:
@@ -138,6 +145,7 @@ def main(
                 reasoning_effort=reasoning_effort,
                 show_reasoning=show_reasoning,
                 prompt_debug=prompt_debug,
+                stream_flag=stream_flag,
             )
         )
     except KeyboardInterrupt:
@@ -156,6 +164,7 @@ async def _run(
     reasoning_effort: str | None = None,
     show_reasoning: bool | None = None,
     prompt_debug: bool = False,
+    stream_flag: bool | None = None,
 ) -> None:
     cfg = _load_config_or_exit(config_path)
 
@@ -164,6 +173,12 @@ async def _run(
         effort_typed: Literal["low", "medium", "high"] = reasoning_effort  # type: ignore[assignment]
         cfg = cfg.model_copy(
             update={"model": cfg.model.model_copy(update={"reasoning_effort": effort_typed})}
+        )
+
+    # CLI 参数 --stream/--no-stream 覆盖 config.stream.enabled。
+    if stream_flag is not None:
+        cfg = cfg.model_copy(
+            update={"stream": cfg.stream.model_copy(update={"enabled": stream_flag})}
         )
 
     # --show-reasoning flag 覆盖 config.cli.show_reasoning；未传 flag 时沿用 config。
@@ -177,9 +192,30 @@ async def _run(
     # show_reasoning 时挂 CLIEventSink。runner 会 fan-out 到 list 里所有 sink。
     event_sinks: list[EventSink] = []
     if trace_enabled:
-        event_sinks.append(JsonlTraceSink(cfg.trace.output_path, auto_flush=cfg.trace.auto_flush))
-    if verbose or effective_show_reasoning:
-        event_sinks.append(CLIEventSink(verbose=verbose, show_reasoning=effective_show_reasoning))
+        event_sinks.append(
+            JsonlTraceSink(
+                cfg.trace.output_path,
+                auto_flush=cfg.trace.auto_flush,
+                delta_sampling=cfg.stream.delta_sampling,
+                periodic_batch_size=cfg.stream.periodic_batch_size,
+            )
+        )
+    # 协调 reasoning 显示归属：流式开启时由 CLIStreamSink 实时打印 reasoning.delta，
+    # CLIEventSink 不再在 llm.response 后重复打印 reasoning_content（避免双重显示）。
+    cli_event_show_reasoning = effective_show_reasoning and not cfg.stream.enabled
+    if verbose or cli_event_show_reasoning:
+        event_sinks.append(
+            CLIEventSink(verbose=verbose, show_reasoning=cli_event_show_reasoning)
+        )
+    # 流式渲染 sink：cfg.stream.enabled 时挂上 CLIStreamSink 负责 reasoning + content 实时渲染。
+    if cfg.stream.enabled:
+        from host import CLIStreamSink
+
+        event_sinks.append(
+            CLIStreamSink(
+                show_reasoning=effective_show_reasoning,
+            )
+        )
 
     registry = build_default_registry(
         file_enabled=cfg.tool.file.enabled,
@@ -304,10 +340,21 @@ async def _run(
             return
 
         resolved_session_id = session_id or _generate_cli_session_id()
+        # 流式路径下 CLIStreamSink 已实时打印 content；SessionBridge 不再重复
+        # write_output(final.content)。流式实际生效要求：cfg 启用 + provider
+        # 实现 SupportsLLMStream（AnthropicMessagesProvider 暂未实现，会自动 fallback）。
+        # getattr 兜底：测试用的 dummy runtime 可能没暴露 llm 属性。
+        runtime_llm = getattr(runtime, "llm", None)
+        stream_active = (
+            cfg.stream.enabled
+            and runtime_llm is not None
+            and isinstance(runtime_llm, SupportsLLMStream)
+        )
         bridge = SessionBridge(
             runtime=runtime,
             adapter=adapter,
             session_id=resolved_session_id,
+            echo_final_content=not stream_active,
         )
 
         _print_banner(

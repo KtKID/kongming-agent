@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from collections.abc import Iterable, Sequence
 from typing import Any
@@ -29,6 +30,7 @@ from core.contracts import (
     ApprovalRequest,
     Event,
     EventSink,
+    FinishReason,
     LLMProvider,
     LLMRequest,
     LLMResponse,
@@ -37,6 +39,7 @@ from core.contracts import (
     PromptDebugSink,
     PromptSource,
     Session,
+    SupportsLLMStream,
     Tool,
     ToolContext,
     ToolLookup,
@@ -74,6 +77,8 @@ class Runner:
         instruction_sources: Sequence[PromptSource] | None = None,
         prompt_debug_sink: PromptDebugSink | None = None,
         instruction_origins: Sequence[str] | None = None,
+        stream_enabled: bool = False,
+        suppress_content_after_tool_call: bool = True,
     ) -> None:
         self._event_sinks: list[EventSink] = list(event_sinks or [])
         self._lifecycle_hooks: list[LifecycleHook] = list(lifecycle_hooks or [])
@@ -86,6 +91,14 @@ class Runner:
         self._instruction_sources: Sequence[PromptSource] = list(instruction_sources or [])
         self._prompt_debug_sink: PromptDebugSink | None = prompt_debug_sink
         self._instruction_origins: list[str] = list(instruction_origins or [])
+        # 流式开关（v0.2 接入阶段）。装配层从 cfg.stream.enabled 注入；
+        # provider 须满足 SupportsLLMStream Protocol 才会实际走流式（runner 用
+        # isinstance 探测，不靠 NotImplementedError 控制流）。
+        self._stream_enabled: bool = stream_enabled
+        # 流中出现 tool_call 后，是否屏蔽继续到达的 content.delta（避免 CLI 在
+        # 工具调用前打印夹带的乱文本）。仅影响事件 emit；message.done 中的
+        # content 不受影响（runner 只在事件层做屏蔽，session 仍记录完整 message）。
+        self._suppress_content_after_tool_call: bool = suppress_content_after_tool_call
 
     # ------------------------------------------------------------------
     # 公共入口
@@ -363,7 +376,12 @@ class Runner:
                 )
             )
 
-            response = await self._safe_llm_complete(llm, llm_request)
+            if self._stream_enabled and isinstance(llm, SupportsLLMStream):
+                response = await self._consume_stream(
+                    llm, llm_request, run_id=state.run_id, turn=state.turn
+                )
+            else:
+                response = await self._safe_llm_complete(llm, llm_request)
             assistant_message = response.message
             await session.append(assistant_message)
             state.record(assistant_message)
@@ -461,6 +479,157 @@ class Runner:
                 f"LLM provider call failed: {exc!r}",
                 details={"exception_type": type(exc).__name__},
             ) from exc
+
+    async def _consume_stream(
+        self,
+        llm: SupportsLLMStream,
+        request: LLMRequest,
+        *,
+        run_id: str,
+        turn: int,
+    ) -> LLMResponse:
+        """消费 :class:`SupportsLLMStream` 的 chunk 流，返回等价 :class:`LLMResponse`。
+
+        与 :meth:`_safe_llm_complete` 行为等价：上层（``_drive_turns``）在拿到
+        ``LLMResponse`` 之后的 tool_call / approval / session.append 流程完全不
+        受流式/非流式影响。
+
+        中间会向 ``EventSink`` 发射四类事件：
+
+        - ``llm.chunk.first``：首个非空 chunk 抵达时 emit 一次（用于 TTFT 度量）
+        - ``content.delta`` / ``reasoning.delta``：每个增量 emit
+        - ``llm.stream.end``：流终止时（成功或异常）汇总 emit 一次
+
+        其它语义：
+
+        - ``tool_call.*`` chunk 在 runner 内累积，**不**直接 emit 为 EventSink 事件
+          （CLI 不渲染中间状态；最终的 ``ToolCall`` 来自 ``message.done``）
+        - 出现 ``tool_call.start`` 后若 ``suppress_content_after_tool_call=True``，
+          后续 ``content.delta`` 不再 emit；但 session 仍保留完整 message（来自
+          ``message.done``）
+        - 流非正常结束（无 ``message.done``）→ 抛 :class:`ProviderError`
+        """
+        started_ns = time.monotonic_ns()
+        first_chunk_emitted = False
+        tool_call_seen = False
+        chunk_count = 0
+        content_chars = 0
+        reasoning_chars = 0
+        tool_call_count = 0
+        truncated_args = False
+
+        final_message: Message | None = None
+        final_finish_reason: FinishReason = "other"
+        final_usage: dict[str, Any] = {}
+        final_provider_metadata: dict[str, Any] = {}
+
+        try:
+            async for chunk in llm.stream(request):
+                chunk_count += 1
+
+                # TTFT：首个非空 chunk 抵达时 emit 一次（不在 message.done 上触发，
+                # 因为 message.done 是终态汇总，不算"首个内容到达"）
+                if not first_chunk_emitted and chunk.kind != "message.done":
+                    elapsed_ms = (time.monotonic_ns() - started_ns) // 1_000_000
+                    await self._emit(
+                        Event(
+                            kind="llm.chunk.first",
+                            run_id=run_id,
+                            turn=turn,
+                            payload={"elapsed_ms": elapsed_ms, "model": request.model},
+                        )
+                    )
+                    first_chunk_emitted = True
+
+                kind = chunk.kind
+                if kind == "content.delta":
+                    content_chars += len(chunk.delta)
+                    if tool_call_seen and self._suppress_content_after_tool_call:
+                        # suppression：tool_call 后的 content 不 emit
+                        continue
+                    await self._emit(
+                        Event(
+                            kind="content.delta",
+                            run_id=run_id,
+                            turn=turn,
+                            payload={"delta": chunk.delta, "index": chunk.index},
+                        )
+                    )
+                elif kind == "reasoning.delta":
+                    reasoning_chars += len(chunk.delta)
+                    await self._emit(
+                        Event(
+                            kind="reasoning.delta",
+                            run_id=run_id,
+                            turn=turn,
+                            payload={"delta": chunk.delta},
+                        )
+                    )
+                elif kind == "tool_call.start":
+                    tool_call_seen = True
+                    tool_call_count += 1
+                    # 不 emit（runner 内部累积；最终 ToolCall 由 message.done 提供）
+                elif kind in ("tool_call.arguments.delta", "tool_call.end"):
+                    # 内部累积；不 emit
+                    pass
+                elif kind == "message.done":
+                    if chunk.message is None:
+                        raise ProviderError(
+                            "stream message.done chunk missing message",
+                            details={"run_id": run_id, "turn": turn},
+                        )
+                    final_message = chunk.message
+                    final_finish_reason = chunk.finish_reason or "other"
+                    final_usage = dict(chunk.usage)
+                    final_provider_metadata = dict(chunk.provider_metadata)
+                    # parser 把 JSON 截断降级为 length；此处记一下供 stream.end payload
+                    if final_finish_reason == "length":
+                        truncated_args = True
+                # 其它未知 kind：忽略，不破坏主链路
+
+            if final_message is None:
+                raise ProviderError(
+                    "stream ended without message.done chunk",
+                    details={"run_id": run_id, "turn": turn, "chunk_count": chunk_count},
+                )
+
+        except AgentError:
+            raise
+        except Exception as exc:
+            raise ProviderError(
+                f"LLM stream consumption failed: {exc!r}",
+                details={
+                    "exception_type": type(exc).__name__,
+                    "run_id": run_id,
+                    "turn": turn,
+                },
+            ) from exc
+        finally:
+            # 终态汇总（流终止 = 成功 or 异常都 emit 一次）
+            await self._emit(
+                Event(
+                    kind="llm.stream.end",
+                    run_id=run_id,
+                    turn=turn,
+                    payload={
+                        "chunk_count": chunk_count,
+                        "finish_reason": (
+                            final_finish_reason if final_message is not None else "error"
+                        ),
+                        "content_chars": content_chars,
+                        "reasoning_chars": reasoning_chars,
+                        "tool_call_count": tool_call_count,
+                        "truncated_args": truncated_args,
+                    },
+                )
+            )
+
+        return LLMResponse(
+            message=final_message,
+            finish_reason=final_finish_reason,
+            usage=final_usage,
+            provider_metadata=final_provider_metadata,
+        )
 
     async def _execute_tool_calls(
         self,

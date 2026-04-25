@@ -13,8 +13,9 @@ API adapter"的规划标签。但：
 - 文件名保留为 ``openai_responses.py`` 是为了和已落地的规划文档保持一致，
   避免双份文件布局引用。
 
-**不做流式**：v1-mini 第一版只走非流式。留给 :class:`BaseLLMProvider` 的扩展
-点承接。流式落地交给后续批次（批次 7 observability 之后，或独立批次）。
+**流式**（v0.2，2026-04-25 接入）：除 :meth:`_do_complete` 非流式外，
+:meth:`stream` 实现 :class:`core.contracts.SupportsLLMStream` Protocol。
+runner 通过 ``isinstance(llm, SupportsLLMStream)`` 能力探测分派。
 
 **httpx 客户端生命周期**：
 - :class:`BaseLLMProvider._ensure_client` 懒加载一个共享 ``httpx.AsyncClient``，
@@ -28,16 +29,20 @@ API adapter"的规划标签。但：
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import AsyncIterator
 from typing import Any, Literal, cast
 
 import httpx
 
 from config_loader.models import ModelConfig
-from core.contracts import LLMRequest, LLMResponse
+from core.contracts import LLMRequest, LLMResponse, LLMStreamChunk
 from core.errors import ProviderError
 from executors.llm.base import BaseLLMProvider
+from executors.llm.openai_compat_stream_parser import OpenAICompatStreamParser
 from executors.llm.raw_dump import dump_raw_llm_interaction
 from executors.llm.reasoning import EffortLevel, ReasoningConfig, resolve_reasoning_plan
+from executors.llm.sse_reader import iter_sse_events
 
 FinishReasonStr = Literal["stop", "tool_calls", "length", "error", "other"]
 
@@ -60,6 +65,7 @@ class OpenAIResponsesProvider(BaseLLMProvider):
         max_retries: int = 3,
         retry_backoff: float = 1.0,
         enable_raw_dump: bool = False,
+        stream_read_timeout: float = 120.0,
     ) -> None:
         super().__init__(
             model_config=model_config,
@@ -70,6 +76,10 @@ class OpenAIResponsesProvider(BaseLLMProvider):
         # env KONGMING_TRACE_RAW_LLM=1 通过 config_loader 的 env 覆盖链路
         # 会自动把 cfg.trace.raw_llm 变成 True，这里只读最终结果。
         self._enable_raw_dump = enable_raw_dump
+        # 流式 read 超时（秒）。装配层从 cfg.stream.read_timeout 传入；
+        # 本地 endpoint（model.is_local=True）会被 stream() 内部自动上调到
+        # max(stream_read_timeout, model.timeout)，因为本地推理 token 间隔可能更长。
+        self._stream_read_timeout = stream_read_timeout
 
     async def _do_complete(self, request: LLMRequest) -> LLMResponse:
         """实现一次真实 chat completion 请求。
@@ -144,6 +154,122 @@ class OpenAIResponsesProvider(BaseLLMProvider):
             )
 
         return self._parse_response(body_for_dump)
+
+    # ------------------------------------------------------------------
+    # 流式请求（满足 SupportsLLMStream Protocol）
+    # ------------------------------------------------------------------
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamChunk]:
+        """OpenAI-compatible 流式响应。
+
+        实现 :class:`core.contracts.SupportsLLMStream` Protocol。链路：
+        ``httpx.AsyncClient.stream("POST", ...)`` → :func:`iter_sse_events`
+        → :class:`OpenAICompatStreamParser` → yield :class:`LLMStreamChunk`。
+
+        - 在 :meth:`_build_payload` 基础上覆盖 ``stream=True`` +
+          ``stream_options.include_usage=true``（确保 GLM 等在最后 chunk 送 usage）
+        - timeout 分离：connect 30s / read 由 ``stream_read_timeout`` 控制
+          （本地 endpoint 自动上调到 ``max(stream_read_timeout, model.timeout)``，
+          因为本地推理 token 间隔可能更长）/ write 跟 ``model.timeout``
+        - HTTP / SSE 错误抛 :class:`ProviderError`（runner 不靠 iterator 耗尽推断终态）
+        - raw_dump 累积所有原始 chunk dict，流结束（不论成功失败）一次性落盘，
+          保留 ``self._enable_raw_dump`` opt-in 语义
+        """
+        url = self._model_config.base_url.rstrip("/") + self._ENDPOINT_PATH
+        payload = self._build_payload(request)
+        # 覆盖 _build_payload 默认的 stream=False，加 include_usage 让最后 chunk 带 usage
+        payload["stream"] = True
+        payload["stream_options"] = {"include_usage": True}
+        headers = self._build_headers()
+
+        # B#4 timeout 分离：本地 endpoint read 超时上调，避免本地推理 token 间隔被截断
+        is_local = self._model_config.is_local
+        effective_read_timeout = (
+            max(self._stream_read_timeout, self._model_config.timeout)
+            if is_local
+            else self._stream_read_timeout
+        )
+        timeout = httpx.Timeout(
+            connect=30.0,
+            read=effective_read_timeout,
+            write=self._model_config.timeout,
+            pool=30.0,
+        )
+
+        client = self._ensure_client()
+        parser = OpenAICompatStreamParser()
+
+        # B#3 raw_dump 累积：流结束（成功或失败）一次性落盘
+        chunks_buffer: list[dict[str, Any]] = []
+        dump_status = 0
+        dump_error: str | None = None
+
+        try:
+            async with client.stream(
+                "POST", url, json=payload, headers=headers, timeout=timeout
+            ) as response:
+                dump_status = response.status_code
+                if response.status_code >= 400:
+                    body_bytes = await response.aread()
+                    detail_text = body_bytes.decode("utf-8", errors="replace")[:2000]
+                    dump_error = f"HTTP {response.status_code}"
+                    raise ProviderError(
+                        f"LLM provider stream HTTP {response.status_code}: {detail_text}",
+                        details={
+                            "status_code": response.status_code,
+                            "url": url,
+                            "model": self._model_config.name,
+                        },
+                    )
+
+                async def _wrapped_events() -> AsyncIterator[
+                    tuple[str | None, dict[str, Any]]
+                ]:
+                    async for evt_name, evt_data in iter_sse_events(response):
+                        chunks_buffer.append(evt_data)
+                        yield evt_name, evt_data
+
+                async for chunk in parser.parse(_wrapped_events()):
+                    yield chunk
+
+        except ProviderError:
+            # 已包装，直接透传（dump 在 finally 落地）
+            raise
+        except httpx.TimeoutException as exc:
+            dump_error = f"timeout: {exc}"
+            raise ProviderError(
+                f"LLM provider stream timeout calling {url}: {exc}",
+                details={"url": url, "model": self._model_config.name},
+            ) from exc
+        except httpx.HTTPError as exc:
+            dump_error = f"http_error: {exc}"
+            raise ProviderError(
+                f"LLM provider stream HTTP error calling {url}: {exc}",
+                details={"url": url, "model": self._model_config.name},
+            ) from exc
+        except Exception as exc:
+            # SSE / parser 异常都视为 provider 侧失败
+            dump_error = f"{type(exc).__name__}: {exc}"
+            raise ProviderError(
+                f"LLM provider stream failed: {exc!r}",
+                details={"url": url, "exception_type": type(exc).__name__},
+            ) from exc
+        finally:
+            # 流结束（成功或异常）一次性 dump，opt-in。
+            # 用 contextlib.suppress 兜底：dump 是观测层旁路，磁盘满 / 序列化
+            # 失败等副作用绝不能覆盖原始 ProviderError（finally 中抛异常会丢失主异常）。
+            with contextlib.suppress(Exception):
+                dump_raw_llm_interaction(
+                    enabled=self._enable_raw_dump,
+                    provider="openai_responses_stream",
+                    url=url,
+                    request_payload=payload,
+                    request_headers=headers,
+                    response_status=dump_status,
+                    response_headers={},
+                    response_body={"chunks": chunks_buffer},
+                    error=dump_error,
+                )
 
     # ------------------------------------------------------------------
     # 请求构造
@@ -264,8 +390,9 @@ class OpenAIResponsesProvider(BaseLLMProvider):
                 provider_metadata[field_name] = data[field_name]
 
         # reasoning_content（可能很长，截断至 500 字符；完整内容在 raw_dump）
+        # 多字段 fallback：reasoning → reasoning_content → reasoning_details[*]
         msg_data = choice.get("message") or {}
-        reasoning_raw = msg_data.get("reasoning_content")
+        reasoning_raw = self._extract_reasoning(msg_data)
         if reasoning_raw is not None:
             provider_metadata["reasoning_content"] = reasoning_raw[:500]
             provider_metadata["reasoning_content_length"] = len(reasoning_raw)
@@ -277,6 +404,47 @@ class OpenAIResponsesProvider(BaseLLMProvider):
             provider_metadata=provider_metadata,
             raw=data,
         )
+
+    @staticmethod
+    def _extract_reasoning(message_data: dict[str, Any]) -> str | None:
+        """从 OpenAI-compat message dict 中抽 reasoning 文本，多字段 fallback。
+
+        按优先级尝试以下字段（命中即返回，不再回退）：
+
+        1. ``message.reasoning`` —— DeepSeek / 部分 Anthropic-compat 兼容层
+        2. ``message.reasoning_content`` —— GLM / Qwen / 本地 reasoning 模型
+        3. ``message.reasoning_details[*]`` —— OpenAI Responses-style，每项内
+           按 ``summary`` / ``thinking`` / ``content`` / ``text`` 顺序取首个非空字段
+
+        对齐 Hermes ``_extract_reasoning``（``other/hermes-agent/run_agent.py``）。
+        返回完整文本（不截断；调用方按需截断）。三层都缺时返回 ``None``。
+        """
+        # 1. reasoning（顶层字符串）
+        raw = message_data.get("reasoning")
+        if isinstance(raw, str) and raw:
+            return raw
+
+        # 2. reasoning_content（顶层字符串）
+        raw = message_data.get("reasoning_content")
+        if isinstance(raw, str) and raw:
+            return raw
+
+        # 3. reasoning_details[*]：每项取首个非空候选字段
+        details = message_data.get("reasoning_details")
+        if isinstance(details, list):
+            parts: list[str] = []
+            for item in details:
+                if not isinstance(item, dict):
+                    continue
+                for key in ("summary", "thinking", "content", "text"):
+                    val = item.get(key)
+                    if isinstance(val, str) and val:
+                        parts.append(val)
+                        break  # 同一项只取一个字段，避免重复累积
+            if parts:
+                return "\n".join(parts)
+
+        return None
 
     @staticmethod
     def _normalize_finish_reason(raw: str, *, message_has_tool_calls: bool) -> FinishReasonStr:

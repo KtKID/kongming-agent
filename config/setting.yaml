@@ -142,11 +142,31 @@ cli:
   # 也可临时用 --show-reasoning flag 覆盖，不改此文件。
   show_reasoning: true
 
+stream:
+  # LLM 流式响应配置（v0.2 接入阶段，2026-04-25）。
+  #
+  # enabled=True 出厂即用打字机效果；可用 --no-stream flag 或
+  # KONGMING_STREAM_ENABLED=0 临时关闭，不需要改本文件。
+  enabled: true
+  # 流式 read 超时（秒）。心跳期间不计入此超时；本地 endpoint 由 provider
+  # 装配层根据 model.is_local 自动上调（见 OpenAIResponsesProvider）。
+  read_timeout: 120.0
+  # 流中出现 tool_call 后，runner 是否屏蔽继续到达的 content.delta。
+  # 默认 True，避免 CLI 在 tool 调用前打印夹带的乱文本。
+  suppress_content_after_tool_call: true
+  # JsonlTraceSink 对 content.delta / reasoning.delta 的采样策略：
+  #   none     不写（默认，防爆磁盘）
+  #   periodic 按 periodic_batch_size 抽样
+  #   full     全写（仅 debug）
+  delta_sampling: none
+  # delta_sampling=periodic 时的采样批大小，每 N 个 delta 取 1 个落盘。
+  periodic_batch_size: 20
+
 evolution:
   memory:
     # 是否启用 memory 模块（跨会话长期记忆）。False 时：不加载 memory 目录、
     # 不注册 memory tool、不 emit snapshot 事件。
-    enabled: true
+    enabled: false
     # memory 根目录。相对路径视为 cwd 子目录；绝对路径直接使用。
     root_path: .kongming/memory
     # 是否将 memory snapshot 注入 system prompt。
@@ -155,4 +175,4 @@ evolution:
     # 单个 memory 文件读取的最大字符数上限，防止异常巨大的文件吃掉 prompt 预算。
     read_max_chars: 65536
     # memory tool view 动作返回的最大字符数。
-    view_max_chars: 8000
+    view_max_chars: 3000

@@ -85,6 +85,11 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("evolution", "memory", "inject_prompt"),
     ("evolution", "memory", "read_max_chars"),
     ("evolution", "memory", "view_max_chars"),
+    ("stream", "enabled"),
+    ("stream", "read_timeout"),
+    ("stream", "suppress_content_after_tool_call"),
+    ("stream", "delta_sampling"),
+    ("stream", "periodic_batch_size"),
 )
 
 # per-module YAML 文件名 → 合并到 Config 的顶层 key。

@@ -45,6 +45,10 @@ if TYPE_CHECKING:
     from core.contracts import Event
 
 
+_STREAM_DELTA_KINDS: frozenset[str] = frozenset({"content.delta", "reasoning.delta"})
+"""流式增量事件 kind 集合，受 ``delta_sampling`` 策略约束。"""
+
+
 class JsonlTraceSink:
     """Write every :class:`~core.contracts.Event` as one JSON line.
 
@@ -59,6 +63,12 @@ class JsonlTraceSink:
         output_path: JSONL 落盘路径。父目录会在首次 ``emit`` 时按需创建。
         auto_flush: 每次写入后是否立即 ``flush``。默认 ``True``，牺牲少量吞吐
             换取崩溃场景下最小丢行窗口。
+        delta_sampling: 对 ``content.delta`` / ``reasoning.delta`` 的采样策略，
+            其它事件全采。``"none"`` 不写 delta（默认，防爆磁盘）；
+            ``"periodic"`` 按 ``periodic_batch_size`` 抽样（每 N 个取 1 个）；
+            ``"full"`` 全写（仅 debug）。``EventSink`` Protocol 形状不变。
+        periodic_batch_size: ``delta_sampling="periodic"`` 时的采样批大小，
+            必须 ``> 0``。
     """
 
     def __init__(
@@ -66,14 +76,28 @@ class JsonlTraceSink:
         output_path: str | Path,
         *,
         auto_flush: bool = True,
+        delta_sampling: str = "none",
+        periodic_batch_size: int = 20,
     ) -> None:
+        if delta_sampling not in ("none", "periodic", "full"):
+            raise ValueError(
+                f"delta_sampling must be one of none/periodic/full, got {delta_sampling!r}"
+            )
+        if periodic_batch_size <= 0:
+            raise ValueError(
+                f"periodic_batch_size must be > 0, got {periodic_batch_size}"
+            )
         self._output_path = Path(output_path)
         self._auto_flush = auto_flush
+        self._delta_sampling = delta_sampling
+        self._periodic_batch_size = periodic_batch_size
         # 串行化文件写入，避免多协程交错写出半行 JSON。
         self._lock = asyncio.Lock()
         # lazy init：父目录与空文件在首次 emit 时创建，
         # 构造函数只做参数登记，不做任何 I/O。
         self._init_done = False
+        # delta 采样计数：按 kind 分别计数；periodic 模式下每 N 取 1 写盘
+        self._delta_seen: dict[str, int] = {}
 
     @property
     def output_path(self) -> Path:
@@ -87,14 +111,39 @@ class JsonlTraceSink:
     async def emit(self, event: Event) -> None:
         """把一条事件写成一行 JSON 追加到 ``output_path``。
 
+        对 ``content.delta`` / ``reasoning.delta`` 应用 ``delta_sampling`` 策略；
+        其它事件 kind 全量写盘。
+
         失败策略：本方法内部不吞异常。runner 在 fan-out 层
         （``core/runner.py`` ``_emit``）已经做了"sink 异常不污染主链路"的兜底，
         所以这里允许抛出 ``OSError`` / ``TypeError`` 等，让 runner 统一处理。
         """
+        if event.kind in _STREAM_DELTA_KINDS and not self._should_write_delta(event.kind):
+            return
         await self._ensure_init()
         line = self._serialize(event)
         async with self._lock:
             await asyncio.to_thread(self._append_line_sync, line)
+
+    def _should_write_delta(self, kind: str) -> bool:
+        """按 ``delta_sampling`` 策略决定本条 delta 是否写盘。
+
+        - ``none`` → 永远 False（默认；防爆磁盘）
+        - ``full`` → 永远 True（仅 debug）
+        - ``periodic`` → 从第 1 个起每 ``periodic_batch_size`` 个 delta 写一个
+          （计数器按 kind 分别维护，``content.delta`` / ``reasoning.delta``
+          互不影响）。``batch_size=1`` 时退化为"全写"（等价 ``full`` 模式）。
+        """
+        if self._delta_sampling == "none":
+            return False
+        if self._delta_sampling == "full":
+            return True
+        # periodic：用 (n-1) % batch_size == 0 表达"从第 1 个起每 N 取 1"。
+        # 这样 batch_size=1 时所有 (n-1)%1=0 → 全写，符合"每 1 取 1=全取"直觉。
+        # 对 batch_size>1 行为不变：n=1,1+N,1+2N,... 命中。
+        n = self._delta_seen.get(kind, 0) + 1
+        self._delta_seen[kind] = n
+        return (n - 1) % self._periodic_batch_size == 0
 
     async def close(self) -> None:
         """Placeholder：当前实现每次 ``emit`` 独立开关文件，无需 close。
@@ -151,11 +200,18 @@ class JsonlTraceSink:
 def build_jsonl_trace_sink(config: Config) -> JsonlTraceSink:
     """按统一配置构造 :class:`JsonlTraceSink`。
 
-    只读 :attr:`config.trace.output_path`，不读环境变量、不碰其它配置项。
+    读取 :attr:`config.trace.output_path` + :attr:`config.trace.auto_flush`，
+    并把 :attr:`config.stream.delta_sampling` / :attr:`config.stream.periodic_batch_size`
+    传给 sink，让流式 delta 事件按策略采样落盘（防爆磁盘）。
     装配层（``native_runtime.build``）负责把返回的 sink 注册进 runner 的
     ``list[EventSink]``；本函数本身不做注册。
     """
-    return JsonlTraceSink(config.trace.output_path)
+    return JsonlTraceSink(
+        config.trace.output_path,
+        auto_flush=config.trace.auto_flush,
+        delta_sampling=config.stream.delta_sampling,
+        periodic_batch_size=config.stream.periodic_batch_size,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -16,12 +16,14 @@ from __future__ import annotations
 
 from host.base import HostAdapter
 from host.cli_adapter import CLIAdapter, CLIEventSink
+from host.cli_stream_sink import CLIStreamSink
 from host.memory_refresh_sink import MemoryRefreshSink
 from host.session_bridge import SessionBridge
 
 __all__ = [
     "CLIAdapter",
     "CLIEventSink",
+    "CLIStreamSink",
     "HostAdapter",
     "MemoryRefreshSink",
     "SessionBridge",
