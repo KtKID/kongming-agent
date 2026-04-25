@@ -23,20 +23,23 @@ class _StubLLM:
     def __init__(
         self,
         responses: list[tuple[str | None, list[ToolCall] | None]] | None = None,
+        usage: dict | None = None,
     ) -> None:
         self._responses = list(responses or [])
+        self._usage = usage or {}
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         if not self._responses:
             return LLMResponse(
                 message=Message(role="assistant", content=""),
                 finish_reason="stop",
+                usage=dict(self._usage),
             )
         content, tool_calls = self._responses.pop(0)
         calls_tuple = tuple(tool_calls) if tool_calls else None
         msg = Message(role="assistant", content=content, tool_calls=calls_tuple)
         finish = "tool_calls" if calls_tuple else "stop"
-        return LLMResponse(message=msg, finish_reason=finish)
+        return LLMResponse(message=msg, finish_reason=finish, usage=dict(self._usage))
 
 
 class _AllowApproval:
@@ -120,6 +123,34 @@ async def test_runner_resolves_tool_names_from_spec() -> None:
     assert result.status == "failed"
     assert result.error is not None
     assert "unknown_tool" in result.error.message
+
+
+@pytest.mark.unit
+async def test_runner_usage_in_result_metadata() -> None:
+    """runner 把 usage 累计写入 Result.metadata['usage']。"""
+    llm = _StubLLM(
+        [("hello", None)],
+        usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    )
+    runner = Runner()
+    session = InMemorySession("u")
+    spec = AgentSpec(name="t", instructions="s", default_model="m", max_turns=3)
+
+    result = await runner.run(
+        "hi",
+        session=session,
+        agent_spec=spec,
+        llm=llm,
+        tools={},
+        approval=_AllowApproval(),
+    )
+
+    assert result.status == "completed"
+    usage = result.metadata.get("usage")
+    assert isinstance(usage, dict)
+    assert usage["prompt_tokens"] == 10
+    assert usage["completion_tokens"] == 5
+    assert usage["total_tokens"] == 15
 
 
 @pytest.mark.unit

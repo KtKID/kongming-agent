@@ -22,34 +22,12 @@ dict 拷一份。
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
 from typing import Any
 
 from context.history_compactor import HistoryCompactor
 from context.instruction_loader import InstructionLoader, InstructionSource
+from core.contracts import AssembledInput, MessageCompactor
 from core.message import Message
-
-
-@dataclass(frozen=True)
-class AssembledInput:
-    """装配结果。
-
-    Attributes:
-        system_message: 本次调用新追加的 system 消息；``None`` 表示没有追加
-            （历史里已经有 system，或 sources 为空）。
-        messages: 要发给 provider 的完整 messages，顺序已正确（system 在最前）。
-        metadata: 装配过程的统计 / 诊断字段。v1-mini 固定含：
-
-            - ``original_count`` (int): 传入 history 的原始长度
-            - ``compacted_count`` (int): 压缩后剩余条数
-            - ``added_system`` (bool): 是否追加了新 system 消息
-            - ``instruction_sources`` (list[str]): 参与渲染的 source origin 名
-            - ``attachments`` (list): 占位字段，v1-mini 永远是空 list
-    """
-
-    system_message: Message | None
-    messages: list[Message]
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class InputAssembler:
@@ -58,17 +36,18 @@ class InputAssembler:
     def __init__(
         self,
         *,
-        compactor: HistoryCompactor | None = None,
+        compactor: MessageCompactor | None = None,
     ) -> None:
         """初始化。
 
         Args:
-            compactor: 历史压缩器；未传则用默认参数的 :class:`HistoryCompactor`。
+            compactor: 历史压缩器（满足 MessageCompactor Protocol 即可）；
+                未传则用默认参数的 :class:`HistoryCompactor`。
         """
-        self._compactor = compactor or HistoryCompactor()
+        self._compactor: MessageCompactor = compactor or HistoryCompactor()
 
     @property
-    def compactor(self) -> HistoryCompactor:
+    def compactor(self) -> MessageCompactor:
         """暴露给上层做 trace 打点用。"""
         return self._compactor
 

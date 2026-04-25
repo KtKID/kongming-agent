@@ -227,10 +227,17 @@ async def test_runner_compactor_failure_falls_back_to_raw_history(
 # ---------------------------------------------------------------------------
 
 
-async def test_native_runtime_build_injects_history_compactor_by_default(
+async def test_native_runtime_build_disables_compactor_by_default(
     stub_llm, recording_approval, tmp_path
 ):
-    """NativeRuntime.build 不传 message_compactor 时，默认用 HistoryCompactor。"""
+    """NativeRuntime.build 默认（cfg.compactor.enabled=False）装 NoopCompactor，
+    不做 FIFO 压缩。显式设 enabled=True 才装 HistoryCompactor（见下一条测试）。
+
+    这是 memory-module5-completion task 定下的新默认行为：现有 FIFO 压缩语义
+    与 LLM summarize 式压缩差距大，默认关闭、留给后续 task compactor-v2-llm-summarize。
+    """
+    from executors.agent_runtime.native_runtime import _NoopCompactor
+
     cfg = _build_stub_cfg(tmp_path)
     runtime = NativeRuntime.build(
         cfg,
@@ -240,7 +247,24 @@ async def test_native_runtime_build_injects_history_compactor_by_default(
     )
     runtime._llm = stub_llm  # type: ignore[attr-defined]
 
-    # runner 内部 compactor 应该是 HistoryCompactor 实例
+    runner = runtime._runner  # type: ignore[attr-defined]
+    assert isinstance(runner._message_compactor, _NoopCompactor)
+
+
+async def test_native_runtime_build_enables_history_compactor_when_configured(
+    stub_llm, recording_approval, tmp_path
+):
+    """cfg.compactor.enabled=True 时装 HistoryCompactor 作为兜底 FIFO 压缩。"""
+    cfg = _build_stub_cfg(tmp_path)
+    cfg.compactor.enabled = True  # 显式启用 FIFO 压缩
+    runtime = NativeRuntime.build(
+        cfg,
+        approval=recording_approval,
+        tools={},
+        enabled_tool_names=[],
+    )
+    runtime._llm = stub_llm  # type: ignore[attr-defined]
+
     runner = runtime._runner  # type: ignore[attr-defined]
     assert isinstance(runner._message_compactor, HistoryCompactor)
 

@@ -11,6 +11,7 @@
 - :class:`ApprovalProvider`
 - :class:`LLMProvider`
 - :class:`EventSink`
+- :class:`PromptDebugSink`
 
 以及一组支撑数据结构（:class:`ToolContext` / :class:`ToolResult` /
 :class:`ApprovalRequest` / :class:`ApprovalDecision` / :class:`LLMRequest` /
@@ -23,7 +24,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -204,12 +205,16 @@ class LLMResponse:
         message: 模型这一轮的 assistant 消息。允许只带 tool_calls，不带 content。
         finish_reason: 结束原因；tool_calls 表示模型要求继续执行工具。
         usage: token 使用量等运行时统计（透传给 observability）。
+        provider_metadata: 厂商扩展字段（reasoning_tokens / cached_tokens /
+            reasoning_content / request_id / model / system_fingerprint 等）。
+            dict 结构，保留原始字段名，不强行归一化。core 不解释内容，只透传。
         raw: 原始 provider 响应的精简引用，仅用于调试，core 不读它。
     """
 
     message: Message
     finish_reason: FinishReason = "stop"
     usage: dict[str, Any] = field(default_factory=dict)
+    provider_metadata: dict[str, Any] = field(default_factory=dict)
     raw: Any | None = None
 
 
@@ -222,6 +227,93 @@ class LLMProvider(Protocol):
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """发起一次模型调用并拿回统一响应。必须 async。"""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# LLM 流式增量（provider-agnostic）
+# ---------------------------------------------------------------------------
+
+
+StreamChunkKind = Literal[
+    "reasoning.delta",
+    "content.delta",
+    "tool_call.start",
+    "tool_call.arguments.delta",
+    "tool_call.end",
+    "message.done",
+]
+
+
+@dataclass(frozen=True)
+class LLMStreamChunk:
+    """provider-agnostic 流式增量事件。
+
+    一次完整的流结束后，必须有且只有一个 ``kind="message.done"`` 的 chunk
+    作为终态。runner 把该 chunk 的 ``message`` / ``finish_reason`` / ``usage``
+    / ``provider_metadata`` 当作等价 :class:`LLMResponse` 使用，后续 tool_call
+    / approval / session.append 链路与非流式完全一致。
+
+    字段必填矩阵详见 ``docs/llm-provider-v0.2/streaming/04-data-and-state.md`` §1.1。
+    核心约束（parser 必须保证）：
+
+    - ``message.done`` 必须是流的最后一个 chunk
+    - 同一 ``index`` 下 ``tool_call.start`` 必须在所有 ``tool_call.arguments.delta``
+      之前；``tool_call.end`` 必须在该 index 的所有 delta 之后
+    - ``tool_call.end`` 只承载定位信息（index / tool_call_id / tool_name），
+      不包含 arguments 完整字符串或 extra_content；完整 tool_call（含合法 JSON
+      化的 arguments 与 extra_content）只能通过 ``message.done.message.tool_calls``
+      获取
+    - 任何 ``*.delta`` kind 的 chunk 必须携带非空 ``delta``
+
+    Attributes:
+        kind: chunk 类型。见上方 :data:`StreamChunkKind`。
+        delta: ``*.delta`` kind 的增量字符串；其他 kind 忽略。
+        index: ``content.delta`` / ``tool_call.*`` 的槽位。``content.delta`` V1
+            始终为 0（单正文 block）。
+        tool_call_id: ``tool_call.start`` / ``tool_call.end`` 必填；
+            ``tool_call.arguments.delta`` 可选。
+        tool_name: ``tool_call.start`` / ``tool_call.end`` 必填。
+        message: 仅 ``message.done`` 必填，其他 kind 忽略；等价非流式
+            :attr:`LLMResponse.message`。
+        finish_reason: 仅 ``message.done`` 必填。
+        usage: 仅 ``message.done`` 必填（可为空 dict），其他 kind 忽略。
+        provider_metadata: 仅 ``message.done`` 必填（可为空 dict），其他 kind 忽略。
+    """
+
+    kind: StreamChunkKind
+    delta: str = ""
+    index: int = 0
+    tool_call_id: str | None = None
+    tool_name: str | None = None
+    message: Message | None = None
+    finish_reason: FinishReason | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
+    provider_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@runtime_checkable
+class SupportsLLMStream(Protocol):
+    """流式能力 Protocol，与 :class:`LLMProvider` 正交。
+
+    具备该能力的 provider 必须同时满足 :class:`LLMProvider`；runner 用
+    ``isinstance(llm, SupportsLLMStream)`` 做能力探测，避免用
+    :class:`NotImplementedError` 作控制流。
+
+    调用约定：
+
+    - runner 不 ``await stream()`` 本身，直接拿 :class:`AsyncIterator`
+    - provider 在 iterator 内部处理 HTTP / SSE / 累积
+    - runner 消费完所有 chunk（直到见到 ``kind="message.done"`` 的终态）
+    - 非 ``message.done`` 结束 = 流中断 = 由 provider 抛
+      :class:`core.errors.ProviderError`；runner 不靠 iterator 耗尽来推断终态
+
+    现有不具备流式能力的 provider / stub 不需要改：结构上没有 ``stream()``
+    方法，``isinstance(..., SupportsLLMStream)`` 自动为 False。
+    """
+
+    def stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamChunk]:
+        """对一次请求启动流式响应。返回可迭代的 :class:`LLMStreamChunk` 流。"""
         ...
 
 
@@ -271,6 +363,29 @@ EventKind = Literal[
     "approval.request",
     "approval.decision",
     "error",
+    # v0.2 流式（llm-streaming-v1）新增：
+    # - content.delta / reasoning.delta：runner 消费 LLMStreamChunk 后按每片增量
+    #   emit，payload={"delta": str, "index": int?}
+    # - llm.chunk.first：首个非空 chunk 抵达时 emit 一次，
+    #   payload={"elapsed_ms": int, "model": str | None}；用于 TTFT 度量
+    # - llm.stream.end：流结束汇总 emit 一次，
+    #   payload={"chunk_count": int, "finish_reason": str, "content_chars": int,
+    #            "reasoning_chars": int, "tool_call_count": int, "truncated_args": bool}
+    "content.delta",
+    "reasoning.delta",
+    "llm.chunk.first",
+    "llm.stream.end",
+    # Memory 模块事件（self-evolution-memory v0.1.3+）：
+    # - memory.write.success：safety_write.execute_write 成功落盘 (status="written")
+    # - memory.write.rejected：内容扫描拦截（prompt injection / secret / 不可见 Unicode 等）
+    # - memory.write.error：写入失败（error / not_found / skipped）
+    # - memory.snapshot.refreshed：history.compact 后 MemoryRefreshSink 重新
+    #   load_from_disk 得到新 snapshot 时 emit；和启动时一次性的 snapshot.captured
+    #   并列（前者可多次，后者只在装配阶段出现）
+    "memory.write.success",
+    "memory.write.rejected",
+    "memory.write.error",
+    "memory.snapshot.refreshed",
 ]
 
 
@@ -332,12 +447,104 @@ class MessageCompactor(Protocol):
         ...
 
 
+# ---------------------------------------------------------------------------
+# InputAssembler 协议
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AssembledInput:
+    """InputAssembler.assemble() 的返回类型契约。
+
+    core 在此定义完整数据结构（协议单一真源），context 层 InputAssembler
+    直接使用此类型，不再重定义。
+
+    Attributes:
+        messages: 要发给 provider 的完整 messages（system 在最前，compact 后）。
+        metadata: 装配元数据，runner 用于构造 ``history.compact`` 事件。
+            最少含 ``original_count`` 和 ``compacted_count`` 两个 int 字段。
+        system_message: 本次新追加的 system 消息；``None`` 表示没有追加。
+    """
+
+    messages: list[Message]
+    metadata: dict[str, Any] = field(default_factory=dict)
+    system_message: Message | None = None
+
+
+class PromptSource(Protocol):
+    """指令来源的最小 Protocol，runner 用于传给 assembler。
+
+    具体实现（``context.instruction_loader.InstructionSource``）是 frozen
+    dataclass，满足此 Protocol。runner 只需知道 origin 和 content 两个属性。
+    """
+
+    @property
+    def origin(self) -> str: ...
+
+    @property
+    def content(self) -> str: ...
+
+
+class PromptAssembler(Protocol):
+    """prompt build 的统一入口协议（runner 对 InputAssembler 的视图）。
+
+    实现类在 ``context.input_assembler.InputAssembler``；core 只定义接口，
+    不持有实现。runner 只调用 :meth:`assemble`，不关心内部如何做 compact /
+    system 注入。
+
+    注意：返回值类型声明为 :class:`AssembledInput`（core 定义的最小契约），
+    实现方可以返回更丰富的子类型（例如 context 里带 ``system_message`` 字段
+    的版本），runner 只读 ``messages`` 和 ``metadata``，不受影响。
+    """
+
+    async def assemble(
+        self,
+        history: Sequence[Message],
+        instructions: Sequence[Any] = (),
+    ) -> AssembledInput:
+        """装配最终输入。
+
+        Args:
+            history: 当前 session 的原始历史。
+            instructions: 静态指令来源列表；空列表则不注入 system。
+
+        Returns:
+            满足 :class:`AssembledInput` 结构的装配结果（``messages`` + ``metadata``）。
+        """
+        ...
+
+
+class PromptDebugSink(Protocol):
+    """prompt debug dump 输出协议。
+
+    实现方通常在 ``observability/``，runner 只负责在 LLM request 前把
+    当前 turn 的 prompt build 快照交出去。
+    """
+
+    def dump(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        turn: int,
+        model: str,
+        instruction_origins: Sequence[str],
+        history_before_assemble: Sequence[Message],
+        assembled_messages: Sequence[Message],
+        metadata: Mapping[str, Any],
+        added_system_prompt: str | None,
+    ) -> str:
+        """写出 prompt debug 快照，返回输出路径字符串。"""
+        ...
+
+
 __all__ = [
     # Tool
     "ApprovalDecision",
     "ApprovalOutcome",
     "ApprovalProvider",
     "ApprovalRequest",
+    "AssembledInput",
     "Event",
     "EventKind",
     "EventSink",
@@ -345,8 +552,14 @@ __all__ = [
     "LLMProvider",
     "LLMRequest",
     "LLMResponse",
+    "LLMStreamChunk",
     "MessageCompactor",
+    "PromptAssembler",
+    "PromptDebugSink",
+    "PromptSource",
     "Session",
+    "StreamChunkKind",
+    "SupportsLLMStream",
     "Tool",
     "ToolContext",
     "ToolLookup",

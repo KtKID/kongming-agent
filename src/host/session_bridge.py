@@ -80,6 +80,13 @@ class SessionBridge:
                 f"[error] {type(result.error).__name__}: {result.error.message}"
             )
 
+        usage = result.metadata.get("usage")
+        if isinstance(usage, dict) and usage:
+            prompt = usage.get("prompt_tokens", 0)
+            completion = usage.get("completion_tokens", 0)
+            total = usage.get("total_tokens", 0)
+            await self._adapter.write_output(f"[tokens ↑{prompt} ↓{completion} ={total}]")
+
         return result
 
     async def run_loop(self) -> None:

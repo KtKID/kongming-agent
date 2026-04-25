@@ -17,15 +17,18 @@ API adapter"的规划标签。但：
 点承接。流式落地交给后续批次（批次 7 observability 之后，或独立批次）。
 
 **httpx 客户端生命周期**：
-- 每次 :meth:`_do_complete` 开启一个 ``httpx.AsyncClient`` 上下文；
-  本地 / 远端模型单次请求都在同一上下文里完成，退出时自动关闭连接。
-- 不做单例、不做连接池持有——v1-mini 第一版请求并发度非常低（CLI 单用户
-  串行），把连接池复用的工程化改造放到后续批次，配合真正的并发压测再决定。
+- :class:`BaseLLMProvider._ensure_client` 懒加载一个共享 ``httpx.AsyncClient``，
+  此后 :meth:`_do_complete` 复用同一个 client 命中 TLS keepalive，省掉
+  每次握手的 ~100-300ms 延迟。
+- timeout 不绑在 client 级，而是每次 ``.post(..., timeout=...)`` 按 per-request
+  覆盖，保证不同 ``LLMRequest.timeout_seconds`` 都生效。
+- 关闭由调用方（``NativeRuntime.aclose`` / CLI finally 分支）触发
+  :meth:`BaseLLMProvider.aclose` 释放连接池。
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import httpx
 
@@ -34,6 +37,7 @@ from core.contracts import LLMRequest, LLMResponse
 from core.errors import ProviderError
 from executors.llm.base import BaseLLMProvider
 from executors.llm.raw_dump import dump_raw_llm_interaction
+from executors.llm.reasoning import EffortLevel, ReasoningConfig, resolve_reasoning_plan
 
 FinishReasonStr = Literal["stop", "tool_calls", "length", "error", "other"]
 
@@ -84,9 +88,11 @@ class OpenAIResponsesProvider(BaseLLMProvider):
             else self._model_config.timeout
         )
 
+        client = self._ensure_client()
         try:
-            async with httpx.AsyncClient(timeout=per_call_timeout) as client:
-                response = await client.post(url, json=payload, headers=headers)
+            response = await client.post(
+                url, json=payload, headers=headers, timeout=per_call_timeout
+            )
         except httpx.TimeoutException as exc:
             # 让 base.complete 按 TimeoutError 心智处理（触发重试）。
             raise TimeoutError(f"httpx timeout calling {url}: {exc}") from exc
@@ -170,6 +176,11 @@ class OpenAIResponsesProvider(BaseLLMProvider):
             # 可配参数时，从 LLMRequest.metadata 读。
             payload["tool_choice"] = "auto"
 
+        # reasoning_effort：从 model_config 读取，按 model name 映射到厂商格式。
+        effort = self._model_config.reasoning_effort
+        if effort is not None:
+            self._apply_reasoning_effort(payload, effort)
+
         # 允许调用方通过 metadata 追加 provider 特定字段（v1-mini 先不展开解释
         # 每个字段；透传便于调试）。
         extra = request.metadata.get("provider_extra") if request.metadata else None
@@ -180,6 +191,20 @@ class OpenAIResponsesProvider(BaseLLMProvider):
                     payload[k] = v
 
         return payload
+
+    def _apply_reasoning_effort(self, payload: dict[str, Any], effort: str) -> None:
+        """按 reasoning_profiles 匹配最终模型名，注入厂商特定 reasoning 参数。
+
+        profiles 为空时静默跳过（reasoning_effort 配置不生效）。
+        """
+        profiles = self._model_config.reasoning_profiles
+        if not profiles:
+            return
+        model_name = payload.get("model", self._model_config.name)
+        config = ReasoningConfig(enabled=True, effort=cast(EffortLevel, effort))
+        plan = resolve_reasoning_plan(model_name, config, profiles)
+        if plan.send_reasoning:
+            payload.update(plan.payload_patch)
 
     def _build_headers(self) -> dict[str, str]:
         """按 api_key 是否为空决定要不要带 Authorization 头。
@@ -222,10 +247,34 @@ class OpenAIResponsesProvider(BaseLLMProvider):
             if key in usage:
                 normalized_usage[key] = usage[key]
 
+        # 厂商扩展字段：按原始字段名收集，不归一化。
+        provider_metadata: dict[str, Any] = {}
+
+        # usage 细分：reasoning_tokens / cached_tokens
+        completion_details = usage.get("completion_tokens_details") or {}
+        if "reasoning_tokens" in completion_details:
+            provider_metadata["reasoning_tokens"] = completion_details["reasoning_tokens"]
+        prompt_details = usage.get("prompt_tokens_details") or {}
+        if "cached_tokens" in prompt_details:
+            provider_metadata["cached_tokens"] = prompt_details["cached_tokens"]
+
+        # request/response 标识
+        for field_name in ("id", "request_id", "model", "system_fingerprint"):
+            if field_name in data:
+                provider_metadata[field_name] = data[field_name]
+
+        # reasoning_content（可能很长，截断至 500 字符；完整内容在 raw_dump）
+        msg_data = choice.get("message") or {}
+        reasoning_raw = msg_data.get("reasoning_content")
+        if reasoning_raw is not None:
+            provider_metadata["reasoning_content"] = reasoning_raw[:500]
+            provider_metadata["reasoning_content_length"] = len(reasoning_raw)
+
         return LLMResponse(
             message=message,
             finish_reason=finish_reason,
             usage=normalized_usage,
+            provider_metadata=provider_metadata,
             raw=data,
         )
 

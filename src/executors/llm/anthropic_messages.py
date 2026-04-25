@@ -32,6 +32,7 @@ from core.contracts import LLMRequest, LLMResponse
 from core.errors import ProviderError
 from core.message import Message, ToolCall
 from executors.llm.base import BaseLLMProvider
+from executors.llm.reasoning import ReasoningConfig, resolve_reasoning_plan
 
 
 class AnthropicMessagesProvider(BaseLLMProvider):
@@ -67,9 +68,11 @@ class AnthropicMessagesProvider(BaseLLMProvider):
             else self._model_config.timeout
         )
 
+        client = self._ensure_client()
         try:
-            async with httpx.AsyncClient(timeout=per_call_timeout) as client:
-                response = await client.post(url, json=payload, headers=headers)
+            response = await client.post(
+                url, json=payload, headers=headers, timeout=per_call_timeout
+            )
         except httpx.TimeoutException as exc:
             raise TimeoutError(f"httpx timeout calling {url}: {exc}") from exc
         except httpx.HTTPError as exc:
@@ -133,6 +136,19 @@ class AnthropicMessagesProvider(BaseLLMProvider):
 
         if request.tools:
             payload["tools"] = self._tools_to_anthropic_format(list(request.tools))
+
+        # reasoning_effort：从 model_config 读取，按最终模型名匹配 profile。
+        # 注意：与 OpenAI provider 不同，Anthropic provider 没有硬编码回退路径。
+        # 原因：Anthropic 历史上没有内置的 reasoning 参数映射；V1 只通过配置驱动
+        # 的 reasoning_profiles 支持 MiniMax 等兼容层模型。若 profiles 为空，
+        # 则 reasoning_effort 配置静默不生效——这是有意设计，不是遗漏。
+        effort = self._model_config.reasoning_effort
+        profiles = self._model_config.reasoning_profiles
+        if effort is not None and profiles:
+            config = ReasoningConfig(enabled=True, effort=effort)
+            plan = resolve_reasoning_plan(payload["model"], config, profiles)
+            if plan.send_reasoning:
+                payload.update(plan.payload_patch)
 
         extra = request.metadata.get("provider_extra") if request.metadata else None
         if isinstance(extra, dict):
@@ -291,10 +307,24 @@ class AnthropicMessagesProvider(BaseLLMProvider):
                 normalized_usage["prompt_tokens"] + normalized_usage["completion_tokens"]
             )
 
+        # 厂商扩展字段：保留原始 Anthropic 字段名。
+        provider_metadata: dict[str, Any] = {}
+
+        # cache token 细分（Anthropic 的 prompt caching）
+        for cache_key in ("cache_creation_input_tokens", "cache_read_input_tokens"):
+            if cache_key in usage_raw:
+                provider_metadata[cache_key] = usage_raw[cache_key]
+
+        # response 级标识
+        for field_name in ("id", "model", "stop_sequence"):
+            if field_name in data:
+                provider_metadata[field_name] = data[field_name]
+
         return LLMResponse(
             message=message,
             finish_reason=finish_reason,
             usage=normalized_usage,
+            provider_metadata=provider_metadata,
             raw=data,
         )
 

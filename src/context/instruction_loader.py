@@ -112,8 +112,11 @@ class InstructionLoader:
     def _read_if_exists(path: Path) -> str | None:
         """存在则读，不存在静默返回 ``None``。
 
-        I/O 错误（权限、编码）在 v1-mini 阶段也直接返回 ``None``——加载指令不应该
-        让整个 agent 启动炸掉；后续可在 observability 里加个告警。
+        缺失处理策略（v0.1.2 契约）：
+
+        - ``OSError``（权限不足、设备错误等 I/O 异常）→ 静默跳过，返回 ``None``
+        - ``UnicodeDecodeError``（文件存在但不是合法 UTF-8）→ **冒泡**，调用方不应
+          把非法编码文件当成空指令吞掉，需要明确失败以便排查配置问题
         """
         try:
             if not path.exists():
@@ -133,7 +136,11 @@ class InstructionLoader:
             content = source.content.strip()
             if not content:
                 continue
-            parts.append(f"# {source.origin}\n{content}")
+            # origin="" 表示"透传"：内容已预格式化，不加 `# \n` 前缀
+            if source.origin:
+                parts.append(f"# {source.origin}\n{content}")
+            else:
+                parts.append(content)
         return "\n\n".join(parts)
 
 

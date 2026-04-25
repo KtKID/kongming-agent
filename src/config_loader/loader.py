@@ -56,6 +56,7 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("model", "timeout"),
     ("model", "max_tokens"),
     ("model", "temperature"),
+    ("model", "reasoning_effort"),
     ("runner", "max_turns"),
     ("session", "backend"),
     ("session", "store_path"),
@@ -72,12 +73,18 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("tool", "shell", "terminate_grace_seconds"),
     ("tool", "file", "enabled"),
     ("tool", "file", "read_max_bytes"),
+    ("compactor", "enabled"),
     ("compactor", "max_messages"),
     ("compactor", "keep_recent"),
     ("compactor", "keep_system"),
     ("compactor", "tool_result_max_chars"),
     ("retry", "max_retries"),
     ("retry", "retry_backoff"),
+    ("evolution", "memory", "enabled"),
+    ("evolution", "memory", "root_path"),
+    ("evolution", "memory", "inject_prompt"),
+    ("evolution", "memory", "read_max_chars"),
+    ("evolution", "memory", "view_max_chars"),
 )
 
 # per-module YAML 文件名 → 合并到 Config 的顶层 key。

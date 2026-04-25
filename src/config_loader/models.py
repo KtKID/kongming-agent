@@ -60,6 +60,51 @@ def _is_local_base_url(base_url: str) -> bool:
     return False
 
 
+class ReasoningProfile(BaseModel):
+    """单个模型的 reasoning 能力描述。
+
+    每条 profile 以模型名（或前缀）为 key 存放在 :attr:`ModelConfig.reasoning_profiles`
+    中；resolver 拿最终请求模型名去匹配，命中后用 adapter 生成 payload patch。
+
+    Attributes:
+        match: ``exact`` 要求模型名完全相等；``prefix`` 检查模型名是否以 key 开头。
+            当 ``exact`` 和 ``prefix`` 同时命中时，``exact`` 优先。
+        adapter: 命中后使用的 payload 翻译策略。V1 支持三种：
+            - ``none``：明确不发送 reasoning 参数（如 gemma 本地模型）
+            - ``glm_thinking_budget``：智谱 GLM 的 ``thinking`` 格式
+            - ``anthropic_compatible_reasoning``：Anthropic 兼容 reasoning 格式
+        supported_efforts: 该模型支持的 effort 档位。``None`` 表示不限制。
+            ``anthropic_compatible_reasoning`` adapter 必须声明此字段。
+        effort_map: 统一 effort 值到厂商特定数值的映射。``glm_thinking_budget``
+            adapter 必须声明此字段。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    match: Literal["exact", "prefix"] = "exact"
+    adapter: Literal[
+        "none",
+        "glm_thinking_budget",
+        "anthropic_compatible_reasoning",
+    ]
+    supported_efforts: list[Literal["low", "medium", "high"]] | None = None
+    effort_map: dict[Literal["low", "medium", "high"], int] | None = None
+
+    @model_validator(mode="after")
+    def _validate_adapter_requirements(self) -> ReasoningProfile:
+        """adapter 必需字段校验。"""
+        if self.adapter == "glm_thinking_budget" and not self.effort_map:
+            raise ValueError(
+                "reasoning profile with adapter='glm_thinking_budget' must include effort_map"
+            )
+        if self.adapter == "anthropic_compatible_reasoning" and not self.supported_efforts:
+            raise ValueError(
+                "reasoning profile with adapter='anthropic_compatible_reasoning' "
+                "must include supported_efforts"
+            )
+        return self
+
+
 class ModelConfig(BaseModel):
     """模型 / provider 配置。
 
@@ -72,6 +117,12 @@ class ModelConfig(BaseModel):
         timeout: 单次请求超时秒数。
         max_tokens: 单次响应最大 token 数。
         temperature: 采样温度，``[0, 2]``。
+        reasoning_effort: 控制模型推理深度。``None`` 表示不发此参数（使用模型默认）；
+            provider 层负责把统一枚举映射到各厂商格式（OpenAI o1 系用
+            ``reasoning_effort``，GLM 系用 ``thinking``，不支持的 provider skip）。
+        reasoning_profiles: 模型 reasoning 能力声明。key 为模型名或前缀，
+            value 为 :class:`ReasoningProfile`。默认空 dict，不声明时不影响现有行为。
+            只走 YAML 配置，不支持 env 覆盖。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -83,6 +134,8 @@ class ModelConfig(BaseModel):
     timeout: float = Field(default=60.0, gt=0)
     max_tokens: int = Field(default=4096, gt=0)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    reasoning_profiles: dict[str, ReasoningProfile] = {}
 
     @field_validator("name")
     @classmethod
@@ -186,6 +239,21 @@ class LoggingConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+class CliConfig(BaseModel):
+    """CLI 交互行为配置。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # 每轮 llm.response 后是否在终端打印模型的思考内容（reasoning_content）。
+    # 仅当模型确实返回了思考内容时才输出；无内容时静默。
+    show_reasoning: bool = False
+
+
+# ---------------------------------------------------------------------------
 # Host / Approval
 # ---------------------------------------------------------------------------
 
@@ -221,10 +289,16 @@ class CompactorConfig(BaseModel):
 
     对应 :mod:`context.history_compactor` 的同名 dataclass，这里用 pydantic
     模型做校验，装配层按需转成 dataclass 传给 HistoryCompactor。
+
+    **默认关闭**：当前压缩仅做消息数 FIFO，语义和 LLM summarize 式压缩（参考
+    ``other/claude-code-main/src/services/compact/``）差距大。v0.1.3 默认 ``enabled=False``
+    不装配 compactor，直接把 history 原样传给 provider；待后续独立 task
+    ``compactor-v2-llm-summarize`` 实施 token + summary 式压缩后再打开默认。
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    enabled: bool = False
     max_messages: int = Field(default=50, gt=0)
     keep_recent: int = Field(default=20, gt=0)
     keep_system: bool = True
@@ -280,6 +354,45 @@ class ToolConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Evolution / Memory
+# ---------------------------------------------------------------------------
+
+
+class EvolutionMemoryConfig(BaseModel):
+    """Memory 模块配置。
+
+    对应 ``config/setting.yaml`` 的 ``evolution.memory`` 节。
+
+    Attributes:
+        enabled: 是否启用 memory 加载和注入。
+        root_path: memory 根目录路径（相对于项目根目录）。
+        inject_prompt: 是否将 memory snapshot 注入 system prompt。
+        read_max_chars: 单文件读取最大字符数。
+        view_max_chars: memory tool view 返回的最大字符数。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    root_path: str = ".kongming/memory"
+    inject_prompt: bool = True
+    read_max_chars: int = 65536
+    view_max_chars: int = 8000
+
+
+class EvolutionConfig(BaseModel):
+    """Self Evolution 配置。
+
+    Attributes:
+        memory: memory 子模块配置。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    memory: EvolutionMemoryConfig = Field(default_factory=EvolutionMemoryConfig)
+
+
+# ---------------------------------------------------------------------------
 # 总配置
 # ---------------------------------------------------------------------------
 
@@ -303,16 +416,22 @@ class Config(BaseModel):
     tool: ToolConfig = Field(default_factory=ToolConfig)
     compactor: CompactorConfig = Field(default_factory=CompactorConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)
+    cli: CliConfig = Field(default_factory=CliConfig)
+    evolution: EvolutionConfig = Field(default_factory=EvolutionConfig)
 
 
 __all__ = [
     "ApprovalConfig",
+    "CliConfig",
     "CompactorConfig",
     "Config",
+    "EvolutionConfig",
+    "EvolutionMemoryConfig",
     "FileToolConfig",
     "HostConfig",
     "LoggingConfig",
     "ModelConfig",
+    "ReasoningProfile",
     "RetryConfig",
     "RunnerConfig",
     "SessionConfig",

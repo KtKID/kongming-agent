@@ -125,16 +125,20 @@ class CLIEventSink:
     """CLI 的 :class:`core.contracts.EventSink` 实现。
 
     verbose 模式下把 runtime 关键节点翻成单行进度；非 verbose 时完全静默，
-    保持终端输出干净。
+    保持终端输出干净。show_reasoning 独立于 verbose：即使非 verbose，只要开启
+    show_reasoning 就会在每轮响应后打印模型思考内容（stdout，非 stderr）。
 
     结构上满足 :class:`core.contracts.EventSink` Protocol（单个 async
     ``emit`` 方法）。
     """
 
-    def __init__(self, *, verbose: bool = False) -> None:
+    def __init__(self, *, verbose: bool = False, show_reasoning: bool = False) -> None:
         self._verbose = verbose
+        self._show_reasoning = show_reasoning
 
     async def emit(self, event: Event) -> None:
+        if self._show_reasoning and event.kind == "llm.response":
+            _render_reasoning(event)
         if not self._verbose:
             return
         line = _render_event_line(event)
@@ -180,6 +184,22 @@ def _render_event_line(event: Event) -> str | None:
     if kind == "error":
         return f"[error] turn={turn} type={payload.get('type')} msg={payload.get('message')}"
     return None
+
+
+def _render_reasoning(event: Event) -> None:
+    """把 llm.response 事件里的 reasoning_content 打印到 stdout。
+
+    只在 provider_metadata 含非空 reasoning_content 时输出，否则静默。
+    """
+    payload = event.payload or {}
+    meta = payload.get("provider_metadata") or {}
+    content = meta.get("reasoning_content")
+    if not content:
+        return
+    total_len = meta.get("reasoning_content_length", len(content))
+    truncated = total_len > len(content)
+    suffix = f" …（共 {total_len} 字符，已截断）" if truncated else ""
+    click.echo(f"\n[thinking turn={event.turn}]{suffix}\n{content}\n")
 
 
 def _format_arguments(arguments: dict[str, object]) -> str:

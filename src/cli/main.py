@@ -25,17 +25,24 @@ from __future__ import annotations
 import asyncio
 import uuid
 from pathlib import Path
+from typing import Literal
 
 import click
 
-from config_loader import Config, load_config
+from config_loader import Config, get_kongming_home, load_config
 from config_loader.errors import ConfigLoadError, ConfigValidationError
-from context import InstructionLoader, build_session
+from context import (
+    InstructionLoader,
+    InstructionSource,
+    build_session,
+    materialize_and_load_prompts,
+)
 from core.contracts import EventSink
 from executors.agent_runtime.native_runtime import NativeRuntime
 from host.cli_adapter import CLIAdapter, CLIEventSink
 from host.session_bridge import SessionBridge
-from observability import JsonlTraceSink
+from memory import MemoryStore
+from observability import JsonlTraceSink, PromptDebugDumpSink
 from tools import build_default_approval, build_default_registry
 
 _CLI_SESSION_ID_HEX_LEN = 12
@@ -86,6 +93,27 @@ def _generate_cli_session_id() -> str:
     default=False,
     help="关闭 JSONL trace 落盘（默认打开，写到 config.trace.output_path）",
 )
+@click.option(
+    "--reasoning-effort",
+    "reasoning_effort",
+    type=click.Choice(["low", "medium", "high"], case_sensitive=False),
+    default=None,
+    help="覆盖模型思考深度（low/medium/high）。仅对支持的 provider 生效（OpenAI o 系列、GLM-Z 等）。",
+)
+@click.option(
+    "--show-reasoning",
+    "show_reasoning",
+    is_flag=True,
+    default=None,
+    help="每轮响应后在终端打印模型思考内容（覆盖 config.cli.show_reasoning）。",
+)
+@click.option(
+    "--debug",
+    "prompt_debug",
+    is_flag=True,
+    default=False,
+    help="保存每轮 system prompt 和完整 history 到 .kongming/debug/。",
+)
 def main(
     config_path: Path | None,
     session_id: str | None,
@@ -93,6 +121,9 @@ def main(
     smoke: bool,
     instructions_files: tuple[Path, ...],
     no_trace: bool,
+    reasoning_effort: str | None,
+    show_reasoning: bool | None,
+    prompt_debug: bool,
 ) -> None:
     """kongming-agent CLI"""
     try:
@@ -104,6 +135,9 @@ def main(
                 smoke=smoke,
                 instructions_files=list(instructions_files),
                 trace_enabled=not no_trace,
+                reasoning_effort=reasoning_effort,
+                show_reasoning=show_reasoning,
+                prompt_debug=prompt_debug,
             )
         )
     except KeyboardInterrupt:
@@ -119,19 +153,33 @@ async def _run(
     smoke: bool,
     instructions_files: list[Path],
     trace_enabled: bool,
+    reasoning_effort: str | None = None,
+    show_reasoning: bool | None = None,
+    prompt_debug: bool = False,
 ) -> None:
     cfg = _load_config_or_exit(config_path)
 
+    # CLI 参数 --reasoning-effort 覆盖 config 文件里的设置。
+    if reasoning_effort is not None:
+        effort_typed: Literal["low", "medium", "high"] = reasoning_effort  # type: ignore[assignment]
+        cfg = cfg.model_copy(
+            update={"model": cfg.model.model_copy(update={"reasoning_effort": effort_typed})}
+        )
+
+    # --show-reasoning flag 覆盖 config.cli.show_reasoning；未传 flag 时沿用 config。
+    effective_show_reasoning = (
+        show_reasoning if show_reasoning is not None else cfg.cli.show_reasoning
+    )
+
     adapter = CLIAdapter(verbose=verbose)
 
-    # 事件 sink 装配：默认挂 JsonlTraceSink（--no-trace 可关）；verbose 时再补
-    # 一个 CLIEventSink 把事件打到终端（stderr）。runner 会 fan-out 到 list 里
-    # 的所有 sink，顺序不敏感。
+    # 事件 sink 装配：默认挂 JsonlTraceSink（--no-trace 可关）；verbose 或
+    # show_reasoning 时挂 CLIEventSink。runner 会 fan-out 到 list 里所有 sink。
     event_sinks: list[EventSink] = []
     if trace_enabled:
         event_sinks.append(JsonlTraceSink(cfg.trace.output_path, auto_flush=cfg.trace.auto_flush))
-    if verbose:
-        event_sinks.append(CLIEventSink(verbose=True))
+    if verbose or effective_show_reasoning:
+        event_sinks.append(CLIEventSink(verbose=verbose, show_reasoning=effective_show_reasoning))
 
     registry = build_default_registry(
         file_enabled=cfg.tool.file.enabled,
@@ -141,7 +189,6 @@ async def _run(
         shell_terminate_grace_seconds=cfg.tool.shell.terminate_grace_seconds,
         file_read_max_bytes=cfg.tool.file.read_max_bytes,
     )
-    enabled_tool_names = registry.names()
 
     # approval 按配置模式选：interactive 时让 adapter 提供 prompt_fn，
     # 其它模式（auto_allow / auto_deny）不需要 prompt_fn。
@@ -150,7 +197,70 @@ async def _run(
 
     # instructions 装配：用 InstructionLoader 把 agent_spec 基础文本 + 外部文件
     # + KONGMING_EXTRA_INSTRUCTIONS 合成一段带来源标注的 system prompt。
-    instructions, instruction_origins = await _assemble_instructions(instructions_files)
+    # memory 通道受 cfg.evolution.memory.enabled/inject_prompt 控制；
+    # enabled=False 时 memory_store 为 None。
+    # prompts 装配（.kongming/prompts/*.md 物化 + 读取）失败时给用户友好错误消息，
+    # 对齐 _load_config_or_exit 的 UX；避免裸 traceback。
+    try:
+        instructions, instruction_origins, memory_store = await _assemble_instructions(
+            cfg,
+            instructions_files,
+        )
+    except (PermissionError, OSError, UnicodeDecodeError, FileNotFoundError) as exc:
+        click.echo(
+            f"[prompts] failed to load .kongming/prompts/ templates: {type(exc).__name__}: {exc}",
+            err=True,
+        )
+        raise SystemExit(2) from exc
+
+    # 仅当 memory 启用时才注册 memory tool + 装 MemoryRefreshSink。
+    if memory_store is not None:
+        from tools.memory_tool import build_memory_tool
+
+        registry.register(
+            build_memory_tool(
+                memory_store,
+                view_max_chars=cfg.evolution.memory.view_max_chars,
+                event_sinks=event_sinks,
+            )
+        )
+
+        # memory snapshot trace event（启动一次性快照捕获）
+        _snap = getattr(memory_store, "snapshot", None)
+        if _snap is not None and not _snap.is_empty:
+            from core.contracts import Event
+
+            for sink in event_sinks:
+                await sink.emit(
+                    Event(
+                        kind="memory.snapshot.captured",
+                        run_id="cli-init",
+                        payload={
+                            "checksum": _snap.checksum,
+                            "memory_chars": len(_snap.memory_text),
+                            "user_chars": len(_snap.user_text),
+                            "source_paths": list(_snap.source_paths),
+                        },
+                    )
+                )
+
+        # 装配 MemoryRefreshSink：监听 history.compact → reload memory snapshot。
+        # 类体由 host/memory_refresh_sink.py 提供（Agent 2 负责）。这里按能力探测
+        # 方式 import，避免 Agent 2 未就绪时 CLI 启动失败。
+        try:
+            from host.memory_refresh_sink import MemoryRefreshSink
+        except ImportError:
+            # Agent 2 尚未落地时保持 CLI 可用；写入的 memory 不会自动刷新快照
+            # 到下一轮 prompt（需要重启 CLI）。
+            pass
+        else:
+            memory_refresh_sink = MemoryRefreshSink(
+                memory_store=memory_store,
+                downstream_sinks=list(event_sinks),
+            )
+            event_sinks = [*event_sinks, memory_refresh_sink]
+
+    enabled_tool_names = registry.names()  # 含 memory 的工具列表（若启用）
 
     # session bootstrap：收集 CLI 阶段可得的稳定元数据，file backend 需要它。
     import hashlib
@@ -181,44 +291,99 @@ async def _run(
         enabled_tool_names=enabled_tool_names,
         session_factory=_session_factory,
         instructions=instructions,
+        prompt_debug_sink=PromptDebugDumpSink() if prompt_debug else None,
+        instruction_origins=instruction_origins,
     )
 
-    if smoke:
-        await _run_smoke(runtime, session_id)
-        return
+    # try/finally 确保 smoke / 交互循环 / KeyboardInterrupt / 其它异常
+    # 三种退出路径都会 aclose runtime（释放 provider httpx client）。
+    # 不上 async context manager 是为了控制改动面：runtime 目前只在这里起止。
+    try:
+        if smoke:
+            await _run_smoke(runtime, session_id)
+            return
 
-    resolved_session_id = session_id or _generate_cli_session_id()
-    bridge = SessionBridge(
-        runtime=runtime,
-        adapter=adapter,
-        session_id=resolved_session_id,
-    )
+        resolved_session_id = session_id or _generate_cli_session_id()
+        bridge = SessionBridge(
+            runtime=runtime,
+            adapter=adapter,
+            session_id=resolved_session_id,
+        )
 
-    _print_banner(
-        cfg,
-        bridge.session_id,
-        verbose=verbose,
-        trace_enabled=trace_enabled,
-        instructions_sources=len(instructions_files),
-    )
-    await bridge.run_loop()
+        _print_banner(
+            cfg,
+            bridge.session_id,
+            verbose=verbose,
+            trace_enabled=trace_enabled,
+            instructions_sources=len(instructions_files),
+        )
+        await bridge.run_loop()
+    finally:
+        await runtime.aclose()
 
 
-async def _assemble_instructions(instructions_files: list[Path]) -> tuple[str, list[str]]:
+def _resolve_memory_dir(raw: str) -> Path:
+    """把 `cfg.evolution.memory.root_path` 解析成绝对 memory 目录。
+
+    - 绝对路径直接用（支持 ``~`` 展开）。
+    - 相对路径视为相对于 **当前 cwd** 的子目录。
+
+    这里不再追加 ``.kongming/memory``——由用户在 config 中直接写完整 memory 目录，
+    让 MemoryStore 按 memory_dir 使用。
+    """
+    expanded = Path(raw).expanduser()
+    if expanded.is_absolute():
+        return expanded
+    return (Path.cwd() / expanded).resolve()
+
+
+async def _assemble_instructions(
+    cfg: Config,
+    instructions_files: list[Path],
+) -> tuple[str, list[str], MemoryStore | None]:
     """用 InstructionLoader 合成最终 system prompt 文本。
 
     Returns:
-        (rendered_text, instruction_origins) — 渲染后的完整文本和来源 origin 列表。
+        (rendered_text, instruction_origins, memory_store) — 渲染后的完整文本、来源 origin 列表、
+        以及 MemoryStore 实例（memory 关闭时为 ``None``）。
 
-    - 基础来源是 "You are kongming agent."
+    - 基础 agent 规约来自 ``.kongming/prompts/{AGENT,TOOLS,USER}.md`` 三份用户
+      可编辑的模板（v0.1.3 prompt-modules）。启动时若这些文件缺失，
+      ``context.prompts_loader.materialize_and_load_prompts`` 会从
+      ``src/prompts/templates/`` 物化默认内容。
     - extra_files 来自 CLI ``--instructions-file`` 参数
     - 环境变量 ``KONGMING_EXTRA_INSTRUCTIONS`` 自动读取（include_env=True）
+    - 本地长期记忆的加载由 ``cfg.evolution.memory`` 控制：
+        - ``enabled=False`` 时完全跳过（返回 memory_store=None）
+        - ``inject_prompt=False`` 时仍加载活态 entries 供 memory tool 使用，
+          但不 append ``InstructionSource(origin="memory")``
     """
+    base_agent_instructions = await materialize_and_load_prompts(get_kongming_home())
+
     loader = InstructionLoader(extra_files=instructions_files, include_env=True)
-    sources = await loader.load(agent_instructions="You are kongming agent.")
+    sources = list(await loader.load(agent_instructions=base_agent_instructions))
+
+    memory_cfg = cfg.evolution.memory
+    memory_store: MemoryStore | None = None
+
+    if memory_cfg.enabled:
+        memory_dir = _resolve_memory_dir(memory_cfg.root_path)
+        memory_store = MemoryStore(
+            memory_dir=memory_dir,
+            read_max_chars=memory_cfg.read_max_chars,
+        )
+        await memory_store.load_from_disk()
+
+        if memory_cfg.inject_prompt:
+            snapshot_prompt = (
+                memory_store.snapshot.render_prompt() if memory_store.snapshot else None
+            )
+            if snapshot_prompt is not None:
+                sources.append(InstructionSource(origin="memory", content=snapshot_prompt))
+
     rendered = loader.render(sources)
     origins = [s.origin for s in sources]
-    return rendered, origins
+    return rendered, origins, memory_store
 
 
 async def _run_smoke(runtime: NativeRuntime, session_id: str | None) -> None:
@@ -257,8 +422,11 @@ def _print_banner(
     instructions_sources: int,
 ) -> None:
     locality = "local" if cfg.model.is_local else "remote"
+    thinking_suffix = (
+        f" · thinking={cfg.model.reasoning_effort}" if cfg.model.reasoning_effort else ""
+    )
     click.echo(
-        f"kongming-agent · model={cfg.model.name} ({locality}) · "
+        f"kongming-agent · model={cfg.model.name} ({locality}){thinking_suffix} · "
         f"session={session_id} ({cfg.session.backend}) · approval={cfg.approval.mode}"
     )
     extras: list[str] = ["Ctrl+D 退出"]

@@ -62,6 +62,8 @@ packages = [
     "src/safety",
     "src/observability",
     "src/config_loader",
+    "src/memory",
+    "src/prompts",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -75,6 +77,8 @@ include = [
     "src/safety",
     "src/observability",
     "src/config_loader",
+    "src/memory",
+    "src/prompts",
     "config",
     "README.md",
     "pyproject.toml",
@@ -113,12 +117,15 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["B", "SIM"]
+# 测试里定义的 Tool 子类复用 src/tools/ 的 input_schema 数据定义模式，
+# 同样适用 RUF012 豁免（无状态类属性、语义等同常量）
+"tests/**" = ["B", "SIM", "RUF012"]
 "__init__.py" = ["F401", "RUF022"]
 # tool input_schema 是数据定义，RUF012 建议不适用
 "src/tools/base.py" = ["RUF012"]
 "src/tools/file_tools.py" = ["RUF012"]
 "src/tools/shell_tool.py" = ["RUF012", "SIM105"]
+"src/tools/memory_tool.py" = ["RUF012"]
 # 其他风格级提示不是硬错误
 "src/core/runner.py" = ["SIM108"]
 "src/safety/chain.py" = ["SIM103"]
@@ -236,6 +243,8 @@ source = [
     "cli",
     "safety",
     "observability",
+    "memory",
+    "config_loader",
 ]
 omit = [
     "tests/*",

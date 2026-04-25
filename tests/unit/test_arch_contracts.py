@@ -1,8 +1,18 @@
-"""架构合约测试：补 .importlinter 不便实现的检查。"""
+"""架构合约测试：补 .importlinter 不便实现的检查 + import-linter 合约回归。
+
+B15 / CR 报告 cr-report-20260424-202744.md：
+原本只做 symbol 级 ast 扫描（Session / EventSink 不得被 sibling 重定义）；
+补充一条 ``test_import_linter_contracts`` 以子进程方式跑 ``lint-imports``，
+让 ``.importlinter`` 的四条合约（core-no-sibling-imports /
+layered-dependency-direction / tools-no-direct-safety-policy 等）在
+``make test-unit`` 路径上被强制回归，不再只依赖 ``make lint`` 手工触发。
+"""
 
 from __future__ import annotations
 
 import ast
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -52,4 +62,27 @@ def test_sibling_packages_do_not_redefine_eventsink(pkg: str) -> None:
     assert not violations, (
         f"{pkg}/ must NOT redefine an `EventSink` class/protocol. "
         f"Found definitions at: {violations}"
+    )
+
+
+def test_import_linter_contracts() -> None:
+    """以子进程方式运行 ``lint-imports``，在 unit 层强制回归 .importlinter 合约。
+
+    必须在 ``make test-unit`` 路径上也能拦截跨层 import 漂移——Makefile 的
+    ``make lint`` 是另一条人工 / CI 路径，不该是合约唯一门禁。
+
+    若本机没装 ``lint-imports``（例如开发者只装了 runtime deps），跳过而不是失败。
+    """
+    if shutil.which("lint-imports") is None:
+        pytest.skip("lint-imports CLI not available (requires import-linter)")
+
+    result = subprocess.run(
+        ["lint-imports"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, (
+        f"import-linter contracts violated. stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )

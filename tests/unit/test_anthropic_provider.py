@@ -16,7 +16,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from config_loader.models import Config, ModelConfig
+from config_loader.models import Config, ModelConfig, ReasoningProfile
+from core.contracts import LLMRequest
 from core.message import Message, ToolCall
 from executors.llm.anthropic_messages import AnthropicMessagesProvider
 
@@ -166,6 +167,31 @@ def test_parse_response_text_only() -> None:
     assert resp.usage["prompt_tokens"] == 10
     assert resp.usage["completion_tokens"] == 5
     assert resp.usage["total_tokens"] == 15
+    # provider_metadata 默认为空 dict（无扩展字段）
+    assert isinstance(resp.provider_metadata, dict)
+
+
+@pytest.mark.unit
+def test_parse_response_provider_metadata_cache_tokens() -> None:
+    """Anthropic cache token 字段被提取到 provider_metadata。"""
+    provider = _make_provider()
+    data: dict[str, Any] = {
+        "id": "msg_abc",
+        "model": "claude-sonnet-4-5",
+        "content": [{"type": "text", "text": "Hi"}],
+        "stop_reason": "end_turn",
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "cache_creation_input_tokens": 80,
+            "cache_read_input_tokens": 30,
+        },
+    }
+    resp = provider._parse_response(data)
+    assert resp.provider_metadata["cache_creation_input_tokens"] == 80
+    assert resp.provider_metadata["cache_read_input_tokens"] == 30
+    assert resp.provider_metadata["id"] == "msg_abc"
+    assert resp.provider_metadata["model"] == "claude-sonnet-4-5"
 
 
 @pytest.mark.unit
@@ -240,6 +266,81 @@ def test_build_headers_contains_api_key_and_version() -> None:
 # ---------------------------------------------------------------------------
 # native_runtime 分发
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# MiniMax via AnthropicMessagesProvider
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_minimax_profile_injects_reasoning_effort_via_build_payload() -> None:
+    """MiniMax-M2.7* 经 AnthropicMessagesProvider._build_payload 注入 reasoning_effort。
+
+    spec 验证项 #4：MiniMax-M2.7* 只在 Anthropic-compatible 路径下发送白名单字段。
+    """
+    provider = AnthropicMessagesProvider(
+        model_config=ModelConfig(
+            provider="anthropic",
+            name="MiniMax-M2.7-3B",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            reasoning_effort="medium",
+            reasoning_profiles={
+                "MiniMax-M2.7": ReasoningProfile(
+                    match="prefix",
+                    adapter="anthropic_compatible_reasoning",
+                    supported_efforts=["low", "medium", "high"],
+                )
+            },
+        )
+    )
+    request = LLMRequest(model="MiniMax-M2.7-3B", messages=(Message.user("hi"),))
+    payload = provider._build_payload(request)
+    assert payload.get("reasoning_effort") == "medium"
+
+
+@pytest.mark.unit
+def test_minimax_profile_not_sent_when_profiles_empty() -> None:
+    """reasoning_profiles 为空时，Anthropic provider 静默跳过 reasoning（有意设计）。"""
+    provider = AnthropicMessagesProvider(
+        model_config=ModelConfig(
+            provider="anthropic",
+            name="MiniMax-M2.7-3B",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            reasoning_effort="medium",
+            # reasoning_profiles 未配置 → 静默跳过
+        )
+    )
+    request = LLMRequest(model="MiniMax-M2.7-3B", messages=(Message.user("hi"),))
+    payload = provider._build_payload(request)
+    assert "reasoning_effort" not in payload
+
+
+@pytest.mark.unit
+def test_non_minimax_anthropic_model_not_sent_reasoning() -> None:
+    """非白名单模型（如 claude-sonnet）无 profile 命中，不注入 reasoning 参数。"""
+    provider = AnthropicMessagesProvider(
+        model_config=ModelConfig(
+            provider="anthropic",
+            name="claude-sonnet-4-5",
+            base_url="https://api.anthropic.com",
+            api_key="sk-ant-test",
+            reasoning_effort="high",
+            reasoning_profiles={
+                "MiniMax-M2.7": ReasoningProfile(
+                    match="prefix",
+                    adapter="anthropic_compatible_reasoning",
+                    supported_efforts=["low", "medium", "high"],
+                )
+            },
+        )
+    )
+    # request.model 是 claude-sonnet，不命中 MiniMax-M2.7 prefix
+    request = LLMRequest(model="claude-sonnet-4-5", messages=(Message.user("hi"),))
+    payload = provider._build_payload(request)
+    assert "reasoning_effort" not in payload
 
 
 @pytest.mark.unit

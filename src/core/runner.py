@@ -33,6 +33,9 @@ from core.contracts import (
     LLMRequest,
     LLMResponse,
     MessageCompactor,
+    PromptAssembler,
+    PromptDebugSink,
+    PromptSource,
     Session,
     Tool,
     ToolContext,
@@ -67,11 +70,22 @@ class Runner:
         event_sinks: Sequence[EventSink] | None = None,
         lifecycle_hooks: Sequence[LifecycleHook] | None = None,
         message_compactor: MessageCompactor | None = None,
+        input_assembler: PromptAssembler | None = None,
+        instruction_sources: Sequence[PromptSource] | None = None,
+        prompt_debug_sink: PromptDebugSink | None = None,
+        instruction_origins: Sequence[str] | None = None,
     ) -> None:
         self._event_sinks: list[EventSink] = list(event_sinks or [])
         self._lifecycle_hooks: list[LifecycleHook] = list(lifecycle_hooks or [])
         # 可选：把 history 送给 LLM 之前过一道 compactor；None 表示原样透传。
         self._message_compactor: MessageCompactor | None = message_compactor
+        # 可选：PromptAssembler 接管 prompt build（system 注入 + compact）。
+        # None 时退化到旧路径（_prepare_messages + _seed_messages 的 system 注入）。
+        self._input_assembler: PromptAssembler | None = input_assembler
+        # 静态指令来源列表，随 assembler 一起传入；None 时等价于空序列。
+        self._instruction_sources: Sequence[PromptSource] = list(instruction_sources or [])
+        self._prompt_debug_sink: PromptDebugSink | None = prompt_debug_sink
+        self._instruction_origins: list[str] = list(instruction_origins or [])
 
     # ------------------------------------------------------------------
     # 公共入口
@@ -128,6 +142,7 @@ class Runner:
                     "agent": agent_spec.name,
                     "model": agent_spec.default_model,
                     "max_turns": effective_max_turns,
+                    "reasoning_effort": agent_spec.reasoning_effort,
                 },
             )
         )
@@ -135,7 +150,7 @@ class Runner:
         try:
             resolved_tools = self._resolve_tools(agent_spec, tools, enabled_tools)
             await self._seed_messages(session, agent_spec, user_input, state)
-            final_message = await self._drive_turns(
+            final_message, accumulated_usage = await self._drive_turns(
                 state=state,
                 session=session,
                 agent_spec=agent_spec,
@@ -152,6 +167,7 @@ class Runner:
                 status="completed",
                 final_message=final_message,
                 turn_count=state.turn,
+                metadata={"usage": accumulated_usage} if accumulated_usage else {},
             )
         except AgentError as exc:
             state.mark_failed(exc)
@@ -235,13 +251,20 @@ class Runner:
         user_input: str,
         state: RunState,
     ) -> None:
-        """如果 session 里还没有 system 指令，就先把 AgentSpec.instructions 注入。"""
-        existing = await session.history()
-        has_system = any(m.role == "system" for m in existing)
-        if not has_system and agent_spec.instructions:
-            system_msg = Message.system(agent_spec.instructions)
-            await session.append(system_msg)
-            state.record(system_msg)
+        """如果 session 里还没有 system 指令，就先把 AgentSpec.instructions 注入。
+
+        当 ``input_assembler`` 已注入时，system 注入职责移交给 assembler，
+        这里只写 user 首条消息，避免双重 system 注入。
+        """
+        if self._input_assembler is None:
+            # 旧路径：由 _seed_messages 自己写 system 消息（兼容 fallback）。
+            existing = await session.history()
+            has_system = any(m.role == "system" for m in existing)
+            if not has_system and agent_spec.instructions:
+                system_msg = Message.system(agent_spec.instructions)
+                await session.append(system_msg)
+                state.record(system_msg)
+        # 始终写入 user 消息。
         user_msg = Message.user(user_input)
         await session.append(user_msg)
         state.record(user_msg)
@@ -257,9 +280,10 @@ class Runner:
         resolved_tools: list[Tool],
         approval: ApprovalProvider,
         max_turns: int,
-    ) -> Message | None:
-        """核心 turn 循环。返回最终 assistant 消息。"""
+    ) -> tuple[Message | None, dict[str, Any]]:
+        """核心 turn 循环。返回 (最终 assistant 消息, 累计 usage)。"""
         final_assistant: Message | None = None
+        accumulated_usage: dict[str, int] = {}
 
         while True:
             if state.turn >= max_turns:
@@ -273,7 +297,44 @@ class Runner:
             await self._run_lifecycle_before_turn(state)
 
             history = await session.history()
-            prepared_messages, compact_meta = await self._prepare_messages(history)
+
+            if self._input_assembler is not None:
+                # 新路径：InputAssembler 接管 compact + system 注入。
+                assembled = await self._input_assembler.assemble(
+                    history,
+                    self._instruction_sources,
+                )
+                prepared_messages = assembled.messages
+                if self._prompt_debug_sink is not None:
+                    system_message = getattr(assembled, "system_message", None)
+                    self._prompt_debug_sink.dump(
+                        session_id=session.session_id,
+                        run_id=state.run_id,
+                        turn=state.turn,
+                        model=agent_spec.default_model,
+                        instruction_origins=self._instruction_origins,
+                        history_before_assemble=history,
+                        assembled_messages=prepared_messages,
+                        metadata=assembled.metadata,
+                        added_system_prompt=(
+                            system_message.content if system_message is not None else None
+                        ),
+                    )
+                # 把 assembler metadata 映射成 compact_meta 格式（若有压缩）。
+                original_count = assembled.metadata.get("original_count", len(history))
+                compacted_count = assembled.metadata.get("compacted_count", len(prepared_messages))
+                if compacted_count != original_count:
+                    compact_meta: dict[str, Any] | None = {
+                        "original_count": original_count,
+                        "compacted_count": compacted_count,
+                        "dropped_count": original_count - compacted_count,
+                    }
+                else:
+                    compact_meta = None
+            else:
+                # 旧路径：_prepare_messages 做 compact，system 已由 _seed_messages 注入。
+                prepared_messages, compact_meta = await self._prepare_messages(history)
+
             if compact_meta is not None:
                 await self._emit(
                     Event(
@@ -316,9 +377,15 @@ class Runner:
                         "finish_reason": response.finish_reason,
                         "has_tool_calls": bool(assistant_message.tool_calls),
                         "usage": dict(response.usage),
+                        "provider_metadata": dict(response.provider_metadata),
                     },
                 )
             )
+
+            # 跨 turn 累计 usage，最终写入 Result.metadata。
+            for key, val in response.usage.items():
+                if isinstance(val, int):
+                    accumulated_usage[key] = accumulated_usage.get(key, 0) + val
 
             await self._run_lifecycle_after_turn(state, assistant_message)
             await self._emit(Event(kind="turn.end", run_id=state.run_id, turn=state.turn))
@@ -339,7 +406,7 @@ class Runner:
             )
             # 回填后继续下一个 turn
 
-        return final_assistant
+        return final_assistant, dict(accumulated_usage)
 
     async def _prepare_messages(
         self,

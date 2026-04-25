@@ -135,3 +135,40 @@ def test_native_runtime_build_with_tools() -> None:
         enabled_tool_names=["read_file"],
     )
     assert runtime is not None
+
+
+@pytest.mark.unit
+async def test_native_runtime_aclose_delegates_to_llm() -> None:
+    """NativeRuntime.aclose 应调 provider.aclose，且幂等（多次调不抛）。"""
+
+    class _AcloseCountingLLM:
+        def __init__(self) -> None:
+            self.aclose_calls = 0
+
+        async def complete(self, request: LLMRequest) -> LLMResponse:  # pragma: no cover
+            raise AssertionError("not invoked in this test")
+
+        async def aclose(self) -> None:
+            self.aclose_calls += 1
+
+    runtime = NativeRuntime.build(_cfg())
+    stub = _AcloseCountingLLM()
+    runtime._llm = stub  # type: ignore[attr-defined]
+
+    await runtime.aclose()
+    await runtime.aclose()
+    assert stub.aclose_calls == 2
+
+
+@pytest.mark.unit
+async def test_native_runtime_aclose_tolerates_llm_without_aclose() -> None:
+    """provider 没有 aclose 方法时，runtime.aclose 不抛（向后兼容）。"""
+
+    class _NoAcloseLLM:
+        async def complete(self, request: LLMRequest) -> LLMResponse:  # pragma: no cover
+            raise AssertionError("not invoked in this test")
+
+    runtime = NativeRuntime.build(_cfg())
+    runtime._llm = _NoAcloseLLM()  # type: ignore[attr-defined]
+    # 不抛即视为通过
+    await runtime.aclose()

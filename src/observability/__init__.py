@@ -16,9 +16,11 @@
 
 from __future__ import annotations
 
+from observability.prompt_debug_dump import PromptDebugDumpSink
 from observability.trace_sink import JsonlTraceSink, build_jsonl_trace_sink
 
 __all__ = [
     "JsonlTraceSink",
+    "PromptDebugDumpSink",
     "build_jsonl_trace_sink",
 ]

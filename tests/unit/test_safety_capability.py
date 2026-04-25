@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from config_loader.models import Config, FileToolConfig, ModelConfig, ShellToolConfig, ToolConfig
+from config_loader.models import (
+    Config,
+    EvolutionConfig,
+    EvolutionMemoryConfig,
+    FileToolConfig,
+    ModelConfig,
+    ShellToolConfig,
+    ToolConfig,
+)
 from safety.capability_policy import CapabilityPolicy, CapabilitySet
 
 
@@ -12,6 +20,7 @@ def _local_config(
     *,
     file_enabled: bool = True,
     shell_enabled: bool = True,
+    memory_enabled: bool = True,
 ) -> Config:
     return Config(
         model=ModelConfig(
@@ -23,6 +32,9 @@ def _local_config(
         tool=ToolConfig(
             file=FileToolConfig(enabled=file_enabled),
             shell=ShellToolConfig(enabled=shell_enabled),
+        ),
+        evolution=EvolutionConfig(
+            memory=EvolutionMemoryConfig(enabled=memory_enabled),
         ),
     )
 
@@ -83,6 +95,25 @@ async def test_from_config_includes_file_and_shell_when_enabled() -> None:
 async def test_from_config_excludes_shell_when_disabled() -> None:
     policy = CapabilityPolicy.from_config(_local_config(shell_enabled=False))
     result = await policy.check("run_shell", {})
+    assert result.outcome == "deny"
+
+
+@pytest.mark.unit
+async def test_from_config_includes_memory_when_enabled() -> None:
+    """evolution.memory.enabled=True 时 capability 层必须允许 memory 工具通过；
+    否则 memory tool 永远被 capability 拦截、无法触达 permission → approval 层。"""
+    policy = CapabilityPolicy.from_config(_local_config(memory_enabled=True))
+    result = await policy.check("memory", {"action": "add", "target": "memory"})
+    assert result.outcome == "allow"
+    assert result.capability == "memory"
+
+
+@pytest.mark.unit
+async def test_from_config_excludes_memory_when_disabled() -> None:
+    """evolution.memory.enabled=False 时 memory capability 不进 allow 集合。
+    此时即使 cli 注册了 memory tool（异常路径），也会被 capability 拦。"""
+    policy = CapabilityPolicy.from_config(_local_config(memory_enabled=False))
+    result = await policy.check("memory", {"action": "view", "target": "memory"})
     assert result.outcome == "deny"
 
 

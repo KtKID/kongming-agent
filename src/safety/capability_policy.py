@@ -69,6 +69,9 @@ _DEFAULT_TOOL_CAPABILITIES: dict[str, str] = {
     "write_file": "file_write",
     # shell 类 builtin tools
     "run_shell": "shell",
+    # memory 长期记忆工具：读写活态 memory；作为独立 capability 登记，
+    # 避免 fallback 走"capability 名 = 工具名"时意外被非空 allow 集合拒绝。
+    "memory": "memory",
 }
 """v1-mini builtin tools 的默认能力映射。
 
@@ -146,6 +149,7 @@ class CapabilityPolicy:
 
         - ``tool.file.enabled = True`` → 追加 ``file_read`` / ``file_write``
         - ``tool.shell.enabled = True`` → 追加 ``shell``
+        - ``evolution.memory.enabled = True`` → 追加 ``memory``
         - ``file_read`` 始终加入默认 allow 集合（反射 / 观察性最低要求）
 
         未启用的能力不进入 allow，配合"非空 allow = 白名单"语义自动阻断。
@@ -155,6 +159,8 @@ class CapabilityPolicy:
             allow.update({"file_read", "file_write"})
         if config.tool.shell.enabled:
             allow.add("shell")
+        if config.evolution.memory.enabled:
+            allow.add("memory")
         return cls(CapabilitySet(allow=frozenset(allow)))
 
 

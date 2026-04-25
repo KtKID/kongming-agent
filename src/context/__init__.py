@@ -7,6 +7,7 @@
 - :mod:`context.history_compactor` 实现最小历史压缩策略
 - :mod:`context.instruction_loader` 从 agent_spec / 文件 / 环境变量加载规则
 - :mod:`context.input_assembler` 把 history + 指令组装成模型真正看到的输入
+- :mod:`context.prompts_loader` 从 ``.kongming/prompts/{AGENT,TOOLS,USER}.md`` 装配三段 system prompt 基础文本（v0.1.3）
 
 严格约束（对齐 ``docs/kongming-agent-v1-minimal/10-contracts.md`` "Session 边界"）：
 
@@ -21,6 +22,7 @@ from context.file_session import FileSession
 from context.history_compactor import CompactorConfig, HistoryCompactor
 from context.input_assembler import AssembledInput, InputAssembler
 from context.instruction_loader import InstructionLoader, InstructionSource
+from context.prompts_loader import TEMPLATE_FILENAMES, materialize_and_load_prompts
 from context.session_bootstrap import SessionBootstrap
 from context.session_store import SQLiteSession, build_session
 
@@ -34,5 +36,7 @@ __all__ = [
     "InstructionSource",
     "SessionBootstrap",
     "SQLiteSession",
+    "TEMPLATE_FILENAMES",
     "build_session",
+    "materialize_and_load_prompts",
 ]

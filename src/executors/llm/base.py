@@ -26,6 +26,8 @@ import random
 import uuid
 from typing import Any
 
+import httpx
+
 from config_loader.models import ModelConfig
 from core.contracts import LLMRequest, LLMResponse
 from core.errors import ProviderError
@@ -59,10 +61,47 @@ class BaseLLMProvider:
         self._model_config = model_config
         self._max_retries = max_retries
         self._retry_backoff = retry_backoff
+        # 懒加载的 httpx.AsyncClient：首次 :meth:`_ensure_client` 触发构造，
+        # 之后跨多次 ``_do_complete`` 复用以命中 TLS keepalive。
+        # 不在 client 级绑 timeout——每次 `.post()` 按 request.timeout_seconds
+        # 覆盖，保证不同 request 的 timeout 自适应。
+        self._client: httpx.AsyncClient | None = None
 
     @property
     def model_config(self) -> ModelConfig:
         return self._model_config
+
+    # ------------------------------------------------------------------
+    # httpx client 生命周期
+    # ------------------------------------------------------------------
+
+    def _ensure_client(self) -> httpx.AsyncClient:
+        """懒加载共享 ``httpx.AsyncClient``。
+
+        参数选择参考 Hermes（``other/hermes-agent/run_agent.py``）：
+        ``max_keepalive_connections=5`` / ``keepalive_expiry=30.0`` 对 kongming
+        单用户 CLI 足够。不在此设置 ``timeout``——per-request 传给 ``.post()``。
+        """
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                limits=httpx.Limits(
+                    max_keepalive_connections=5,
+                    keepalive_expiry=30.0,
+                ),
+            )
+        return self._client
+
+    async def aclose(self) -> None:
+        """关闭持有的 ``httpx.AsyncClient`` 并释放连接池。
+
+        幂等：未曾创建或已关闭时，连续调用不抛错。调用方（``NativeRuntime.aclose``
+        / CLI finally 分支）负责在生命周期结束时调用。
+        """
+        client = self._client
+        if client is None:
+            return
+        self._client = None
+        await client.aclose()
 
     # ------------------------------------------------------------------
     # 公共入口（Protocol 语义：满足 core.contracts.LLMProvider）

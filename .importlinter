@@ -19,6 +19,8 @@ root_packages =
     safety
     observability
     config_loader
+    memory
+    prompts
 source_paths = src
 include_external_packages = True
 
@@ -39,6 +41,7 @@ forbidden_modules =
     cli
     safety
     observability
+    prompts
 
 ; Contract 2（"context 不允许重定义 Session Protocol"）由 pytest 架构合约测试
 ; 实现，见 tests/unit/test_arch_contracts.py::test_context_does_not_define_session_protocol
@@ -58,8 +61,10 @@ layers =
     host
     safety
     tools | context | executors | observability
+    memory
     config_loader
     core
+    prompts
 containers =
 ; Exception: 运行时装配层 ``executors/agent_runtime/native_runtime.py`` 跨层
 ; 引用 ``safety`` / ``context`` 是 v1-mini 的刻意设计——Safety Baseline 和
@@ -70,6 +75,8 @@ ignore_imports =
     executors.agent_runtime.native_runtime -> safety
     executors.agent_runtime.native_runtime -> context
     executors.agent_runtime.native_runtime -> context.history_compactor
+    executors.agent_runtime.native_runtime -> context.input_assembler
+    executors.agent_runtime.native_runtime -> context.instruction_loader
 
 ; ---------------------------------------------------------------------------
 ; Contract 4: tools 不允许直接 import safety 内部 policy

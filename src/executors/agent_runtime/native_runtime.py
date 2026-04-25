@@ -39,6 +39,8 @@ from collections.abc import Callable, Mapping, Sequence
 from config_loader.models import Config
 from context import HistoryCompactor
 from context.history_compactor import CompactorConfig
+from context.input_assembler import InputAssembler
+from context.instruction_loader import InstructionSource
 from core.agent_spec import AgentSpec
 from core.contracts import (
     ApprovalDecision,
@@ -47,10 +49,12 @@ from core.contracts import (
     EventSink,
     LLMProvider,
     MessageCompactor,
+    PromptDebugSink,
     Session,
     Tool,
     ToolLookup,
 )
+from core.message import Message
 from core.result import Result
 from core.runner import Runner
 from core.session import InMemorySession
@@ -102,6 +106,23 @@ class _EmptyToolLookup:
 
     def __getitem__(self, name: str) -> Tool:
         raise KeyError(name)
+
+
+class _NoopCompactor:
+    """原样透传的 MessageCompactor。
+
+    当 ``cfg.compactor.enabled=False``（默认）时装配进 runner / input_assembler，
+    runner 感知上等同 "没有 compactor"。这样可以避免 :class:`InputAssembler` 的
+    默认 fallback（``compactor or HistoryCompactor()``）重新装上一个 FIFO 压缩器。
+
+    语义：不改消息数量、不截断任何字段，仅返回 ``list(history)`` 副本。
+    """
+
+    async def compact(self, history: Sequence[Message]) -> list[Message]:
+        return list(history)
+
+
+_NOOP_COMPACTOR = _NoopCompactor()
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +183,8 @@ class NativeRuntime:
         capability_policy: CapabilityPolicy | None = None,
         permission_policy: PermissionPolicy | None = None,
         message_compactor: MessageCompactor | None = None,
+        prompt_debug_sink: PromptDebugSink | None = None,
+        instruction_origins: Sequence[str] | None = None,
     ) -> NativeRuntime:
         """按 Config 装配一份默认 runtime。
 
@@ -194,6 +217,9 @@ class NativeRuntime:
                 （超过 50 条时裁剪中段、截断超长 tool_result，永远保留首条 system
                 和最近 20 条）。显式传 ``False`` 式占位对象可关闭；测试场景可传
                 ``_NoopCompactor`` 之类的 stub。
+            prompt_debug_sink: prompt debug 输出 sink；不传则关闭。
+            instruction_origins: CLI / host 侧收集到的真实 instruction 来源列表，
+                仅用于 prompt debug dump。
 
         Returns:
             装配好的 :class:`NativeRuntime`，直接 ``await runtime.run(...)`` 即可。
@@ -247,20 +273,55 @@ class NativeRuntime:
             default_model=config.model.name,
             tool_names=tuple(resolved_tool_names),
             max_turns=config.runner.max_turns,
+            reasoning_effort=config.model.reasoning_effort,
         )
 
-        resolved_compactor: MessageCompactor = message_compactor or HistoryCompactor(
-            config=CompactorConfig(
-                max_messages=config.compactor.max_messages,
-                keep_recent=config.compactor.keep_recent,
-                keep_system=config.compactor.keep_system,
-                tool_result_max_chars=config.compactor.tool_result_max_chars,
+        # 压缩默认关闭（cfg.compactor.enabled=False）。显式传入 message_compactor 时
+        # 优先使用；否则仅当 enabled=True 才装配 HistoryCompactor，否则走 _NOOP_COMPACTOR
+        # （原样透传 history，不做裁剪）。走 _NOOP_COMPACTOR 而非 None，是为了避免
+        # InputAssembler 默认的 ``compactor or HistoryCompactor()`` fallback 又装回
+        # FIFO 压缩器。LLM summarize 式压缩留给后续独立 task compactor-v2-llm-summarize。
+        resolved_compactor: MessageCompactor
+        if message_compactor is not None:
+            resolved_compactor = message_compactor
+        elif config.compactor.enabled:
+            resolved_compactor = HistoryCompactor(
+                config=CompactorConfig(
+                    max_messages=config.compactor.max_messages,
+                    keep_recent=config.compactor.keep_recent,
+                    keep_system=config.compactor.keep_system,
+                    tool_result_max_chars=config.compactor.tool_result_max_chars,
+                )
             )
-        )
+        else:
+            resolved_compactor = _NOOP_COMPACTOR
+
+        # 把 AgentSpec.instructions 包装成 InstructionSource，交给 InputAssembler。
+        # origin="" 表示"透传"：NativeRuntime 接收的 instructions 可能已经是
+        # InstructionLoader.render() 产出的格式化文本（带 "# origin\n" 前缀），
+        # 用空 origin 避免 InputAssembler 再次追加 "# agent_spec\n" 前缀（双重渲染）。
+        # InputAssembler 接管 system 注入 + compact；Runner._seed_messages()
+        # 在有 assembler 时只写 user 消息，不再双重注入 system。
+        agent_instruction_sources: list[InstructionSource] = []
+        if resolved_spec.instructions and resolved_spec.instructions.strip():
+            agent_instruction_sources.append(
+                InstructionSource(
+                    origin="",
+                    content=resolved_spec.instructions,
+                )
+            )
+
+        # InputAssembler 复用 resolved_compactor，确保显式传入的 message_compactor
+        # 在 assembler 路径下也生效（不另创建新实例）。
+        input_assembler = InputAssembler(compactor=resolved_compactor)
 
         runner = Runner(
             event_sinks=resolved_event_sinks,
             message_compactor=resolved_compactor,
+            input_assembler=input_assembler,
+            instruction_sources=agent_instruction_sources,
+            prompt_debug_sink=prompt_debug_sink,
+            instruction_origins=instruction_origins,
         )
 
         return cls(
@@ -322,6 +383,20 @@ class NativeRuntime:
         """追加事件 sink 到底层 runner。"""
         self._event_sinks.append(sink)
         self._runner.add_event_sink(sink)
+
+    # ------------------------------------------------------------------
+    # 生命周期
+    # ------------------------------------------------------------------
+
+    async def aclose(self) -> None:
+        """关闭底层资源（目前只有 provider 的 httpx client）。
+
+        幂等：provider 自身的 ``aclose`` 已做 None 检查，多次调不会抛。
+        由 CLI / SessionBridge 退出路径或测试 finally 触发。
+        """
+        aclose = getattr(self._llm, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
     # ------------------------------------------------------------------
     # 内部

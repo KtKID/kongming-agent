@@ -21,9 +21,65 @@ model:
   base_url: http://127.0.0.1:1234/v1
   # 本地模型留空；远端模型在 .env 中填写 KONGMING_MODEL_API_KEY。
   api_key: ""
+  # 单次请求超时秒数。
   timeout: 60
+  # 单次响应最大 token 数。
   max_tokens: 4096
+  # 采样温度，范围 [0, 2]。0 最确定，2 最随机。
   temperature: 0.7
+
+  # 推理深度控制。可选值：low | medium | high | （注释掉表示不发此参数，使用模型默认）。
+  # 仅在 reasoning_profiles 中声明了对应模型时生效；不声明 profile 则此字段被忽略。
+  reasoning_effort: high
+
+  # 模型 reasoning 能力声明。key 为模型名或前缀，用于将 reasoning_effort 映射到
+  # 各厂商 payload 格式。不配置此节时，reasoning_effort 静默不生效。
+  #
+  # 每条 profile 字段说明：
+  #   match:   exact（完全匹配模型名）或 prefix（模型名以 key 开头即命中）
+  #   adapter: 命中后使用的翻译策略，支持三种：
+  #     none                         — 明确不发送 reasoning 参数（如本地 gemma）
+  #     glm_thinking_budget          — 智谱 GLM 深度思考系列
+  #                                    payload 注入：{"thinking": {"type": "enabled", "budget_tokens": N}}
+  #                                    budget_tokens = 模型允许用于内部推理的最大 token 数
+  #                                    GLM 官方推荐范围：1024–32768，超出上限按上限处理
+  #     anthropic_compatible_reasoning — Anthropic 兼容层（如 MiniMax）
+  #                                    payload 注入：{"reasoning_effort": "low"|"medium"|"high"}
+  #   effort_map:        glm_thinking_budget 必填；low/medium/high 各档对应的 budget_tokens 值
+  #                      参考值：low=1024（快速）  medium=8192（均衡）  high=32768（深度）
+  #   supported_efforts: anthropic_compatible_reasoning 必填；列出该模型支持的档位
+  #
+  reasoning_profiles:
+    glm-5:                            # 匹配 glm-5.1 / glm-5-plus 等
+      match: prefix
+      adapter: glm_thinking_budget
+      effort_map:
+        low: 1024
+        medium: 8192
+        high: 32768
+    glm-z:                            # 匹配 glm-z1 / glm-z1-flash 等
+      match: prefix
+      adapter: glm_thinking_budget
+      effort_map:
+        low: 1024
+        medium: 8192
+        high: 32768
+    glm-zero:                         # 匹配 glm-zero-preview 等
+      match: prefix
+      adapter: glm_thinking_budget
+      effort_map:
+        low: 1024
+        medium: 8192
+        high: 32768
+    gemma-4-e4b-it:                   # 本地模型明确禁用 reasoning 参数
+      match: exact
+      adapter: none
+  # Anthropic 兼容层示例（如 MiniMax，取消注释即可用）：
+  # reasoning_profiles:
+  #   MiniMax-M2.7:
+  #     match: prefix
+  #     adapter: anthropic_compatible_reasoning
+  #     supported_efforts: [low, medium, high]
 
 runner:
   max_turns: 10
@@ -63,11 +119,40 @@ tool:
     read_max_bytes: 65536
 
 compactor:
+  # 默认关闭：现有压缩仅做消息数 FIFO，和 LLM summarize 式压缩差距大。
+  # 正式 LLM summarize 压缩待后续独立 task compactor-v2-llm-summarize 实施，
+  # 届时再把默认值切到 true。当前可手动设 true 体验 FIFO 语义。
+  enabled: false
+  # 送给 LLM 之前历史消息数超过此阈值才触发压缩；不改 session 本身。
   max_messages: 50
+  # 压缩时保留最近 N 条原样不动。
   keep_recent: 20
+  # 压缩时是否保留首条 system 指令（通常都是）。
   keep_system: true
+  # 单条 tool 结果被压缩时保留的最大字符数，超出截断。
   tool_result_max_chars: 2000
 
 retry:
   max_retries: 3
   retry_backoff: 1.0
+
+cli:
+  # 每轮响应后是否在终端打印模型思考内容（reasoning_content）。
+  # 仅当模型实际返回了 reasoning_content 时才输出，否则静默。
+  # 也可临时用 --show-reasoning flag 覆盖，不改此文件。
+  show_reasoning: true
+
+evolution:
+  memory:
+    # 是否启用 memory 模块（跨会话长期记忆）。False 时：不加载 memory 目录、
+    # 不注册 memory tool、不 emit snapshot 事件。
+    enabled: true
+    # memory 根目录。相对路径视为 cwd 子目录；绝对路径直接使用。
+    root_path: .kongming/memory
+    # 是否将 memory snapshot 注入 system prompt。
+    # False 时 memory tool 仍可用，但 prompt 不含 memory block。
+    inject_prompt: true
+    # 单个 memory 文件读取的最大字符数上限，防止异常巨大的文件吃掉 prompt 预算。
+    read_max_chars: 65536
+    # memory tool view 动作返回的最大字符数。
+    view_max_chars: 8000

@@ -214,3 +214,54 @@ def test_dotenv_injected_env_vars_affect_config(
 
     # LOCAL_YAML 的 api_key 是空字符串，被注入的 env 覆盖后应该是测试值
     assert cfg.model.api_key == "from-dotenv-simulated"
+
+
+# ---------------------------------------------------------------------------
+# reasoning_effort
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_reasoning_effort_defaults_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """未显式配置 reasoning_effort 时默认为 None —— 开箱不发 reasoning 参数。
+
+    注意：项目 config/setting.yaml 自 commit 7185541 起默认 reasoning_effort="high"（启用 GLM-5 深度
+    推理），所以不能直接加载 SETTING_YAML 断言 None。本用例用临时 yaml 验证"不显式配置时的默认值"。
+    """
+    monkeypatch.delenv("KONGMING_MODEL_REASONING_EFFORT", raising=False)
+    minimal_yaml = tmp_path / "minimal.yaml"
+    minimal_yaml.write_text(
+        "model:\n  name: test-model\n  base_url: http://127.0.0.1:1234/v1\n  api_key: ''\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(minimal_yaml, load_env_file=False)
+    assert cfg.model.reasoning_effort is None
+
+
+@pytest.mark.unit
+def test_reasoning_effort_overridden_by_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``KONGMING_MODEL_REASONING_EFFORT=low`` 通过 env 覆盖链路生效。"""
+    monkeypatch.setenv("KONGMING_MODEL_REASONING_EFFORT", "low")
+    cfg = load_config(SETTING_YAML, load_env_file=False)
+    assert cfg.model.reasoning_effort == "low"
+
+
+@pytest.mark.unit
+def test_reasoning_effort_invalid_value_raises(
+    tmp_path: Path,
+) -> None:
+    """非法值（非 low/medium/high）应被 pydantic 拒绝。"""
+    cfg_file = tmp_path / "bad_effort.yaml"
+    # 读原始 setting.yaml 然后注入非法值
+    raw = _read_yaml(SETTING_YAML)
+    raw["model"]["reasoning_effort"] = "ultra"
+    import yaml as _yaml
+
+    cfg_file.write_text(_yaml.dump(raw), encoding="utf-8")
+    with pytest.raises(ConfigValidationError):
+        load_config(cfg_file, load_env_file=False)

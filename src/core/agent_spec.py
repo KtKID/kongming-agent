@@ -29,6 +29,7 @@ class AgentSpec:
     tool_names: tuple[str, ...] = ()
     max_turns: int = 10
     metadata: dict[str, str] = field(default_factory=dict)
+    reasoning_effort: str | None = None
 
     def __post_init__(self) -> None:
         if self.max_turns <= 0:

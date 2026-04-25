@@ -149,7 +149,11 @@ class SQLiteSession:
     ``seq`` 从 1 起递增，唯一决定同一个 session 的消息顺序。
     """
 
-    def __init__(self, session_id: str, db_path: str | Path) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        db_path: str | Path,
+    ) -> None:
         """初始化。
 
         Args:
@@ -313,13 +317,20 @@ def build_session(
 
         return InMemorySession(session_id)
     if backend == "sqlite":
-        return SQLiteSession(session_id, config.session.store_path)
+        return SQLiteSession(
+            session_id,
+            config.session.store_path,
+        )
     if backend == "file":
         if bootstrap is None:
             raise ValueError("file backend requires bootstrap")
         from context.file_session import FileSession
 
-        return FileSession(session_id, bootstrap, config.session.file_store_path)
+        return FileSession(
+            session_id,
+            bootstrap,
+            config.session.file_store_path,
+        )
     raise ValueError(f"unknown session backend: {backend!r}")
 
 
