@@ -1,4 +1,11 @@
-"""unit：safety.capability_policy 基本判定行为。"""
+"""unit：safety.capability_policy v0.1.4 占位形态 + from_config 迁移产物。
+
+v0.1.4 起 ``CapabilityPolicy.check`` 方法体已被 ``raise NotImplementedError``
+替换；本文件仅验证 ``from_config`` 不抛异常 + 迁移产物形态正确。
+
+完整 v0.1.3 → v0.1.4 端到端等价测试见 ``test_legacy_policy_migration.py``
+（通过 SafetyDecisionEngine 走 e2e）。
+"""
 
 from __future__ import annotations
 
@@ -14,6 +21,7 @@ from config_loader.models import (
     ToolConfig,
 )
 from safety.capability_policy import CapabilityPolicy, CapabilitySet
+from safety.types import HardDenyCommand
 
 
 def _local_config(
@@ -40,86 +48,45 @@ def _local_config(
 
 
 @pytest.mark.unit
-async def test_empty_allow_means_allow_all() -> None:
-    """allow 集合为空 → 全开（配合黑名单使用）。"""
-    policy = CapabilityPolicy(CapabilitySet(allow=frozenset()))
-    result = await policy.check("read_file", {})
-    assert result.outcome == "allow"
+async def test_check_raises_not_implemented_in_v014() -> None:
+    """v0.1.4 起 .check() 不再返回结果，而是 raise NotImplementedError。"""
+    policy = CapabilityPolicy(CapabilitySet())
+    with pytest.raises(NotImplementedError, match="moved to SafetyDecisionEngine"):
+        await policy.check("read_file", {})
 
 
 @pytest.mark.unit
-async def test_deny_takes_precedence_over_allow() -> None:
-    policy = CapabilityPolicy(
-        CapabilitySet(
-            allow=frozenset({"file_read"}),
-            deny=frozenset({"file_read"}),
-        )
-    )
-    result = await policy.check("read_file", {})
-    assert result.outcome == "deny"
-
-
-@pytest.mark.unit
-async def test_capability_not_in_allow_is_denied() -> None:
-    policy = CapabilityPolicy(CapabilitySet(allow=frozenset({"file_read"})))
-    # run_shell 对应 capability=shell，不在 allow 中
-    result = await policy.check("run_shell", {})
-    assert result.outcome == "deny"
-
-
-@pytest.mark.unit
-async def test_capability_in_allow_is_allowed() -> None:
-    policy = CapabilityPolicy(CapabilitySet(allow=frozenset({"file_read"})))
-    result = await policy.check("read_file", {})
-    assert result.outcome == "allow"
-
-
-@pytest.mark.unit
-async def test_unknown_tool_name_falls_back_to_tool_name_as_capability() -> None:
-    """未登记的 tool_name，capability 就是 tool_name 本身。"""
-    policy = CapabilityPolicy(CapabilitySet(allow=frozenset({"custom_cap"})))
-    result = await policy.check("custom_cap", {})
-    assert result.outcome == "allow"
-
-
-@pytest.mark.unit
-async def test_from_config_includes_file_and_shell_when_enabled() -> None:
+def test_from_config_returns_instance_with_expected_allow_set() -> None:
+    """from_config 在不抛异常的同时，capability_set 包含预期 allow capability。"""
     policy = CapabilityPolicy.from_config(_local_config())
-    r1 = await policy.check("read_file", {})
-    r2 = await policy.check("run_shell", {})
-    assert r1.outcome == "allow"
-    assert r2.outcome == "allow"
+    caps = policy.capability_set
+    assert "file_read" in caps.allow
+    assert "file_write" in caps.allow
+    assert "shell" in caps.allow
+    assert "memory" in caps.allow
 
 
 @pytest.mark.unit
-async def test_from_config_excludes_shell_when_disabled() -> None:
+def test_from_config_excludes_shell_when_disabled() -> None:
     policy = CapabilityPolicy.from_config(_local_config(shell_enabled=False))
-    result = await policy.check("run_shell", {})
-    assert result.outcome == "deny"
+    assert "shell" not in policy.capability_set.allow
 
 
 @pytest.mark.unit
-async def test_from_config_includes_memory_when_enabled() -> None:
-    """evolution.memory.enabled=True 时 capability 层必须允许 memory 工具通过；
-    否则 memory tool 永远被 capability 拦截、无法触达 permission → approval 层。"""
-    policy = CapabilityPolicy.from_config(_local_config(memory_enabled=True))
-    result = await policy.check("memory", {"action": "add", "target": "memory"})
-    assert result.outcome == "allow"
-    assert result.capability == "memory"
-
-
-@pytest.mark.unit
-async def test_from_config_excludes_memory_when_disabled() -> None:
-    """evolution.memory.enabled=False 时 memory capability 不进 allow 集合。
-    此时即使 cli 注册了 memory tool（异常路径），也会被 capability 拦。"""
+def test_from_config_excludes_memory_when_disabled() -> None:
     policy = CapabilityPolicy.from_config(_local_config(memory_enabled=False))
-    result = await policy.check("memory", {"action": "view", "target": "memory"})
-    assert result.outcome == "deny"
+    assert "memory" not in policy.capability_set.allow
 
 
 @pytest.mark.unit
-async def test_capability_check_includes_reason() -> None:
-    policy = CapabilityPolicy(CapabilitySet(allow=frozenset({"file_read"})))
-    result = await policy.check("read_file", {})
-    assert result.reason != ""
-    assert result.capability == "file_read"
+def test_capability_deny_translates_to_hard_deny_commands() -> None:
+    """v0.1.4 迁移：capability deny 派生为 HardDenyCommand 元组。"""
+    policy = CapabilityPolicy(CapabilitySet(deny=frozenset({"shell", "file_write"})))
+    rules = policy.migrated_hard_deny_commands
+    assert len(rules) == 2
+    rule_names = {r.name for r in rules}
+    assert "legacy-capability-deny-shell" in rule_names
+    assert "legacy-capability-deny-file_write" in rule_names
+    for r in rules:
+        assert isinstance(r, HardDenyCommand)
+        assert r.match_mode == "profile"

@@ -4,19 +4,34 @@
 # 切换远端模型：在 .env 中设置 KONGMING_MODEL_BASE_URL 和 KONGMING_MODEL_API_KEY。
 
 model:
-  # provider: openai_compatible（默认）或 anthropic
+  # provider: 可选。openai_compatible / anthropic / 省略（推荐省略，让 URL 决定）。
   #
-  # openai_compatible — OpenAI Chat Completions 格式，适用于：
-  #   本地 LM Studio / Ollama: base_url=http://127.0.0.1:1234/v1
-  #   智谱 BigModel:            base_url=https://open.bigmodel.cn/api/paas/v4
-  #   OpenAI 官方:              base_url=https://api.openai.com/v1
-  #   base_url 需包含版本段，代码直接拼 /chat/completions。
+  # ⚡ 4 级智能路由（effective_provider，v0.2 起）：
+  #   按以下优先级判定真实 provider，省去用户手动同步 yaml 与 .env 的麻烦：
   #
-  # anthropic — 原生 Anthropic Messages API，适用于 Claude 系列模型：
-  #   base_url=https://api.anthropic.com（代码拼 /v1/messages）
-  #   name=claude-sonnet-4-5  （或其他 claude-* 模型名）
-  #   api_key 在 .env 中填写 KONGMING_MODEL_API_KEY=sk-ant-...
-  provider: openai_compatible
+  #   1. URL path 强信号（最高优先级，覆盖 declare）：
+  #        - host = api.anthropic.com → anthropic
+  #        - 路径含独立 "anthropic" 段 → anthropic（升级，第三方兼容端点）
+  #        - 路径末尾段是 v\d+（v1/v2/...）→ openai_compatible（降级）
+  #   2. Host 路由表（见 provider_routing 字段）
+  #   3. 用户 declare（本字段，可选）
+  #   4. 默认 openai_compatible
+  #
+  #   实例：
+  #     base_url=http://127.0.0.1:1234/v1                 → openai_compatible（path v1）
+  #     base_url=https://open.bigmodel.cn/api/paas/v4     → openai_compatible（path v4）
+  #     base_url=https://api.openai.com/v1                → openai_compatible（path v1）
+  #     base_url=https://api.anthropic.com                → anthropic（host 命中）
+  #     base_url=https://api.minimaxi.com/anthropic       → anthropic（path 含 anthropic）
+  #     base_url=https://api.minimaxi.com/v1              → openai_compatible（path v1）
+  #
+  # base_url 写法约定（按选定协议）：
+  #   openai_compatible：**带版本段**（如 /v1, /v4）。代码拼 /chat/completions。
+  #   anthropic：       **不带版本段**。代码拼 /v1/messages。
+  #     ⚠ 若 anthropic 端点误写 /anthropic/v1，会拼成 /anthropic/v1/v1/messages 而 404。
+  #
+  # 通常省略 provider 字段即可。仅当未知厂商 + URL 无强信号 + host 不在 provider_routing 时（罕见 corner case），才需显式 declare。
+  # provider: anthropic
   name: gemma-4-e4b-it
   base_url: http://127.0.0.1:1234/v1
   # 本地模型留空；远端模型在 .env 中填写 KONGMING_MODEL_API_KEY。
@@ -27,6 +42,24 @@ model:
   max_tokens: 4096
   # 采样温度，范围 [0, 2]。0 最确定，2 最随机。
   temperature: 0.7
+
+  # Host → provider 路由表（按协议分组）。effective_provider 4 级判定的第 2 级，
+  # 用于 path 启发式无强信号但 host 已知的场景（如裸 host ``https://api.openai.com``）。
+  #
+  # 内置 8 host 默认（无需在此重写）：
+  #   openai_compatible: api.openai.com / open.bigmodel.cn / api.deepseek.com /
+  #                      api.moonshot.cn / api.minimaxi.com / localhost / 127.0.0.1
+  #   anthropic:         api.anthropic.com
+  #
+  # 用户在此**新增 host 时与默认表合并**（不替换；list extend + 去重）。例如：
+  # provider_routing:
+  #   openai_compatible:
+  #     - api.my-new-llm.example.com   # 自定义 OpenAI 兼容厂商
+  #   anthropic:
+  #     - my-anthropic-proxy.internal  # 自定义 Anthropic 兼容代理
+  #
+  # 注意：path 启发式（path 含 "anthropic" 段 / 末尾 vN）**优先于**本表。同 host
+  # 双协议（如 MiniMax 同时有 /v1 OpenAI 和 /anthropic Anthropic 端点）由 path 区分。
 
   # 推理深度控制。可选值：low | medium | high | （注释掉表示不发此参数，使用模型默认）。
   # 仅在 reasoning_profiles 中声明了对应模型时生效；不声明 profile 则此字段被忽略。
@@ -74,15 +107,13 @@ model:
     gemma-4-e4b-it:                   # 本地模型明确禁用 reasoning 参数
       match: exact
       adapter: none
-  # Anthropic 兼容层示例（如 MiniMax，取消注释即可用）：
-  # reasoning_profiles:
-  #   MiniMax-M2.7:
-  #     match: prefix
-  #     adapter: anthropic_compatible_reasoning
-  #     supported_efforts: [low, medium, high]
+    MiniMax-M2.7:                     # MiniMax Anthropic 兼容端点
+      match: prefix
+      adapter: anthropic_compatible_reasoning
+      supported_efforts: [low, medium, high]
 
 runner:
-  max_turns: 10
+  max_turns: 90
 
 session:
   # memory | sqlite | file
@@ -176,3 +207,316 @@ evolution:
     read_max_chars: 65536
     # memory tool view 动作返回的最大字符数。
     view_max_chars: 3000
+
+# ---------------------------------------------------------------------------
+# safety v0.1.4 — 安全审批与边界配置
+# ---------------------------------------------------------------------------
+#
+# 主决策模型：HardBlock → SilentAllow → ExplicitConsent。
+# 用户配置 **追加** 默认规则，不替换；安全基线不可被降级。
+# 默认规则见 src/safety/default_rules.py（11 hard_deny + 6 approval_required + 16 sensitive_paths）。
+#
+# v0.1.4 boundary_kind 恒为 host：boundary_scope 仅接受 "any" / "host"，写 "sandbox" 会被拒。
+# 详见 docs/safety-scope-v0.1.4/04-data-and-state.md。
+safety:
+  # ---- ① hard_deny_commands —— 命令硬禁，命中即拒，不弹批准框 ----
+  # match_mode: segment_regex（regex 按 shell segment 匹配）| profile（命名 action profile）
+  # boundary_scope: any（host/sandbox 都生效）| host（仅 host）
+  #
+  # ⚠️ yaml 注意事项：
+  # - 整个 matcher 字符串建议用双引号包起来
+  # - 双引号字符串内反斜杠要写成 \\（如 \\s = 空白，\\b = word boundary）
+  # - 单引号字符串里反斜杠不需要转义（如 '\s+'），但单引号内不能写 ''（空字符串）
+  # - regex 用法：^cmd\\s+ ... \\b<keyword>(/|$|\\s) 这种结构最稳
+  #
+  # 路径相关：matcher 是 regex，**对完整 shell 命令字符串做 segment 切分后
+  # 逐段 re.search**，路径在这里是**字面文本**，不展开 ~ 也不解析相对路径。
+  # 想"按目标路径"拦的场景，用下方 ③ sensitive_paths 更可靠（按 resolve 后路径）。
+  hard_deny_commands: []
+
+  # 更多硬禁示例（取消注释即生效）：
+  # hard_deny_commands:
+  #   - name: "kubectl-prod-namespace-delete"
+  #     matcher: "^kubectl\\s+delete\\s+namespace\\s+prod"
+  #     match_mode: "segment_regex"
+  #     boundary_scope: "any"
+  #     reason: "禁止删除生产 namespace"
+  #
+  #   - name: "ssh-config-overwrite"
+  #     matcher: "^cat\\s+>\\s*~/.ssh/config"
+  #     match_mode: "segment_regex"
+  #     boundary_scope: "host"
+  #     reason: "禁止重写 SSH 配置"
+
+  # ---- ② approval_required_commands —— 命令需人工审批 ----
+  # severity: standard（普通确认）| elevated（typed confirm + 不允许 [s]/[p]）
+  approval_required_commands:
+    # 任何递归删除（rm -r* / rm -rf / rm --recursive）一律 elevated 审批。
+    # default_rules.py 已 hard_deny 根级目标（rm -rf / / ~ / $HOME / .）；
+    # sensitive_paths block 已拦个人数据目录（上面 ~/Documents 等）；
+    # trusted_workdirs（.kongming/work/、.kongming/tmp/）走 silent_allow 不进
+    # ConsentResolver。所以本规则**只覆盖剩余的灰色地带**：相对路径子目录
+    # （rm -rf warp / build / node_modules 等）、未列入敏感的绝对路径等。
+    # severity=elevated → UI 显示高强度审批弹框（典型实现：默认拒绝、需明确点击、
+    # 不接受顺手回车），避免顺手点同意酿成误删。
+    - name: "rm-recursive-elevated"
+      # macOS BSD rm 支持 -R 大写，GNU rm 支持 -r 小写 / --recursive；都拦。
+      # 短选项簇：-rf / -fr / -fR / -Rf 等任意顺序。
+      matcher: "^rm\\s+(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\\b"
+      match_mode: "segment_regex"
+      severity: "elevated"
+      boundary_scope: "any"
+      reason: "递归删除：升级 elevated 审批，避免顺手点同意"
+  # 例子：
+  # approval_required_commands:
+  #   - name: "git-force-push"
+  #     matcher: "^git\\s+push.*--force"
+  #     match_mode: "segment_regex"
+  #     severity: "elevated"
+  #     boundary_scope: "any"
+  #     reason: "强制推送会覆盖远端历史"
+  #
+  #   - name: "docker-system-prune"
+  #     matcher: "^docker\\s+system\\s+prune"
+  #     match_mode: "segment_regex"
+  #     severity: "standard"
+  #     boundary_scope: "host"
+  #     reason: "清理 Docker 资源不可逆"
+
+  # ---- ③ sensitive_paths —— 路径风险按 read/write 分流 ----
+  # match_mode 决定 matcher 怎么解析：
+  #   - path_prefix      —— 绝对路径或 ~/  会做 expanduser + resolve；
+  #                         例：matcher="~/.kube/config" → /Users/<you>/.kube/config
+  #   - project_relative —— 项目相对路径，拼接到 <project_root>；
+  #                         例：matcher="scratch/" → <project_root>/scratch/
+  #                         project_root = `git rev-parse --show-toplevel` 推导，
+  #                         不在 git 仓库时退化为启动 cwd（受 --workdir / -C 影响）
+  #   - glob             —— 仅文件名层匹配（当前实现粒度等于"项目根下任意文件"，
+  #                         见 _resolve_sensitive_matcher docstring 的已知 gap）；
+  #                         例：matcher=".env*" / "*.pem"
+  # ops: ["read", "write", "exec"] 子集
+  # effect: block（HardBlockGuard 拦截）| elevated（升级 ask）| allow（静默放行）
+  sensitive_paths:
+    # === 个人数据目录保护（按路径硬拦，比命令 regex 更可靠）===
+    # default_rules.py baseline 只覆盖凭据类（~/.ssh / ~/.aws/credentials 等），
+    # 不覆盖用户日常文档目录。本组规则补齐：agent 通过任何 tool 接触这些目录的
+    # write 都会被 HardBlockGuard 直接拦截（不经审批弹框）。
+
+    - name: "user-documents"
+      matcher: "~/Documents/"
+      match_mode: "path_prefix"
+      ops: ["read", "write"]
+      effect: "block"
+      boundary_scope: "any"
+      reason: "用户文档目录，agent 不应触碰个人数据"
+
+    - name: "user-desktop"
+      matcher: "~/Desktop/"
+      match_mode: "path_prefix"
+      ops: ["read", "write"]
+      effect: "block"
+      boundary_scope: "any"
+      reason: "用户桌面，可能含临时敏感文件"
+
+    - name: "user-downloads"
+      matcher: "~/Downloads/"
+      match_mode: "path_prefix"
+      ops: ["read", "write"]
+      effect: "block"
+      boundary_scope: "any"
+      reason: "下载目录，常含未审核的外部文件"
+
+    - name: "macos-keychains"
+      matcher: "~/Library/Keychains/"
+      match_mode: "path_prefix"
+      ops: ["read", "write"]
+      effect: "block"
+      boundary_scope: "any"
+      reason: "macOS 钥匙串容器"
+
+    - name: "macos-mail"
+      matcher: "~/Library/Mail/"
+      match_mode: "path_prefix"
+      ops: ["read", "write"]
+      effect: "block"
+      boundary_scope: "any"
+      reason: "本地邮件存档"
+
+    # 媒体目录：read 不拦（让 agent 看图/音/视频是合理用例），write 硬拦
+    - name: "user-pictures-write"
+      matcher: "~/Pictures/"
+      match_mode: "path_prefix"
+      ops: ["write"]
+      effect: "block"
+      boundary_scope: "any"
+      reason: "禁止删除/修改个人照片"
+
+    - name: "user-movies-write"
+      matcher: "~/Movies/"
+      match_mode: "path_prefix"
+      ops: ["write"]
+      effect: "block"
+      boundary_scope: "any"
+      reason: "禁止删除/修改个人视频"
+
+    - name: "user-music-write"
+      matcher: "~/Music/"
+      match_mode: "path_prefix"
+      ops: ["write"]
+      effect: "block"
+      boundary_scope: "any"
+      reason: "禁止删除/修改个人音乐"
+
+    # 跨卷写：当前项目所在卷之外的卷，写入要 elevated 审批
+    # （read 不拦，agent 跨卷读资料是合理用例）
+    - name: "cross-volume-write"
+      matcher: "/Volumes/"
+      match_mode: "path_prefix"
+      ops: ["write"]
+      effect: "elevated"
+      boundary_scope: "any"
+      reason: "跨卷写入需明确审批，避免误删其他卷数据"
+  # 例子：
+  # sensitive_paths:
+  #   - name: "kubeconfig"
+  #     matcher: "~/.kube/config"
+  #     match_mode: "path_prefix"
+  #     ops: ["read", "write"]
+  #     effect: "elevated"
+  #     boundary_scope: "host"
+  #     reason: "K8s 凭据"
+  #
+  #   - name: "project-scratch-allow"
+  #     matcher: "scratch/"
+  #     match_mode: "project_relative"
+  #     ops: ["read", "write"]
+  #     effect: "allow"
+  #     boundary_scope: "any"
+  #     reason: "本项目低风险目录，静默放行"
+  #
+  #   - name: "secret-key-files"
+  #     matcher: "*.pem"
+  #     match_mode: "glob"
+  #     ops: ["read", "write"]
+  #     effect: "block"
+  #     boundary_scope: "any"
+  #     reason: "TLS 私钥文件"
+
+  # ---- ④ trusted_workdirs —— 默认作用域之外的可信工作目录 ----
+  # 命中后 read/write 直接 silent_allow（intrinsic）。
+  # 默认已含 .kongming/work/ 和 .kongming/tmp/（在 default_rules.py 内嵌）。
+  #
+  # 路径解析：**仅接受项目相对路径**，拼接到 <project_root> 下。
+  #   ✅ "scratch/"           → <project_root>/scratch/
+  #   ✅ "build/output/"      → <project_root>/build/output/
+  #   ❌ "~/anywhere"         不展开 ~，会变成 <project_root>/~/anywhere（静默失效）
+  #   ❌ "/abs/path"          不展开绝对路径，会变成 <project_root>//abs/path（静默失效）
+  # 想表达"home 下目录信任放行"，用 sensitive_paths 的 path_prefix 模式（见上）
+  # 或 allow_writes（仅写）。
+  trusted_workdirs: []
+  # 例子：
+  # trusted_workdirs:
+  #   - "scratch/"
+  #   - "build/output/"
+
+  # ---- ⑤ allow_writes —— 配置静默放行的写路径（grant scope=config）----
+  # 命中后 silent_allow + decision_source=config（**仅 write**，read 不靠它）。
+  #
+  # 路径解析（**与 trusted_workdirs / sensitive_paths 不一致，已知不一致**）：
+  #   - 字符串字面**前缀**比对，**不展开 `~`**，**不 resolve 相对路径**
+  #   - tool 调用传入的 path 一律 expanduser + resolve 成绝对路径后再比对前缀
+  # 实用建议：
+  #   ✅ "/Users/me/scratch/"     绝对路径，可命中 LLM 写 "~/scratch/foo"
+  #                               （后者解析后 = /Users/me/scratch/foo）
+  #   ✅ "/tmp/kongming-"         绝对前缀
+  #   ❌ "~/scratch/"             永远不命中（请求方解析后是绝对路径）
+  #   ❌ "scratch/"               依赖请求方 resolve 出来的字符串前缀，不可靠
+  allow_writes: []
+  # 例子：
+  # allow_writes:
+  #   - "/Users/me/scratch/"
+  #   - "/tmp/kongming-"
+
+  # ---- ⑥ allow_tools_silent —— 配置静默放行的工具白名单 ----
+  # 命中工具的所有调用（不看 path）直接 silent_allow，不进 ask。
+  # 此字段是 tool **名字**集合，**不涉及路径**——填工具的 `name` 属性即可。
+  # read 类工具放这里最常见；放 write_file 等价于"全盘信任所有写入"，慎用。
+  allow_tools_silent:
+    - "read_file"
+    - "list_dir"
+
+  # ---- ⑦ log_silent_reads —— silent_allow + read 操作的 trace 写盘开关 ----
+  # 默认 false（避免 jsonl 膨胀）；调试时设 true 可看到完整决策事件。
+  # 也可临时用 KONGMING_SAFETY_LOG_SILENT_READS=true 覆盖。
+  log_silent_reads: false
+
+  # ---- env 覆盖（4 个） ----
+  # KONGMING_SAFETY_TRUSTED_WORKDIRS=".kongming/work/,.kongming/tmp/"
+  # KONGMING_SAFETY_ALLOW_WRITES="~/scratch/,/tmp/kongming-*/"
+  # KONGMING_SAFETY_ALLOW_TOOLS_SILENT="read_file,list_dir"
+  # KONGMING_SAFETY_LOG_SILENT_READS=true
+
+
+# =============================================================================
+# Web 宿主壳（v0.1.5+）
+# =============================================================================
+#
+# 启用方式：把 enabled 改为 true，然后 `make web` 启动 uvicorn。
+# 默认 enabled=false：CLI 路径完全不受 web 段配置影响。
+#
+# 文档：docs/web-multi-thread-frontend-v0.1.5/
+web:
+  # 是否启用 web 宿主壳（默认 false；启用前先 review 整段配置）
+  enabled: false
+
+  # uvicorn bind IP：仅本机用 127.0.0.1；需外网访问改 0.0.0.0 + 防火墙
+  host: "0.0.0.0"
+  port: 8080
+
+  # 跳过登录鉴权（仅本地开发！）；上线必须 false 并设强密码
+  dev_mode: false
+
+  # 浏览器 Origin 白名单；空列表 = 拒绝所有跨域；本机调试可填 ["http://localhost:5173"]
+  cors_origins: []
+
+  # cell 空闲多久后自动 evict（默认 30 分钟，下限 60s）
+  idle_timeout_seconds: 1800
+
+  # 后台扫盘检查周期（默认 60s，下限 10s）
+  idle_check_interval_seconds: 60
+
+  # 单次审批等待上限（超时默认拒绝，默认 60s，下限 10s）
+  pending_approval_timeout_seconds: 60
+
+  # LLM preset 列表；浏览器创建 thread 时下拉选其一。
+  # v0.1.5 留空，由 web-app-shell 任务实际填默认 preset。
+  llm_presets:
+    - id: bigmodel-glm5
+      display_name: "智谱 GLM-5.1"
+      base_url: https://open.bigmodel.cn/api/coding/paas/v4
+      model: glm-5.1
+      api_key_env: KONGMING_MODEL_API_KEY
+      reasoning_effort: high
+    - id: minimax-m2-7
+      display_name: "MiniMax M2.7"
+      base_url: https://api.minimaxi.com/anthropic
+      model: MiniMax-M2.7
+      api_key_env: MINIMAX_API_KEY
+      reasoning_effort: medium
+  # 示例：
+  # llm_presets:
+  #   - id: claude-sonnet-4
+  #     display_name: "Claude Sonnet 4"
+  #     provider: anthropic
+  #     base_url: https://api.anthropic.com
+  #     model: claude-sonnet-4-20250514
+  #     api_key_env: ANTHROPIC_API_KEY
+  #     reasoning_effort: medium
+  #   - id: lm-studio-local
+  #     display_name: "LM Studio 本地"
+  #     base_url: http://127.0.0.1:1234/v1
+  #     model: gemma-4-e4b-it
+  #     # 本地端点不需要 api_key_env
+
+  # ---- 启用 / 调优请改上方 yaml 字段，或用 KONGMING_WEB_* env 覆盖 ----
+  # 完整 env 清单见 .env.example 的「Web 服务」段（单一真源；本处不再列）。

@@ -6,7 +6,8 @@
 SHELL := /usr/bin/env bash
 
 .PHONY: help install install-hooks fmt fmt-check lint typecheck \
-        precommit test test-unit test-e2e smoke cli clean
+        precommit test test-unit test-e2e smoke cli clean \
+        web-build web-dev web-test web
 
 help:
 	@echo "kongming-agent Makefile"
@@ -65,3 +66,26 @@ clean:
 	rm -rf build dist *.egg-info
 	find . -type d -name __pycache__ -not -path "./other/*" -not -path "./.venv/*" -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -not -path "./other/*" -not -path "./.venv/*" -delete 2>/dev/null || true
+
+# ---------- web frontend (v0.1.5) ----------
+# web-build：在 docker 里跑 npm ci + npm run build；产物在 web/dist/
+# web-dev   ：本地 vite dev server（不带后端，需要后端时另外跑 `make web` 之类）
+# web-test  ：跑前端 vitest 单测
+
+web-build:
+	bash web/scripts/build-in-docker.sh
+
+web-dev:
+	cd web && npm run dev
+
+web-test:
+	cd web && npm run test:unit
+
+# web：启动 uvicorn web 后端（v0.1.5 web-app-shell）。
+# 前置：
+#   - export KONGMING_WEB_PASSWORD=<your-pwd>（首次必填）
+#   - 配置文件 cfg.web.enabled=true / dev_mode 视情况
+#   - 前端可选：先 make web-build 让 web/dist 存在
+# 默认 host=0.0.0.0 port=8080；按 cfg.web 实际值覆盖
+web:
+	bash scripts/web.sh

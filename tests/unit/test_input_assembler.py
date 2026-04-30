@@ -6,7 +6,9 @@
 #2 compactor 删掉已有 system 时，同轮 assemble 不重补（避免震荡）
 #3 结构化 sources 与预渲染 prompt 透传
 
-每个测试完成后将 assembled 结果落盘到 ``.kongming/debug/assembler-<timestamp>.json``。
+每个测试完成后将 assembled 结果落盘到 ``.kongming/debug/tests/assembler-<timestamp>.json``。
+落到 ``debug/tests/`` 子目录是为了和 CLI ``--debug`` 生产落盘的
+``.kongming/debug/prompt-debug-*.json`` 物理分开，方便人工查看。
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from context.instruction_loader import InstructionSource
 from core.message import Message
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_DUMP_DIR = _REPO_ROOT / ".kongming/debug"
+_DUMP_DIR = _REPO_ROOT / ".kongming/debug/tests"
 
 
 def _dump_assemble_result(test_name: str, result: object, sources: list[InstructionSource]) -> None:

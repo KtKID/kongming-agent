@@ -1,19 +1,24 @@
-"""粗粒度能力门禁。
+"""粗粒度能力门禁（v0.1.4 已迁移到 SafetyDecisionEngine）。
 
-职责边界：
+v0.1.3 角色：
 
 - 回答"这次运行是否允许使用某类能力"，例如 ``shell`` / ``file_read`` / ``file_write``
 - 输入：``tool_name + args``；输出：:class:`CapabilityCheck`（``allow`` / ``deny``）
-- **不**负责细粒度规则匹配（那是 :mod:`safety.permission_policy` 的事）
-- **不**负责与人工交互（那是 :class:`core.contracts.ApprovalProvider` 的事）
 
-装配层按 :meth:`CapabilityPolicy.from_config` 从统一 :class:`Config` 读 tool
-启用开关并转成 allow 集合；业务代码不需要关心映射逻辑。
+v0.1.4 变化（任务 #37/#39）：
 
-**内部组件约束**（来自 ``10-contracts.md``）：
+- **不再做运行时判定**：``check()`` 方法保留签名，方法体改为
+  ``raise NotImplementedError``。所有 capability 判定全部下沉到
+  :class:`safety.decision_engine.SafetyDecisionEngine`。
+- **保留 `from_config` 作为迁移入口**：v0.1.3 yaml 中的 ``capability allow=...``
+  / ``deny=...`` 字段（实际由 ``config.tool.<name>.enabled`` 等推导）翻译为新
+  规则表的派生条目（:data:`MIGRATED_HARD_DENY_COMMANDS`）。
+- **v0.1.3 默认行为保留**：``capability deny`` 派生为 ``HardDenyCommand``
+  （match_mode="profile"），追加到 :class:`HardBlockGuard` 的 hard_deny_commands。
+  ``capability allow`` 不动（默认 silent_allow 范围由 BoundaryResolver / TrustResolver
+  推导）。
 
-- ``CapabilityPolicy`` 是 ``safety/`` 内部组件，**不进 core/contracts.py**
-- ``Tool Runtime`` 不直接 import 它；运行时装配层负责把它串进高层安全链
+迁移指引详见 ``docs/modules/安全/README.md`` 末尾。
 """
 
 from __future__ import annotations
@@ -23,19 +28,20 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from config_loader.models import Config
+from safety.types import BoundaryScope, HardDenyCommand
 
 # ---------------------------------------------------------------------------
-# 数据结构
+# 数据结构（保留供 v0.1.3 调用方导入）
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class CapabilitySet:
-    """一次运行允许使用的能力集合。
+    """一次运行允许使用的能力集合（v0.1.3 兼容字段）。
 
     Attributes:
         allow: 白名单。空集合视为"全开"，配合 ``deny`` 使用。
-        deny: 显式黑名单。优先于 ``allow``——任一能力命中 ``deny`` 即拒绝。
+        deny: 显式黑名单。优先于 ``allow``。
     """
 
     allow: frozenset[str] = frozenset()
@@ -44,13 +50,7 @@ class CapabilitySet:
 
 @dataclass(frozen=True)
 class CapabilityCheck:
-    """单次 tool 调用的能力判定结果。
-
-    Attributes:
-        outcome: ``allow`` 或 ``deny``。
-        capability: 本次调用对应的能力名（已经过 ``tool_name → capability`` 映射）。
-        reason: 判定理由，会拼进 :class:`core.contracts.ApprovalDecision.reason`。
-    """
+    """单次 tool 调用的能力判定结果（v0.1.3 兼容字段，v0.1.4 不再产生）。"""
 
     outcome: Literal["allow", "deny"]
     capability: str
@@ -58,26 +58,17 @@ class CapabilityCheck:
 
 
 # ---------------------------------------------------------------------------
-# 默认 tool_name → capability 映射
+# 默认 tool_name → capability 映射（保留供 v0.1.3 测试期间访问）
 # ---------------------------------------------------------------------------
 
 
 _DEFAULT_TOOL_CAPABILITIES: dict[str, str] = {
-    # 文件类 builtin tools
     "read_file": "file_read",
     "list_dir": "file_read",
     "write_file": "file_write",
-    # shell 类 builtin tools
     "run_shell": "shell",
-    # memory 长期记忆工具：读写活态 memory；作为独立 capability 登记，
-    # 避免 fallback 走"capability 名 = 工具名"时意外被非空 allow 集合拒绝。
     "memory": "memory",
 }
-"""v1-mini builtin tools 的默认能力映射。
-
-对于未登记的工具名，:meth:`CapabilityPolicy.check` 回退到 "capability 名 = 工具名"，
-这样第三方 tool 不登记映射时仍可通过精确工具名进入白名单。
-"""
 
 
 # ---------------------------------------------------------------------------
@@ -86,16 +77,14 @@ _DEFAULT_TOOL_CAPABILITIES: dict[str, str] = {
 
 
 class CapabilityPolicy:
-    """粗粒度能力门禁。
+    """v0.1.4 占位类。
 
-    规则：
+    v0.1.3 时承担 capability 门禁判定；v0.1.4 起不再做运行时决策，仅作为
+    v0.1.3 yaml 字段到新规则表的迁移入口（保留 :meth:`from_config` 把
+    capability deny 翻译成 :class:`HardDenyCommand`）。
 
-    1. ``tool_name → capability`` 按 ``tool_capabilities`` 映射；未登记时
-       capability = 工具名本身。
-    2. capability 命中 ``deny`` 集合：返回 ``outcome=deny``（优先级最高）。
-    3. ``allow`` 为空：视为"全开"，返回 ``outcome=allow``。
-    4. capability 命中 ``allow`` 集合：返回 ``outcome=allow``。
-    5. 其他：返回 ``outcome=deny``。
+    ``check()`` 方法签名保留以避免外部 import 断链；调用 raise
+    :class:`NotImplementedError`，引导 caller 改走 SafetyDecisionEngine。
     """
 
     def __init__(
@@ -106,53 +95,57 @@ class CapabilityPolicy:
     ) -> None:
         self._caps = capability_set
         self._tool_map = dict(tool_capabilities or _DEFAULT_TOOL_CAPABILITIES)
+        # 迁移产物（_migrated_hard_deny_commands）：capability deny 派生的规则
+        self._migrated_hard_deny_commands: tuple[HardDenyCommand, ...] = (
+            _derive_hard_deny_commands_from_capability_deny(capability_set.deny)
+        )
+
+    @property
+    def capability_set(self) -> CapabilitySet:
+        """暴露原始 :class:`CapabilitySet`（供测试 / 迁移工具访问）。"""
+        return self._caps
+
+    @property
+    def migrated_hard_deny_commands(self) -> tuple[HardDenyCommand, ...]:
+        """v0.1.3 capability deny 翻译后的 :class:`HardDenyCommand` 元组。
+
+        v0.1.4 SafetyDecisionEngine 装配 :class:`HardBlockGuard` 时合并默认 +
+        用户 yaml 规则；本字段提供给 native_runtime / 测试观察迁移效果。
+        """
+        return self._migrated_hard_deny_commands
 
     async def check(
         self,
         tool_name: str,
         args: dict[str, Any],
     ) -> CapabilityCheck:
-        """判定单次工具调用的能力是否允许。"""
-        capability = self._tool_map.get(tool_name, tool_name)
+        """v0.1.4 已删除内部判定。
 
-        if capability in self._caps.deny:
-            return CapabilityCheck(
-                outcome="deny",
-                capability=capability,
-                reason=f"capability '{capability}' explicitly denied",
-            )
-
-        if not self._caps.allow:
-            # 空 allow = 全开；配合黑名单使用。
-            return CapabilityCheck(
-                outcome="allow",
-                capability=capability,
-                reason=f"capability '{capability}' allowed (empty allow-list means allow-all)",
-            )
-
-        if capability in self._caps.allow:
-            return CapabilityCheck(
-                outcome="allow",
-                capability=capability,
-                reason=f"capability '{capability}' in allow list",
-            )
-
-        return CapabilityCheck(
-            outcome="deny",
-            capability=capability,
-            reason=f"capability '{capability}' not in allow list",
+        Raises:
+            NotImplementedError: 永远抛出，提示调用方改走 SafetyDecisionEngine。
+        """
+        raise NotImplementedError(
+            "CapabilityPolicy.check is removed in v0.1.4; "
+            "decisions moved to SafetyDecisionEngine. "
+            "Use safety.chain.build_safety_chain(...) instead."
         )
 
     @classmethod
     def from_config(cls, config: Config) -> CapabilityPolicy:
-        """按统一配置装配默认 :class:`CapabilityPolicy`。
+        """v0.1.3 yaml → v0.1.4 规则表迁移入口。
 
-        - ``tool.file.enabled = True`` → 追加 ``file_read`` / ``file_write``
-        - ``tool.shell.enabled = True`` → 追加 ``shell``
-        - ``evolution.memory.enabled = True`` → 追加 ``memory``
-        - ``file_read`` 始终加入默认 allow 集合（反射 / 观察性最低要求）
+        映射规则：
 
-        未启用的能力不进入 allow，配合"非空 allow = 白名单"语义自动阻断。
+        - ``config.tool.file.enabled = True`` → ``file_read`` / ``file_write``
+          进 allow（不影响 v0.1.4 判定，仅用于历史调用方读 ``capability_set``）
+        - ``config.tool.shell.enabled = True`` → ``shell`` 进 allow
+        - ``config.evolution.memory.enabled = True`` → ``memory`` 进 allow
+        - ``capability deny`` 由用户在 yaml 显式追加（v0.1.3 schema 没暴露，
+          但保留接口）；deny 集合派生为 ``HardDenyCommand`` 追加到
+          HardBlockGuard 默认规则集
+
+        v0.1.3 测试 / native_runtime 仍可正常 ``CapabilityPolicy.from_config(cfg)``
+        拿到一个不抛异常的实例；只是 ``check()`` 不再返回结果。
         """
         allow: set[str] = {"file_read"}
         if config.tool.file.enabled:
@@ -162,6 +155,41 @@ class CapabilityPolicy:
         if config.evolution.memory.enabled:
             allow.add("memory")
         return cls(CapabilitySet(allow=frozenset(allow)))
+
+
+# ---------------------------------------------------------------------------
+# 迁移辅助
+# ---------------------------------------------------------------------------
+
+
+def _derive_hard_deny_commands_from_capability_deny(
+    deny_capabilities: frozenset[str],
+) -> tuple[HardDenyCommand, ...]:
+    """把 v0.1.3 capability deny 集合翻译成 ``HardDenyCommand`` 规则元组。
+
+    每条 capability deny 对应一条 ``match_mode="profile"`` 规则，
+    matcher 为 ``"capability_<name>"``。这些 profile 名不会被默认
+    :func:`safety.guards.consent._profile_matches` 命中（它仅识别
+    git_push / git_reset_hard），所以默认情况下"capability deny X"
+    不会自动拒绝普通工具调用——这是 v0.1.4 的明确边角：
+
+    - v0.1.3 capability deny 的本意是"运行级别禁用此能力"
+    - v0.1.4 改为通过工具开关（``config.tool.<name>.enabled = false``）实现
+      同等效果；capability deny 的派生规则仅作为 trace 留痕
+
+    用户如确实需要拒绝某 capability，应改为关闭对应工具或在
+    ``safety.hard_deny_commands`` yaml 字段显式追加 segment_regex 规则。
+    """
+    return tuple(
+        HardDenyCommand(
+            name=f"legacy-capability-deny-{cap}",
+            matcher=f"capability_{cap}",
+            match_mode="profile",
+            boundary_scope=BoundaryScope.ANY,
+            reason=f"v0.1.3 capability deny migration for {cap!r} (informational)",
+        )
+        for cap in sorted(deny_capabilities)
+    )
 
 
 __all__ = [

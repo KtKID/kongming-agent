@@ -26,6 +26,7 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from core.message import Message
@@ -141,6 +142,27 @@ class ApprovalDecision:
         outcome: approved / rejected / cancelled 之一。
         reason: 人工或策略给出的理由文本。
         metadata: 附加信息，比如操作者身份、来源 UI 等。
+
+    **safety v0.1.4 metadata 字段约定**（不改变协议形态，仅约定 metadata 内的键名）：
+
+    - ``decision_class``: ``hard_block`` / ``silent_allow`` / ``explicit_consent``
+      —— 主决策三段式分类。
+    - ``decision_source``: ``intrinsic`` / ``session`` / ``config``
+      （silent_allow 用） / ``standard`` / ``elevated``（explicit_consent 用）
+      —— 证据来源或审批强度。``hard_block`` 不使用此字段。
+    - ``matched_rule``: 命中规则的字符串描述（如 ``"deny:~/.ssh/"``、
+      ``"grant:tests/integration/"``）。
+    - ``reason``: 人读理由（用于 trace / UI 展示）。
+    - ``grant_scope``: ``session`` / ``config`` —— 仅 ``decision_source=session/config``
+      的 silent_allow 携带，标识 grant 持久化范围。
+    - ``boundary_kind``: ``host`` / ``sandbox`` —— v0.1.4 实现恒为 ``host``，
+      为未来 sandbox 落地预留。
+    - ``suggested_alternatives``: ``list[str]`` —— 仅 hard_block 时携带，
+      给 LLM 的备选建议（如 "改写到 ~/scratch/ 后再要"）。
+    - ``stage``: 兼容 v0.1.3 字段（``capability`` / ``permission`` / ``approval``），
+      由 SafetyDecisionEngine 按映射规则填充。
+
+    详见 ``docs/safety-scope-v0.1.4/04-data-and-state.md``。
     """
 
     outcome: ApprovalOutcome
@@ -165,6 +187,35 @@ class ApprovalProvider(Protocol):
     async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
         """对一次工具调用做出审批决定。"""
         ...
+
+
+class ApprovalAction(StrEnum):
+    """v0.1.4 安全链审批结果的结构化 action。
+
+    ``InteractiveApproval`` 在 v0.1.3 仅返回 ``bool``；v0.1.4 升级为携带
+    ``ApprovalAction`` 的结构化决策，让用户除了"允许 / 拒绝"外，还能
+    选择"本会话允许"或"持久化到配置"。
+
+    - ``ACCEPT_ONCE``：一次性允许，不缓存 grant
+    - ``ACCEPT_FOR_SESSION``：允许并写入本会话 ``GrantStore``，session 结束失效
+    - ``ACCEPT_PERSIST``：允许并提议写回项目 yaml 配置（CLI 应做二次确认）
+    - ``REJECT``：拒绝
+
+    映射到 :class:`ApprovalDecision`：
+
+    - ``ACCEPT_ONCE`` → ``outcome="approved"``，``metadata.grant_scope`` 缺省
+    - ``ACCEPT_FOR_SESSION`` → ``outcome="approved"``，``metadata.grant_scope="session"``
+    - ``ACCEPT_PERSIST`` → ``outcome="approved"``，``metadata.grant_scope="config"``
+    - ``REJECT`` → ``outcome="rejected"``
+
+    向后兼容：v0.1.3 旧 bool 返回路径由 adapter 自动映射为
+    ``ACCEPT_ONCE`` / ``REJECT``，不破坏现有 ApprovalProvider 实现。
+    """
+
+    ACCEPT_ONCE = "accept_once"
+    ACCEPT_FOR_SESSION = "accept_for_session"
+    ACCEPT_PERSIST = "accept_persist"
+    REJECT = "reject"
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +396,28 @@ class Session(Protocol):
         """清空当前会话历史。"""
         ...
 
+    async def advance_run_index(self) -> int:
+        """递增并返回新的 run 编号；递增后立即持久化（如有持久化层）。
+
+        语义：
+        - 调用一次 → +1 → 返回新值
+        - 持久化后端（FileSession / 未来 SQLite）必须把递增后的值落盘
+        - 内存后端（InMemorySession）只更新实例字段
+        - sqlite 后端当前不维护，可抛 ``NotImplementedError``
+
+        非事务原子约定（v0.x 简化）：
+        - 调用方通常在 ``session.append(user_msg)`` 之后立刻调用本方法，
+          以把"用户消息入历史"和"run 编号递增"绑到同一时机
+        - 严格讲两步应单事务原子提交，但 v0.x 阶段不做事务化：
+          - append 成功 + advance 失败 → 下次启动 run_count 不变，新 run_index
+            复用上次值；本 run 已崩溃未生成 run_id 记录，新一轮取此值仍唯一
+            不撞，不会丢消息也不会让 run_id 重复
+          - advance 成功 + append 失败（极罕见）→ jsonl 少一条，run_count 跳号，
+            仍唯一不撞
+        - 事务化留给 v0.2+
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # EventSink / Event
@@ -386,6 +459,37 @@ EventKind = Literal[
     "memory.write.rejected",
     "memory.write.error",
     "memory.snapshot.refreshed",
+    # safety v0.1.4 决策事件（safety-scope-v0.1.4 模块 8 DecisionTrace）：
+    # - tool.denied：HardBlock 命中 / ConsentResolver 用户拒绝。payload 含
+    #   decision_class / decision_source / matched_rule / reason / boundary_kind
+    #   / tool_name / path_or_command / request_id / outcome
+    # - tool.approval_required：ConsentResolver 进入 standard / elevated ask 时
+    #   触发，发起 InteractiveApproval 之前 emit 一次（先于 decision）
+    # - tool.silently_allowed：TrustResolver 命中 intrinsic / session / config
+    #   或 ConsentResolver 用户允许时触发。read 类工具的 silently_allowed
+    #   默认不写盘（受 config.safety.log_silent_reads 控制，避免 jsonl 膨胀）
+    "tool.denied",
+    "tool.approval_required",
+    "tool.silently_allowed",
+    # Skill loader 装配期事件（skill-loader-v0.1.6）：
+    # - skill.discovered：每成功解析一个 SkillSpec
+    # - skill.shadowed：workspace 覆盖 home 时
+    # - skill.parse_failed：frontmatter YAML 解析失败 / 必填字段缺失
+    # - skill.skipped：符号链接逃逸 skill 目录
+    "skill.discovered",
+    "skill.shadowed",
+    "skill.parse_failed",
+    "skill.skipped",
+    # Skill 运行时事件（skill-tool-v0.1.6）：
+    # - skill.invoked：SkillTool.execute 入口（unknown skill 不 emit）。
+    #   payload={"name", "source", "body_path", "args", "body_chars": 0}
+    # - skill.completed：body 读取 + 变量替换成功后 emit。
+    #   payload={"name", "source", "body_chars", "elapsed_ms"}
+    # - skill.failed：read 失败 / `!command` 拒绝 / 任何派生异常。
+    #   payload={"name", "source", "error_kind", "message", "elapsed_ms"}
+    "skill.invoked",
+    "skill.completed",
+    "skill.failed",
 ]
 
 
@@ -540,6 +644,7 @@ class PromptDebugSink(Protocol):
 
 __all__ = [
     # Tool
+    "ApprovalAction",
     "ApprovalDecision",
     "ApprovalOutcome",
     "ApprovalProvider",

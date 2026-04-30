@@ -25,6 +25,7 @@ class InMemorySession:
     def __init__(self, session_id: str | None = None) -> None:
         self.session_id: str = session_id or f"sess_{uuid.uuid4().hex[:12]}"
         self._messages: list[Message] = []
+        self._run_count: int = 0
 
     async def append(self, message: Message) -> None:
         self._messages.append(message)
@@ -35,6 +36,11 @@ class InMemorySession:
 
     async def clear(self) -> None:
         self._messages.clear()
+
+    async def advance_run_index(self) -> int:
+        # 内存后端无持久化；进程重启后从 0 重数（与 history 同语义）。
+        self._run_count += 1
+        return self._run_count
 
     def __len__(self) -> int:
         return len(self._messages)

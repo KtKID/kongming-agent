@@ -22,12 +22,16 @@ from pathlib import Path
 import pytest
 
 from core import AgentSpec, InMemorySession, Runner, ToolCall
-from safety import (
-    CapabilityPolicy,
-    CapabilitySet,
-    PermissionPolicy,
-    PermissionRule,
-    SafetyGatedApproval,
+from safety import SafetyGatedApproval
+from safety.boundary_resolver import BoundaryResolver
+from safety.decision_engine import SafetyDecisionEngine
+from safety.grant_store import GrantStore
+from safety.guards.consent import ConsentResolver
+from safety.guards.hard_block import HardBlockGuard
+from safety.guards.trust import TrustResolver
+from safety.types import (
+    BoundaryScope,
+    SensitivePathRule,
 )
 from tests.e2e.conftest import MemoryEventSink, StubLLMProvider
 from tools import AutoAllowApproval, ReadFileTool
@@ -36,7 +40,7 @@ from tools import AutoAllowApproval, ReadFileTool
 class _TrackingApproval:
     """底层 approval spy：记录是否被 SafetyGatedApproval 下沉调用。
 
-    permission deny 分支下不应该走到这里。如果 ``called`` 变成 True，
+    hard_block 分支下不应该走到这里。如果 ``called`` 变成 True，
     说明安全链的"硬否决"短路逻辑坏了。
     """
 
@@ -54,29 +58,58 @@ class _TrackingApproval:
 def _build_deny_chain(
     *,
     underlying=None,
+    deny_path_prefix: str = "/",
 ) -> SafetyGatedApproval:
-    """构造一条 permission=deny 的安全链。
+    """构造一条 sensitive_paths effect=block 的安全链（v0.1.4）。
 
-    - capability 层放行（``file_read`` 在 allow 中）
-    - permission 层对 ``read_file`` 直接 deny
-    - 底层 approval 用 spy / AutoAllowApproval：permission deny 应该短路，不下沉
+    v0.1.4 起 permission deny 由 sensitive_paths(effect=block) 表达，命中后
+    HardBlockGuard 短路返回 rejected，不下沉到 InteractiveApproval。
+
+    Args:
+        underlying: 底层 ApprovalProvider spy；hard_block 分支不应被调用。
+        deny_path_prefix: 拒绝的 path 前缀（默认 "/"，覆盖任意绝对路径）。
     """
-    capability = CapabilityPolicy(CapabilitySet(allow=frozenset({"file_read"})))
-    permission = PermissionPolicy(
-        rules=(
-            PermissionRule(
-                tool_name="read_file",
-                outcome="deny",
-                reason="test-policy-deny",
-            ),
+    underlying = underlying or AutoAllowApproval()
+
+    # 直接构造一条 ``effect=block`` 的 SensitivePathRule，与 HardBlockGuard 配合
+    extra_block_rule = SensitivePathRule(
+        name="test-policy-deny-readfile",
+        matcher=deny_path_prefix,
+        match_mode="path_prefix",
+        ops=frozenset({"read", "write"}),
+        effect="block",
+        boundary_scope=BoundaryScope.ANY,
+        reason="test-policy-deny",
+    )
+    hard_block = HardBlockGuard(
+        hard_deny_commands=(),
+        sensitive_paths=(extra_block_rule,),
+    )
+    boundary = BoundaryResolver.from_project_root()
+
+    from config_loader.models import (
+        ApprovalConfig,
+        Config,
+        ModelConfig,
+    )
+
+    cfg = Config(
+        model=ModelConfig(
+            provider="openai_compatible",
+            name="m",
+            base_url="http://127.0.0.1:1234",
+            api_key="",
         ),
-        default_outcome="ask",
+        approval=ApprovalConfig(mode="interactive"),
     )
-    return SafetyGatedApproval(
-        capability_policy=capability,
-        permission_policy=permission,
-        interactive_approval=underlying or AutoAllowApproval(),
+    grants = GrantStore.from_config(cfg)
+    engine = SafetyDecisionEngine(
+        hard_block=hard_block,
+        boundary=boundary,
+        trust=TrustResolver(boundary, grants),
+        consent=ConsentResolver.from_config(cfg, interactive_approval=underlying),
     )
+    return SafetyGatedApproval(engine=engine, grant_store=grants)
 
 
 @pytest.mark.e2e
@@ -211,10 +244,9 @@ async def test_permission_deny_emits_approval_decision_event(
     assert decisions[0].payload.get("outcome") == "rejected"
     assert decisions[0].payload.get("call_id") == "d1"
     assert decisions[0].payload.get("tool_name") == "read_file"
-    # reason 里应该能看到 permission 阶段的标记（SafetyGatedApproval 在 reason
-    # 前面加了 "[permission]" 前缀）
+    # v0.1.4 起 deny 由 HardBlockGuard 表达；reason 含 "hard_block" 标识。
     reason_text = decisions[0].payload.get("reason") or ""
-    assert "permission" in reason_text.lower()
+    assert "hard_block" in reason_text.lower() or "test-policy-deny" in reason_text.lower()
 
     # tool.call.end 的 ok 应该是 False，reason 显式是 approval_rejected
     end_events = memory_sink.of_kind("tool.call.end")

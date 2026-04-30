@@ -30,6 +30,11 @@ from config_loader.models import (
 from memory import MemoryStore
 from tools.memory_tool import MemoryTool, build_memory_tool
 
+# 默认 AGENT 模板内容（来自源模板文件）。断言"agent 段落已被拼入 rendered/text"
+# 用此内容做真值，避免与模板字面字符串硬编码耦合（模板内容可能后续被改写）。
+_TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "src" / "prompts" / "templates"
+_DEFAULT_AGENT_TEXT = (_TEMPLATES_DIR / "AGENT.md").read_text(encoding="utf-8").strip()
+
 
 def _build_cfg(memory: EvolutionMemoryConfig | None = None) -> Config:
     return Config(
@@ -63,8 +68,8 @@ async def test_enabled_false_skips_memory_tool_registration(tmp_path: Path) -> N
 
     assert memory_store is None
     assert "memory" not in origins
-    # 默认 agent instructions 中文版依然写入
-    assert "kongming-agent" in rendered
+    # 默认 agent instructions 段落仍被拼入（实际内容来自 AGENT.md 模板）
+    assert _DEFAULT_AGENT_TEXT in rendered
 
 
 async def test_inject_prompt_false_keeps_entries_but_no_prompt_block(tmp_path: Path) -> None:
@@ -210,7 +215,8 @@ async def test_default_agent_instructions_mentions_memory_tool(tmp_path) -> None
     text = await materialize_and_load_prompts(tmp_path)
     assert "memory" in text
     assert "write_file" in text  # 显式反面警示
-    assert "kongming-agent" in text
+    # AGENT 段落实际内容（来自模板文件）已被拼入
+    assert _DEFAULT_AGENT_TEXT in text
 
 
 if __name__ == "__main__":

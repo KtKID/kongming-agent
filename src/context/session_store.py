@@ -274,6 +274,17 @@ class SQLiteSession:
             )
             conn.commit()
 
+    async def advance_run_index(self) -> int:
+        """sqlite 后端不维护 run_count；调用即抛 ``NotImplementedError``。
+
+        项目当前默认 ``backend: file``，sqlite 是代码里留的备用通道但最近版本
+        不再维护。需要 run_id 自增语义请使用 :class:`context.file_session.FileSession`
+        或 :class:`core.session.InMemorySession`。
+        """
+        raise NotImplementedError(
+            "sqlite backend deprecated; use file or memory backend for run_id counting"
+        )
+
     # -- 调试辅助 ------------------------------------------------------------
 
     def __repr__(self) -> str:  # pragma: no cover - 调试友好

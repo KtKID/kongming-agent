@@ -17,6 +17,31 @@ from context.prompts_loader import (
 )
 
 # ---------------------------------------------------------------------------
+# 测试辅助：动态从已物化的模板文件读"段落实际内容"
+#
+# 目的：把测试断言与模板字面内容解耦——模板内容（``src/prompts/templates/*.md``）
+# 后续可能被改写（如 AGENT.md 从 "你是 kongming-agent" 改为 "你叫孔明..."），
+# 测试不应再依赖具体字面字符串。read_section_text 把 home/prompts/<name>.md 物化
+# 后的真实内容剔注释 + strip 返回，作为下方"段落是否出现在 result"断言的真值来源。
+# ---------------------------------------------------------------------------
+
+
+def read_section_text(prompts_dir: Path, name: str) -> str:
+    """读已物化模板文件的实际段落内容（剔除 HTML 注释 + strip）。
+
+    与 ``materialize_and_load_prompts`` 的内部拼接逻辑保持同样的预处理：
+
+    - 剔除 HTML 注释（``<!-- ... -->``）
+    - ``.strip()`` 去掉前后空白
+
+    返回的字符串就是该段落最终拼入 ``result`` 的字面内容。当 USER.md 仅含
+    HTML 注释（即"测试占位被清空"语义）时返回空串。
+    """
+    raw = (prompts_dir / name).read_text(encoding="utf-8")
+    return _strip_html_comments(raw).strip()
+
+
+# ---------------------------------------------------------------------------
 # 物化行为
 # ---------------------------------------------------------------------------
 
@@ -91,12 +116,22 @@ async def test_creates_prompts_dir_when_missing(tmp_path: Path) -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_returns_combined_three_sections_by_default(tmp_path: Path) -> None:
-    """首次装配返回值包含三部分内容，用 '\\n\\n' 连接。"""
+    """首次装配返回值包含三部分内容，用 '\\n\\n' 连接。
+
+    断言以已物化的模板文件实际内容为真值（不写死字面字符串），这样后续修改
+    模板（如 AGENT.md 从 "你是 kongming-agent" 改成 "你叫孔明..."）不会破测试。
+    """
     result = await materialize_and_load_prompts(tmp_path)
 
-    assert "你是 kongming-agent" in result
-    assert "长期记忆" in result
-    assert "测试占位" in result
+    prompts_dir = tmp_path / "prompts"
+    agent_text = read_section_text(prompts_dir, "AGENT.md")
+    tools_text = read_section_text(prompts_dir, "TOOLS.md")
+    user_text = read_section_text(prompts_dir, "USER.md")
+
+    # 三段实际内容都应出现在拼接结果里
+    assert agent_text and agent_text in result
+    assert tools_text and tools_text in result
+    assert user_text and user_text in result
     # 至少存在两个 "\n\n" 分节符（三段之间两个空行）
     assert result.count("\n\n") >= 2
 
@@ -114,18 +149,25 @@ async def test_user_md_html_comments_are_stripped(tmp_path: Path) -> None:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_user_md_cleaned_empty_skipped(tmp_path: Path) -> None:
-    """USER.md 清空 → 返回值不含测试占位文字，且不以 '\\n\\n' 结尾。"""
-    # 先物化一次，再把 USER.md 清空
+    """USER.md 清空 → 返回值不含 USER 默认占位文字，且不以 '\\n\\n' 结尾。"""
+    # 先物化一次，记录 USER.md 默认内容（即"被清空前应该出现"的字符串），
+    # 同时拿到 AGENT / TOOLS 两段的真值。
     await materialize_and_load_prompts(tmp_path)
-    (tmp_path / "prompts" / "USER.md").write_text("", encoding="utf-8")
+    prompts_dir = tmp_path / "prompts"
+    user_default_text = read_section_text(prompts_dir, "USER.md")
+    agent_text = read_section_text(prompts_dir, "AGENT.md")
+    tools_text = read_section_text(prompts_dir, "TOOLS.md")
 
+    # 清空 USER.md 重新装配
+    (prompts_dir / "USER.md").write_text("", encoding="utf-8")
     result = await materialize_and_load_prompts(tmp_path)
 
-    assert "测试占位" not in result
+    # USER 默认占位文字此时不应出现
+    assert user_default_text and user_default_text not in result
     assert not result.endswith("\n\n")
     # AGENT + TOOLS 两段应仍在
-    assert "你是 kongming-agent" in result
-    assert "长期记忆" in result
+    assert agent_text in result
+    assert tools_text in result
 
 
 @pytest.mark.unit
@@ -133,16 +175,21 @@ async def test_user_md_cleaned_empty_skipped(tmp_path: Path) -> None:
 async def test_user_md_fully_removed_skipped(tmp_path: Path) -> None:
     """USER.md 仅含 HTML 注释 → strip 后为空 → 不拼入。"""
     await materialize_and_load_prompts(tmp_path)
-    (tmp_path / "prompts" / "USER.md").write_text("<!-- only comment -->", encoding="utf-8")
+    prompts_dir = tmp_path / "prompts"
+    user_default_text = read_section_text(prompts_dir, "USER.md")
+    agent_text = read_section_text(prompts_dir, "AGENT.md")
+    tools_text = read_section_text(prompts_dir, "TOOLS.md")
 
+    (prompts_dir / "USER.md").write_text("<!-- only comment -->", encoding="utf-8")
     result = await materialize_and_load_prompts(tmp_path)
 
-    assert "测试占位" not in result
+    # USER 默认占位文字此时不应出现
+    assert user_default_text and user_default_text not in result
     assert "<!--" not in result
     assert not result.endswith("\n\n")
     # AGENT + TOOLS 两段应仍在
-    assert "你是 kongming-agent" in result
-    assert "长期记忆" in result
+    assert agent_text in result
+    assert tools_text in result
 
 
 @pytest.mark.unit
@@ -166,13 +213,17 @@ async def test_user_edits_agent_reflected_in_output(tmp_path: Path) -> None:
     """用户把 AGENT.md 改成自定义内容 → 返回值包含自定义内容，不含默认。"""
     await materialize_and_load_prompts(tmp_path)
 
+    prompts_dir = tmp_path / "prompts"
+    default_agent_text = read_section_text(prompts_dir, "AGENT.md")
+
     custom = "Custom agent identity"
-    (tmp_path / "prompts" / "AGENT.md").write_text(custom, encoding="utf-8")
+    (prompts_dir / "AGENT.md").write_text(custom, encoding="utf-8")
 
     result = await materialize_and_load_prompts(tmp_path)
 
     assert custom in result
-    assert "你是 kongming-agent" not in result
+    # 默认 AGENT 内容（来自模板文件）不应再出现
+    assert default_agent_text and default_agent_text not in result
 
 
 # ---------------------------------------------------------------------------

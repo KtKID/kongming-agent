@@ -147,4 +147,44 @@ class InstructionLoader:
 __all__ = [
     "InstructionLoader",
     "InstructionSource",
+    "assemble_instructions",
 ]
+
+
+async def assemble_instructions(
+    *,
+    kongming_home: Path,
+    extra_files: Sequence[str | Path] = (),
+    cwd: Path | None = None,
+) -> tuple[str, list[str]]:
+    """Assemble base agent instructions from prompts + extra files + env + runtime context.
+
+    Shared by CLI and web host. Extracts the core instruction assembly logic
+    (prompts materialization, InstructionLoader, runtime context injection)
+    without host-specific concerns like memory loading.
+
+    Args:
+        kongming_home: Path to the ``.kongming/`` directory.
+        extra_files: Additional instruction file paths (e.g. from CLI ``--instructions-file``).
+        cwd: Working directory for runtime context. Defaults to ``Path.cwd()``.
+
+    Returns:
+        ``(rendered_text, origins)`` — merged system prompt text and origin label list.
+    """
+    from .prompts_loader import materialize_and_load_prompts
+    from .runtime_context import build_runtime_context_text
+
+    base = await materialize_and_load_prompts(kongming_home)
+
+    loader = InstructionLoader(extra_files=extra_files, include_env=True)
+    sources = list(await loader.load(agent_instructions=base))
+
+    runtime_text = build_runtime_context_text(
+        cwd=cwd or Path.cwd(),
+        kongming_home=kongming_home,
+    )
+    sources.insert(0, InstructionSource(origin="runtime", content=runtime_text))
+
+    rendered = loader.render(sources)
+    origins = [s.origin for s in sources]
+    return rendered, origins

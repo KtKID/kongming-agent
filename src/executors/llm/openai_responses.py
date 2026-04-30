@@ -222,9 +222,7 @@ class OpenAIResponsesProvider(BaseLLMProvider):
                         },
                     )
 
-                async def _wrapped_events() -> AsyncIterator[
-                    tuple[str | None, dict[str, Any]]
-                ]:
+                async def _wrapped_events() -> AsyncIterator[tuple[str | None, dict[str, Any]]]:
                     async for evt_name, evt_data in iter_sse_events(response):
                         chunks_buffer.append(evt_data)
                         yield evt_name, evt_data

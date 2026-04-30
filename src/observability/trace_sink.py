@@ -84,9 +84,7 @@ class JsonlTraceSink:
                 f"delta_sampling must be one of none/periodic/full, got {delta_sampling!r}"
             )
         if periodic_batch_size <= 0:
-            raise ValueError(
-                f"periodic_batch_size must be > 0, got {periodic_batch_size}"
-            )
+            raise ValueError(f"periodic_batch_size must be > 0, got {periodic_batch_size}")
         self._output_path = Path(output_path)
         self._auto_flush = auto_flush
         self._delta_sampling = delta_sampling

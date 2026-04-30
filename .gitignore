@@ -35,3 +35,11 @@ htmlcov/
 .env.local
 .env.*
 !.env.example
+.claude/skills/openspec-apply-change
+.claude/commands/opsx/archive.md
+.claude/commands/opsx/explore.md
+.claude/commands/opsx/propose.md
+.claude/commands/opsx/apply.md
+.claude/skills/openspec-archive-change/SKILL.md
+.claude/skills/openspec-explore/SKILL.md
+.claude/skills/openspec-propose/SKILL.md

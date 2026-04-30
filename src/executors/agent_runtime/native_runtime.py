@@ -224,7 +224,11 @@ class NativeRuntime:
         Returns:
             装配好的 :class:`NativeRuntime`，直接 ``await runtime.run(...)`` 即可。
         """
-        if config.model.provider == "anthropic":
+        # 用 effective_provider 而非 provider：当 base_url 命中 anthropic 启发式
+        # （host=api.anthropic.com / path 段含 "anthropic"）时自动切到 anthropic
+        # 协议，让用户在 .env 里切第三方 anthropic 兼容端点（MiniMax / OpenRouter）
+        # 时无需手动改 yaml 里的 provider 字段。
+        if config.model.effective_provider == "anthropic":
             llm: LLMProvider = AnthropicMessagesProvider(
                 model_config=config.model,
                 max_retries=config.retry.max_retries,
@@ -250,18 +254,22 @@ class NativeRuntime:
         # 底层 approval：命中 ask 时用的 human-in-the-loop。
         base_approval: ApprovalProvider = approval or _AllowAllApproval()
 
+        resolved_event_sinks: list[EventSink] = list(event_sinks or [])
+
         # 把 capability / permission / approval 串成高层安全链；
         # 这是最终传给 runner 的 ApprovalProvider。
+        # v0.1.4：传入 event_sinks 让 SafetyDecisionEngine emit 三个新决策事件
+        # （tool.denied / tool.approval_required / tool.silently_allowed）到
+        # 统一 trace（受 cfg.safety.log_silent_reads 控制是否写盘）。
         safety_approval: SafetyGatedApproval = build_safety_chain(
             config,
             interactive_approval=base_approval,
             capability_policy=capability_policy,
             permission_policy=permission_policy,
+            event_sinks=resolved_event_sinks,
         )
 
         resolved_session_factory = session_factory or (lambda sid: InMemorySession(session_id=sid))
-
-        resolved_event_sinks: list[EventSink] = list(event_sinks or [])
 
         resolved_instructions = (
             instructions
@@ -391,6 +399,18 @@ class NativeRuntime:
         ``CLIStreamSink`` 已渲染过完整正文）。
         """
         return self._llm
+
+    @property
+    def grant_store(self):  # type: ignore[no-untyped-def]
+        """暴露底层 :class:`safety.grant_store.GrantStore`（如有）。
+
+        web ``thread_manager.evict_cell`` 用 ``runtime.grant_store.clear_session(session_id)``
+        清理 thread 私有 grants（修 bug-report-20260427-235232 跨 thread 信任泄漏）。
+        approval 不是 ``SafetyGatedApproval``（如 stub / AutoAllow）时返回 ``None``。
+
+        无 type 注解：避免在执行器层 import safety.grant_store（架构边界）。
+        """
+        return getattr(self._approval, "grant_store", None)
 
     def add_event_sink(self, sink: EventSink) -> None:
         """追加事件 sink 到底层 runner。"""

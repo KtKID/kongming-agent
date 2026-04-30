@@ -27,6 +27,20 @@ dependencies = [
     "click>=8.1",
     "prompt-toolkit>=3.0",
     "python-dotenv>=1.0",
+    # safety v0.1.4 M5：grant 持久化写回 yaml 时保留注释 + key 顺序。
+    # 用户手工 `uv sync` 安装；运行时若 import 失败，_grant_persister
+    # 会降级到 pyyaml（注释会丢失，但功能可用）。
+    "ruamel.yaml>=0.18.0",
+    # web v0.1.5：FastAPI + uvicorn + 鉴权 / cookie 签名所需依赖。
+    # 仅在 cfg.web.enabled=True 时实际装配；cli 路径不强依赖运行时引用。
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    # bcrypt 直接用：passlib 1.7 + bcrypt 4.x 在 backend 探测路径上有兼容
+    # 问题（探测时传 >72 字节 password 触发新 bcrypt 拒绝），单用户场景不
+    # 需要 passlib 的多算法管理；保留 passlib 兜底依赖供其它模块按需用。
+    "bcrypt>=4.0",
+    "passlib[bcrypt]>=1.7",
+    "itsdangerous>=2.2",
 ]
 
 [project.optional-dependencies]
@@ -64,6 +78,7 @@ packages = [
     "src/config_loader",
     "src/memory",
     "src/prompts",
+    "src/web",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -79,6 +94,7 @@ include = [
     "src/config_loader",
     "src/memory",
     "src/prompts",
+    "src/web",
     "config",
     "README.md",
     "pyproject.toml",
@@ -144,6 +160,9 @@ known-first-party = [
     "safety",
     "observability",
     "config_loader",
+    "memory",
+    "prompts",
+    "web",
 ]
 
 [tool.ruff.format]

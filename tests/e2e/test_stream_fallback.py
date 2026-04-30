@@ -41,8 +41,12 @@ async def test_e4_1_stream_disabled_uses_complete_not_stream() -> None:
     stub.script_chunks(chunks)
 
     res = await runner.run(
-        "hi", session=InMemorySession("fb1"), agent_spec=_spec(),
-        llm=stub, tools={}, approval=RecordingApproval(),
+        "hi",
+        session=InMemorySession("fb1"),
+        agent_spec=_spec(),
+        llm=stub,
+        tools={},
+        approval=RecordingApproval(),
     )
 
     assert res.status == "completed"
@@ -66,8 +70,12 @@ async def test_e4_2_isinstance_probe_fallback_when_provider_lacks_stream() -> No
     stub.script(content="hi via complete")
 
     res = await runner.run(
-        "ping", session=InMemorySession("fb2"), agent_spec=_spec(),
-        llm=stub, tools={}, approval=RecordingApproval(),
+        "ping",
+        session=InMemorySession("fb2"),
+        agent_spec=_spec(),
+        llm=stub,
+        tools={},
+        approval=RecordingApproval(),
     )
 
     assert res.status == "completed"
@@ -95,15 +103,21 @@ async def test_e4_3_suppress_off_emits_content_after_tool_call() -> None:
 
     sink = MemoryEventSink()
     runner = Runner(
-        stream_enabled=True, suppress_content_after_tool_call=False, event_sinks=[sink],
+        stream_enabled=True,
+        suppress_content_after_tool_call=False,
+        event_sinks=[sink],
     )
     stub = StubLLMStreamProvider()
     stub.script_chunks(turn1)
 
     spec = AgentSpec(name="t", instructions="x", default_model="m1", max_turns=1)
     await runner.run(
-        "x", session=InMemorySession("fb3"), agent_spec=spec,
-        llm=stub, tools={}, approval=RecordingApproval(),
+        "x",
+        session=InMemorySession("fb3"),
+        agent_spec=spec,
+        llm=stub,
+        tools={},
+        approval=RecordingApproval(),
     )
 
     deltas = [e.payload["delta"] for e in sink.of_kind("content.delta")]
@@ -127,8 +141,12 @@ async def test_e4_4_stream_enabled_with_streaming_provider_emits_events() -> Non
     stub.script_chunks(chunks)
 
     res = await runner.run(
-        "hi", session=InMemorySession("fb4"), agent_spec=_spec(),
-        llm=stub, tools={}, approval=RecordingApproval(),
+        "hi",
+        session=InMemorySession("fb4"),
+        agent_spec=_spec(),
+        llm=stub,
+        tools={},
+        approval=RecordingApproval(),
     )
 
     assert res.status == "completed"

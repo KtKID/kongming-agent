@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import time
-import uuid
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -140,29 +139,33 @@ class Runner:
             这是为了让 host / cli 只关心 Result 即可。
         """
 
-        run_id = run_id or f"run_{uuid.uuid4().hex[:12]}"
+        # run_id 不再在入口生成 uuid；改为 _seed_messages 内 advance_run_index 后拼装
+        # (`run-{session_id}-{n}`)。外部传入的 run_id 仍然兜底优先（测试注入等场景）。
+        # state.run_id 起始为 "" 占位，_seed_messages 写真值后再 emit run.start。
+        run_id = run_id or ""
         effective_max_turns = max_turns if max_turns is not None else agent_spec.max_turns
 
         state = RunState(run_id=run_id, session_id=session.session_id)
         state.mark_running()
 
-        await self._emit(
-            Event(
-                kind="run.start",
-                run_id=run_id,
-                payload={
-                    "session_id": session.session_id,
-                    "agent": agent_spec.name,
-                    "model": agent_spec.default_model,
-                    "max_turns": effective_max_turns,
-                    "reasoning_effort": agent_spec.reasoning_effort,
-                },
-            )
-        )
-
         try:
             resolved_tools = self._resolve_tools(agent_spec, tools, enabled_tools)
+            # _seed_messages 内部完成 user message append + advance_run_index +
+            # 写 state.run_id；之后所有 emit / Result 都读 state.run_id（已落定）。
             await self._seed_messages(session, agent_spec, user_input, state)
+            await self._emit(
+                Event(
+                    kind="run.start",
+                    run_id=state.run_id,
+                    payload={
+                        "session_id": session.session_id,
+                        "agent": agent_spec.name,
+                        "model": agent_spec.default_model,
+                        "max_turns": effective_max_turns,
+                        "reasoning_effort": agent_spec.reasoning_effort,
+                    },
+                )
+            )
             final_message, accumulated_usage = await self._drive_turns(
                 state=state,
                 session=session,
@@ -175,7 +178,7 @@ class Runner:
             )
             state.mark_completed()
             result = Result(
-                run_id=run_id,
+                run_id=state.run_id,
                 session_id=session.session_id,
                 status="completed",
                 final_message=final_message,
@@ -187,13 +190,13 @@ class Runner:
             await self._emit(
                 Event(
                     kind="error",
-                    run_id=run_id,
+                    run_id=state.run_id,
                     turn=state.turn,
                     payload={"type": type(exc).__name__, "message": exc.message},
                 )
             )
             result = Result(
-                run_id=run_id,
+                run_id=state.run_id,
                 session_id=session.session_id,
                 status="failed",
                 final_message=None,
@@ -209,13 +212,13 @@ class Runner:
             await self._emit(
                 Event(
                     kind="error",
-                    run_id=run_id,
+                    run_id=state.run_id,
                     turn=state.turn,
                     payload={"type": "UnexpectedError", "message": str(exc)},
                 )
             )
             result = Result(
-                run_id=run_id,
+                run_id=state.run_id,
                 session_id=session.session_id,
                 status="failed",
                 final_message=None,
@@ -226,7 +229,7 @@ class Runner:
         await self._emit(
             Event(
                 kind="run.end",
-                run_id=run_id,
+                run_id=state.run_id,
                 turn=state.turn,
                 payload={"status": result.status, "turn_count": result.turn_count},
             )
@@ -268,6 +271,10 @@ class Runner:
 
         当 ``input_assembler`` 已注入时，system 注入职责移交给 assembler，
         这里只写 user 首条消息，避免双重 system 注入。
+
+        本方法承担两件事：
+        1. user message append（必做）
+        2. ``session.advance_run_index()`` 拼装 ``state.run_id``（仅当外部未注入 run_id 时）
         """
         if self._input_assembler is None:
             # 旧路径：由 _seed_messages 自己写 system 消息（兼容 fallback）。
@@ -280,6 +287,23 @@ class Runner:
         # 始终写入 user 消息。
         user_msg = Message.user(user_input)
         await session.append(user_msg)
+        # 紧跟 user message append 调 advance_run_index，把"用户消息入历史"和
+        # "run 编号递增"绑到同一时机。
+        #
+        # 非事务原子约定（v0.x 简化）：append + advance 分两步执行，不构成单事务。
+        # 失败模式：
+        #   - append 成功 + advance 失败 → 下次启动 manifest run_count 不变，
+        #     新一轮 advance 拿到的 run_index 复用上次值；但本 run 已崩溃未生成
+        #     run_id 持久记录，新一轮 run_id 仍唯一不撞，不丢消息也不重号。
+        #   - advance 成功 + append 失败（极罕见） → jsonl 少一条，run_count 跳号，
+        #     仍唯一不撞。
+        # 不会丢消息也不让 run_id 重复。事务化留 v0.2+。
+        #
+        # 外部注入 run_id（state.run_id 非空，多见于测试 fixture）时跳过 advance，
+        # 保持外部传入的标识不变。
+        if not state.run_id:
+            run_index = await session.advance_run_index()
+            state.run_id = f"run-{session.session_id}-{run_index}"
         state.record(user_msg)
 
     async def _drive_turns(
@@ -382,6 +406,18 @@ class Runner:
                 )
             else:
                 response = await self._safe_llm_complete(llm, llm_request)
+                # 非流式路径：把完整内容包装成一次 content.delta 发出，
+                # 让下游（WS EventSink → 前端流式渲染）能收到内容。
+                # 流式路径由 _consume_stream 逐 chunk 发，不需要这里补。
+                if response.message.content:
+                    await self._emit(
+                        Event(
+                            kind="content.delta",
+                            run_id=state.run_id,
+                            turn=state.turn,
+                            payload={"delta": response.message.content, "seq": 0},
+                        )
+                    )
             assistant_message = response.message
             await session.append(assistant_message)
             state.record(assistant_message)
@@ -656,10 +692,8 @@ class Runner:
 
             tool = tools_by_name.get(call.tool_name)
             if tool is None:
-                result_message = self._build_tool_error_message(
-                    call,
-                    f"tool {call.tool_name!r} not registered",
-                )
+                error_message = f"tool {call.tool_name!r} not registered"
+                result_message = self._build_tool_error_message(call, error_message)
                 await session.append(result_message)
                 state.record(result_message)
                 await self._emit(
@@ -672,6 +706,9 @@ class Runner:
                             "tool_name": call.tool_name,
                             "ok": False,
                             "reason": "not_registered",
+                            "content": "",
+                            "data": None,
+                            "error_message": error_message,
                         },
                     )
                 )
@@ -715,9 +752,10 @@ class Runner:
 
             if not decision.approved:
                 reason = decision.reason or decision.outcome
+                error_message = f"approval {decision.outcome}: {reason}"
                 rejected_msg = self._build_tool_error_message(
                     call,
-                    f"approval {decision.outcome}: {reason}",
+                    error_message,
                     metadata={"approval_outcome": decision.outcome},
                 )
                 await session.append(rejected_msg)
@@ -732,6 +770,9 @@ class Runner:
                             "tool_name": call.tool_name,
                             "ok": False,
                             "reason": f"approval_{decision.outcome}",
+                            "content": "",
+                            "data": None,
+                            "error_message": error_message,
                         },
                     )
                 )
@@ -761,6 +802,18 @@ class Runner:
 
             await session.append(result_message)
             state.record(result_message)
+            # tool.call.end payload 携带 ToolResult 4 字段（content / data / ok /
+            # error_message），让下游 sink（trace / web）拿到工具产出。
+            # tool_err 路径走异常分支，content="" + error_message=异常消息。
+            if tool_err is not None:
+                payload_content = ""
+                payload_data: dict[str, Any] | None = None
+                payload_error_message: str | None = tool_err.message
+            else:
+                assert tool_result is not None
+                payload_content = tool_result.content
+                payload_data = tool_result.data
+                payload_error_message = tool_result.error_message
             await self._emit(
                 Event(
                     kind="tool.call.end",
@@ -770,6 +823,9 @@ class Runner:
                         "call_id": call.call_id,
                         "tool_name": call.tool_name,
                         "ok": tool_err is None and (tool_result is None or tool_result.ok),
+                        "content": payload_content,
+                        "data": payload_data,
+                        "error_message": payload_error_message,
                     },
                 )
             )

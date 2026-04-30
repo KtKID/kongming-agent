@@ -132,6 +132,7 @@ class TestTC3ManifestFields:
         "cwd",
         "app_version",
         "format",
+        "run_count",
     }
 
     async def test_all_fields_present(self, store_path: str) -> None:
@@ -391,3 +392,77 @@ class TestValidate:
         result = fs.validate()
         assert result.valid is False
         assert any("重复" in e for e in result.errors)
+
+
+# ---------------------------------------------------------------------------
+# advance_run_index：递增 + 持久化 + 跨实例延续 + 旧 manifest 兜底
+# ---------------------------------------------------------------------------
+
+
+class TestAdvanceRunIndex:
+    async def test_first_call_returns_one(self, store_path: str) -> None:
+        fs = _make_session(store_path=store_path)
+        assert await fs.advance_run_index() == 1
+
+    async def test_monotonic_increment(self, store_path: str) -> None:
+        fs = _make_session(store_path=store_path)
+        assert await fs.advance_run_index() == 1
+        assert await fs.advance_run_index() == 2
+        assert await fs.advance_run_index() == 3
+
+    async def test_persists_to_manifest(self, store_path: str) -> None:
+        fs = _make_session(store_path=store_path)
+        await fs.advance_run_index()
+        await fs.advance_run_index()
+
+        manifest_path = Path(store_path) / "test-session" / "manifest.json"
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        assert manifest["run_count"] == 2
+
+    async def test_recover_continues_from_persisted(self, store_path: str) -> None:
+        # 第一次实例：advance 两次
+        fs1 = _make_session(store_path=store_path)
+        await fs1.advance_run_index()
+        await fs1.advance_run_index()
+
+        # 第二次实例（同 session_id + store_path）：应从 2 继续到 3
+        fs2 = _make_session(store_path=store_path)
+        assert await fs2.advance_run_index() == 3
+
+    async def test_legacy_manifest_without_run_count_falls_back_to_zero(
+        self, store_path: str
+    ) -> None:
+        # 先正常落盘一次（含 run_count）
+        fs1 = _make_session(store_path=store_path)
+        await fs1.append(Message.user("seed"))
+
+        # 手工把 manifest 里的 run_count 字段删掉，模拟旧 session 文件
+        manifest_path = Path(store_path) / "test-session" / "manifest.json"
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        manifest.pop("run_count", None)
+        with open(manifest_path, "w") as f:
+            json.dump(manifest, f)
+
+        # 新实例 recover 时 run_count 兜底 0；首次 advance 应返回 1
+        fs2 = _make_session(store_path=store_path)
+        assert await fs2.advance_run_index() == 1
+
+    async def test_advance_does_not_corrupt_jsonl(self, store_path: str) -> None:
+        # advance_run_index 只动 manifest.json 不动 jsonl
+        fs = _make_session(store_path=store_path)
+        await fs.append(Message.user("a"))
+        await fs.advance_run_index()
+        await fs.append(Message.user("b"))
+
+        history = await fs.history()
+        assert [m.content for m in history] == ["a", "b"]
+
+    async def test_clear_resets_run_count(self, store_path: str) -> None:
+        fs = _make_session(store_path=store_path)
+        await fs.advance_run_index()
+        await fs.advance_run_index()
+        await fs.clear()
+        # clear 重置内存计数；新一轮 advance 从 1 开始
+        assert await fs.advance_run_index() == 1

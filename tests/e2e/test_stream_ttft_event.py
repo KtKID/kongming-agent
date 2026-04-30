@@ -16,7 +16,10 @@ from tests.e2e.conftest import MemoryEventSink, RecordingApproval, StubLLMStream
 
 def _spec() -> AgentSpec:
     return AgentSpec(
-        name="t", instructions="x", default_model="m1", max_turns=3,
+        name="t",
+        instructions="x",
+        default_model="m1",
+        max_turns=3,
     )
 
 
@@ -36,8 +39,12 @@ async def test_e2_1_ttft_event_emitted_once_per_run() -> None:
     stub.script_chunks(chunks)
 
     await runner.run(
-        "hi", session=InMemorySession("ttft1"), agent_spec=_spec(),
-        llm=stub, tools={}, approval=RecordingApproval(),
+        "hi",
+        session=InMemorySession("ttft1"),
+        agent_spec=_spec(),
+        llm=stub,
+        tools={},
+        approval=RecordingApproval(),
     )
 
     ttft_events = sink.of_kind("llm.chunk.first")
@@ -66,8 +73,12 @@ async def test_e2_2_ttft_not_emitted_when_only_message_done() -> None:
     stub.script_chunks(chunks)
 
     await runner.run(
-        "hi", session=InMemorySession("ttft2"), agent_spec=_spec(),
-        llm=stub, tools={}, approval=RecordingApproval(),
+        "hi",
+        session=InMemorySession("ttft2"),
+        agent_spec=_spec(),
+        llm=stub,
+        tools={},
+        approval=RecordingApproval(),
     )
 
     ttft_events = sink.of_kind("llm.chunk.first")

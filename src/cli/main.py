@@ -23,7 +23,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -32,11 +34,15 @@ import click
 from config_loader import Config, get_kongming_home, load_config
 from config_loader.errors import ConfigLoadError, ConfigValidationError
 from context import (
-    InstructionLoader,
-    InstructionSource,
+    SessionSummary,
+    assemble_instructions,
     build_session,
-    materialize_and_load_prompts,
+    discover_file_sessions,
+    discover_sqlite_sessions,
+    find_session_by_id,
+    most_recent_session,
 )
+from context.skill_loader import SkillSpec, format_skill_listing, load_skill_specs
 from core.contracts import EventSink, SupportsLLMStream
 from executors.agent_runtime.native_runtime import NativeRuntime
 from host.cli_adapter import CLIAdapter, CLIEventSink
@@ -58,14 +64,27 @@ def _generate_cli_session_id() -> str:
     "--config",
     "-c",
     "config_path",
-    type=click.Path(dir_okay=False, path_type=Path),
+    type=click.Path(dir_okay=False, resolve_path=True, path_type=Path),
     default=None,
-    help="配置文件路径（缺省走 KONGMING_CONFIG 环境变量或 config/setting.yaml）",
+    help="配置文件路径（缺省走 KONGMING_CONFIG 环境变量或 config/setting.yaml）。"
+    "click 在 parse 阶段就 resolve 成绝对路径，避免与 --workdir chdir 联用时找不到。",
 )
 @click.option(
     "--session-id",
     default=None,
     help="复用会话 ID（缺省随机生成一个 cli-<hex12>）",
+)
+@click.option(
+    "--list-sessions",
+    is_flag=True,
+    default=False,
+    help="列出当前持久化 backend 的已有 session，并退出。",
+)
+@click.option(
+    "--resume-last",
+    is_flag=True,
+    default=False,
+    help="恢复最近活跃的已有 session。",
 )
 @click.option(
     "--verbose",
@@ -83,9 +102,10 @@ def _generate_cli_session_id() -> str:
 @click.option(
     "--instructions-file",
     "instructions_files",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True, path_type=Path),
     multiple=True,
-    help="额外的系统指令文件（markdown / 文本）。可重复指定。",
+    help="额外的系统指令文件（markdown / 文本）。可重复指定。"
+    "click 在 parse 阶段 resolve 成绝对路径，避免与 --workdir chdir 联用时失效。",
 )
 @click.option(
     "--no-trace",
@@ -120,9 +140,26 @@ def _generate_cli_session_id() -> str:
     default=None,
     help="启用/关闭 LLM 流式响应（覆盖 config.stream.enabled）。",
 )
+@click.option(
+    "--workdir",
+    "-C",
+    "workdir",
+    type=click.Path(
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        resolve_path=True,
+        path_type=Path,
+    ),
+    default=None,
+    help="启动时切到该目录工作（os.chdir）。LLM 看到的 cwd 即此路径。等同于先 cd 进去再启动 CLI。",
+)
 def main(
     config_path: Path | None,
     session_id: str | None,
+    list_sessions: bool,
+    resume_last: bool,
     verbose: bool,
     smoke: bool,
     instructions_files: tuple[Path, ...],
@@ -131,6 +168,7 @@ def main(
     show_reasoning: bool | None,
     prompt_debug: bool,
     stream_flag: bool | None,
+    workdir: Path | None,
 ) -> None:
     """kongming-agent CLI"""
     try:
@@ -138,6 +176,8 @@ def main(
             _run(
                 config_path=config_path,
                 session_id=session_id,
+                list_sessions=list_sessions,
+                resume_last=resume_last,
                 verbose=verbose,
                 smoke=smoke,
                 instructions_files=list(instructions_files),
@@ -146,6 +186,7 @@ def main(
                 show_reasoning=show_reasoning,
                 prompt_debug=prompt_debug,
                 stream_flag=stream_flag,
+                workdir=workdir,
             )
         )
     except KeyboardInterrupt:
@@ -157,6 +198,8 @@ async def _run(
     *,
     config_path: Path | None,
     session_id: str | None,
+    list_sessions: bool,
+    resume_last: bool,
     verbose: bool,
     smoke: bool,
     instructions_files: list[Path],
@@ -165,8 +208,64 @@ async def _run(
     show_reasoning: bool | None = None,
     prompt_debug: bool = False,
     stream_flag: bool | None = None,
+    workdir: Path | None = None,
 ) -> None:
+    # --workdir / -C：在 load_config 之前 chdir，让 KONGMING_HOME 默认值
+    # （cwd/.kongming）和工具相对路径解析都基于新 cwd。
+    #
+    # 但必须先把 ``--config`` / ``--instructions-file`` 的相对路径基于**原
+    # cwd** resolve（``cli.sh`` 写死了 ``--config config/setting.yaml`` 是相对
+    # 仓库根的）。click option 已加 ``resolve_path=True``；此处再做防御性
+    # resolve 覆盖直接 ``await _run(...)`` 绕过 click 的调用路径。
+    config_path, instructions_files = _resolve_input_paths_before_chdir(
+        config_path, instructions_files
+    )
+
+    if workdir is not None:
+        _chdir_or_exit(workdir)
+
     cfg = _load_config_or_exit(config_path)
+    _validate_session_selection_or_exit(
+        session_id=session_id,
+        list_sessions=list_sessions,
+        resume_last=resume_last,
+        smoke=smoke,
+    )
+
+    discovered_sessions, discovered_path = _discover_persistent_sessions(cfg)
+    if list_sessions:
+        _print_sessions_and_exit(
+            backend=cfg.session.backend,
+            summaries=discovered_sessions,
+            source_path=discovered_path,
+        )
+        return
+
+    if resume_last:
+        if cfg.session.backend == "memory":
+            click.echo("[sessions] --resume-last 需要 file 或 sqlite backend。", err=True)
+            raise SystemExit(2)
+        latest = most_recent_session(discovered_sessions)
+        if latest is None:
+            source = str(discovered_path) if discovered_path is not None else "<unavailable>"
+            click.echo(f"[sessions] 未找到可恢复 session：{source}", err=True)
+            raise SystemExit(2)
+        session_id = latest.session_id
+
+    if (
+        session_id
+        and cfg.session.backend in ("file", "sqlite")
+        and find_session_by_id(discovered_sessions, session_id) is None
+    ):
+        source = str(discovered_path) if discovered_path is not None else "<unavailable>"
+        click.echo(
+            f"[sessions] session 不存在：{session_id}；运行 --list-sessions 查看可用会话。"
+            f" source={source}",
+            err=True,
+        )
+        raise SystemExit(2)
+
+    cfg = _bind_discovered_session_path(cfg, discovered_path)
 
     # CLI 参数 --reasoning-effort 覆盖 config 文件里的设置。
     if reasoning_effort is not None:
@@ -204,9 +303,7 @@ async def _run(
     # CLIEventSink 不再在 llm.response 后重复打印 reasoning_content（避免双重显示）。
     cli_event_show_reasoning = effective_show_reasoning and not cfg.stream.enabled
     if verbose or cli_event_show_reasoning:
-        event_sinks.append(
-            CLIEventSink(verbose=verbose, show_reasoning=cli_event_show_reasoning)
-        )
+        event_sinks.append(CLIEventSink(verbose=verbose, show_reasoning=cli_event_show_reasoning))
     # 流式渲染 sink：cfg.stream.enabled 时挂上 CLIStreamSink 负责 reasoning + content 实时渲染。
     if cfg.stream.enabled:
         from host import CLIStreamSink
@@ -217,6 +314,17 @@ async def _run(
             )
         )
 
+    # v0.1.6 skill 装载：扫描 <home>/skills + <cwd>/.kongming/skills，得到 SkillSpec
+    # 列表与 listing 文本。listing 在 _assemble_instructions 内部拼到 system prompt；
+    # specs 字典传给 build_default_registry 注册 SkillTool。
+    skill_specs_list = await load_skill_specs(
+        get_kongming_home(),
+        workspace=Path.cwd(),
+        event_sinks=event_sinks,
+    )
+    skill_specs: dict[str, SkillSpec] = {s.name: s for s in skill_specs_list}
+    skill_listing = format_skill_listing(skill_specs_list)
+
     registry = build_default_registry(
         file_enabled=cfg.tool.file.enabled,
         shell_enabled=cfg.tool.shell.enabled,
@@ -224,6 +332,8 @@ async def _run(
         shell_max_stream_bytes=cfg.tool.shell.max_stream_bytes,
         shell_terminate_grace_seconds=cfg.tool.shell.terminate_grace_seconds,
         file_read_max_bytes=cfg.tool.file.read_max_bytes,
+        skill_specs=skill_specs or None,
+        skill_event_sinks=event_sinks,
     )
 
     # approval 按配置模式选：interactive 时让 adapter 提供 prompt_fn，
@@ -241,6 +351,7 @@ async def _run(
         instructions, instruction_origins, memory_store = await _assemble_instructions(
             cfg,
             instructions_files,
+            skill_listing=skill_listing,
         )
     except (PermissionError, OSError, UnicodeDecodeError, FileNotFoundError) as exc:
         click.echo(
@@ -387,6 +498,8 @@ def _resolve_memory_dir(raw: str) -> Path:
 async def _assemble_instructions(
     cfg: Config,
     instructions_files: list[Path],
+    *,
+    skill_listing: str = "",
 ) -> tuple[str, list[str], MemoryStore | None]:
     """用 InstructionLoader 合成最终 system prompt 文本。
 
@@ -394,22 +507,29 @@ async def _assemble_instructions(
         (rendered_text, instruction_origins, memory_store) — 渲染后的完整文本、来源 origin 列表、
         以及 MemoryStore 实例（memory 关闭时为 ``None``）。
 
-    - 基础 agent 规约来自 ``.kongming/prompts/{AGENT,TOOLS,USER}.md`` 三份用户
-      可编辑的模板（v0.1.3 prompt-modules）。启动时若这些文件缺失，
-      ``context.prompts_loader.materialize_and_load_prompts`` 会从
-      ``src/prompts/templates/`` 物化默认内容。
-    - extra_files 来自 CLI ``--instructions-file`` 参数
-    - 环境变量 ``KONGMING_EXTRA_INSTRUCTIONS`` 自动读取（include_env=True）
+    - 基础指令装配（prompts 物化 + env + runtime context）委托给
+      :func:`context.assemble_instructions`，本函数只追加 skill / memory 通道。
+    - v0.1.6 skill 通道：``skill_listing`` 非空时追加为 ``# skills`` 段并标
+      origin。空 listing（无 skill 或 loader 跳过）保持 v0.1.5 行为。
     - 本地长期记忆的加载由 ``cfg.evolution.memory`` 控制：
         - ``enabled=False`` 时完全跳过（返回 memory_store=None）
         - ``inject_prompt=False`` 时仍加载活态 entries 供 memory tool 使用，
           但不 append ``InstructionSource(origin="memory")``
     """
-    base_agent_instructions = await materialize_and_load_prompts(get_kongming_home())
+    kongming_home = get_kongming_home()
 
-    loader = InstructionLoader(extra_files=instructions_files, include_env=True)
-    sources = list(await loader.load(agent_instructions=base_agent_instructions))
+    # 公共指令装配：prompts 物化 + InstructionLoader + runtime context
+    rendered, origins = await assemble_instructions(
+        kongming_home=kongming_home,
+        extra_files=instructions_files,
+    )
 
+    # v0.1.6 skill listing 通道（在 memory 之前；listing 描述能力，memory 描述事实）
+    if skill_listing:
+        rendered = rendered + f"\n\n# skills\n{skill_listing}"
+        origins = [*origins, "skills"]
+
+    # Memory 通道（CLI 特有，不在公共函数里）
     memory_cfg = cfg.evolution.memory
     memory_store: MemoryStore | None = None
 
@@ -426,10 +546,9 @@ async def _assemble_instructions(
                 memory_store.snapshot.render_prompt() if memory_store.snapshot else None
             )
             if snapshot_prompt is not None:
-                sources.append(InstructionSource(origin="memory", content=snapshot_prompt))
+                rendered = rendered + f"\n\n# memory\n{snapshot_prompt}"
+                origins = [*origins, "memory"]
 
-    rendered = loader.render(sources)
-    origins = [s.origin for s in sources]
     return rendered, origins, memory_store
 
 
@@ -452,12 +571,171 @@ async def _run_smoke(runtime: NativeRuntime, session_id: str | None) -> None:
     raise SystemExit(1)
 
 
+def _resolve_input_paths_before_chdir(
+    config_path: Path | None,
+    instructions_files: list[Path],
+) -> tuple[Path | None, list[Path]]:
+    """把 CLI 传入的相对路径基于**当前** cwd 解析成绝对路径。
+
+    必须在 ``--workdir`` chdir **之前**调用。否则相对路径会落到新 cwd 下，
+    导致 ``cli.sh --config config/setting.yaml`` 这类相对默认值找不到文件。
+
+    Args:
+        config_path: ``--config`` 选项；``None`` 时不动。
+        instructions_files: ``--instructions-file`` 选项列表。
+
+    Returns:
+        ``(resolved_config_path, resolved_instructions_files)``。绝对路径
+        原样返回；相对路径调 :meth:`Path.resolve`。
+    """
+    if config_path is not None and not config_path.is_absolute():
+        config_path = config_path.resolve()
+    instructions_files = [f if f.is_absolute() else f.resolve() for f in instructions_files]
+    return config_path, instructions_files
+
+
+def _chdir_or_exit(workdir: Path) -> None:
+    """切换进程 cwd 到 ``workdir``，失败时友好报错并退出。
+
+    click 的 ``Path(exists=True, ...)`` 已经做存在 / 是目录 / 可读校验；
+    此函数只兜底 chdir 时刻的 OSError（race / 权限 / 设备问题）。
+    """
+    try:
+        os.chdir(workdir)
+    except OSError as exc:
+        click.echo(f"[cli] 无法切到工作目录 {workdir}: {exc}", err=True)
+        raise SystemExit(2) from exc
+
+
 def _load_config_or_exit(config_path: Path | None) -> Config:
     try:
         return load_config(config_path)
     except (ConfigLoadError, ConfigValidationError) as exc:
         click.echo(f"[config] {type(exc).__name__}: {exc.message}", err=True)
         raise SystemExit(2) from exc
+
+
+def _validate_session_selection_or_exit(
+    *,
+    session_id: str | None,
+    list_sessions: bool,
+    resume_last: bool,
+    smoke: bool,
+) -> None:
+    if session_id and resume_last:
+        click.echo("[sessions] --session-id 和 --resume-last 只能二选一。", err=True)
+        raise SystemExit(2)
+    if list_sessions and smoke:
+        click.echo("[sessions] --list-sessions 和 --smoke 不能同时使用。", err=True)
+        raise SystemExit(2)
+    if list_sessions and resume_last:
+        click.echo("[sessions] --list-sessions 和 --resume-last 只能二选一。", err=True)
+        raise SystemExit(2)
+
+
+def _discover_persistent_sessions(
+    cfg: Config,
+) -> tuple[list[SessionSummary], Path | None]:
+    if cfg.session.backend == "file":
+        return _discover_file_backend_sessions(cfg.session.file_store_path)
+    if cfg.session.backend == "sqlite":
+        return _discover_sqlite_backend_sessions(cfg.session.store_path)
+    return [], None
+
+
+def _discover_file_backend_sessions(raw_path: str) -> tuple[list[SessionSummary], Path | None]:
+    candidates = _resolve_session_candidates(raw_path)
+    fallback_path = candidates[0] if candidates else None
+    first_existing: Path | None = None
+    for candidate in candidates:
+        if candidate.is_dir():
+            if first_existing is None:
+                first_existing = candidate
+            summaries = discover_file_sessions(candidate)
+            if summaries:
+                return summaries, candidate
+    return [], first_existing or fallback_path
+
+
+def _discover_sqlite_backend_sessions(raw_path: str) -> tuple[list[SessionSummary], Path | None]:
+    candidates = _resolve_session_candidates(raw_path)
+    fallback_path = candidates[0] if candidates else None
+    first_existing: Path | None = None
+    for candidate in candidates:
+        if candidate.exists():
+            if first_existing is None:
+                first_existing = candidate
+            summaries = discover_sqlite_sessions(candidate)
+            if summaries:
+                return summaries, candidate
+    return [], first_existing or fallback_path
+
+
+def _resolve_session_candidates(raw_path: str) -> list[Path]:
+    raw = Path(raw_path).expanduser()
+    if raw.is_absolute():
+        return [raw.resolve()]
+
+    cwd_candidate = (Path.cwd() / raw).resolve()
+    candidates = [cwd_candidate]
+    parts = raw.parts
+    if parts and parts[0] == ".kongming":
+        suffix = Path(*parts[1:]) if len(parts) > 1 else Path()
+        home_candidate = (get_kongming_home() / suffix).resolve()
+        if home_candidate not in candidates:
+            candidates.append(home_candidate)
+    return candidates
+
+
+def _print_sessions_and_exit(
+    *,
+    backend: str,
+    summaries: list[SessionSummary],
+    source_path: Path | None,
+) -> None:
+    if backend == "memory":
+        click.echo("[sessions] memory backend 没有可恢复 session 列表。")
+        return
+
+    source = str(source_path) if source_path is not None else "<unavailable>"
+    if not summaries:
+        click.echo(f"[sessions] 未找到 session。source={source}")
+        return
+
+    click.echo(f"[sessions] backend={backend} source={source} count={len(summaries)}")
+    for summary in summaries:
+        click.echo(_format_session_summary(summary))
+
+
+def _bind_discovered_session_path(cfg: Config, discovered_path: Path | None) -> Config:
+    if discovered_path is None:
+        return cfg
+    if cfg.session.backend == "file":
+        return cfg.model_copy(
+            update={
+                "session": cfg.session.model_copy(update={"file_store_path": str(discovered_path)})
+            }
+        )
+    if cfg.session.backend == "sqlite":
+        return cfg.model_copy(
+            update={"session": cfg.session.model_copy(update={"store_path": str(discovered_path)})}
+        )
+    return cfg
+
+
+def _format_session_summary(summary: SessionSummary) -> str:
+    session_id = summary.session_id
+    updated_at = summary.updated_at
+    preview = summary.preview
+    preview_text = preview if preview else "(empty)"
+    timestamp = _format_timestamp(updated_at)
+    return f"- {session_id} | {timestamp} | {preview_text}"
+
+
+def _format_timestamp(value: float) -> str:
+    if value <= 0:
+        return "unknown"
+    return datetime.fromtimestamp(value).astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _print_banner(

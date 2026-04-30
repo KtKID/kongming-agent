@@ -34,7 +34,8 @@ def test_local_model_config_loads_from_yaml() -> None:
     # load_env_file=False：隔离本地 .env，只测 YAML 结构本身
     cfg = load_config(LOCAL_MODEL_YAML, load_env_file=False)
     assert isinstance(cfg, Config)
-    assert cfg.model.provider == raw["model"]["provider"]
+    # provider 在 v0.1.x 起为可选字段（可由 base_url + 路由表自动推断），yaml 可省略
+    assert cfg.model.provider == raw["model"].get("provider")
     assert cfg.model.name == raw["model"]["name"]
     assert cfg.model.base_url.rstrip("/") == raw["model"]["base_url"].rstrip("/")
     assert cfg.model.api_key == ""

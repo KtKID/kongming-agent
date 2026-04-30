@@ -292,3 +292,11 @@ def test_build_session_file_with_bootstrap(tmp_path):
     )
     s = build_session(_cfg(tmp_path, "file"), "sid", bootstrap=bootstrap)
     assert isinstance(s, FileSession)
+
+
+@pytest.mark.asyncio
+async def test_advance_run_index_raises_not_implemented(tmp_path):
+    """sqlite 后端按方案不维护 run_count；调用 advance_run_index 必须抛 NotImplementedError。"""
+    s = SQLiteSession("sid", str(tmp_path / "x.db"))
+    with pytest.raises(NotImplementedError, match="sqlite backend deprecated"):
+        await s.advance_run_index()

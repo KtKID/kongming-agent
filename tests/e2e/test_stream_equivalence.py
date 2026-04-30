@@ -108,14 +108,22 @@ async def test_e1_2_tool_calls_equivalence() -> None:
     stub_s = StubLLMStreamProvider()
     stub_s.script_chunks(chunks)
     res_stream = await runner_s.run(
-        "hi", session=InMemorySession("s1"), agent_spec=spec,
-        llm=stub_s, tools={}, approval=RecordingApproval(),
+        "hi",
+        session=InMemorySession("s1"),
+        agent_spec=spec,
+        llm=stub_s,
+        tools={},
+        approval=RecordingApproval(),
     )
     stub_n = StubLLMStreamProvider()
     stub_n.script_chunks(chunks)
     res_nonstream = await runner_n.run(
-        "hi", session=InMemorySession("s2"), agent_spec=spec,
-        llm=stub_n, tools={}, approval=RecordingApproval(),
+        "hi",
+        session=InMemorySession("s2"),
+        agent_spec=spec,
+        llm=stub_n,
+        tools={},
+        approval=RecordingApproval(),
     )
 
     # tool_call 后 runner 尝试执行未注册工具 → tool_result error → 第 2 轮被 max_turns=1 截停
@@ -169,16 +177,24 @@ async def test_e1_4_finish_reason_passthrough() -> None:
         # stream 路径
         runner_s = Runner(stream_enabled=True)
         await runner_s.run(
-            "hi", session=InMemorySession(f"s-{finish}"), agent_spec=_spec(),
-            llm=stub_s, tools={}, approval=RecordingApproval(),
+            "hi",
+            session=InMemorySession(f"s-{finish}"),
+            agent_spec=_spec(),
+            llm=stub_s,
+            tools={},
+            approval=RecordingApproval(),
         )
         # non-stream 路径用同一份 chunks
         stub_n = StubLLMStreamProvider()
         stub_n.script_chunks(chunks)
         runner_n = Runner(stream_enabled=False)
         res_n = await runner_n.run(
-            "hi", session=InMemorySession(f"n-{finish}"), agent_spec=_spec(),
-            llm=stub_n, tools={}, approval=RecordingApproval(),
+            "hi",
+            session=InMemorySession(f"n-{finish}"),
+            agent_spec=_spec(),
+            llm=stub_n,
+            tools={},
+            approval=RecordingApproval(),
         )
         assert res_n.status == "completed"
 

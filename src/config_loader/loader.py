@@ -90,6 +90,19 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("stream", "suppress_content_after_tool_call"),
     ("stream", "delta_sampling"),
     ("stream", "periodic_batch_size"),
+    # safety v0.1.4
+    ("safety", "trusted_workdirs"),
+    ("safety", "allow_writes"),
+    ("safety", "allow_tools_silent"),
+    ("safety", "log_silent_reads"),
+    # web v0.1.5
+    ("web", "enabled"),
+    ("web", "host"),
+    ("web", "port"),
+    ("web", "dev_mode"),
+    ("web", "idle_timeout_seconds"),
+    ("web", "idle_check_interval_seconds"),
+    ("web", "pending_approval_timeout_seconds"),
 )
 
 # per-module YAML 文件名 → 合并到 Config 的顶层 key。

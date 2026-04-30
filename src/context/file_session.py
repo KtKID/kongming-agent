@@ -62,6 +62,8 @@ class FileSession:
 
         self._materialized: bool = False
         self._last_message_id: str | None = None
+        # run_count 在 manifest.json 中持久化；advance_run_index 时 +1 + 写盘
+        self._run_count: int = 0
 
         # 检测已存在目录 → 走恢复路径
         if self._session_dir.is_dir() and self._manifest_path.is_file():
@@ -130,6 +132,23 @@ class FileSession:
 
         self._materialized = False
         self._last_message_id = None
+        self._run_count = 0
+
+    async def advance_run_index(self) -> int:
+        """递增 run_count 并立即写回 manifest.json，返回新值。
+
+        非事务原子约定见 :meth:`core.contracts.Session.advance_run_index`：
+        本方法只保证"内存 +1 + manifest 落盘"两步完成；与上游 ``append`` 不
+        构成单事务，崩溃模式下不会让 run_id 重复或丢消息。
+
+        若当前未 materialize（极罕见，理论上 runner 总是先 append 再 advance），
+        先 _materialize 把目录和空 jsonl 准备好，再写 manifest。
+        """
+        if not self._materialized:
+            self._materialize()
+        self._run_count += 1
+        self._write_manifest()
+        return self._run_count
 
     # ------------------------------------------------------------------
     # materialize / recover
@@ -138,7 +157,20 @@ class FileSession:
     def _materialize(self) -> None:
         """创建目录、原子写 manifest、准备 jsonl 文件。"""
         self._session_dir.mkdir(parents=True, exist_ok=True)
+        self._write_manifest()
 
+        # 创建空 jsonl（如果不存在）
+        if not self._messages_path.exists():
+            self._messages_path.touch()
+
+        self._materialized = True
+
+    def _write_manifest(self) -> None:
+        """原子写 manifest.json：先写 ``.tmp`` 再 rename，含 fsync。
+
+        被 :meth:`_materialize`（首次落盘）和 :meth:`advance_run_index`（更新
+        ``run_count``）共用；任何会变更 manifest 内容的地方都应走这条路径。
+        """
         manifest: dict[str, Any] = {
             "schema_version": _SCHEMA_VERSION,
             "session_id": self.session_id,
@@ -150,21 +182,15 @@ class FileSession:
             "cwd": self._bootstrap.cwd,
             "app_version": self._bootstrap.app_version,
             "format": f"{self.session_id}.jsonl",
+            "run_count": self._run_count,
         }
 
-        # 原子写入：先写 .tmp 再 rename
         tmp_path = self._manifest_path.with_suffix(".tmp")
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, self._manifest_path)
-
-        # 创建空 jsonl（如果不存在）
-        if not self._messages_path.exists():
-            self._messages_path.touch()
-
-        self._materialized = True
 
     def _recover(self) -> None:
         """从磁盘恢复 session 状态。"""
@@ -186,6 +212,9 @@ class FileSession:
                 cwd=manifest.get("cwd", self._bootstrap.cwd),
                 app_version=manifest.get("app_version", self._bootstrap.app_version),
             )
+            # 旧 manifest 无 run_count 字段时兜底为 0；用户已声明旧 session 全删，
+            # 这里仅防御开发期残留旧文件触发 KeyError。
+            self._run_count = int(manifest.get("run_count", 0))
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning(
                 "session %s: manifest 损坏，使用传入 bootstrap: %s", self.session_id, exc

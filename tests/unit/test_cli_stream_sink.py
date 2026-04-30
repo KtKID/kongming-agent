@@ -88,8 +88,6 @@ async def test_d6_unknown_kind_silently_ignored() -> None:
     await sink.emit(Event(kind="content.delta", run_id="r1", payload={"delta": ""}))
     await sink.emit(Event(kind="reasoning.delta", run_id="r1", payload={"delta": ""}))
     # delta 不是 str（防御性）
-    await sink.emit(
-        Event(kind="content.delta", run_id="r1", payload={"delta": 123, "index": 0})
-    )
+    await sink.emit(Event(kind="content.delta", run_id="r1", payload={"delta": 123, "index": 0}))
     # 全部应该没输出
     assert out.getvalue() == ""

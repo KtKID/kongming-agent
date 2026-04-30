@@ -22,7 +22,9 @@ from executors.agent_runtime.native_runtime import NativeRuntime
 from observability import JsonlTraceSink, PromptDebugDumpSink
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_DUMP_DIR = _REPO_ROOT / ".kongming/debug"
+# 测试 dump 与 CLI ``--debug`` 生产落盘 (.kongming/debug/prompt-debug-*.json)
+# 物理分开，避免人工查看 debug 时被测试垃圾干扰。
+_DUMP_DIR = _REPO_ROOT / ".kongming/debug/tests"
 
 
 def _build_cfg(
@@ -277,12 +279,16 @@ async def test_prompt_complete_flow_uses_production_assembly_and_dumps_json(
         _build_cfg(tmp_path, backend="memory"), [extra_file]
     )
 
+    # runtime 段由 _assemble_instructions 强制前置注入（cwd / kongming_home），
+    # 让 LLM 知道自己跑在哪。不可关闭。
     assert origins == [
+        "runtime",
         "agent_spec",
         "file:rules.md",
         "env:KONGMING_EXTRA_INSTRUCTIONS",
         "memory",
     ]
+    assert "# runtime" in rendered_prompt
     assert "# agent_spec" in rendered_prompt
     assert "# file:rules.md" in rendered_prompt
     assert "# env:KONGMING_EXTRA_INSTRUCTIONS" in rendered_prompt
@@ -460,6 +466,8 @@ async def test_cli_run_persists_instruction_metadata_to_file_manifest(
     await cli_main._run(
         config_path=None,
         session_id=None,
+        list_sessions=False,
+        resume_last=False,
         verbose=False,
         smoke=False,
         instructions_files=[extra_file],
@@ -477,3 +485,162 @@ async def test_cli_run_persists_instruction_metadata_to_file_manifest(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["instruction_sources"] == expected_origins
     assert manifest["instruction_text_hash"] == expected_hash
+
+
+async def test_cli_run_lists_existing_file_sessions_before_runtime_start(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    cfg = _build_cfg(
+        tmp_path,
+        backend="file",
+        file_store_path=str(tmp_path / "file-sessions"),
+    )
+    _write_file_session_record(
+        tmp_path / "file-sessions",
+        "demo-a",
+        role="user",
+        content="latest answer",
+        created_at=200.0,
+    )
+    _write_file_session_record(
+        tmp_path / "file-sessions",
+        "demo-b",
+        role="user",
+        content="older question",
+        created_at=100.0,
+    )
+
+    monkeypatch.setattr(cli_main, "_load_config_or_exit", lambda _: cfg)
+
+    def _unexpected_build(*_args, **_kwargs):
+        raise AssertionError("runtime should not build for --list-sessions")
+
+    monkeypatch.setattr(cli_main.NativeRuntime, "build", staticmethod(_unexpected_build))
+
+    await cli_main._run(
+        config_path=None,
+        session_id=None,
+        list_sessions=True,
+        resume_last=False,
+        verbose=False,
+        smoke=False,
+        instructions_files=[],
+        trace_enabled=False,
+        reasoning_effort=None,
+    )
+
+    output = capsys.readouterr().out
+    assert "demo-a" in output
+    assert "latest an…" in output
+    assert output.index("demo-a") < output.index("demo-b")
+
+
+async def test_cli_run_resume_last_selects_latest_file_session(tmp_path, monkeypatch) -> None:
+    cfg = _build_cfg(
+        tmp_path,
+        backend="file",
+        file_store_path=str(tmp_path / "file-sessions"),
+    )
+    _write_file_session_record(
+        tmp_path / "file-sessions",
+        "older",
+        role="user",
+        content="old answer",
+        created_at=100.0,
+    )
+    _write_file_session_record(
+        tmp_path / "file-sessions",
+        "latest",
+        role="user",
+        content="new answer",
+        created_at=200.0,
+    )
+
+    captured: dict[str, str] = {}
+
+    class _DummyRegistry:
+        def register(self, _tool) -> None:
+            return None
+
+        def names(self) -> list[str]:
+            return []
+
+    class _FakeRuntime:
+        def __init__(self, *, session_factory) -> None:  # type: ignore[no-untyped-def]
+            self._session_factory = session_factory
+
+        async def aclose(self) -> None:
+            return None
+
+    class _DummyBridge:
+        def __init__(
+            self,
+            *,
+            runtime,
+            adapter,
+            session_id: str,
+            echo_final_content: bool = True,
+        ) -> None:
+            del runtime, adapter, echo_final_content
+            captured["session_id"] = session_id
+            self.session_id = session_id
+
+        async def run_loop(self) -> None:
+            return None
+
+    monkeypatch.setattr(cli_main, "_load_config_or_exit", lambda _: cfg)
+
+    async def _fake_assemble_instructions(_cfg, _files):
+        return "system", [], None
+
+    monkeypatch.setattr(cli_main, "_assemble_instructions", _fake_assemble_instructions)
+    monkeypatch.setattr(cli_main, "build_default_registry", lambda **_: _DummyRegistry())
+    monkeypatch.setattr(cli_main, "build_default_approval", lambda *_, **__: object())
+    monkeypatch.setattr(
+        cli_main.NativeRuntime,
+        "build",
+        staticmethod(lambda *_, **kwargs: _FakeRuntime(session_factory=kwargs["session_factory"])),
+    )
+    monkeypatch.setattr(cli_main, "SessionBridge", _DummyBridge)
+    monkeypatch.setattr(cli_main, "_print_banner", lambda *_, **__: None)
+
+    await cli_main._run(
+        config_path=None,
+        session_id=None,
+        list_sessions=False,
+        resume_last=True,
+        verbose=False,
+        smoke=False,
+        instructions_files=[],
+        trace_enabled=False,
+        reasoning_effort=None,
+    )
+
+    assert captured["session_id"] == "latest"
+
+
+def _write_file_session_record(
+    root: Path,
+    session_id: str,
+    *,
+    role: str,
+    content: str,
+    created_at: float,
+) -> None:
+    session_dir = root / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "schema_version": "0.1.1",
+        "session_id": session_id,
+        "message_id": f"msg-{session_id}",
+        "parent_message_id": None,
+        "created_at": created_at,
+        "message": {
+            "role": role,
+            "content": content,
+        },
+    }
+    (session_dir / f"{session_id}.jsonl").write_text(
+        json.dumps(record, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )

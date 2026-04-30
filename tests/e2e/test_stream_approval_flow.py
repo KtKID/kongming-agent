@@ -35,7 +35,10 @@ class StubTool:
 
 def _spec_with_tool() -> AgentSpec:
     return AgentSpec(
-        name="t", instructions="x", default_model="m1", max_turns=5,
+        name="t",
+        instructions="x",
+        default_model="m1",
+        max_turns=5,
         tool_names=("echo_tool",),
     )
 
@@ -72,8 +75,12 @@ async def test_e3_1_stream_tool_call_approved_then_complete() -> None:
 
     runner = Runner(stream_enabled=True, event_sinks=[sink])
     res = await runner.run(
-        "use tool", session=InMemorySession("appr1"), agent_spec=_spec_with_tool(),
-        llm=stub, tools={"echo_tool": tool}, approval=approval,
+        "use tool",
+        session=InMemorySession("appr1"),
+        agent_spec=_spec_with_tool(),
+        llm=stub,
+        tools={"echo_tool": tool},
+        approval=approval,
     )
 
     assert res.status == "completed"
@@ -116,8 +123,12 @@ async def test_e3_2_stream_tool_call_rejected() -> None:
 
     runner = Runner(stream_enabled=True)
     res = await runner.run(
-        "use tool", session=InMemorySession("appr2"), agent_spec=_spec_with_tool(),
-        llm=stub, tools={"echo_tool": tool}, approval=approval,
+        "use tool",
+        session=InMemorySession("appr2"),
+        agent_spec=_spec_with_tool(),
+        llm=stub,
+        tools={"echo_tool": tool},
+        approval=approval,
     )
 
     # tool 没被执行
@@ -158,13 +169,15 @@ async def test_e3_3_suppress_content_after_tool_call() -> None:
     sink = MemoryEventSink()
     runner = Runner(stream_enabled=True, suppress_content_after_tool_call=True, event_sinks=[sink])
     await runner.run(
-        "x", session=InMemorySession("appr3"), agent_spec=_spec_with_tool(),
-        llm=stub, tools={"echo_tool": StubTool()}, approval=RecordingApproval(),
+        "x",
+        session=InMemorySession("appr3"),
+        agent_spec=_spec_with_tool(),
+        llm=stub,
+        tools={"echo_tool": StubTool()},
+        approval=RecordingApproval(),
     )
 
     # 只有 pre-call 进 EventSink；POST-CALL-LEAK 被 runner 屏蔽
-    content_deltas = [
-        e.payload["delta"] for e in sink.of_kind("content.delta")
-    ]
+    content_deltas = [e.payload["delta"] for e in sink.of_kind("content.delta")]
     assert "pre-call" in content_deltas
     assert "POST-CALL-LEAK" not in content_deltas

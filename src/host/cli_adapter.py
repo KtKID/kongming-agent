@@ -11,9 +11,12 @@
 
 - 本文件只消费 ``core.contracts`` 里的协议和 ``host.base`` 的基类；
   不反向 import ``cli/``，也不 import ``safety/`` / ``observability/``。
-- ``prompt_approval`` 与 :func:`tools.build_default_approval` 的
-  ``interactive`` 模式契合：返回 ``bool``，由 ``InteractiveApproval`` 翻成
-  ``ApprovalDecision``。
+- ``prompt_approval``（v0.1.6）返回 :class:`core.contracts.ApprovalAction`
+  的 3 档结构化决策（``ACCEPT_ONCE`` / ``ACCEPT_FOR_SESSION`` / ``REJECT``），
+  与 web `ApprovalDialog` 三按钮 UX 对齐；由 ``InteractiveApproval`` 通过
+  ``__action_aware__`` 标记自动识别并翻成 ``ApprovalDecision``。
+  ``ACCEPT_PERSIST`` 当前未在 CLI / web 暴露（后端 dead path），等前端"永久
+  同意"按钮设计稳定后再加。
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 import click
 
-from core.contracts import ApprovalRequest, Event
+from core.contracts import ApprovalAction, ApprovalRequest, Event
 from host.base import HostAdapter
 
 if TYPE_CHECKING:  # pragma: no cover - import-time only
@@ -39,8 +42,9 @@ class CLIAdapter(HostAdapter):
     - ``write_output``：用 :func:`click.echo` 打印，避免 stdout buffer
       问题。
     - ``notify_event``：verbose 时写单行进度，非 verbose 时完全静默。
-    - ``prompt_approval``：在终端打一行 "允许？[y/N]"；默认拒绝，避免
-      一把回车意外放行。
+    - ``prompt_approval``：在终端打一行 "允许？[y=once / s=session / N=reject]"；
+      返回 :class:`ApprovalAction` 三档决策；默认拒绝（裸回车 / 任意其他输入），
+      避免误确认。
     """
 
     def __init__(
@@ -82,7 +86,25 @@ class CLIAdapter(HostAdapter):
         if line is not None:
             click.echo(line, err=True)
 
-    async def prompt_approval(self, request: ApprovalRequest) -> bool:
+    async def prompt_approval(  # type: ignore[override]
+        self, request: ApprovalRequest
+    ) -> ApprovalAction:
+        """v0.1.6 三档审批：与 web ``ApprovalDialog`` 三按钮 UX 对齐。
+
+        输入映射：
+
+        - ``y`` / ``yes`` → :attr:`ApprovalAction.ACCEPT_ONCE`（仅本次）
+        - ``s`` / ``session`` → :attr:`ApprovalAction.ACCEPT_FOR_SESSION`
+          （本 session 内同类工具调用静默放行；GrantStore 内存级，重启失效）
+        - 其他（含空回车 / ``n`` / ``no`` / EOF / Ctrl-C / 任意其他字符）→
+          :attr:`ApprovalAction.REJECT`
+
+        默认 reject 而非 once，是安全约定：误按回车不应该意外放行。
+
+        ``ACCEPT_PERSIST`` 当前未提供 CLI 入口；后端写盘 wiring 也未接通
+        （`_grant_persister.persist_grants` 0 处调用），等前端"永久同意"
+        按钮设计稳定后再统一打开。
+        """
         args_preview = _format_arguments(request.arguments)
         reason = f" reason={request.reason}" if request.reason else ""
         click.echo(
@@ -93,12 +115,27 @@ class CLIAdapter(HostAdapter):
         # 挪到子线程，避免阻塞事件循环，同时也不和 prompt_toolkit 的事件
         # 循环抢 TTY。
         try:
-            raw = await asyncio.to_thread(_blocking_readline, "允许？[y/N] ")
+            raw = await asyncio.to_thread(
+                _blocking_readline,
+                "允许？[y=once / s=session / N=reject] ",
+            )
         except (EOFError, KeyboardInterrupt):
             # 审批被中断等同于拒绝。
-            return False
+            return ApprovalAction.REJECT
         answer = (raw or "").strip().lower()
-        return answer in {"y", "yes"}
+        if answer in {"y", "yes"}:
+            return ApprovalAction.ACCEPT_ONCE
+        if answer in {"s", "session"}:
+            return ApprovalAction.ACCEPT_FOR_SESSION
+        return ApprovalAction.REJECT
+
+    # 标记 prompt_approval 为 action-aware（返回 ApprovalAction 而非 bool）。
+    # 直接在类外用属性赋值替代 @mark_action_aware 装饰器：装饰器签名是
+    # ``Callable[[ApprovalRequest], Awaitable[ApprovalAction]]``，与方法的
+    # ``Callable[[Self, ApprovalRequest], ...]`` 不兼容，会触发 mypy arg-type
+    # 错误。属性赋值在运行时和装饰器等价，绕过 mypy 静态检查。
+    # 与 ``web.host_adapter.WebHostAdapter`` 同模式。
+    prompt_approval.__action_aware__ = True  # type: ignore[attr-defined]
 
     async def close(self) -> None:
         if self._closed:
@@ -183,7 +220,35 @@ def _render_event_line(event: Event) -> str | None:
         )
     if kind == "error":
         return f"[error] turn={turn} type={payload.get('type')} msg={payload.get('message')}"
+    # safety v0.1.4 DecisionTrace（M8.5）：3 个新事件 kind 在 verbose 模式下
+    # 各打一行可读进度，方便人工跟踪决策路径。
+    if kind == "tool.denied":
+        rule = payload.get("matched_rule") or "unknown"
+        reason = payload.get("reason") or ""
+        return (
+            f"[hard_block:{rule}] x {payload.get('tool_name')} "
+            f"{_format_path_or_command(payload)} - REJECTED ({reason})"
+        )
+    if kind == "tool.approval_required":
+        severity = payload.get("decision_source") or "standard"
+        return f"[{severity}] ? {payload.get('tool_name')} {_format_path_or_command(payload)}"
+    if kind == "tool.silently_allowed":
+        source = payload.get("decision_source") or "intrinsic"
+        return (
+            f"[silent_allow:{source}] v {payload.get('tool_name')} "
+            f"{_format_path_or_command(payload)}"
+        )
     return None
+
+
+def _format_path_or_command(payload: dict[str, object]) -> str:
+    """从 trace event payload 里提取并截断 path_or_command。"""
+    raw = payload.get("path_or_command")
+    if not isinstance(raw, str):
+        return ""
+    if len(raw) > 80:
+        return raw[:77] + "..."
+    return raw
 
 
 def _render_reasoning(event: Event) -> None:

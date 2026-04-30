@@ -1,34 +1,37 @@
-"""高层安全链：capability → permission → approval。
+"""高层安全链：v0.1.4 主决策链装配 + v0.1.3 兼容薄壳。
 
-本模块只做一件事：把 :class:`safety.capability_policy.CapabilityPolicy`、
-:class:`safety.permission_policy.PermissionPolicy` 和底层
-:class:`core.contracts.ApprovalProvider` 三层串成一个**对外只暴露
-ApprovalProvider Protocol** 的复合对象 :class:`SafetyGatedApproval`。
+本模块的两件事：
 
-这样做的目的：
+1. :class:`SafetyGatedApproval` —— v0.1.3 暴露给上游（``tools/`` / ``host/`` /
+   ``cli/``）的 :class:`core.contracts.ApprovalProvider` 实现。v0.1.4 起改为
+   薄壳：构造 :class:`safety.types.RuntimeBoundaryContext` → 调
+   :class:`safety.decision_engine.SafetyDecisionEngine` → 装饰
+   ``metadata.stage`` 兼容字段后返回。
+2. :func:`build_safety_chain` —— 装配入口。v0.1.4 内部装配新四件套
+   （HardBlock / BoundaryResolver / TrustResolver / ConsentResolver）+
+   SafetyDecisionEngine + EventSink fan-out。函数签名向上游零变更：
+   ``capability_policy`` / ``permission_policy`` 仍为 keyword 参数（兼容期），
+   新增的 ``boundary_resolver`` / ``grant_store`` / ``trace_emitter`` 等也
+   走 keyword-only，默认 ``None``。
 
-- ``core.runner`` / ``tools/`` / ``host/`` / ``cli/`` 只认
-  :class:`core.contracts.ApprovalProvider` 单一协议面，不直接 touch safety 内部
-  policy，符合 ``10-contracts.md`` 中"Capability 与 Permission"硬性约束。
-- 装配层（``executors/agent_runtime/native_runtime.py``）调用
-  :func:`build_safety_chain` 一次性串起来，形成最终 approval provider。
-- 判定顺序固定：**capability → permission → approval**。任何一层"硬否决"都
-  会短路后续层。
+迁移说明：
 
-:class:`SafetyGatedApproval` **不**在装配时抛 :class:`core.errors.CapabilityDenied`
-或 :class:`core.errors.PermissionDenied`——它把拒绝理由转成
-``ApprovalDecision(outcome="rejected", ...)``，由 runner 统一处理 approval
-拒绝路径（runner 会按 :class:`core.errors.ApprovalRejected` 规约收口）。
-如果日后确有需求需要把安全链产生的"拒绝"区分自 runner 的 approval 语义，
-再通过 ``metadata["stage"]`` 字段恢复（已写入）。
+- v0.1.3 的 ``capability_policy.check()`` / ``permission_policy.evaluate()``
+  内部判定已被删除（保留方法签名 + ``raise NotImplementedError``）。``from_config``
+  仍保留作为 v0.1.3 yaml 字段到 v0.1.4 三张规则表的迁移入口。
+- ``metadata.stage`` 兼容字段保留：``hard_block`` → ``capability``、
+  ``explicit_consent + standard`` → ``permission``、
+  ``explicit_consent + elevated`` → ``approval``，
+  ``silent_allow`` 不写 stage（v0.1.3 没这个概念）。
+
+详见 ``docs/modules/安全/README.md`` 末尾的迁移指引。
 """
 
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-# 延迟 import 以避免循环：Config 仅在类型注解里使用即可
 from config_loader.models import Config
 from core.contracts import (
     ApprovalDecision,
@@ -36,8 +39,23 @@ from core.contracts import (
     ApprovalRequest,
 )
 from core.errors import AgentError
+from safety.boundary_resolver import BoundaryResolver
 from safety.capability_policy import CapabilityPolicy
-from safety.permission_policy import PermissionPolicy, PermissionRule
+from safety.decision_engine import SafetyDecisionEngine, TraceEmitter
+from safety.grant_store import GrantStore, grant_with_now
+from safety.guards.consent import ConsentResolver
+from safety.guards.hard_block import HardBlockGuard
+from safety.guards.trust import TrustResolver
+from safety.permission_policy import PermissionPolicy
+from safety.types import (
+    ApprovalMetadataKeys,
+    BoundaryKind,
+    DecisionSource,
+    RuntimeBoundaryContext,
+)
+
+if TYPE_CHECKING:
+    from core.contracts import Event, EventSink
 
 # ---------------------------------------------------------------------------
 # 异常
@@ -47,56 +65,10 @@ from safety.permission_policy import PermissionPolicy, PermissionRule
 class SafetyChainError(AgentError):
     """安全链内部异常。
 
-    仅用于"安全链自身出错"——例如底层 approval provider 抛了未预料的异常。
-    capability / permission 层的"拒绝"不走这个异常，而是转成
+    仅用于"安全链自身出错"——例如 SafetyDecisionEngine 抛了未预料的异常。
+    HardBlock / Trust / Consent 各 guard 自己的"拒绝"不走这个异常，而是转成
     :class:`ApprovalDecision(outcome="rejected")`。
     """
-
-
-# ---------------------------------------------------------------------------
-# 内部 helper
-# ---------------------------------------------------------------------------
-
-
-def _approved(*, reason: str, metadata: dict[str, Any]) -> ApprovalDecision:
-    return ApprovalDecision(
-        outcome="approved",
-        reason=reason,
-        metadata=dict(metadata),
-    )
-
-
-def _rejected(*, reason: str, metadata: dict[str, Any]) -> ApprovalDecision:
-    return ApprovalDecision(
-        outcome="rejected",
-        reason=reason,
-        metadata=dict(metadata),
-    )
-
-
-def _clone_decision(
-    decision: ApprovalDecision,
-    *,
-    metadata: dict[str, Any],
-) -> ApprovalDecision:
-    """复制 :class:`ApprovalDecision` 并替换 ``metadata``。
-
-    ``ApprovalDecision`` 是 frozen dataclass，用 :func:`dataclasses.replace`
-    产出新实例，保持不可变性。
-    """
-    return replace(decision, metadata=dict(metadata))
-
-
-def _rule_meta(rule: PermissionRule | None) -> dict[str, Any] | None:
-    if rule is None:
-        return None
-    return {
-        "tool_name": rule.tool_name,
-        "outcome": rule.outcome,
-        "arg_key": rule.arg_key,
-        "arg_contains": rule.arg_contains,
-        "reason": rule.reason,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -105,74 +77,60 @@ def _rule_meta(rule: PermissionRule | None) -> dict[str, Any] | None:
 
 
 class SafetyGatedApproval:
-    """高层安全链。
+    """v0.1.4 安全链对外门面（薄壳）。
 
-    实现 :class:`core.contracts.ApprovalProvider` Protocol（duck-typed，
-    不显式继承，保持和其他实现一致的轻量风格）。
+    实现 :class:`core.contracts.ApprovalProvider` Protocol（duck-typed）。
+    ``decide`` 内部：
 
-    内部顺序：
+    1. 构造 :class:`RuntimeBoundaryContext` (``boundary_kind=HOST``)
+    2. 调 :class:`SafetyDecisionEngine.decide`
+    3. 装饰 ``metadata.stage`` 兼容字段（v0.1.3 → v0.1.4 平滑迁移）
+    4. 返回 :class:`ApprovalDecision`
 
-    1. **capability check** —— 命中 ``deny`` → 直接 ``rejected``
-    2. **permission check** —— 命中 ``allow`` → 直接 ``approved``；
-       命中 ``deny`` → 直接 ``rejected``；``ask`` → 落到第 3 步
-    3. **approval** —— 调用底层 :class:`ApprovalProvider` 拿最终决定
-
-    所有返回的 :class:`ApprovalDecision` 都会带 ``metadata["stage"]`` 标识
-    决定来源阶段，便于 observability 与调试。
+    上游 ``tools/`` / ``host/`` / ``cli/`` 接线零侵入。
     """
 
     def __init__(
         self,
         *,
-        capability_policy: CapabilityPolicy,
-        permission_policy: PermissionPolicy,
-        interactive_approval: ApprovalProvider,
+        engine: SafetyDecisionEngine,
+        grant_store: GrantStore,
+        capability_policy: CapabilityPolicy | None = None,
+        permission_policy: PermissionPolicy | None = None,
     ) -> None:
+        self._engine = engine
+        # 持 grant_store 引用：用于 ACCEPT_FOR_SESSION 写回（v0.1.4 缺口修复）
+        # + 暴露给上游（NativeRuntime / web thread_manager evict 钩子）。
+        self._grant_store = grant_store
+        # 保留引用便于 v0.1.3 测试期间访问；本类不再调用其判定方法
         self._cap = capability_policy
         self._perm = permission_policy
-        self._approval = interactive_approval
+
+    @property
+    def grant_store(self) -> GrantStore:
+        """暴露 grant_store 引用给上游（NativeRuntime / thread_manager）。
+
+        thread_manager.evict_cell 用 ``grant_store.clear_session(session_id)``
+        清理 thread 私有 grants；CLI 路径不需要这个引用（进程退出时 GC 回收）。
+        """
+        return self._grant_store
 
     async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
-        """按 capability → permission → approval 顺序给出最终 ApprovalDecision。"""
-        # -- 1. capability check -----------------------------------------
-        cap_result = await self._cap.check(request.tool_name, dict(request.arguments))
-        if cap_result.outcome == "deny":
-            return _rejected(
-                reason=f"[capability] {cap_result.reason}",
-                metadata={
-                    "stage": "capability",
-                    "capability": cap_result.capability,
-                    "tool_name": request.tool_name,
-                },
-            )
+        """委托 SafetyDecisionEngine 给出决策；装饰 metadata.stage 兼容字段。
 
-        # -- 2. permission check -----------------------------------------
-        perm_result = await self._perm.check(request.tool_name, dict(request.arguments))
-        if perm_result.outcome == "allow":
-            return _approved(
-                reason=f"[permission] {perm_result.reason}",
-                metadata={
-                    "stage": "permission",
-                    "matched_rule": _rule_meta(perm_result.matched_rule),
-                    "tool_name": request.tool_name,
-                },
-            )
-        if perm_result.outcome == "deny":
-            return _rejected(
-                reason=f"[permission] {perm_result.reason}",
-                metadata={
-                    "stage": "permission",
-                    "matched_rule": _rule_meta(perm_result.matched_rule),
-                    "tool_name": request.tool_name,
-                },
-            )
+        如果 engine 抛任何未预料的异常，包成 :class:`SafetyChainError` 上抛。
 
-        # -- 3. ask → 下沉到底层 ApprovalProvider ------------------------
+        v0.1.6 修复：拿到 ``approved + grant_scope=session`` 的 decision 后，
+        构造 ``Grant`` 写回 :class:`GrantStore` —— 让"本 session 同意"真正
+        生效（之前 v0.1.4 留了空，导致 CLI [s] 是死代码、web "本 session 同意"
+        点了等于 once）。
+        """
+        runtime = RuntimeBoundaryContext(boundary_kind=BoundaryKind.HOST)
         try:
-            decision = await self._approval.decide(request)
-        except Exception as exc:  # 防御性：底层 provider 不应抛异常
+            decision = await self._engine.decide(request, runtime)
+        except Exception as exc:
             raise SafetyChainError(
-                "underlying approval provider raised unexpectedly",
+                "SafetyDecisionEngine raised unexpectedly",
                 details={
                     "tool_name": request.tool_name,
                     "call_id": request.call_id,
@@ -180,15 +138,101 @@ class SafetyGatedApproval:
                 },
             ) from exc
 
-        merged: dict[str, Any] = dict(decision.metadata or {})
-        merged.setdefault("stage", "approval")
-        merged.setdefault("ask_source", "permission_policy")
-        merged.setdefault("tool_name", request.tool_name)
-        return _clone_decision(decision, metadata=merged)
+        decorated = _decorate_stage_compat(decision)
+        self._maybe_write_session_grant(decorated, request)
+        return decorated
+
+    def _maybe_write_session_grant(
+        self,
+        decision: ApprovalDecision,
+        request: ApprovalRequest,
+    ) -> None:
+        """ACCEPT_FOR_SESSION 写回 GrantStore。
+
+        触发条件：``decision.outcome=="approved"`` + ``metadata.grant_scope=="session"``。
+        capability 命名 ``tool:<tool_name>`` + matcher=``"*"``，对齐
+        :func:`GrantStore.from_config` 的 ``allow_tools_silent`` 转换路径
+        （``grant_store.py:_TOOL_CAPABILITY_PREFIX`` / ``_WILDCARD_MATCHER``），
+        保证下一轮 :class:`TrustResolver.find_matching` 能命中。
+
+        ``request.session_id`` 缺失时静默跳过（防御性；schema 上 session_id
+        是必填字段，但避免运行时 stub 测试场景下崩链）。
+        """
+        metadata = decision.metadata or {}
+        if decision.outcome != "approved":
+            return
+        if metadata.get(ApprovalMetadataKeys.GRANT_SCOPE) != "session":
+            return
+        if not request.session_id:
+            # session grant 必须绑定到具体 session_id；空串 / None 视为不写
+            return
+
+        grant = grant_with_now(
+            # 字面值 "tool:" 对齐 grant_store.py:_TOOL_CAPABILITY_PREFIX
+            capability=f"tool:{request.tool_name}",
+            matcher="*",
+            scope="session",
+            source=DecisionSource.SESSION,
+            request_id=request.call_id,
+            session_id=request.session_id,
+        )
+        self._grant_store.put_session(grant)
+
+    def _legacy_decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        """v0.1.3 兼容期 fallback。
+
+        v0.1.4 已删除 v0.1.3 内部判定路径，本方法保留为占位防止外部直接调用，
+        如需恢复请重新实现。
+        """
+        raise RuntimeError(
+            "SafetyGatedApproval._legacy_decide: legacy v0.1.3 path removed; "
+            "v0.1.4 主链路只走 SafetyDecisionEngine。"
+        )
 
 
 # ---------------------------------------------------------------------------
-# 装配糖
+# metadata.stage 兼容映射
+# ---------------------------------------------------------------------------
+
+
+def _decorate_stage_compat(decision: ApprovalDecision) -> ApprovalDecision:
+    """按 v0.1.3 → v0.1.4 映射规则补 ``metadata.stage`` 兼容字段。
+
+    映射规则：
+
+    - ``decision_class=hard_block`` → ``stage="capability"``
+    - ``decision_class=silent_allow`` → 不写 stage（v0.1.3 没有 silent_allow 概念）
+    - ``decision_class=explicit_consent`` + ``decision_source=standard`` →
+      ``stage="permission"``
+    - ``decision_class=explicit_consent`` + ``decision_source=elevated`` →
+      ``stage="approval"``
+
+    已有 ``stage`` 字段时不覆盖（HardBlockGuard / ConsentResolver 已自行写入）。
+    """
+    metadata = dict(decision.metadata or {})
+    if ApprovalMetadataKeys.STAGE in metadata:
+        # 已有 stage（HardBlockGuard / ConsentResolver 自行写入），保持不变
+        return decision
+
+    decision_class = metadata.get(ApprovalMetadataKeys.DECISION_CLASS)
+    decision_source = metadata.get(ApprovalMetadataKeys.DECISION_SOURCE)
+
+    stage: str | None = None
+    if decision_class == "hard_block":
+        stage = "capability"
+    elif decision_class == "explicit_consent":
+        stage = "approval" if decision_source == "elevated" else "permission"
+    # silent_allow 不写 stage
+
+    if stage is None:
+        return decision
+
+    metadata[ApprovalMetadataKeys.STAGE] = stage
+    return replace(decision, metadata=metadata)
+
+
+# ---------------------------------------------------------------------------
+# build_safety_chain
 # ---------------------------------------------------------------------------
 
 
@@ -198,29 +242,184 @@ def build_safety_chain(
     interactive_approval: ApprovalProvider,
     capability_policy: CapabilityPolicy | None = None,
     permission_policy: PermissionPolicy | None = None,
+    boundary_resolver: BoundaryResolver | None = None,
+    grant_store: GrantStore | None = None,
+    trace_emitter: TraceEmitter | None = None,
+    event_sinks: list[EventSink] | None = None,
 ) -> SafetyGatedApproval:
     """按统一配置 + 底层 approval 装配一条完整的高层安全链。
 
     Args:
-        config: 统一 :class:`Config`。``capability_policy`` / ``permission_policy``
-            未显式传入时由 ``from_config`` 按此配置自动装配。
+        config: 统一 :class:`Config`。三张规则表 + grant 配置都从这里读。
         interactive_approval: 底层 :class:`ApprovalProvider`（通常是
             :class:`tools.approval.InteractiveApproval` 或
             :class:`tools.approval.AutoAllowApproval` 等）。
-        capability_policy: 显式注入的 :class:`CapabilityPolicy`；``None`` 走
-            :meth:`CapabilityPolicy.from_config`。
-        permission_policy: 显式注入的 :class:`PermissionPolicy`；``None`` 走
-            :meth:`PermissionPolicy.from_config`。
+        capability_policy: v0.1.3 兼容字段；本次实现仅作占位保留，规则迁移
+            通过 ``CapabilityPolicy.from_config`` 在运行时返回的对象只影响
+            内部 ``hard_deny_commands`` 增量（HardBlockGuard 已合并）。
+        permission_policy: v0.1.3 兼容字段；同上，规则迁移通过
+            ``PermissionPolicy.from_config`` 在运行时把老 yaml 字段翻译到新
+            规则表。
+        boundary_resolver: 显式注入的 :class:`BoundaryResolver`；``None`` 走
+            :meth:`BoundaryResolver.from_project_root`。
+        grant_store: 显式注入的 :class:`GrantStore`；``None`` 走
+            :meth:`GrantStore.from_config`。
+        trace_emitter: trace callback；``None`` 时若提供 ``event_sinks``，自动
+            构造一个把 EventSink 列表 fan-out 的 emitter。
+        event_sinks: ``EventSink`` 列表；当 ``trace_emitter`` 为 ``None`` 时，
+            本参数用于自动构造 emitter。
 
     Returns:
         :class:`SafetyGatedApproval` 实例，满足
         :class:`core.contracts.ApprovalProvider` Protocol。
     """
-    return SafetyGatedApproval(
-        capability_policy=capability_policy or CapabilityPolicy.from_config(config),
-        permission_policy=permission_policy or PermissionPolicy.from_config(config),
-        interactive_approval=interactive_approval,
+    boundary = boundary_resolver or BoundaryResolver.from_project_root()
+    grants = grant_store or GrantStore.from_config(config)
+    hard_block = HardBlockGuard.from_config(config)
+    trust = TrustResolver(boundary, grants)
+    consent = ConsentResolver.from_config(config, interactive_approval=interactive_approval)
+
+    # 自动 emitter：trace_emitter 显式给优先；否则按 event_sinks 装一个
+    resolved_emitter: TraceEmitter | None = trace_emitter
+    if resolved_emitter is None and event_sinks:
+        resolved_emitter = _build_event_sink_emitter(
+            event_sinks=event_sinks,
+            log_silent_reads=config.safety.log_silent_reads,
+        )
+
+    engine = SafetyDecisionEngine(
+        hard_block=hard_block,
+        boundary=boundary,
+        trust=trust,
+        consent=consent,
+        trace_emitter=resolved_emitter,
     )
+
+    return SafetyGatedApproval(
+        engine=engine,
+        grant_store=grants,
+        capability_policy=capability_policy,
+        permission_policy=permission_policy,
+    )
+
+
+# ---------------------------------------------------------------------------
+# EventSink fan-out 适配器
+# ---------------------------------------------------------------------------
+
+
+# read 类工具集合（决定 silent_allow 是否落 trace）
+_READ_TOOL_NAMES: frozenset[str] = frozenset({"read_file", "list_dir"})
+
+# 持有 sink emit 任务引用，避免 GC 提前回收（RUF006 / fire-and-forget pattern）。
+# 模块级 set 而非实例属性：emitter 是闭包，没有自然挂载点；同进程多个
+# build_safety_chain 共享一份 task pool 不影响正确性。
+_PENDING_EMIT_TASKS: set[Any] = set()
+
+
+def _build_event_sink_emitter(
+    *,
+    event_sinks: list[EventSink],
+    log_silent_reads: bool,
+) -> TraceEmitter:
+    """构造把 EventSink 列表 fan-out 的同步 emitter。
+
+    SafetyDecisionEngine 的 ``trace_emitter`` 是同步回调（避免主决策路径上
+    引入 await）；EventSink 是异步接口。这里用 ``asyncio.ensure_future``
+    把 emit 调度到 loop，避免阻塞。
+
+    写盘控制：
+
+    - read 类工具的 ``tool.silently_allowed`` 默认不写（除非
+      ``log_silent_reads=True``）；write 类总写。
+    - ``tool.denied`` / ``tool.approval_required`` 总写。
+    """
+    from core.contracts import Event
+
+    def _emit(
+        event_kind: str,
+        decision: ApprovalDecision,
+        request: ApprovalRequest,
+    ) -> None:
+        # read silent 写盘控制
+        if (
+            event_kind == "tool.silently_allowed"
+            and request.tool_name in _READ_TOOL_NAMES
+            and not log_silent_reads
+        ):
+            return
+
+        payload = _build_event_payload(decision, request)
+        event = Event(
+            kind=event_kind,
+            run_id=request.run_id,
+            turn=request.turn,
+            payload=payload,
+        )
+        for sink in event_sinks:
+            _safely_dispatch_emit(sink, event)
+
+    return _emit
+
+
+def _safely_dispatch_emit(sink: EventSink, event: Event) -> None:
+    """把异步 emit 调度到当前 event loop；无 loop 时退化为创建临时 loop。"""
+    import asyncio
+    import contextlib
+
+    coro = sink.emit(event)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # 不在 event loop 内（同步上下文）。这种场景在生产中极少出现
+        # （SafetyDecisionEngine.decide 是 async，调用方一定在 loop 内）；
+        # 测试调用 _emit 时可能命中。回退到 asyncio.run 的简单兜底，
+        # 避免吞掉异常但也不阻塞主流程。
+        with contextlib.suppress(Exception):
+            asyncio.run(coro)
+        return
+    # 在 loop 内：调度成 task。store reference to avoid premature gc (RUF006)。
+    task = loop.create_task(coro)
+    # 把 task 引用塞到 set 里，sink 完成后由 done callback 移除。
+    _PENDING_EMIT_TASKS.add(task)
+    task.add_done_callback(_PENDING_EMIT_TASKS.discard)
+
+
+def _build_event_payload(
+    decision: ApprovalDecision,
+    request: ApprovalRequest,
+) -> dict[str, Any]:
+    """从 ApprovalDecision + ApprovalRequest 拼出 trace event payload。
+
+    字段对齐 ``docs/safety-scope-v0.1.4/04-data-and-state.md`` § 事件模型：
+    ``decision_class`` / ``decision_source`` / ``matched_rule`` / ``reason`` /
+    ``boundary_kind`` / ``tool_name`` / ``path_or_command`` / ``request_id``。
+    """
+    metadata = decision.metadata or {}
+    return {
+        "decision_class": metadata.get(ApprovalMetadataKeys.DECISION_CLASS),
+        "decision_source": metadata.get(ApprovalMetadataKeys.DECISION_SOURCE),
+        "matched_rule": metadata.get(ApprovalMetadataKeys.MATCHED_RULE),
+        "reason": metadata.get(ApprovalMetadataKeys.REASON) or decision.reason,
+        "boundary_kind": metadata.get(ApprovalMetadataKeys.BOUNDARY_KIND, "host"),
+        "grant_scope": metadata.get(ApprovalMetadataKeys.GRANT_SCOPE),
+        "tool_name": request.tool_name,
+        "path_or_command": _extract_path_or_command(request),
+        "request_id": request.call_id,
+        "outcome": decision.outcome,
+    }
+
+
+def _extract_path_or_command(request: ApprovalRequest) -> str | None:
+    """从 ApprovalRequest.arguments 提取 path 或 command 字段。"""
+    args = request.arguments or {}
+    path = args.get("path")
+    if isinstance(path, str):
+        return path
+    command = args.get("command")
+    if isinstance(command, str):
+        return command
+    return None
 
 
 __all__ = [

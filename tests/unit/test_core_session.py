@@ -75,3 +75,27 @@ async def test_len_reflects_size():
     assert len(s) == 2
     await s.clear()
     assert len(s) == 0
+
+
+@pytest.mark.asyncio
+async def test_advance_run_index_starts_at_one():
+    s = InMemorySession("sid")
+    assert await s.advance_run_index() == 1
+
+
+@pytest.mark.asyncio
+async def test_advance_run_index_monotonic():
+    s = InMemorySession("sid")
+    assert await s.advance_run_index() == 1
+    assert await s.advance_run_index() == 2
+    assert await s.advance_run_index() == 3
+
+
+@pytest.mark.asyncio
+async def test_advance_run_index_isolated_per_instance():
+    a = InMemorySession("a")
+    b = InMemorySession("b")
+    assert await a.advance_run_index() == 1
+    assert await b.advance_run_index() == 1
+    assert await a.advance_run_index() == 2
+    assert await b.advance_run_index() == 2
