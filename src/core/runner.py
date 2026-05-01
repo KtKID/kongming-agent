@@ -436,6 +436,21 @@ class Runner:
                 )
             )
 
+            # 独立 usage event，供 WS EventSink 推送到前端 StatusLine
+            u = response.usage
+            await self._emit(
+                Event(
+                    kind="usage",
+                    run_id=state.run_id,
+                    turn=state.turn,
+                    payload={
+                        "prompt_tokens": u.get("prompt_tokens", 0),
+                        "completion_tokens": u.get("completion_tokens", 0),
+                        "total_tokens": u.get("total_tokens", 0),
+                    },
+                )
+            )
+
             # 跨 turn 累计 usage，最终写入 Result.metadata。
             for key, val in response.usage.items():
                 if isinstance(val, int):

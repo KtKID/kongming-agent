@@ -1,0 +1,28 @@
+# kongming-agent v0.1.5 web 构建镜像
+#
+# 用途：在容器里跑 npm ci + npm run build，把 dist/ 拷给宿主机。
+# 不直接 serve；后端 web-app-shell 读取 web/dist/ 静态文件即可。
+#
+# 用法：
+#   docker build -f Dockerfile.build -t kongming-web-build:0.1.5 .
+#   docker run --rm -v "$(pwd)/dist":/out kongming-web-build:0.1.5 \
+#     sh -c "cp -r /app/dist/. /out/"
+
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# 1) 先拷依赖文件，借助 docker layer cache
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
+
+# 2) 拷源码 + 配置
+COPY tsconfig.json vite.config.ts tailwind.config.ts postcss.config.js \
+     components.json index.html ./
+COPY src ./src
+
+# 3) 构建产物到 /app/dist
+RUN npm run build
+
+# 4) 默认命令：把 dist 复制到挂载的 /out
+CMD ["sh", "-c", "cp -r /app/dist/. /out/"]

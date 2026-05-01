@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <script>
+      // 防闪烁：在 body 渲染前根据 localStorage 决定 dark 类
+      (function () {
+        var t = localStorage.getItem("kongming-theme");
+        var dark =
+          t === "dark" ||
+          (t !== "light" &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches);
+        if (dark) document.documentElement.classList.add("dark");
+      })();
+    </script>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <title>kongming-agent</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

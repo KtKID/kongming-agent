@@ -490,6 +490,9 @@ EventKind = Literal[
     "skill.invoked",
     "skill.completed",
     "skill.failed",
+    # Token 用量（每轮 LLM 返回后 emit）：
+    # payload={"prompt_tokens": int, "completion_tokens": int, "total_tokens": int}
+    "usage",
 ]
 
 
