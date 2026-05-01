@@ -181,8 +181,9 @@ async def _dispatch_frame(
     kind = frame.kind
     if kind == "user.input":
         # 后台跑 run_once；不阻塞读循环
+        effort = getattr(frame, "reasoning_effort", None)
         task = asyncio.create_task(
-            _run_once_safely(cell, frame.text, websocket),
+            _run_once_safely(cell, frame.text, websocket, reasoning_effort=effort),
             name=f"web-run-once-{thread_id}",
         )
         # 把 task 暂存到 cell（便于 evict 时 cancel）
@@ -207,10 +208,16 @@ async def _dispatch_frame(
         await _send_error_frame(websocket, "internal", f"unknown frame kind: {kind}")
 
 
-async def _run_once_safely(cell: Any, text: str, websocket: WebSocket) -> None:
+async def _run_once_safely(
+    cell: Any,
+    text: str,
+    websocket: WebSocket,
+    *,
+    reasoning_effort: str | None = None,
+) -> None:
     """在后台跑 ``cell.bridge.run_once``；异常推 ``error`` 帧不沉默死掉。"""
     try:
-        await cell.bridge.run_once(text)
+        await cell.bridge.run_once(text, reasoning_effort=reasoning_effort)
     except asyncio.CancelledError:
         raise
     except Exception as exc:

@@ -31,10 +31,10 @@ THREAD_ID = "thread-aaaaaaaaaaaa"
 
 class FakeBridge:
     def __init__(self) -> None:
-        self.run_once_calls: list[str] = []
+        self.run_once_calls: list[tuple[str, str | None]] = []
 
-    async def run_once(self, text: str) -> None:
-        self.run_once_calls.append(text)
+    async def run_once(self, text: str, *, reasoning_effort: str | None = None) -> None:
+        self.run_once_calls.append((text, reasoning_effort))
 
 
 class FakeAdapter:
@@ -225,7 +225,55 @@ def test_ws_thread_not_found_closes(tmp_path: Path) -> None:
         client.__exit__(None, None, None)
 
 
-def test_ws_user_input_triggers_run_once(tmp_path: Path) -> None:
+def test_ws_user_input_with_reasoning_effort(tmp_path: Path) -> None:
+    """user.input 帧 reasoning_effort 字段透传到 bridge.run_once。"""
+    tm = WSFakeTM()
+    client = _login(tmp_path, tm)
+    try:
+        with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
+            _ = ws.receive_json()  # history
+            ws.send_json(
+                {
+                    "kind": "user.input",
+                    "text": "think hard",
+                    "request_id": "req-reasoning",
+                    "reasoning_effort": "high",
+                }
+            )
+            import time
+
+            time.sleep(0.2)
+
+        cell = tm.get_cell(THREAD_ID)
+        assert cell is not None
+        assert ("think hard", "high") in cell.bridge.run_once_calls
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_ws_user_input_without_reasoning_effort(tmp_path: Path) -> None:
+    """不带 reasoning_effort 的 user.input 帧不传 effort（None）。"""
+    tm = WSFakeTM()
+    client = _login(tmp_path, tm)
+    try:
+        with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
+            _ = ws.receive_json()  # history
+            ws.send_json(
+                {
+                    "kind": "user.input",
+                    "text": "normal",
+                    "request_id": "req-normal",
+                }
+            )
+            import time
+
+            time.sleep(0.1)
+
+        cell = tm.get_cell(THREAD_ID)
+        assert cell is not None
+        assert ("normal", None) in cell.bridge.run_once_calls
+    finally:
+        client.__exit__(None, None, None)
     tm = WSFakeTM()
     client = _login(tmp_path, tm)
     try:

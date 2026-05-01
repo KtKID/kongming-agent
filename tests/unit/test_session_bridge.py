@@ -71,7 +71,13 @@ class _StubRuntime:
         self._run_error = run_error
         self.calls: list[tuple[str, str]] = []
 
-    async def run(self, user_input: str, *, session_id: str | None = None) -> Result:
+    async def run(
+        self,
+        user_input: str,
+        *,
+        session_id: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> Result:
         self.calls.append((user_input, session_id or ""))
         if self._run_error is not None:
             err = self._run_error

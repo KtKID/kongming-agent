@@ -69,13 +69,22 @@ class SessionBridge:
     # 单轮 / 交互循环
     # ------------------------------------------------------------------
 
-    async def run_once(self, user_input: str) -> Result:
+    async def run_once(
+        self,
+        user_input: str,
+        *,
+        reasoning_effort: str | None = None,
+    ) -> Result:
         """执行一次 run，把结果写回 adapter。
 
         不抛异常——runner 会把所有异常收口到 :class:`core.result.Result`
         的 ``error`` 字段，这里只做结果 → 文本的翻译。
         """
-        result = await self._runtime.run(user_input, session_id=self._session_id)
+        result = await self._runtime.run(
+            user_input,
+            session_id=self._session_id,
+            reasoning_effort=reasoning_effort,
+        )
 
         final = result.final_message
         if self._echo_final_content and final is not None and final.content:

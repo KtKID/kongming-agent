@@ -68,6 +68,7 @@ class UserInputFrame(_C2SFrameBase):
     kind: Literal["user.input"] = "user.input"
     text: str
     request_id: str
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
 
 
 # ---------------------------------------------------------------------------

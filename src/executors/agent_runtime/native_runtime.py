@@ -356,13 +356,34 @@ class NativeRuntime:
         user_input: str,
         *,
         session_id: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> Result:
         """执行一次"输入 → 结果"主链路。
 
         - 同一 ``session_id`` 反复调用会落到同一个 Session 实例上（多轮对话）。
         - ``session_id`` 为 ``None`` 时走匿名新 session。
+        - ``reasoning_effort`` 非 None 时临时覆盖 model_config.reasoning_effort，
+          本次 run 结束后恢复原值。Provider 每次调用都读 model_config，无需改动。
         """
         session = self._get_or_create_session(session_id)
+
+        if reasoning_effort is not None:
+            saved = self._config.model.reasoning_effort
+            self._config.model.reasoning_effort = reasoning_effort  # type: ignore[assignment]
+            try:
+                return await self._runner.run(
+                    user_input,
+                    session=session,
+                    agent_spec=self._agent_spec,
+                    llm=self._llm,
+                    tools=self._tools,
+                    approval=self._approval,
+                    max_turns=self._config.runner.max_turns,
+                    enabled_tools=self._resolve_enabled_tools(),
+                )
+            finally:
+                self._config.model.reasoning_effort = saved
+
         return await self._runner.run(
             user_input,
             session=session,
