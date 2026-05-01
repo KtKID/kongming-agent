@@ -41,6 +41,10 @@ dependencies = [
     "bcrypt>=4.0",
     "passlib[bcrypt]>=1.7",
     "itsdangerous>=2.2",
+    # claude-sidecar v0.1：用于驱动 Claude Code，由 src/claude_sidecar 子系统调用。
+    # 版本严格锁定到 0.1.72（dev-pipeline/tasks/claude-sidecar-v0.1/smoke-report.md
+    # 实测的版本）。SDK 0.1.x 字段会随版本变动，升级前必须重跑 smoke 验证。
+    "claude-agent-sdk==0.1.72",
 ]
 
 [project.optional-dependencies]
