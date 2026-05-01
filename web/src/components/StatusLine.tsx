@@ -1,5 +1,6 @@
-import { ArrowUp, ArrowDown, Sigma } from "lucide-react";
+import { ArrowUp, ArrowDown, Sigma, Brain } from "lucide-react";
 import { useChatStore } from "@/stores/chat";
+import type { ReasoningEffort } from "@/components/Composer";
 
 function fmt(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -26,6 +27,7 @@ function Stat({
 
 interface StatusLineProps {
   threadId: string | undefined;
+  reasoningEffort?: ReasoningEffort | null;
 }
 
 /**
@@ -34,16 +36,25 @@ interface StatusLineProps {
  * 当前 section：
  * - token 用量（prompt / completion / 累计）
  */
-export function StatusLine({ threadId }: StatusLineProps) {
+export function StatusLine({ threadId, reasoningEffort }: StatusLineProps) {
   const usage = useChatStore((s) =>
     threadId ? (s.usageByThread[threadId] ?? null) : null,
   );
 
   return (
-    <div className="mx-auto flex max-w-3xl items-center justify-end gap-3 px-0 py-1 text-[11px] tabular-nums text-muted-foreground">
+    <div className="mx-auto flex max-w-3xl items-center justify-between px-0 py-1 text-[11px] tabular-nums text-muted-foreground">
+      {reasoningEffort && (
+        <span className="inline-flex items-center gap-1 text-primary">
+          <Brain className="h-3 w-3" />
+          深度思考 {reasoningEffort === "low" ? "低" : reasoningEffort === "medium" ? "中" : "高"}
+        </span>
+      )}
+      {!reasoningEffort && <span />}
+      <span className="inline-flex items-center gap-3">
       <Stat icon={ArrowUp} label="Prompt tokens" value={fmt(usage?.lastPrompt ?? 0)} />
       <Stat icon={ArrowDown} label="Completion tokens" value={fmt(usage?.lastCompletion ?? 0)} />
       <Stat icon={Sigma} label="累计 tokens" value={fmt(usage?.cumulativeTotal ?? 0)} />
+      </span>
     </div>
   );
 }

@@ -150,7 +150,7 @@ export function Composer({
             </Button>
           </div>
         </div>
-        <StatusLine threadId={threadId} />
+        <StatusLine threadId={threadId} reasoningEffort={reasoningEffort} />
       </div>
     </div>
   );
