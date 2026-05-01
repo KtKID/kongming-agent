@@ -207,6 +207,78 @@ export interface ThreadMetadataDTO {
   schema_version?: 1;
 }
 
+/**
+ * 白板中的单张卡片。
+ *
+ * 一个卡片对应一个 markdown 文件；布局和内容一并由 `GET /api/whiteboard`
+ * 返回，避免前端首屏多请求。
+ */
+export interface WhiteboardCardDTO {
+  id: string;
+  title: string;
+  category: string;
+  filename: string;
+  content: string;
+  x: number;
+  y: number;
+  height: number;
+  collapsed: boolean;
+  z_index: number;
+  updated_at: number;
+}
+
+/**
+ * workspace 级白板快照。
+ */
+export interface WhiteboardDTO {
+  title: string;
+  cards: WhiteboardCardDTO[];
+  schema_version?: 1;
+}
+
+/**
+ * 新建白板卡片请求体。
+ */
+export interface CreateWhiteboardCardRequest {
+  title: string;
+  category: string;
+  content: string;
+  x: number;
+  y: number;
+  height: number;
+  collapsed?: boolean;
+}
+
+/**
+ * 更新单张白板卡片请求体。
+ */
+export interface UpdateWhiteboardCardRequest {
+  content: string;
+  title?: string | null;
+  category?: string | null;
+  expected_updated_at?: number | null;
+}
+
+/**
+ * 单张卡片的布局数据。
+ */
+export interface WhiteboardCardLayoutDTO {
+  id: string;
+  x: number;
+  y: number;
+  height: number;
+  collapsed: boolean;
+  z_index: number;
+}
+
+/**
+ * 白板布局更新请求体。
+ */
+export interface UpdateWhiteboardLayoutRequest {
+  title?: string | null;
+  cards: WhiteboardCardLayoutDTO[];
+}
+
 // ============================================================================
 // ===== C2S 帧（浏览器 → 后端，3 个；对应 Python ws_frames.py）=====
 //
