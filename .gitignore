@@ -1,6 +1,10 @@
 # 参考项目源码（用于借鉴，不纳入版本控制）
 other/
 
+# 开发期 plugin 软链（如 plugins/client/XSpace 是指向另一个 git 仓库的 symlink），
+# commit 进来会让其他人 clone 时破链 —— 永久排除。
+plugins/
+
 # macOS
 .DS_Store
 
@@ -8,9 +12,6 @@ other/
 .rtk/
 .serena/
 .kongming/
-
-# auto-publish 日志（公开 worktree 写入此目录，不入版本控制）
-error/
 
 # Python
 __pycache__/
