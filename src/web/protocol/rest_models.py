@@ -13,6 +13,7 @@
 - :class:`CellSummaryDTO`：``GET /api/manage/cells`` 返回元素，管理页用。
 - :class:`ErrorResponseDTO`：REST 端通用错误响应（与 WS ``error`` 帧不同——
   WS 帧带 ``timestamp_ms``，REST 错误是请求-响应一对一，无需时序戳）。
+- 白板 DTO：workspace 级 ``GET /api/whiteboard`` 快照与 card/layout 更新请求体。
 
 所有 DTO 继承 :class:`web.protocol._base._FrameBase`（``frozen=True``、
 ``extra='forbid'``），从而：
@@ -148,13 +149,85 @@ class ThreadMetadataDTO(_FrameBase):
     schema_version: Literal[1] = 1
 
 
+class WhiteboardCardDTO(_FrameBase):
+    """白板卡片完整 DTO。"""
+
+    id: Annotated[str, Field(pattern=r"^card-[a-f0-9]{12}$")]
+    title: Annotated[str, Field(min_length=1, max_length=200)]
+    category: Annotated[str, Field(max_length=100)] = ""
+    x: Annotated[int, Field(ge=0)]
+    y: Annotated[int, Field(ge=0)]
+    height: Annotated[int, Field(ge=120, le=4000)]
+    collapsed: bool
+    z_index: Annotated[int, Field(ge=0)]
+    filename: Annotated[
+        str,
+        Field(pattern=r"^[a-z0-9][a-z0-9-]{0,120}-[a-f0-9]{12}\.md$"),
+    ]
+    content: str
+    updated_at: float
+
+
+class WhiteboardDTO(_FrameBase):
+    """Workspace 级白板聚合快照。"""
+
+    title: Annotated[str, Field(min_length=1, max_length=200)]
+    cards: list[WhiteboardCardDTO] = Field(default_factory=list)
+    schema_version: Literal[1] = 1
+
+
+class CreateWhiteboardCardRequest(_FrameBase):
+    """创建白板卡片请求体。"""
+
+    title: Annotated[str, Field(min_length=1, max_length=200)] = "Untitled"
+    category: Annotated[str, Field(max_length=100)] = ""
+    content: str = ""
+    x: Annotated[int, Field(ge=0)] = 24
+    y: Annotated[int, Field(ge=0)] = 24
+    height: Annotated[int, Field(ge=120, le=4000)] = 280
+    collapsed: bool = False
+
+
+class UpdateWhiteboardCardRequest(_FrameBase):
+    """更新白板卡片正文与基础属性。"""
+
+    content: str
+    expected_updated_at: float | None = None
+    title: Annotated[str, Field(min_length=1, max_length=200)] | None = None
+    category: Annotated[str, Field(max_length=100)] | None = None
+
+
+class WhiteboardCardLayoutDTO(_FrameBase):
+    """单张卡片的布局更新 DTO。"""
+
+    id: Annotated[str, Field(pattern=r"^card-[a-f0-9]{12}$")]
+    x: Annotated[int, Field(ge=0)]
+    y: Annotated[int, Field(ge=0)]
+    height: Annotated[int, Field(ge=120, le=4000)]
+    collapsed: bool
+    z_index: Annotated[int, Field(ge=0)]
+
+
+class UpdateWhiteboardLayoutRequest(_FrameBase):
+    """更新白板布局请求体。"""
+
+    title: Annotated[str, Field(min_length=1, max_length=200)] | None = None
+    cards: list[WhiteboardCardLayoutDTO] = Field(default_factory=list)
+
+
 __all__: list[str] = [
     "CellSummaryDTO",
     "CreateThreadRequest",
+    "CreateWhiteboardCardRequest",
     "ErrorResponseDTO",
     "HistoryMessageDTO",
     "LLMPresetDTO",
     "LoginRequest",
     "RenameThreadRequest",
     "ThreadMetadataDTO",
+    "UpdateWhiteboardCardRequest",
+    "UpdateWhiteboardLayoutRequest",
+    "WhiteboardCardDTO",
+    "WhiteboardCardLayoutDTO",
+    "WhiteboardDTO",
 ]

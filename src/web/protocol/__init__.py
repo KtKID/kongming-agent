@@ -70,6 +70,7 @@ from web.protocol._base import (
 from web.protocol.rest_models import (
     CellSummaryDTO,
     CreateThreadRequest,
+    CreateWhiteboardCardRequest,
     ErrorResponseDTO,
     HistoryMessageDTO,
     LLMPresetDTO,
@@ -77,6 +78,11 @@ from web.protocol.rest_models import (
     RenameThreadRequest,
     ResetPasswordRequest,
     ThreadMetadataDTO,
+    UpdateWhiteboardCardRequest,
+    UpdateWhiteboardLayoutRequest,
+    WhiteboardCardDTO,
+    WhiteboardCardLayoutDTO,
+    WhiteboardDTO,
 )
 from web.protocol.ws_frames import (
     ApprovalAckFrame,
@@ -135,6 +141,7 @@ __all__: list[str] = [
     # REST DTO
     "CellSummaryDTO",
     "CreateThreadRequest",
+    "CreateWhiteboardCardRequest",
     "ErrorResponseDTO",
     "HistoryMessageDTO",
     "LLMPresetDTO",
@@ -142,4 +149,9 @@ __all__: list[str] = [
     "RenameThreadRequest",
     "ResetPasswordRequest",
     "ThreadMetadataDTO",
+    "UpdateWhiteboardCardRequest",
+    "UpdateWhiteboardLayoutRequest",
+    "WhiteboardCardDTO",
+    "WhiteboardCardLayoutDTO",
+    "WhiteboardDTO",
 ]

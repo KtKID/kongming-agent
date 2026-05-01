@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
@@ -160,6 +161,7 @@ def create_app(
     app.state.rate_limiter = rate_limiter
     app.state.thread_manager = thread_manager
     app.state.kongming_home = home
+    app.state.workspace_root = Path.cwd()
 
     # 6. middleware（顺序：CSRF → Auth；先注册的最外层）
     app.add_middleware(AuthMiddleware, allow_docs=cfg.web.dev_mode)
@@ -173,11 +175,13 @@ def create_app(
     from web.routers.manage import router as manage_router
     from web.routers.presets import router as presets_router
     from web.routers.threads import router as threads_router
+    from web.routers.whiteboard import router as whiteboard_router
 
     app.include_router(auth_router)
     app.include_router(threads_router)
     app.include_router(presets_router)
     app.include_router(manage_router)
+    app.include_router(whiteboard_router)
 
     # 9. WS endpoint
     from web.ws import register_ws_routes
