@@ -113,7 +113,7 @@ def test_session_secret_corrupt_file_regenerates(monkeypatch, tmp_path: Path) ->
 
 
 def test_password_hash_env_writes_file_and_clears_env(monkeypatch, tmp_path: Path) -> None:
-    """env 提供明文 → bcrypt 落盘 + 清 env。"""
+    """缺文件时 env 提供明文 → bcrypt 落盘 + 清 env。"""
     monkeypatch.setenv(ENV_WEB_PASSWORD, "test-password-123")
 
     h = load_or_init_password_hash(tmp_path)
@@ -140,6 +140,21 @@ def test_password_hash_file_only(monkeypatch, tmp_path: Path) -> None:
     h = load_or_init_password_hash(tmp_path)
 
     assert h == h_orig
+
+
+def test_password_hash_existing_file_beats_env(monkeypatch, tmp_path: Path) -> None:
+    """已有 password.hash 时保持文件为真源，忽略残留 env。"""
+    h_orig = hash_password("persisted-password")
+    web_dir = tmp_path / "web"
+    web_dir.mkdir(parents=True)
+    (web_dir / PASSWORD_HASH_FILENAME).write_text(h_orig, encoding="utf-8")
+    monkeypatch.setenv(ENV_WEB_PASSWORD, "stale-env-password")
+
+    h = load_or_init_password_hash(tmp_path)
+
+    assert h == h_orig
+    assert verify_password("persisted-password", h) is True
+    assert verify_password("stale-env-password", h) is False
 
 
 def test_password_hash_missing_raises(monkeypatch, tmp_path: Path) -> None:

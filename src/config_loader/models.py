@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
@@ -568,16 +569,38 @@ class EvolutionMemoryConfig(BaseModel):
     view_max_chars: int = 8000
 
 
+class EvolutionLearningConfig(BaseModel):
+    """Self evolution learning 配置。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    mode: Literal["child_agent"] = "child_agent"
+    background: bool = True
+    model_name: str | None = None
+    reasoning_effort: str | None = None
+    every_n_runs: int = Field(default=5, ge=1)
+    min_user_turns: int = Field(default=3, ge=1)
+    max_history_messages: int = Field(default=20, ge=1)
+    max_nutrients: int = Field(default=2, ge=1)
+    nutrient_confidence_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
+    review_timeout_seconds: float = Field(default=10.0, gt=0)
+    drain_on_close_seconds: float = Field(default=3.0, gt=0)
+    root_path: str = ".kongming/evolution"
+
+
 class EvolutionConfig(BaseModel):
     """Self Evolution 配置。
 
     Attributes:
         memory: memory 子模块配置。
+        learning: review / nutrient 存储子模块配置。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     memory: EvolutionMemoryConfig = Field(default_factory=EvolutionMemoryConfig)
+    learning: EvolutionLearningConfig = Field(default_factory=EvolutionLearningConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -756,6 +779,47 @@ class SafetyConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Scheduler / cron module (v0.2)
+# ---------------------------------------------------------------------------
+
+
+class SchedulerConfig(BaseModel):
+    """cron 模块运行配置（v0.2 引入）。
+
+    v0.2 替换 v0.1 的 CLI/Web 主入口为 LLM Tool（``schedule_tool``）；本配置
+    控制是否启用、ticker 扫描间隔、并发上限和任务 GC 策略。
+
+    Attributes:
+        enabled: 是否启用 cron 模块。``False`` 时 registry 不注册
+            ``schedule_tool`` 也不在 cli/web 入口装配 ticker。
+        home: cron 数据根目录（``tasks.json`` / ``audit.jsonl`` 落盘位置）。
+            ``None`` 时由调用方走 ``get_kongming_home() / "cron"``。
+        interval: ticker 扫描间隔（秒），下限 ``0.1s`` 防误配把 CPU 烧穿。
+        max_inflight: 同时并发跑的 cron 任务上限，由 ``asyncio.Semaphore`` 在
+            ticker 内限流。下限 ``1``。
+        max_task_age_seconds: 任务多久没跑就被 GC 掉；``None`` 表示永不 GC。
+        default_timezone: v0.3 新增。LLM 通过 ``schedule_tool`` 创建任务时，
+            若没有显式指定 timezone，用此默认值（IANA timezone name，如
+            ``"Asia/Shanghai"``）。**应当反映用户当前的 wall-clock 时区**，
+            避免 cron 表达式被错误地按 UTC 解释。默认 ``"UTC"`` 是保守选择，
+            用户应在 ``config/setting.yaml`` 中按本地时区覆盖。
+        default_delivery_channel: v0.3 新增。LLM 通过 ``schedule_tool`` 创建
+            任务时默认填的 delivery channel；``"web"`` 适合主要在浏览器使用的
+            场景，``"cli"`` 适合主要在终端使用的场景。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    home: Path | None = None
+    interval: float = Field(default=1.0, ge=0.1)
+    max_inflight: int = Field(default=8, ge=1)
+    max_task_age_seconds: int | None = None
+    default_timezone: str = "UTC"
+    default_delivery_channel: Literal["web", "cli"] = "web"
+
+
+# ---------------------------------------------------------------------------
 # Web 宿主壳（v0.1.5+）
 # ---------------------------------------------------------------------------
 
@@ -875,6 +939,7 @@ class Config(BaseModel):
     evolution: EvolutionConfig = Field(default_factory=EvolutionConfig)
     stream: StreamConfig = Field(default_factory=StreamConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
+    scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     web: WebConfig = Field(default_factory=WebConfig)
 
 
@@ -898,6 +963,7 @@ __all__ = [
     "SafetyHardDenyConfig",
     "SafetySensitivePathConfig",
     "SafetySkillCallConfig",
+    "SchedulerConfig",
     "SessionConfig",
     "ShellToolConfig",
     "StreamConfig",

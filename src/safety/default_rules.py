@@ -353,10 +353,56 @@ DEFAULT_ALLOW_TOOLS_SILENT: tuple[str, ...] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# consent-then-trust 工具清单 —— 文档型常量（v0.1.6 memory / v0.2 schedule）
+# ---------------------------------------------------------------------------
+#
+# 列出这些 tool 默认走"首次 consent → 后续 trust"模式：
+#
+# 1. ConsentResolver._classify 没有为这些 tool_name 写专用分支 → 命中
+#    fallback ``unknown-tool-default`` → severity="standard" → 调
+#    InteractiveApproval 拿用户决策。
+# 2. 用户点击"本 session 同意"后，:class:`SafetyGatedApproval` 写
+#    ``Grant(capability=f"tool:{tool_name}", matcher="*", scope=session)``。
+# 3. 同 session 后续调用：:class:`TrustResolver` 的 ``tool:<name>`` 通配查询
+#    （``trust.py`` ``_lookup_grant`` 第 2 步）命中 → 返回
+#    ``decision_class=silent_allow`` + ``decision_source=session``。
+#
+# 本常量**不被任何 guard 直接消费** —— 该语义由 ConsentResolver fallback +
+# SafetyGatedApproval._maybe_write_session_grant + TrustResolver 通配三件
+# 套合作实现。维护此清单是为了：
+#
+# - 给 import-linter / 装配审计提供"哪些工具确实走这条 lane"的真源
+# - 让新增此类工具时（如 v0.2 ``schedule``）有一处可登记的锚点
+# - 测试通过 ``DEFAULT_CONSENT_THEN_TRUST_TOOLS`` 锁定行为不被无声破坏
+#
+# 注：``read_file`` / ``list_dir`` 不在此清单——它们走 ``DEFAULT_ALLOW_TOOLS_SILENT``
+# intrinsic 静默放行。``write_file`` / ``run_shell`` 不在此清单——它们各有专用
+# severity 分流（sensitive_paths / approval_required_commands）。
+
+DEFAULT_CONSENT_THEN_TRUST_TOOLS: tuple[str, ...] = (
+    "memory",
+    "schedule",
+)
+"""默认走 "首次 standard consent → 后续 session-scoped trust" 模式的工具名集合。
+
+每个 tool_name 对应 capability ``tool:<tool_name>``：
+
+- ``memory``：v0.1.3 引入；MemoryTool 写入需用户首次确认，授予后本 session 内静默。
+- ``schedule``：v0.2 引入（agent-cron-module-v0.2 模块 6）；ScheduleTool 创建 / 暂停 /
+  删除 / run_now 等 action 走同一 capability，首次确认后本 session 静默。
+  ``cron run`` 内 ``schedule_tool`` 会被装配层裁掉，这里的规则在 cron run 上下文
+  不会被命中——属于双重保护中的 default-rule 一侧。
+
+新增此类工具时在此追加 tool_name 即可；不需要改 ConsentResolver / TrustResolver。
+"""
+
+
 __all__ = [
     "DEFAULT_ALLOW_TOOLS_SILENT",
     "DEFAULT_ALLOW_WRITES",
     "DEFAULT_APPROVAL_REQUIRED_COMMANDS",
+    "DEFAULT_CONSENT_THEN_TRUST_TOOLS",
     "DEFAULT_HARD_DENY_COMMANDS",
     "DEFAULT_SENSITIVE_PATHS",
     "DEFAULT_SKILL_CALL_RULES",

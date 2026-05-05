@@ -380,3 +380,201 @@ def test_native_runtime_dispatches_openai_provider_by_default() -> None:
     )
     runtime = NativeRuntime.build(cfg)
     assert isinstance(runtime._llm, OpenAIResponsesProvider)
+
+
+# ---------------------------------------------------------------------------
+# stream() e2e（httpx.MockTransport 伪造 SSE 字节流）
+# ---------------------------------------------------------------------------
+
+
+def _make_anthropic_sse_bytes(events: list[tuple[str, dict[str, Any]]]) -> bytes:
+    """把 (event_name, data_dict) 列表序列化为 Anthropic SSE 线传字节流。"""
+    import json as _json
+
+    parts: list[str] = []
+    for name, data in events:
+        parts.append(f"event: {name}\n")
+        parts.append(f"data: {_json.dumps(data)}\n\n")
+    return "".join(parts).encode("utf-8")
+
+
+def _build_mock_transport(sse_bytes: bytes, *, status_code: int = 200) -> Any:
+    """构造 httpx.MockTransport，固定返回给定 SSE 字节流。"""
+    import httpx
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code,
+            headers={"content-type": "text/event-stream"},
+            content=sse_bytes,
+        )
+
+    return httpx.MockTransport(_handler)
+
+
+@pytest.mark.unit
+async def test_stream_basic_text_block_e2e() -> None:
+    """provider.stream() 端到端：MockTransport 喂入 SSE 字节流，收齐 LLMStreamChunk 序列。"""
+    import httpx
+
+    events: list[tuple[str, dict[str, Any]]] = [
+        (
+            "message_start",
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_e2e",
+                    "model": "claude-test",
+                    "usage": {"input_tokens": 10, "output_tokens": 0},
+                },
+            },
+        ),
+        (
+            "content_block_start",
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
+        ),
+        (
+            "content_block_delta",
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "你"},
+            },
+        ),
+        (
+            "content_block_delta",
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "好"},
+            },
+        ),
+        ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+        (
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 2},
+            },
+        ),
+        ("message_stop", {"type": "message_stop"}),
+    ]
+    sse = _make_anthropic_sse_bytes(events)
+    transport = _build_mock_transport(sse)
+
+    provider = _make_provider()
+    # 注入 mock transport 作为 client 的运输层
+    provider._client = httpx.AsyncClient(transport=transport)
+
+    request = LLMRequest(model="claude-sonnet-4-5", messages=(Message.user("hi"),))
+    chunks = [c async for c in provider.stream(request)]
+
+    # 收尾必为 message.done
+    assert chunks[-1].kind == "message.done"
+    assert chunks[-1].message is not None
+    assert chunks[-1].message.content == "你好"
+    assert chunks[-1].finish_reason == "stop"
+    assert chunks[-1].usage["prompt_tokens"] == 10
+    assert chunks[-1].usage["completion_tokens"] == 2
+
+    await provider.aclose()
+
+
+@pytest.mark.unit
+async def test_stream_http_error_raises_provider_error() -> None:
+    """4xx HTTP 状态码 → ProviderError，details 包含 status_code / url / model。"""
+    import httpx
+
+    from core.errors import ProviderError
+
+    transport = _build_mock_transport(b"upstream is down", status_code=503)
+    provider = _make_provider()
+    provider._client = httpx.AsyncClient(transport=transport)
+
+    request = LLMRequest(model="claude-sonnet-4-5", messages=(Message.user("hi"),))
+    with pytest.raises(ProviderError) as excinfo:
+        async for _ in provider.stream(request):
+            pass
+    assert excinfo.value.details is not None
+    assert excinfo.value.details.get("status_code") == 503
+    assert "claude-sonnet-4-5" in excinfo.value.details.get("model", "")
+
+    await provider.aclose()
+
+
+@pytest.mark.unit
+async def test_stream_tool_use_block_e2e() -> None:
+    """tool_use block：start/arguments.delta/end 三元组顺序 + 流末 ToolCall 完整。"""
+    import httpx
+
+    events: list[tuple[str, dict[str, Any]]] = [
+        (
+            "message_start",
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_tu",
+                    "model": "claude-test",
+                    "usage": {"input_tokens": 5, "output_tokens": 0},
+                },
+            },
+        ),
+        (
+            "content_block_start",
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "tool_use", "id": "tu_1", "name": "Echo", "input": {}},
+            },
+        ),
+        (
+            "content_block_delta",
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": '{"msg":'},
+            },
+        ),
+        (
+            "content_block_delta",
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": '"hi"}'},
+            },
+        ),
+        ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+        (
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use"},
+                "usage": {"output_tokens": 4},
+            },
+        ),
+        ("message_stop", {"type": "message_stop"}),
+    ]
+    sse = _make_anthropic_sse_bytes(events)
+    provider = _make_provider()
+    provider._client = httpx.AsyncClient(transport=_build_mock_transport(sse))
+
+    request = LLMRequest(model="claude-sonnet-4-5", messages=(Message.user("call tool"),))
+    chunks = [c async for c in provider.stream(request)]
+
+    kinds = [c.kind for c in chunks]
+    # 序列约束：tool_call.start 在 arguments.delta 之前；tool_call.end 在最后 delta 之后
+    assert "tool_call.start" in kinds
+    assert "tool_call.end" in kinds
+    sidx = kinds.index("tool_call.start")
+    eidx = kinds.index("tool_call.end")
+    args_indices = [i for i, k in enumerate(kinds) if k == "tool_call.arguments.delta"]
+    assert all(sidx < a < eidx for a in args_indices)
+
+    last = chunks[-1]
+    assert last.kind == "message.done"
+    assert last.finish_reason == "tool_calls"
+    assert last.message is not None and last.message.tool_calls is not None
+    assert last.message.tool_calls[0].arguments == {"msg": "hi"}
+
+    await provider.aclose()

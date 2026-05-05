@@ -41,11 +41,14 @@ from typing import TYPE_CHECKING, Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
+from evolution.state_store import EvolutionStateStore
+from evolution.store import EvolutionStore, resolve_evolution_root
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 from web.protocol import (
     ErrorFrame,
     HistoryMessageDTO,
     PongFrame,
+    SystemNoticeFrame,
     ThreadHistoryFrame,
     WSFrameC2SAdapter,
 )
@@ -119,6 +122,7 @@ async def _thread_ws_handler(websocket: WebSocket, thread_id: str) -> None:
     # 5. 推 thread.history
     try:
         await _send_history_frame(websocket, cell)
+        await _send_evolution_replay_frames(websocket, cell)
     except Exception:
         logger.exception("send history frame failed for thread_id=%s", thread_id)
         # 不关连接，只是 history 失败 —— 让用户继续对话
@@ -127,12 +131,12 @@ async def _thread_ws_handler(websocket: WebSocket, thread_id: str) -> None:
     try:
         await _receive_loop(websocket, cell, tm, thread_id)
     finally:
-        # cleanup：调 adapter.close 把 pending approval 置 False；不主动 evict
-        # cell（让 idle loop 自然回收，浏览器可能马上重连）
-        close_call = getattr(cell.adapter, "close", None)
-        if callable(close_call):
+        # cleanup：只注销当前 ws；cell / adapter / runtime 生命周期继续由
+        # ThreadManager 管，避免同一 thread 的其它连接被一条断连带走。
+        detach_call = getattr(cell, "detach_ws", None)
+        if callable(detach_call):
             with contextlib.suppress(Exception):
-                await close_call()
+                detach_call(websocket)
 
 
 async def _receive_loop(
@@ -216,8 +220,20 @@ async def _run_once_safely(
     reasoning_effort: str | None = None,
 ) -> None:
     """在后台跑 ``cell.bridge.run_once``；异常推 ``error`` 帧不沉默死掉。"""
+    tm: ThreadManagerProtocol = websocket.app.state.thread_manager
+    thread_id = str(cell.thread_id)
     try:
-        await cell.bridge.run_once(text, reasoning_effort=reasoning_effort)
+        result = await cell.bridge.run_once(text, reasoning_effort=reasoning_effort)
+        if hasattr(result, "run_id"):
+            usage = result.metadata.get("usage")
+            if isinstance(usage, dict) and usage:
+                with contextlib.suppress(Exception):
+                    await tm.add_thread_usage(
+                        thread_id,
+                        prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+                        completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+                        total_tokens=int(usage.get("total_tokens", 0) or 0),
+                    )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -327,6 +343,36 @@ async def _send_history_frame(websocket: WebSocket, cell: Any) -> None:
 
     frame = ThreadHistoryFrame(messages=messages, timestamp_ms=_now_ms())
     await websocket.send_json(frame.model_dump())
+
+
+async def _send_evolution_replay_frames(websocket: WebSocket, cell: Any) -> None:
+    cfg = getattr(websocket.app.state, "config", None)
+    if cfg is None:
+        return
+    if getattr(cfg.evolution.learning, "enabled", False) is not True:
+        return
+    raw_root = getattr(cfg.evolution.learning, "root_path", None)
+    if not isinstance(raw_root, str) or not raw_root.strip():
+        return
+    root_dir = resolve_evolution_root(raw_root)
+    store = EvolutionStore(
+        root_dir=root_dir,
+        state_store=EvolutionStateStore(root_dir),
+    )
+    snapshots = await store.list_notice_snapshots_for_session(str(cell.thread_id))
+    for snapshot in snapshots:
+        frame = SystemNoticeFrame(
+            notice_key="self_evolution.review",
+            source="self_evolution",
+            status=snapshot.status,
+            title=snapshot.title,
+            message=snapshot.message,
+            details=dict(snapshot.details),
+            icon=snapshot.icon,
+            run_id=snapshot.run_id,
+            timestamp_ms=snapshot.reviewed_at_ms,
+        )
+        await websocket.send_json(frame.model_dump())
 
 
 def _extract_field(obj: Any, name: str, *, default: Any) -> Any:

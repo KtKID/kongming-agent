@@ -3,7 +3,7 @@
 每个 thread 在 ``.kongming/web/threads/<thread_id>/metadata.json`` 落一份
 :class:`ThreadMetadata` 文件。本文件提供：
 
-- :class:`ThreadMetadata` Pydantic 模型（v0.1.5 schema_version=1）
+- :class:`ThreadMetadata` Pydantic 模型（当前 schema_version=4，v0.2.1 起）
 - :func:`thread_metadata_path` —— 路径常量
 - :func:`write_thread_metadata` —— 原子写入（``tmp.replace(path)``）
 - :func:`read_thread_metadata` —— 读 + 校验；schema_version 不匹配 / JSON
@@ -36,9 +36,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 logger = logging.getLogger(__name__)
 
 
-# v0.1.5 schema 版本；将来字段不兼容变化时 bump 此值，旧文件读入后
-# 由迁移层升级（v0.1.5 不实现迁移，只做兜底拒绝）。
-THREAD_METADATA_SCHEMA_VERSION = 1
+# v0.2.2 schema 版本：bump 到 5 以支持 codex 接入
+# 新增 ``codex_thread_id``（codex CLI 的 UUIDv7 thread id）；
+# ``backend_kind`` 扩展 ``"codex"`` 枚举值。
+# 老 v4 文件读入时补 ``codex_thread_id=""`` 升到 v5。
+THREAD_METADATA_SCHEMA_VERSION = 5
 
 
 class ThreadMetadata(BaseModel):
@@ -50,22 +52,44 @@ class ThreadMetadata(BaseModel):
         id: thread ID，格式 ``thread-<hex12>``。与 session_id 同值。
         name: 用户给 thread 起的名（最长 200 字符）。
         preset_id: 创建时选的 LLM preset ID（来自
-            :class:`config_loader.models.LLMPresetConfig`）。
+            :class:`config_loader.models.LLMPresetConfig`）。``backend_kind="claude_code"``
+            时允许空字符串占位（claude_code 由 SDK 内部选 model，不需要 preset）。
+        backend_kind: 后端类型；``"generic_chat"`` 表示走 InputAssembler + LLM provider 的
+            原有路径；``"claude_code"`` 表示走 ``/ws/claude-code``+ Claude Agent SDK。
+            v0.1.6 新增；老 v1 文件兼容默认 ``"generic_chat"``。
+        sdk_session_id: thread 关联的 SDK session UUID。v0.2.0 新增（claude-code-history-resume）；
+            空字符串表示**未绑定任何 SDK session**（首次对话前 / 仅 generic_chat 后端）。
+            一旦绑定即记录 SDK 侧分配的 session UUID，用于下次 resume 历史。
+        cwd: claude_code 后端运行时的工作目录绝对路径。v0.2.0 新增；用于定位
+            ``~/.claude/projects/<encoded-cwd>/<sdk_session_id>.jsonl`` 历史文件。
+            空字符串表示**不需要 / 未设置**（generic_chat 后端不消费此字段）。
         created_at: Unix 时间戳（秒）。
         updated_at: Unix 时间戳（秒）；rename / 一轮对话结束时更新。
         message_count: 历史消息总数；用于 UI 上的"X 条消息"展示。
-        schema_version: 当前 1；将来字段变更时 bump。
+        cumulative_prompt_tokens: thread 级累计输入 token 总量；每次 run 结束后
+            加上本次 ``Result.metadata.usage.prompt_tokens``。
+        cumulative_completion_tokens: thread 级累计输出 token 总量。
+        cumulative_total_tokens: thread 级累计总 token。
+        schema_version: 当前 ``4``；``Literal[1, 2, 3, 4]`` 同时接受老文件，
+            写盘时永远写 ``4``。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     id: Annotated[str, Field(pattern=r"^thread-[a-f0-9]{12}$")]
     name: Annotated[str, Field(min_length=1, max_length=200)]
-    preset_id: Annotated[str, Field(min_length=1)]
+    preset_id: str = ""
+    backend_kind: Literal["generic_chat", "claude_code", "codex"] = "generic_chat"
+    sdk_session_id: str = ""
+    codex_thread_id: str = ""
+    cwd: str = ""
     created_at: float
     updated_at: float
     message_count: Annotated[int, Field(ge=0)] = 0
-    schema_version: Literal[1] = 1
+    cumulative_prompt_tokens: Annotated[int, Field(ge=0)] = 0
+    cumulative_completion_tokens: Annotated[int, Field(ge=0)] = 0
+    cumulative_total_tokens: Annotated[int, Field(ge=0)] = 0
+    schema_version: Literal[1, 2, 3, 4, 5] = 5
 
 
 def thread_metadata_path(home: Path, thread_id: str) -> Path:
@@ -116,8 +140,21 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
 
     - 文件不存在 / 不是普通文件
     - JSON 解析失败（损坏 / 编码异常）
-    - schema_version 不是 1（v0.1.5 不做迁移）
+    - schema_version 不在 ``{1, 2, 3, 4}``（更高版本 = 该进程不认识，拒绝）
     - 字段校验失败（缺字段 / 类型不对 / 正则不匹配）
+
+    **v1 → v2 懒升级**：``schema_version=1`` 且缺 ``backend_kind`` 时，
+    自动在内存里补 ``backend_kind="generic_chat"`` 与 ``schema_version=2``。
+
+    **v2 → v3 懒升级**：``schema_version=2`` 且缺 ``sdk_session_id`` 时，
+    自动在内存里补 ``sdk_session_id=""`` / ``cwd=""`` 与 ``schema_version=3``。
+
+    **v3 → v4 懒升级**：``schema_version=3`` 且缺累计 usage 字段时，
+    自动在内存里补 3 个累计字段与 ``schema_version=4``。
+
+    返回的 :class:`ThreadMetadata` 实例已是最新 v4 形态。下次
+    :func:`write_thread_metadata` 会以 v4 写盘（默认 ``schema_version=4``，
+    无需调用方关心）。本函数**不**自己回写——避免读盘函数有副作用。
 
     所有 ``None`` 路径都会记 warning 日志，便于排查。
     本函数永不抛 —— 让调用方在 list_thread_metadata 里安全跳过损坏项。
@@ -131,16 +168,41 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
         logger.warning("failed to read thread metadata at %s: %s", path, exc)
         return None
     try:
-        return ThreadMetadata.model_validate_json(raw)
+        data = json.loads(raw)
+    except (ValueError, json.JSONDecodeError) as exc:
+        logger.warning("thread metadata JSON corrupted at %s: %s", path, exc)
+        return None
+    if not isinstance(data, dict):
+        logger.warning("thread metadata not a JSON object at %s", path)
+        return None
+    # v1 → v2 懒升级：老文件 schema_version=1，缺 backend_kind 字段
+    if data.get("schema_version") == 1 and "backend_kind" not in data:
+        data["backend_kind"] = "generic_chat"
+        # 升级到 v2，让下游模型直接验证为新版本
+        data["schema_version"] = 2
+    # v2 → v3 懒升级：缺 sdk_session_id 字段（v0.2.0 claude-code-history-resume 新增）
+    if data.get("schema_version") == 2 and "sdk_session_id" not in data:
+        data["sdk_session_id"] = ""
+        data["cwd"] = ""
+        data["schema_version"] = 3
+    # v3 → v4 懒升级：缺累计 usage 字段（v0.2.1 thread 级 token 持久化新增）
+    if data.get("schema_version") == 3 and "cumulative_prompt_tokens" not in data:
+        data["cumulative_prompt_tokens"] = 0
+        data["cumulative_completion_tokens"] = 0
+        data["cumulative_total_tokens"] = 0
+        data["schema_version"] = 4
+    # v4 → v5 懒升级：缺 codex_thread_id 字段（v0.2.2 codex 接入新增）
+    if data.get("schema_version") == 4 and "codex_thread_id" not in data:
+        data["codex_thread_id"] = ""
+        data["schema_version"] = 5
+    try:
+        return ThreadMetadata.model_validate(data)
     except ValidationError as exc:
         logger.warning(
             "thread metadata validation failed at %s: %s",
             path,
             exc,
         )
-        return None
-    except (ValueError, json.JSONDecodeError) as exc:
-        logger.warning("thread metadata JSON corrupted at %s: %s", path, exc)
         return None
 
 

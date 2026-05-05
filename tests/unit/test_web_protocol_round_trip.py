@@ -1,7 +1,7 @@
 """Round-trip 单元测试：v0.1.5 web 协议层（任务 #10）。
 
 覆盖：
-- 17 个 WS 帧的 ``model_dump_json`` ↔ ``model_validate_json`` round-trip
+- 18 个 WS 帧的 ``model_dump_json`` ↔ ``model_validate_json`` round-trip
 - 8 个 REST DTO 的 round-trip
 - ``WSFrameC2SAdapter`` 与 ``WSFrameS2CAdapter`` 的 discriminator 分派
 - 各帧 / DTO 的 ``kind`` / ``schema_version`` 默认值
@@ -38,6 +38,7 @@ from web.protocol.ws_frames import (
     PingFrame,
     PongFrame,
     ReasoningDeltaFrame,
+    SystemNoticeFrame,
     ThreadHistoryFrame,
     ToolCallEndFrame,
     ToolCallStartFrame,
@@ -172,9 +173,23 @@ def _make_pong() -> PongFrame:
     return PongFrame(timestamp_ms=1_700_000_000_013)
 
 
+def _make_system_notice() -> SystemNoticeFrame:
+    return SystemNoticeFrame(
+        timestamp_ms=1_700_000_000_014,
+        notice_key="self_evolution.review",
+        source="self_evolution",
+        status="completed",
+        title="Self-evolution review completed",
+        message="Review finished and wrote evolution nutrients.",
+        details={"review_id": "evo-review:run-1", "write_status": "written"},
+        icon="check-circle",
+        run_id="run-1",
+    )
+
+
 def _make_cell_evicted() -> CellEvictedFrame:
     return CellEvictedFrame(
-        timestamp_ms=1_700_000_000_014,
+        timestamp_ms=1_700_000_000_015,
         thread_id="thread-aaaaaaaaaaaa",
         reason="idle",
         message="60s no activity",
@@ -199,9 +214,16 @@ def _make_thread_metadata() -> ThreadMetadataDTO:
         id="thread-abcdef012345",
         name="my thread",
         preset_id="preset-default",
+        backend_kind="generic_chat",
+        sdk_session_id="",
+        cwd="",
         created_at=1_700_000_000.0,
         updated_at=1_700_000_010.5,
         message_count=3,
+        cumulative_prompt_tokens=1200,
+        cumulative_completion_tokens=340,
+        cumulative_total_tokens=1540,
+        schema_version=4,
     )
 
 
@@ -249,7 +271,7 @@ def _make_error_response() -> ErrorResponseDTO:
 
 
 # ---------------------------------------------------------------------------
-# Round-trip 参数化：WS 帧（17 个）
+# Round-trip 参数化：WS 帧（18 个）
 # ---------------------------------------------------------------------------
 
 
@@ -270,6 +292,7 @@ WS_FRAME_FACTORIES = [
     pytest.param(_make_turn_start, id="turn_start_frame"),
     pytest.param(_make_turn_end, id="turn_end_frame"),
     pytest.param(_make_pong, id="pong_frame"),
+    pytest.param(_make_system_notice, id="system_notice_frame"),
     pytest.param(_make_cell_evicted, id="cell_evicted_frame"),
 ]
 
@@ -338,7 +361,7 @@ def test_ws_c2s_adapter_dispatch(payload, expected_cls):
 
 
 # ---------------------------------------------------------------------------
-# Adapter 分派：S2C（14 帧）
+# Adapter 分派：S2C（15 帧）
 # ---------------------------------------------------------------------------
 
 
@@ -469,6 +492,22 @@ S2C_DISPATCH_CASES = [
     ),
     pytest.param(
         {
+            "kind": "system.notice",
+            "timestamp_ms": 1,
+            "notice_key": "self_evolution.review",
+            "source": "self_evolution",
+            "status": "running",
+            "title": "Self-evolution review started",
+            "message": "Review evo-review:run-1 is collecting a transcript window.",
+            "details": {"review_id": "evo-review:run-1"},
+            "icon": "sparkles",
+            "run_id": "run-1",
+        },
+        SystemNoticeFrame,
+        id="system_notice_dispatch",
+    ),
+    pytest.param(
+        {
             "kind": "cell.evicted",
             "timestamp_ms": 1,
             "thread_id": "thread-abcdef012345",
@@ -573,19 +612,34 @@ def test_kind_default_pong():
     assert PongFrame(timestamp_ms=1).kind == "pong"
 
 
+def test_kind_default_system_notice():
+    frame = SystemNoticeFrame(
+        timestamp_ms=1,
+        notice_key="self_evolution.review",
+        source="self_evolution",
+        status="running",
+        title="t",
+        message="m",
+        details={},
+        icon="sparkles",
+    )
+    assert frame.kind == "system.notice"
+
+
 def test_kind_default_cell_evicted():
     frame = CellEvictedFrame(timestamp_ms=1, thread_id="thread-abcdef012345", reason="idle")
     assert frame.kind == "cell.evicted"
 
 
 def test_thread_metadata_schema_version_default():
-    """``ThreadMetadataDTO.schema_version`` 默认 ``1``（Literal[1]）。"""
+    """``ThreadMetadataDTO.schema_version`` 默认 ``4``（v0.2.1 bump，加累计 usage 字段）。"""
     dto = ThreadMetadataDTO(
         id="thread-abcdef012345",
         name="x",
         preset_id="p",
+        backend_kind="generic_chat",
         created_at=0.0,
         updated_at=0.0,
         message_count=0,
     )
-    assert dto.schema_version == 1
+    assert dto.schema_version == 4

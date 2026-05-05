@@ -26,7 +26,10 @@ export function Layout() {
 
   return (
     <div className="flex h-full flex-col bg-background">
-      <header className="flex h-13 shrink-0 items-center gap-3 border-b border-border px-4">
+      <header
+        className="relative z-30 flex h-13 shrink-0 items-center gap-3 border-b border-border px-4"
+        data-testid="app-header"
+      >
         <Link
           to="/chat"
           className="flex items-center gap-2 text-sm font-semibold tracking-tight"
@@ -76,7 +79,7 @@ export function Layout() {
           退出
         </Button>
       </header>
-      <main className="flex-1 overflow-hidden">
+      <main className="relative z-0 flex-1 overflow-hidden">
         <Outlet />
       </main>
     </div>

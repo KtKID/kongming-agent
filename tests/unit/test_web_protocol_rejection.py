@@ -43,6 +43,7 @@ from web.protocol.ws_frames import (
     PingFrame,
     PongFrame,
     ReasoningDeltaFrame,
+    SystemNoticeFrame,
     ThreadHistoryFrame,
     ToolCallEndFrame,
     ToolCallStartFrame,
@@ -70,8 +71,9 @@ from web.protocol.ws_frames import (
         (HistoryMessageDTO, {"role": "user"}),
         # ContentDeltaFrame：缺 seq + timestamp_ms
         (ContentDeltaFrame, {"delta": "x", "turn": 1}),
-        # CreateThreadRequest：缺 preset_id
-        (CreateThreadRequest, {"name": "thread A"}),
+        # CreateThreadRequest：缺 name（v0.1.6 起 preset_id 已改可选，
+        # name 是 CreateThreadRequest 唯一仍必填的字段）
+        (CreateThreadRequest, {"preset_id": "p"}),
         # LoginRequest：完全空
         (LoginRequest, {}),
     ],
@@ -80,7 +82,7 @@ from web.protocol.ws_frames import (
         "approval_ack_missing_approved",
         "history_message_missing_content_turn_timestamp",
         "content_delta_missing_seq_timestamp",
-        "create_thread_missing_preset_id",
+        "create_thread_missing_name",
         "login_request_empty",
     ],
 )
@@ -451,6 +453,18 @@ def test_reject_thread_name_exceeds_max_length(model: Any) -> None:
             {"call_id": "c", "tool_name": "t", "arguments": {}, "turn": 1},
         ),
         (ReasoningDeltaFrame, {"delta": "x", "turn": 1, "seq": 0}),
+        (
+            SystemNoticeFrame,
+            {
+                "notice_key": "self_evolution.review",
+                "source": "self_evolution",
+                "status": "running",
+                "title": "t",
+                "message": "m",
+                "details": {},
+                "icon": "sparkles",
+            },
+        ),
     ],
     ids=[
         "pong",
@@ -458,6 +472,7 @@ def test_reject_thread_name_exceeds_max_length(model: Any) -> None:
         "tool_call_end",
         "approval_request",
         "reasoning_delta",
+        "system_notice",
     ],
 )
 def test_reject_s2c_frame_missing_timestamp_ms(model: Any, kwargs: dict[str, Any]) -> None:

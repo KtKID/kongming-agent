@@ -9,7 +9,7 @@
       manifest.json
       <session_id>.jsonl
 
-设计决策（v0.1.1）：
+设计决策（v0.1.2）：
 - 延迟 materialize：``__init__`` 不创建文件，首次 ``append()`` 才触发落盘
 - 无 pending_buffer：未 materialize 时 ``history()`` 返回空列表
 - 消息链：``message_id`` (UUIDv4) + ``parent_message_id``，无 seq 字段
@@ -34,7 +34,7 @@ from core.message import Message
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = "0.1.1"
+_SCHEMA_VERSION = "0.1.2"
 
 
 class FileSession:
@@ -73,7 +73,7 @@ class FileSession:
     # Session Protocol
     # ------------------------------------------------------------------
 
-    async def append(self, message: Message) -> None:
+    async def append(self, message: Message, *, usage: dict[str, Any] | None = None) -> None:
         """追加一条消息。首次调用触发 materialize。"""
         if not self._materialized:
             self._materialize()
@@ -90,6 +90,8 @@ class FileSession:
             "created_at": time.time(),
             "message": _message_to_dict(message),
         }
+        if usage is not None:
+            record["usage"] = dict(usage)
 
         line = json.dumps(record, ensure_ascii=False) + "\n"
         with open(self._messages_path, "a", encoding="utf-8") as f:

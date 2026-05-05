@@ -1,4 +1,13 @@
-import type { ErrorCode, ErrorResponseDTO } from "@/protocol";
+import type {
+  ClaudeProjectSummaryDTO,
+  ClaudeProjectsRefreshProgressDTO,
+  ErrorCode,
+  EvolutionDecisionItemDTO,
+  ErrorResponseDTO,
+  EvolutionDecisionRequest,
+  EvolutionDecisionResponse,
+  EvolutionReviewDTO,
+} from "@/protocol";
 
 /**
  * kongming-agent v0.1.5 REST 封装
@@ -125,3 +134,131 @@ export const apiPut = <T>(path: string, body?: unknown) =>
 export const apiPatch = <T>(path: string, body?: unknown) =>
   request<T>("PATCH", path, body);
 export const apiDelete = (path: string) => request<void>("DELETE", path);
+
+function normalizeEvolutionDecision(
+  decision: EvolutionDecisionItemDTO,
+): EvolutionDecisionItemDTO {
+  return {
+    ...decision,
+    applied_status: decision.applied_status ?? null,
+    applied_path: decision.applied_path ?? null,
+    applied_mode: decision.applied_mode ?? null,
+    applied_at_ms: decision.applied_at_ms ?? null,
+    applied_error: decision.applied_error ?? null,
+  };
+}
+
+function normalizeEvolutionReview(review: EvolutionReviewDTO): EvolutionReviewDTO {
+  return {
+    ...review,
+    decisions: review.decisions.map(normalizeEvolutionDecision),
+  };
+}
+
+export const apiGetEvolutionReviews = async (threadId: string) => {
+  const reviews = await apiGet<EvolutionReviewDTO[]>(
+    `/api/threads/${threadId}/evolution/reviews`,
+  );
+  return reviews.map(normalizeEvolutionReview);
+};
+
+export const apiPostEvolutionDecision = (
+  threadId: string,
+  reviewId: string,
+  body: EvolutionDecisionRequest,
+) =>
+  apiPost<EvolutionDecisionResponse>(
+    `/api/threads/${threadId}/evolution/reviews/${encodeURIComponent(reviewId)}/decisions`,
+    body,
+  ).then((response) => ({
+    ...response,
+    review: normalizeEvolutionReview(response.review),
+  }));
+
+export const apiPostEvolutionReapply = (threadId: string, reviewId: string) =>
+  apiPost<EvolutionDecisionResponse>(
+    `/api/threads/${threadId}/evolution/reviews/${encodeURIComponent(reviewId)}/reapply`,
+  ).then((response) => ({
+    ...response,
+    review: normalizeEvolutionReview(response.review),
+  }));
+
+type ClaudeProjectsRefreshEvent =
+  | {
+      kind: "progress";
+      current: number;
+      total: number;
+      current_project: string;
+    }
+  | {
+      kind: "done";
+      projects: ClaudeProjectSummaryDTO[];
+    }
+  | {
+      kind: "error";
+      detail: string;
+    };
+
+export async function apiRefreshClaudeProjects(
+  onProgress: (progress: ClaudeProjectsRefreshProgressDTO) => void,
+): Promise<{ projects: ClaudeProjectSummaryDTO[] }> {
+  let response: Response;
+  try {
+    response = await fetch(`${BASE}/api/claude/projects/refresh`, {
+      method: "GET",
+      headers: {
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      credentials: "include",
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new ApiError(0, "network", `网络错误：${msg}`);
+  }
+
+  if (response.status === 401) {
+    await handle401();
+    throw new ApiError(401, "unauthenticated", "session expired");
+  }
+
+  if (!response.ok) {
+    throw new ApiError(
+      response.status,
+      "internal",
+      response.statusText ?? "request failed",
+    );
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new ApiError(0, "network", "刷新响应为空");
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const event = JSON.parse(trimmed) as ClaudeProjectsRefreshEvent;
+      if (event.kind === "progress") {
+        onProgress(event);
+        continue;
+      }
+      if (event.kind === "error") {
+        throw new ApiError(500, "internal", event.detail);
+      }
+      return { projects: event.projects };
+    }
+
+    if (done) break;
+  }
+
+  throw new ApiError(0, "network", "刷新响应提前结束");
+}

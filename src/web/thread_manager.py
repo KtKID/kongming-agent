@@ -34,7 +34,7 @@ import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from config_loader.models import Config
 from core.contracts import ApprovalAction
@@ -50,8 +50,17 @@ from web.thread_metadata import (
     write_thread_metadata,
 )
 from web.ws_event_sink import WSEventSink
+from web.ws_fanout import WebSocketFanout
 
 logger = logging.getLogger(__name__)
+
+
+class SdkSessionAlreadyBoundError(ValueError):
+    """thread.sdk_session_id 已经非空，禁止覆盖（v0.2 invariant：写入后只读）。"""
+
+
+class SdkSessionConflictError(ValueError):
+    """sdk_session_id 已被另一 thread 绑定，禁止重复绑定（v0.2 invariant：1:1 绑定）。"""
 
 
 # runtime_factory 签名：根据 thread_id + preset_id + adapter + sinks 构造
@@ -180,15 +189,31 @@ class ThreadManager:
     # CRUD
     # ------------------------------------------------------------------
 
-    async def create_thread(self, name: str, preset_id: str) -> ThreadMetadata:
+    async def create_thread(
+        self,
+        name: str,
+        preset_id: str = "",
+        *,
+        backend_kind: Literal["generic_chat", "claude_code"] = "generic_chat",
+        cwd: str = "",
+    ) -> ThreadMetadata:
         """创建一个新 thread 的 metadata（不 boot cell）。
 
         浏览器先 ``POST /api/threads`` 创建，再单独建 WS 触发 boot。
+
+        Args:
+            name: thread 名（剥前后空白后非空）。
+            preset_id: ``backend_kind="generic_chat"`` 时必须非空，
+                ``backend_kind="claude_code"`` 时允许空字符串占位。
+            backend_kind: 后端类型；决定后续 WS endpoint 走 ``/ws/threads/<id>``
+                还是 ``/ws/claude-code?thread_id=<id>``。
+            cwd: 可选 workspace 根目录；为空表示纯聊天 thread。
         """
         if not name or not name.strip():
             raise ValueError("thread name must not be empty")
-        if not preset_id or not preset_id.strip():
-            raise ValueError("preset_id must not be empty")
+        if backend_kind == "generic_chat" and (not preset_id or not preset_id.strip()):
+            raise ValueError("preset_id required for generic_chat backend")
+        normalized_cwd = cwd.strip()
 
         thread_id = _generate_thread_id()
         now = _now()
@@ -196,9 +221,14 @@ class ThreadManager:
             id=thread_id,
             name=name.strip(),
             preset_id=preset_id,
+            backend_kind=backend_kind,
+            cwd=normalized_cwd,
             created_at=now,
             updated_at=now,
             message_count=0,
+            cumulative_prompt_tokens=0,
+            cumulative_completion_tokens=0,
+            cumulative_total_tokens=0,
         )
         # 写盘可能阻塞，放 to_thread
         await asyncio.to_thread(write_thread_metadata, self._home, meta)
@@ -220,9 +250,51 @@ class ThreadManager:
             id=meta.id,
             name=new_name.strip(),
             preset_id=meta.preset_id,
+            backend_kind=meta.backend_kind,
+            sdk_session_id=meta.sdk_session_id,
+            cwd=meta.cwd,
             created_at=meta.created_at,
             updated_at=_now(),
             message_count=meta.message_count,
+            cumulative_prompt_tokens=meta.cumulative_prompt_tokens,
+            cumulative_completion_tokens=meta.cumulative_completion_tokens,
+            cumulative_total_tokens=meta.cumulative_total_tokens,
+        )
+        await asyncio.to_thread(write_thread_metadata, self._home, updated)
+        async with self._lock:
+            cell = self._cells.get(thread_id)
+            if cell is not None:
+                cell.metadata = updated
+        return updated
+
+    async def add_thread_usage(
+        self,
+        thread_id: str,
+        *,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+    ) -> ThreadMetadata:
+        """把一次 run 的累计 usage 回写到 thread metadata。
+
+        用于 generic chat 路径在 ``bridge.run_once`` 结束后落盘 thread 级累计
+        ``prompt / completion / total``。负数一律按 0 处理，避免上游异常值污染累计量。
+        """
+        meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
+        if meta is None:
+            raise KeyError(f"thread not found: {thread_id}")
+
+        prompt = max(0, int(prompt_tokens))
+        completion = max(0, int(completion_tokens))
+        total = max(0, int(total_tokens))
+        updated = meta.model_copy(
+            update={
+                "updated_at": _now(),
+                "cumulative_prompt_tokens": meta.cumulative_prompt_tokens + prompt,
+                "cumulative_completion_tokens": meta.cumulative_completion_tokens + completion,
+                "cumulative_total_tokens": meta.cumulative_total_tokens + total,
+                "schema_version": 4,
+            }
         )
         await asyncio.to_thread(write_thread_metadata, self._home, updated)
         async with self._lock:
@@ -346,14 +418,12 @@ class ThreadManager:
         被 _safe_send_json 吞掉并标 closed；后续 attach_ws 重置 closed
         即可正常发。
         """
+        fanout = WebSocketFanout()
         adapter = WebHostAdapter(
-            ws=_NullWS(),
+            ws=fanout,
             pending_approval_timeout_seconds=float(self._cfg.web.pending_approval_timeout_seconds),
         )
-        ws_sink = WSEventSink(_NullWS())
-        # 暂标 closed = 没有真实 ws；attach_ws 时 unset
-        adapter._closed = True
-        ws_sink._closed = True
+        ws_sink = WSEventSink(fanout)
 
         sinks: list[Any] = [ws_sink]
         runtime, bridge = await self._runtime_factory(
@@ -522,6 +592,84 @@ class ThreadManager:
         """同步查 cell；不触发 boot。"""
         return self._cells.get(thread_id)
 
+    def find_thread_by_sdk_session_id(self, sdk_session_id: str) -> ThreadMetadata | None:
+        """按 ``sdk_session_id`` 反查 thread metadata。
+
+        v0.2.0 claude-code-history-resume 用：
+
+        - import claude session 路径上做防重复（命中即返回已有 thread）
+        - 续聊路径上从 SDK session UUID 找回对应 thread
+
+        实现：复用 :meth:`list_threads`（已合并扫盘 + 内存覆盖）线性扫，
+        命中第一个返回。空 ``sdk_session_id`` 不匹配任何 thread（默认值
+        是空字符串，不能用作 key）。
+
+        同步函数：扫盘 IO 量级与 list_threads 相同，路由层按需可在
+        ``asyncio.to_thread`` 内调用。
+        """
+        if not sdk_session_id:
+            return None
+        for meta in self.list_threads():
+            if meta.sdk_session_id == sdk_session_id:
+                return meta
+        return None
+
+    async def bind_sdk_session(
+        self,
+        thread_id: str,
+        sdk_session_id: str,
+        cwd: str,
+    ) -> ThreadMetadata:
+        """把 ``sdk_session_id`` + ``cwd`` 持久化到已存在的 thread。
+
+        v0.2.0 invariant：
+
+        - **写入后只读**：thread 当前 ``sdk_session_id != ""`` 时抛
+          :class:`SdkSessionAlreadyBoundError`，不允许覆盖
+        - **1:1 绑定**：``sdk_session_id`` 已被另一 thread 绑定时抛
+          :class:`SdkSessionConflictError`
+        - **空字符串非法**：``sdk_session_id == ""`` 抛 :class:`ValueError`
+          （绑空等于不绑，禁止）
+
+        失败：thread 不存在抛 :class:`KeyError`。
+
+        若 cell 已 boot，同步更新 cell.metadata 引用（与 rename_thread 同款）。
+        """
+        if not sdk_session_id:
+            raise ValueError("sdk_session_id must not be empty")
+
+        meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
+        if meta is None:
+            raise KeyError(f"thread not found: {thread_id}")
+
+        # invariant 双重检查
+        if meta.sdk_session_id:
+            raise SdkSessionAlreadyBoundError(
+                f"thread {thread_id} already bound to sdk_session_id="
+                f"{meta.sdk_session_id!r}; refuse to overwrite"
+            )
+        existing = self.find_thread_by_sdk_session_id(sdk_session_id)
+        if existing is not None and existing.id != thread_id:
+            raise SdkSessionConflictError(
+                f"sdk_session_id={sdk_session_id!r} already bound to "
+                f"thread {existing.id}; refuse duplicate bind on {thread_id}"
+            )
+
+        updated = meta.model_copy(
+            update={
+                "sdk_session_id": sdk_session_id,
+                "cwd": cwd,
+                "schema_version": 3,
+                "updated_at": _now(),
+            }
+        )
+        await asyncio.to_thread(write_thread_metadata, self._home, updated)
+        async with self._lock:
+            cell = self._cells.get(thread_id)
+            if cell is not None:
+                cell.metadata = updated
+        return updated
+
     # ------------------------------------------------------------------
     # 审批
     # ------------------------------------------------------------------
@@ -596,4 +744,9 @@ class _NullWS:
         return None
 
 
-__all__ = ["RuntimeFactory", "ThreadManager"]
+__all__ = [
+    "RuntimeFactory",
+    "SdkSessionAlreadyBoundError",
+    "SdkSessionConflictError",
+    "ThreadManager",
+]

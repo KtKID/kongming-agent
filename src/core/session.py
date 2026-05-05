@@ -11,6 +11,7 @@ v1-mini 单协程执行，不加锁；后续如果出现多任务共享 session 
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from core.message import Message
 
@@ -27,7 +28,7 @@ class InMemorySession:
         self._messages: list[Message] = []
         self._run_count: int = 0
 
-    async def append(self, message: Message) -> None:
+    async def append(self, message: Message, *, usage: dict[str, Any] | None = None) -> None:
         self._messages.append(message)
 
     async def history(self) -> list[Message]:

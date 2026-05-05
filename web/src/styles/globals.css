@@ -37,6 +37,8 @@
     --border: 240 6% 90%;
     --input: 240 6% 90%;
     --ring: 217 91% 60%;
+    --scrollbar-thumb: 240 6% 18% / 0.18;
+    --scrollbar-thumb-hover: 240 6% 18% / 0.28;
     --radius: 0.625rem;
   }
 
@@ -64,6 +66,8 @@
       --border: 240 4% 16%;
       --input: 240 4% 16%;
       --ring: 217 91% 60%;
+      --scrollbar-thumb: 0 0% 100% / 0.16;
+      --scrollbar-thumb-hover: 0 0% 100% / 0.26;
   }
 
   * {
@@ -112,6 +116,30 @@
     border-radius: 4px;
   }
   .scrollbar-thin::-webkit-scrollbar-track {
+    background-color: transparent;
+  }
+
+  .scrollbar-overlay {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--scrollbar-thumb)) transparent;
+  }
+  .scrollbar-overlay::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  .scrollbar-overlay::-webkit-scrollbar-track {
+    background-color: transparent;
+  }
+  .scrollbar-overlay::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--scrollbar-thumb));
+    border: 3px solid transparent;
+    border-radius: 9999px;
+    background-clip: content-box;
+  }
+  .scrollbar-overlay:hover::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--scrollbar-thumb-hover));
+  }
+  .scrollbar-overlay::-webkit-scrollbar-corner {
     background-color: transparent;
   }
 }

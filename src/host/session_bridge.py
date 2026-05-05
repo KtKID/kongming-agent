@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+from commands.models import CommandResult
+from commands.service import CommandService, build_default_command_service, build_execution_context
 from core.result import Result
 from executors.agent_runtime.native_runtime import NativeRuntime
 from host.base import HostAdapter
@@ -37,6 +39,7 @@ class SessionBridge:
         adapter: HostAdapter,
         session_id: str,
         echo_final_content: bool = True,
+        command_service: CommandService | None = None,
     ) -> None:
         if not session_id:
             raise ValueError("session_id must not be empty")
@@ -48,6 +51,12 @@ class SessionBridge:
         # cli/main.py 在装配时按 `cfg.stream.enabled and isinstance(runtime.llm,
         # SupportsLLMStream)` 计算后传入 False；非流式或 fallback 路径默认 True。
         self._echo_final_content = echo_final_content
+        self._command_service = command_service or build_default_command_service(
+            runtime=runtime,
+            adapter=adapter,
+            session_id=session_id,
+            runtime_delegate=self._run_runtime_once,
+        )
 
     # ------------------------------------------------------------------
     # 访问器
@@ -74,18 +83,45 @@ class SessionBridge:
         user_input: str,
         *,
         reasoning_effort: str | None = None,
-    ) -> Result:
-        """执行一次 run，把结果写回 adapter。
+    ) -> Result | CommandResult:
+        return await self.handle_input(user_input, reasoning_effort=reasoning_effort)
+
+    async def handle_input(
+        self,
+        user_input: str,
+        *,
+        reasoning_effort: str | None = None,
+    ) -> Result | CommandResult:
+        """执行一次输入，把结果写回 adapter。
 
         不抛异常——runner 会把所有异常收口到 :class:`core.result.Result`
         的 ``error`` 字段，这里只做结果 → 文本的翻译。
         """
-        result = await self._runtime.run(
+        context = build_execution_context(
+            session_id=self._session_id,
+            adapter=self._adapter,
+            reasoning_effort=reasoning_effort,
+        )
+        result = await self._command_service.handle_input(user_input, context=context)
+        if isinstance(result, Result):
+            await self._write_runtime_result(result)
+            return result
+
+        await self._write_command_result(result)
+        return result
+
+    async def _run_runtime_once(
+        self,
+        user_input: str,
+        reasoning_effort: str | None = None,
+    ) -> Result:
+        return await self._runtime.run(
             user_input,
             session_id=self._session_id,
             reasoning_effort=reasoning_effort,
         )
 
+    async def _write_runtime_result(self, result: Result) -> None:
         final = result.final_message
         if self._echo_final_content and final is not None and final.content:
             await self._adapter.write_output(final.content)
@@ -102,7 +138,9 @@ class SessionBridge:
             total = usage.get("total_tokens", 0)
             await self._adapter.write_output(f"[tokens ↑{prompt} ↓{completion} ={total}]")
 
-        return result
+    async def _write_command_result(self, result: CommandResult) -> None:
+        if result.output_text:
+            await self._adapter.write_output(result.output_text)
 
     async def run_loop(self) -> None:
         """交互式主循环：读输入 → run_once → 再读，直到 EOF / Ctrl-C。

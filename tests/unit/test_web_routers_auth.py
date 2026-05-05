@@ -23,6 +23,7 @@ from web.auth import (
     CSRF_HEADER_VALUE,
     SESSION_COOKIE_NAME,
 )
+from web.auth_secrets import ENV_WEB_PASSWORD
 from web.rate_limit import LoginRateLimiter
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
@@ -182,3 +183,37 @@ def test_login_missing_csrf_header_returns_403(tmp_path: Path) -> None:
             # 故意不带 CSRF header
         )
         assert resp.status_code == 403
+
+
+def test_reset_password_survives_restart_with_stale_env(monkeypatch, tmp_path: Path) -> None:
+    """重置后重新装配 app，仍以落盘 hash 为准。"""
+    monkeypatch.setenv(ENV_WEB_PASSWORD, "old-bootstrap-password")
+    cfg = _make_cfg()
+    tm = FakeThreadManager()
+    app = create_app(cfg, tm, home_dir=tmp_path)
+
+    with TestClient(app) as client:
+        reset_resp = client.post(
+            "/api/auth/reset-password",
+            json={"new_password": "new-password-456"},
+            headers=CSRF_HEADERS,
+        )
+        assert reset_resp.status_code == 200
+
+    monkeypatch.setenv(ENV_WEB_PASSWORD, "old-bootstrap-password")
+    restarted_app = create_app(cfg, FakeThreadManager(), home_dir=tmp_path)
+
+    with TestClient(restarted_app) as client:
+        old_login = client.post(
+            "/api/auth/login",
+            json={"password": "old-bootstrap-password"},
+            headers=CSRF_HEADERS,
+        )
+        assert old_login.status_code == 401
+
+        new_login = client.post(
+            "/api/auth/login",
+            json={"password": "new-password-456"},
+            headers=CSRF_HEADERS,
+        )
+        assert new_login.status_code == 200

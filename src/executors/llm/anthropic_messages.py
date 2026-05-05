@@ -21,18 +21,23 @@ provider 内部拼 ``/v1/messages``——与 OpenAI provider 约定一致，版�
 
 from __future__ import annotations
 
+import contextlib
 import json
 import uuid
+from collections.abc import AsyncIterator
 from typing import Any, Literal
 
 import httpx
 
 from config_loader.models import ModelConfig
-from core.contracts import LLMRequest, LLMResponse
+from core.contracts import LLMRequest, LLMResponse, LLMStreamChunk
 from core.errors import ProviderError
 from core.message import Message, ToolCall
+from executors.llm.anthropic_stream_parser import AnthropicStreamParser
 from executors.llm.base import BaseLLMProvider
+from executors.llm.raw_dump import dump_raw_llm_interaction
 from executors.llm.reasoning import ReasoningConfig, resolve_reasoning_plan
+from executors.llm.sse_reader import iter_sse_events
 
 
 class AnthropicMessagesProvider(BaseLLMProvider):
@@ -50,12 +55,20 @@ class AnthropicMessagesProvider(BaseLLMProvider):
         model_config: ModelConfig,
         max_retries: int = 3,
         retry_backoff: float = 1.0,
+        enable_raw_dump: bool = False,
+        stream_read_timeout: float = 120.0,
     ) -> None:
         super().__init__(
             model_config=model_config,
             max_retries=max_retries,
             retry_backoff=retry_backoff,
         )
+        # 与 OpenAIResponsesProvider 对齐：raw_dump 由 cfg.trace.raw_llm 驱动；
+        # stream_read_timeout 由 cfg.stream.read_timeout 驱动。
+        # Anthropic 是远端服务（is_local 恒 False），read_timeout 不像 OpenAI 那样
+        # 按 is_local 自动上调。
+        self._enable_raw_dump = enable_raw_dump
+        self._stream_read_timeout = stream_read_timeout
 
     async def _do_complete(self, request: LLMRequest) -> LLMResponse:
         url = self._model_config.base_url.rstrip("/") + self._ENDPOINT_PATH
@@ -98,6 +111,103 @@ class AnthropicMessagesProvider(BaseLLMProvider):
             ) from exc
 
         return self._parse_response(data)
+
+    # ------------------------------------------------------------------
+    # 流式请求（满足 SupportsLLMStream Protocol）
+    # ------------------------------------------------------------------
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamChunk]:
+        """Anthropic Messages API 流式响应。
+
+        实现 :class:`core.contracts.SupportsLLMStream` Protocol。链路：
+        ``httpx.AsyncClient.stream("POST", ...)`` → :func:`iter_sse_events`
+        → :class:`AnthropicStreamParser` → yield :class:`LLMStreamChunk`。
+
+        与 :meth:`OpenAIResponsesProvider.stream` 结构一致，差异：
+
+        - payload 加 ``"stream": True``，**不**加 ``stream_options``（Anthropic
+          的 usage 天然由 ``message_start`` + ``message_delta`` 携带，无需主动开）
+        - timeout 不按 ``is_local`` 上调（Anthropic 远端恒定）
+        - raw_dump chunk 元素带回 ``event_name`` 便于排查
+        - 异常映射、HTTP 4xx/5xx 处理、finally 段 dump 全部对齐
+        """
+        url = self._model_config.base_url.rstrip("/") + self._ENDPOINT_PATH
+        payload = {**self._build_payload(request), "stream": True}
+        headers = self._build_headers()
+
+        timeout = httpx.Timeout(
+            connect=30.0,
+            read=self._stream_read_timeout,
+            write=self._model_config.timeout,
+            pool=30.0,
+        )
+
+        client = self._ensure_client()
+        parser = AnthropicStreamParser()
+
+        chunks_buffer: list[dict[str, Any]] = []
+        dump_status = 0
+        dump_error: str | None = None
+
+        try:
+            async with client.stream(
+                "POST", url, json=payload, headers=headers, timeout=timeout
+            ) as response:
+                dump_status = response.status_code
+                if response.status_code >= 400:
+                    body_bytes = await response.aread()
+                    detail_text = body_bytes.decode("utf-8", errors="replace")[:2000]
+                    dump_error = f"HTTP {response.status_code}"
+                    raise ProviderError(
+                        f"LLM provider stream HTTP {response.status_code}: {detail_text}",
+                        details={
+                            "status_code": response.status_code,
+                            "url": url,
+                            "model": self._model_config.name,
+                        },
+                    )
+
+                async def _wrapped_events() -> AsyncIterator[tuple[str | None, dict[str, Any]]]:
+                    async for evt_name, evt_data in iter_sse_events(response):
+                        chunks_buffer.append({"event": evt_name, "data": evt_data})
+                        yield evt_name, evt_data
+
+                async for chunk in parser.parse(_wrapped_events()):
+                    yield chunk
+
+        except ProviderError:
+            raise
+        except httpx.TimeoutException as exc:
+            dump_error = f"timeout: {exc}"
+            raise ProviderError(
+                f"LLM provider stream timeout calling {url}: {exc}",
+                details={"url": url, "model": self._model_config.name},
+            ) from exc
+        except httpx.HTTPError as exc:
+            dump_error = f"http_error: {exc}"
+            raise ProviderError(
+                f"LLM provider stream HTTP error calling {url}: {exc}",
+                details={"url": url, "model": self._model_config.name},
+            ) from exc
+        except Exception as exc:
+            dump_error = f"{type(exc).__name__}: {exc}"
+            raise ProviderError(
+                f"LLM provider stream failed: {exc!r}",
+                details={"url": url, "exception_type": type(exc).__name__},
+            ) from exc
+        finally:
+            with contextlib.suppress(Exception):
+                dump_raw_llm_interaction(
+                    enabled=self._enable_raw_dump,
+                    provider="anthropic_messages_stream",
+                    url=url,
+                    request_payload=payload,
+                    request_headers=headers,
+                    response_status=dump_status,
+                    response_headers={},
+                    response_body={"chunks": chunks_buffer},
+                    error=dump_error,
+                )
 
     # ------------------------------------------------------------------
     # 请求构造

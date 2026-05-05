@@ -51,8 +51,8 @@ export function StatusLine({ threadId, reasoningEffort }: StatusLineProps) {
       )}
       {!reasoningEffort && <span />}
       <span className="inline-flex items-center gap-3">
-      <Stat icon={ArrowUp} label="Prompt tokens" value={fmt(usage?.lastPrompt ?? 0)} />
-      <Stat icon={ArrowDown} label="Completion tokens" value={fmt(usage?.lastCompletion ?? 0)} />
+      <Stat icon={ArrowUp} label="累计输入 tokens" value={fmt(usage?.cumulativePrompt ?? 0)} />
+      <Stat icon={ArrowDown} label="累计输出 tokens" value={fmt(usage?.cumulativeCompletion ?? 0)} />
       <Stat icon={Sigma} label="累计 tokens" value={fmt(usage?.cumulativeTotal ?? 0)} />
       </span>
     </div>

@@ -45,6 +45,10 @@ dependencies = [
     # 版本严格锁定到 0.1.72（dev-pipeline/tasks/claude-sidecar-v0.1/smoke-report.md
     # 实测的版本）。SDK 0.1.x 字段会随版本变动，升级前必须重跑 smoke 验证。
     "claude-agent-sdk==0.1.72",
+    # scheduler v0.1：cron 模块只用 croniter 解析 5 字段 cron 表达式。
+    # 调度循环走 Hermes 风格的 60s tick（src/scheduler/ticker.py），
+    # 不再依赖 APScheduler。
+    "croniter>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -146,6 +150,7 @@ ignore = [
 "src/tools/file_tools.py" = ["RUF012"]
 "src/tools/shell_tool.py" = ["RUF012", "SIM105"]
 "src/tools/memory_tool.py" = ["RUF012"]
+"src/tools/schedule_tool.py" = ["RUF012"]
 # 其他风格级提示不是硬错误
 "src/core/runner.py" = ["SIM108"]
 "src/safety/chain.py" = ["SIM103"]

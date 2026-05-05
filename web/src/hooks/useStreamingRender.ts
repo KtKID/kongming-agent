@@ -12,7 +12,7 @@ import type { ThreadSocket } from "@/lib/ws";
 /**
  * kongming-agent v0.1.5 流式渲染 hook
  *
- * 职责：把 ThreadSocket 收到的 14 类 S2C 帧 dispatch 到 chat store / approval queue / toast。
+ * 职责：把 ThreadSocket 收到的 15 类 S2C 帧 dispatch 到 chat store / approval queue / toast。
  *
  * ## 帧 → 行为映射
  *
@@ -24,6 +24,7 @@ import type { ThreadSocket } from "@/lib/ws";
  * | turn.start         | 无（已有 placeholder 由 delta 创建）|
  * | turn.end           | flushTurn（标 streaming=false + 清 buffer）|
  * | assistant.final    | appendAssistantFinal（覆盖 streaming 累积值）|
+ * | system.notice      | appendSystemNotice（按 noticeKey + runId 原地更新）|
  * | tool.call.start    | appendToolStart（item ok=null）|
  * | tool.call.end      | appendToolEnd（写 ok / errorMessage）|
  * | approval.request   | push 到 approval 队列 + chat store appendApprovalRequest|
@@ -44,6 +45,7 @@ export function useStreamingRender(
 ) {
   const setHistory = useChatStore((s) => s.setHistory);
   const appendAssistantFinal = useChatStore((s) => s.appendAssistantFinal);
+  const appendSystemNotice = useChatStore((s) => s.appendSystemNotice);
   const appendToolStart = useChatStore((s) => s.appendToolStart);
   const appendToolEnd = useChatStore((s) => s.appendToolEnd);
   const appendApprovalRequest = useChatStore((s) => s.appendApprovalRequest);
@@ -85,6 +87,9 @@ export function useStreamingRender(
           break;
         case "assistant.final":
           appendAssistantFinal(threadId, frame);
+          break;
+        case "system.notice":
+          appendSystemNotice(threadId, frame);
           break;
         case "tool.call.start":
           appendToolStart(threadId, frame);
@@ -131,6 +136,7 @@ export function useStreamingRender(
     socket,
     setHistory,
     appendAssistantFinal,
+    appendSystemNotice,
     appendToolStart,
     appendToolEnd,
     appendApprovalRequest,

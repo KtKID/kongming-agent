@@ -1,0 +1,4 @@
+{"timestamp":"2026-05-03T16:00:00.000Z","type":"session_meta","payload":{"id":"019dee50-bbbb-7341-9011-112233445566","cwd":"/test/path/proj","originator":"codex_exec","cli_version":"0.128.0","source":"exec","model_provider":"openai"}}
+{"timestamp":"2026-05-03T16:00:01.000Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-05-03T16:00:02.000Z","type":"event_msg","payload":{"type":"agent_message","text":"Starting work..."}}
+{"timestamp":"2026-05-03T16:00:03.000Z","type":"event_msg","payload":{"type":"command_execution","command":"long-running-cmd","exit_code":null,"output":""}}

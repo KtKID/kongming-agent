@@ -210,6 +210,24 @@ class TestTC4RecordFields:
             record = json.loads(f.readline())
         assert record["model_name"] == bootstrap.model_name
 
+    async def test_usage_field_omitted_when_not_provided(self, store_path: str) -> None:
+        fs = _make_session(store_path=store_path)
+        await fs.append(Message.user("hello"))
+        jsonl_path = os.path.join(store_path, "test-session", "test-session.jsonl")
+        with open(jsonl_path) as f:
+            record = json.loads(f.readline())
+        assert "usage" not in record
+
+    async def test_usage_field_written_at_record_top_level(self, store_path: str) -> None:
+        fs = _make_session(store_path=store_path)
+        usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        await fs.append(Message.assistant("hello"), usage=usage)
+        jsonl_path = os.path.join(store_path, "test-session", "test-session.jsonl")
+        with open(jsonl_path) as f:
+            record = json.loads(f.readline())
+        assert record["usage"] == usage
+        assert record["message"]["metadata"] == {}
+
 
 # ---------------------------------------------------------------------------
 # TC5: 消息链 parent_message_id 正确串联

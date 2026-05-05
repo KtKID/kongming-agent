@@ -141,11 +141,10 @@ async def reset_password(
     # 更新内存中的 hash
     request.app.state.password_hash = new_hash
 
-    # 写盘
-    from config_loader.paths import get_kongming_home
+    # 写回 app 当前使用的 kongming_home，保证启动读源与重置写源一致。
     from web.auth_secrets import PASSWORD_HASH_FILENAME, _ensure_web_dir, _write_secret_text
 
-    home = get_kongming_home()
+    home = request.app.state.kongming_home
     _ensure_web_dir(home)
     path = home / "web" / PASSWORD_HASH_FILENAME
     _write_secret_text(path, new_hash)

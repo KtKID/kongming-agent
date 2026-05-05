@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from commands.models import CommandResult
 from core.errors import ProviderError
 from core.message import Message
 from core.result import Result
@@ -100,6 +101,17 @@ def _ok_result(sid: str | None, content: str = "hi", **extra: Any) -> Result:
 def _bridge(runtime, adapter, sid: str = "sid-1") -> SessionBridge:
     # 通过 typing.cast 式的 duck 注入，绕开 NativeRuntime 强类型。
     return SessionBridge(runtime=runtime, adapter=adapter, session_id=sid)  # type: ignore[arg-type]
+
+
+class _StubCommandService:
+    def __init__(self, result: CommandResult) -> None:
+        self._result = result
+        self.calls: list[str] = []
+
+    async def handle_input(self, raw_input: str, *, context: Any) -> CommandResult:
+        self.calls.append(raw_input)
+        assert context.session_id == "sid-1"
+        return self._result
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +235,31 @@ async def test_run_once_passes_session_id_to_runtime():
     b = _bridge(rt, ad, sid="sid-42")
     await b.run_once("x")
     assert rt.calls == [("x", "sid-42")]
+
+
+@pytest.mark.asyncio
+async def test_run_once_routes_command_result_without_runtime():
+    rt, ad = _StubRuntime(), _StubAdapter()
+    cmd_service = _StubCommandService(
+        CommandResult(
+            status="completed",
+            command_name="/review",
+            output_text="/review completed.",
+            invocation_id="cmd-1",
+        )
+    )
+    b = SessionBridge(
+        runtime=rt,  # type: ignore[arg-type]
+        adapter=ad,
+        session_id="sid-1",
+        command_service=cmd_service,  # type: ignore[arg-type]
+    )
+
+    result = await b.run_once("/review")
+
+    assert isinstance(result, CommandResult)
+    assert rt.calls == []
+    assert ad.outputs == ["/review completed."]
 
 
 # ---------------------------------------------------------------------------

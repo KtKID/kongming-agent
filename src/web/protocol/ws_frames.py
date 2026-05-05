@@ -1,7 +1,7 @@
 """WS 帧 Pydantic v2 模型定义（v0.1.5 web 宿主壳协议层）。
 
-本文件集中定义全部 17 个 WebSocket 帧的数据模型——3 个 C2S（浏览器 → 后端）
-+ 14 个 S2C（后端 → 浏览器）。每个帧类都带 ``kind: Literal[...]`` 字段，
+本文件集中定义全部 18 个 WebSocket 帧的数据模型——3 个 C2S（浏览器 → 后端）
++ 15 个 S2C（后端 → 浏览器）。每个帧类都带 ``kind: Literal[...]`` 字段，
 供 Pydantic v2 的 discriminated union 在外层 union（``WSFrameC2S`` /
 ``WSFrameS2C``，由后续任务 #8 在 ``ws_frames`` 模块的 union 文件中聚合）做
 ``Field(discriminator='kind')`` 自动分派。
@@ -72,7 +72,7 @@ class UserInputFrame(_C2SFrameBase):
 
 
 # ---------------------------------------------------------------------------
-# S2C 帧（后端 → 浏览器，14 个）
+# S2C 帧（后端 → 浏览器，15 个）
 # ---------------------------------------------------------------------------
 
 
@@ -137,6 +137,24 @@ class PongFrame(_S2CFrameBase):
     """对 ``ping`` 的应答；仅含 ``timestamp_ms``。"""
 
     kind: Literal["pong"] = "pong"
+
+
+class SystemNoticeFrame(_S2CFrameBase):
+    """系统级 notice。
+
+    v0.1.9 首个来源是 self-evolution review 状态通知；字段保持通用，
+    后续其它后端模块也可复用同一帧种类。
+    """
+
+    kind: Literal["system.notice"] = "system.notice"
+    notice_key: str
+    source: str
+    status: str
+    title: str
+    message: str
+    details: dict[str, Any] = Field(default_factory=dict)
+    icon: str
+    run_id: str = ""
 
 
 class ReasoningDeltaFrame(_S2CFrameBase):
@@ -210,6 +228,7 @@ class UsageFrame(_S2CFrameBase):
     completion_tokens: int
     total_tokens: int
     turn: int
+    run_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +268,7 @@ WSFrameS2C = Annotated[
     | TurnStartFrame
     | TurnEndFrame
     | PongFrame
+    | SystemNoticeFrame
     | CellEvictedFrame,
     Field(discriminator="kind"),
 ]
@@ -275,6 +295,7 @@ __all__: list[str] = [
     "PingFrame",
     "PongFrame",
     "ReasoningDeltaFrame",
+    "SystemNoticeFrame",
     "ThreadHistoryFrame",
     "ToolCallEndFrame",
     "ToolCallStartFrame",

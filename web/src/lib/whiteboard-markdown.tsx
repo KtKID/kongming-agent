@@ -37,7 +37,7 @@ function parseInline(text: string): ReactNode[] {
       out.push(
         <code
           key={key++}
-          className="rounded bg-stone-100 px-1 py-0.5 font-mono text-[0.82em] text-stone-900"
+          className="rounded bg-muted px-1 py-0.5 font-mono text-[0.82em] text-foreground"
         >
           {codeMatch[1]}
         </code>,
@@ -54,7 +54,7 @@ function parseInline(text: string): ReactNode[] {
           href={safeHref(linkMatch[2]!)}
           target="_blank"
           rel="noopener noreferrer"
-          className="font-medium text-blue-700 underline decoration-blue-300 underline-offset-4"
+          className="font-medium text-accent underline decoration-accent/40 underline-offset-4"
         >
           {linkMatch[1]}
         </a>,
@@ -66,7 +66,7 @@ function parseInline(text: string): ReactNode[] {
     const boldMatch = /^\*\*([^*]+)\*\*/.exec(rest);
     if (boldMatch) {
       out.push(
-        <strong key={key++} className="font-semibold text-stone-900">
+        <strong key={key++} className="font-semibold text-foreground">
           {boldMatch[1]}
         </strong>,
       );
@@ -77,7 +77,7 @@ function parseInline(text: string): ReactNode[] {
     const italicMatch = /^\*([^*]+)\*/.exec(rest);
     if (italicMatch) {
       out.push(
-        <em key={key++} className="italic text-stone-700">
+        <em key={key++} className="italic text-muted-foreground">
           {italicMatch[1]}
         </em>,
       );
@@ -218,7 +218,7 @@ function renderTaskItemWithAction(
     <li key={key} className="list-none">
       <button
         type="button"
-        className="flex w-full items-start gap-2 rounded-xl bg-amber-50/70 px-2.5 py-2 text-left transition-colors hover:bg-amber-100/70"
+        className="flex w-full items-start gap-2 rounded-xl bg-muted/65 px-2.5 py-2 text-left transition-colors hover:bg-muted"
         onClick={() => {
           if (onToggleTask && typeof taskIndex === "number") {
             onToggleTask(taskIndex);
@@ -230,13 +230,13 @@ function renderTaskItemWithAction(
           className={[
             "mt-0.5 inline-flex h-4 w-4 flex-none items-center justify-center rounded border text-[10px] font-bold",
             checked
-              ? "border-emerald-700 bg-emerald-700 text-white"
-              : "border-stone-500/60 bg-white text-transparent",
+              ? "border-success bg-success text-success-foreground"
+              : "border-border bg-background text-transparent",
           ].join(" ")}
         >
           ✓
         </span>
-        <span className={checked ? "text-stone-400 line-through" : "text-stone-800"}>
+        <span className={checked ? "text-muted-foreground line-through" : "text-foreground"}>
           {parseInline(text)}
         </span>
       </button>
@@ -245,12 +245,12 @@ function renderTaskItemWithAction(
 }
 
 const HEADING_CLASS: Record<1 | 2 | 3 | 4 | 5 | 6, string> = {
-  1: "mt-1 text-[1.05rem] font-semibold leading-snug text-stone-900",
-  2: "mt-1 text-[0.98rem] font-semibold leading-snug text-stone-900",
-  3: "mt-1 text-[0.92rem] font-semibold leading-snug text-stone-800",
-  4: "mt-1 text-[0.88rem] font-semibold leading-snug text-stone-800",
-  5: "mt-1 text-[0.84rem] font-semibold leading-snug text-stone-700",
-  6: "mt-1 text-[0.8rem] font-semibold uppercase tracking-[0.08em] text-stone-600",
+  1: "mt-1 text-[1.05rem] font-semibold leading-snug text-foreground",
+  2: "mt-1 text-[0.98rem] font-semibold leading-snug text-foreground",
+  3: "mt-1 text-[0.92rem] font-semibold leading-snug text-foreground",
+  4: "mt-1 text-[0.88rem] font-semibold leading-snug text-foreground",
+  5: "mt-1 text-[0.84rem] font-semibold leading-snug text-muted-foreground",
+  6: "mt-1 text-[0.8rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground",
 };
 
 export function WhiteboardMarkdown({
@@ -271,14 +271,14 @@ export function WhiteboardMarkdown({
           case "hr":
             return (
               <div key={key++} className="my-3">
-                <hr className="border-0 border-t border-dashed border-stone-300" />
+                <hr className="border-0 border-t border-dashed border-border" />
               </div>
             );
           case "code":
             return (
               <pre
                 key={key++}
-                className="my-3 overflow-x-auto rounded-2xl border border-stone-200 bg-stone-950 px-3 py-2.5 text-xs text-stone-100 shadow-sm"
+                className="my-3 overflow-x-auto rounded-2xl border border-border bg-foreground px-3 py-2.5 text-xs text-background shadow-sm"
               >
                 <code className="font-mono">{token.lines.join("\n")}</code>
               </pre>
@@ -295,7 +295,7 @@ export function WhiteboardMarkdown({
             return (
               <blockquote
                 key={key++}
-                className="my-3 rounded-r-2xl rounded-l-md border-l-[3px] border-blue-400 bg-blue-50/80 px-3 py-2 text-[13px] leading-6 text-stone-700"
+                className="my-3 rounded-r-2xl rounded-l-md border-l-[3px] border-accent bg-accent/8 px-3 py-2 text-[13px] leading-6 text-muted-foreground"
               >
                 {token.lines.map((line, index) => (
                   <Fragment key={index}>
@@ -325,7 +325,7 @@ export function WhiteboardMarkdown({
             return (
               <ol
                 key={key++}
-                className="my-3 list-decimal space-y-1.5 pl-5 text-[13px] leading-6 marker:font-semibold marker:text-stone-700"
+                className="my-3 list-decimal space-y-1.5 pl-5 text-[13px] leading-6 marker:font-semibold marker:text-foreground"
               >
                 {token.items.map((item, index) => (
                   <li key={index}>{parseInline(item)}</li>
@@ -334,7 +334,7 @@ export function WhiteboardMarkdown({
             );
           case "p":
             return (
-              <p key={key++} className="my-3 text-[13px] leading-6 text-stone-700">
+              <p key={key++} className="my-3 text-[13px] leading-6 text-muted-foreground">
                 {token.lines.map((line, index) => (
                   <Fragment key={index}>
                     {index > 0 ? <br /> : null}

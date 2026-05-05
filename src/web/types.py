@@ -17,7 +17,7 @@ Why typing.Protocol：
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from web.protocol import CellSummaryDTO
@@ -34,6 +34,8 @@ class ThreadCellProtocol(Protocol):
     bridge: Any  # SessionBridge
 
     def attach_ws(self, new_ws: Any) -> None: ...
+
+    def detach_ws(self, ws: Any) -> None: ...
 
     def touch(self) -> None: ...
 
@@ -60,7 +62,14 @@ class ThreadManagerProtocol(Protocol):
     async def aclose_all(self) -> None: ...
 
     # CRUD
-    async def create_thread(self, name: str, preset_id: str) -> ThreadMetadata: ...
+    async def create_thread(
+        self,
+        name: str,
+        preset_id: str = "",
+        *,
+        backend_kind: Literal["generic_chat", "claude_code"] = "generic_chat",
+        cwd: str = "",
+    ) -> ThreadMetadata: ...
 
     async def rename_thread(self, thread_id: str, new_name: str) -> ThreadMetadata: ...
 
@@ -83,6 +92,24 @@ class ThreadManagerProtocol(Protocol):
     def list_cells(self) -> list[CellSummaryDTO]: ...
 
     def get_cell(self, thread_id: str) -> ThreadCellProtocol | None: ...
+
+    def find_thread_by_sdk_session_id(self, sdk_session_id: str) -> ThreadMetadata | None: ...
+
+    async def bind_sdk_session(
+        self,
+        thread_id: str,
+        sdk_session_id: str,
+        cwd: str,
+    ) -> ThreadMetadata: ...
+
+    async def add_thread_usage(
+        self,
+        thread_id: str,
+        *,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+    ) -> ThreadMetadata: ...
 
     def resolve_approval(self, thread_id: str, call_id: str, approved: bool) -> None: ...
 

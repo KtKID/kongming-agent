@@ -91,7 +91,9 @@ def test_thread_metadata_name_max_200() -> None:
 
 def test_thread_metadata_default_schema_version() -> None:
     meta = _make_meta()
-    assert meta.schema_version == THREAD_METADATA_SCHEMA_VERSION == 1
+    # v0.2.1 bump 到 4（加累计 usage 字段）；老 v1/v2/v3 文件由
+    # read_thread_metadata 懒升级
+    assert meta.schema_version == THREAD_METADATA_SCHEMA_VERSION == 4
 
 
 def test_thread_metadata_message_count_non_negative() -> None:
@@ -169,9 +171,10 @@ def test_read_corrupted_json_returns_none(tmp_path: Path) -> None:
 def test_read_invalid_schema_returns_none(tmp_path: Path) -> None:
     path = thread_metadata_path(tmp_path, "thread-aaaaaaaaaaaa")
     path.parent.mkdir(parents=True, exist_ok=True)
-    # 缺 preset_id
+    # 缺 name（仍是必填，min_length=1）；v0.1.6 后 preset_id 改为可选默认 ""，
+    # 不能再用它做 invalid 用例。
     path.write_text(
-        '{"id":"thread-aaaaaaaaaaaa","name":"x","created_at":1.0,"updated_at":1.0,'
+        '{"id":"thread-aaaaaaaaaaaa","preset_id":"p","created_at":1.0,"updated_at":1.0,'
         '"message_count":0,"schema_version":1}',
         encoding="utf-8",
     )
@@ -188,6 +191,23 @@ def test_read_wrong_schema_version_returns_none(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa") is None
+
+
+def test_read_v3_lazy_upgrades_usage_totals_to_v4(tmp_path: Path) -> None:
+    path = thread_metadata_path(tmp_path, "thread-aaaaaaaaaaaa")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '{"id":"thread-aaaaaaaaaaaa","name":"x","preset_id":"p",'
+        '"backend_kind":"generic_chat","sdk_session_id":"","cwd":"",'
+        '"created_at":1.0,"updated_at":2.0,"message_count":3,"schema_version":3}',
+        encoding="utf-8",
+    )
+    loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
+    assert loaded is not None
+    assert loaded.schema_version == 4
+    assert loaded.cumulative_prompt_tokens == 0
+    assert loaded.cumulative_completion_tokens == 0
+    assert loaded.cumulative_total_tokens == 0
 
 
 def test_read_directory_instead_of_file_returns_none(tmp_path: Path) -> None:

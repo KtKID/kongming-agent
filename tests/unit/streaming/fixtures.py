@@ -160,12 +160,134 @@ def mock_response_with_bytes(raw: bytes, *, chunk_size: int = 4096) -> FakeStrea
     return FakeStreamingResponse(raw, chunk_size=chunk_size)
 
 
+# ---------------------------------------------------------------------------
+# Anthropic SSE event 工厂
+# ---------------------------------------------------------------------------
+
+
+def make_anthropic_message_start(
+    *,
+    msg_id: str = "msg_test",
+    model: str = "claude-test-model",
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_creation_input_tokens: int | None = None,
+    cache_read_input_tokens: int | None = None,
+) -> tuple[str, dict[str, Any]]:
+    usage: dict[str, Any] = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }
+    if cache_creation_input_tokens is not None:
+        usage["cache_creation_input_tokens"] = cache_creation_input_tokens
+    if cache_read_input_tokens is not None:
+        usage["cache_read_input_tokens"] = cache_read_input_tokens
+    return (
+        "message_start",
+        {
+            "type": "message_start",
+            "message": {
+                "id": msg_id,
+                "model": model,
+                "usage": usage,
+            },
+        },
+    )
+
+
+def make_anthropic_block_start(
+    *,
+    index: int,
+    block_type: str,
+    tool_id: str | None = None,
+    tool_name: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    block: dict[str, Any] = {"type": block_type}
+    if block_type == "tool_use":
+        if tool_id is not None:
+            block["id"] = tool_id
+        if tool_name is not None:
+            block["name"] = tool_name
+        block["input"] = {}
+    return (
+        "content_block_start",
+        {"type": "content_block_start", "index": index, "content_block": block},
+    )
+
+
+def make_anthropic_text_delta(*, index: int, text: str) -> tuple[str, dict[str, Any]]:
+    return (
+        "content_block_delta",
+        {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "text_delta", "text": text},
+        },
+    )
+
+
+def make_anthropic_thinking_delta(*, index: int, thinking: str) -> tuple[str, dict[str, Any]]:
+    return (
+        "content_block_delta",
+        {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "thinking_delta", "thinking": thinking},
+        },
+    )
+
+
+def make_anthropic_input_json_delta(*, index: int, partial_json: str) -> tuple[str, dict[str, Any]]:
+    return (
+        "content_block_delta",
+        {
+            "type": "content_block_delta",
+            "index": index,
+            "delta": {"type": "input_json_delta", "partial_json": partial_json},
+        },
+    )
+
+
+def make_anthropic_block_stop(*, index: int) -> tuple[str, dict[str, Any]]:
+    return (
+        "content_block_stop",
+        {"type": "content_block_stop", "index": index},
+    )
+
+
+def make_anthropic_message_delta(
+    *,
+    stop_reason: str = "end_turn",
+    output_tokens: int = 0,
+) -> tuple[str, dict[str, Any]]:
+    return (
+        "message_delta",
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+            "usage": {"output_tokens": output_tokens},
+        },
+    )
+
+
+def make_anthropic_message_stop() -> tuple[str, dict[str, Any]]:
+    return ("message_stop", {"type": "message_stop"})
+
+
 __all__ = [
     "FakeStreamingResponse",
     "assert_message_done_equivalent",
     "async_iter_events",
     "collect_content_deltas",
     "collect_reasoning_deltas",
+    "make_anthropic_block_start",
+    "make_anthropic_block_stop",
+    "make_anthropic_input_json_delta",
+    "make_anthropic_message_delta",
+    "make_anthropic_message_start",
+    "make_anthropic_message_stop",
+    "make_anthropic_text_delta",
+    "make_anthropic_thinking_delta",
     "make_openai_chunk",
     "make_tool_call_delta",
     "mock_response_with_bytes",

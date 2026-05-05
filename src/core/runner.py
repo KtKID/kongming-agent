@@ -419,7 +419,8 @@ class Runner:
                         )
                     )
             assistant_message = response.message
-            await session.append(assistant_message)
+            assistant_usage = dict(response.usage) if response.usage else None
+            await session.append(assistant_message, usage=assistant_usage)
             state.record(assistant_message)
 
             await self._emit(

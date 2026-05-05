@@ -384,8 +384,12 @@ class Session(Protocol):
 
     session_id: str
 
-    async def append(self, message: Message) -> None:
-        """追加一条消息到会话末尾。"""
+    async def append(self, message: Message, *, usage: dict[str, Any] | None = None) -> None:
+        """追加一条消息到会话末尾。
+
+        ``usage`` 用于附着这条记录对应的 LLM token 统计。当前 runner 只在
+        assistant 消息写入时传入；user / system / tool 默认留空。
+        """
         ...
 
     async def history(self) -> list[Message]:

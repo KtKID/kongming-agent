@@ -1,7 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  LoaderCircle,
+  Sigma,
+  XCircle,
+} from "lucide-react";
+import { EvolutionDecisionModal } from "@/components/EvolutionDecisionModal";
 import { Markdown } from "@/lib/markdown";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { ChatAvatar } from "@/components/ChatAvatar";
 import { useChatStore, type ChatItem } from "@/stores/chat";
 import { isDebugMode } from "@/lib/debug";
@@ -13,6 +25,7 @@ import { cn } from "@/lib/utils";
  * - user：右对齐气泡
  * - assistant：左对齐气泡 + reasoning 折叠 + Markdown
  * - tool：折叠卡片 + status badge
+ * - system：时间线系统提示卡片
  * - approval：内联 banner（modal 由 ApprovalDialog 单独负责）
  * - error：醒目横幅
  *
@@ -25,20 +38,31 @@ import { cn } from "@/lib/utils";
 const EMPTY_ITEMS: ChatItem[] = [];
 const NEAR_BOTTOM_PX = 80;
 
-export function MessageList({
-  threadId,
-}: {
-  threadId: string | undefined;
-}) {
-  const items = useChatStore((s) =>
-    threadId ? (s.itemsByThread[threadId] ?? EMPTY_ITEMS) : EMPTY_ITEMS,
+interface MessageViewportProps<T> {
+  items: T[];
+  emptyText: string;
+  renderItem: (item: T, index: number) => ReactNode;
+  getUserMessageCount?: (items: T[]) => number;
+  resetKey?: string | number;
+}
+
+export function MessageViewport<T>({
+  items,
+  emptyText,
+  renderItem,
+  getUserMessageCount,
+  resetKey,
+}: MessageViewportProps<T>) {
+  const countUsers = useCallback(
+    (list: T[]) =>
+      getUserMessageCount ? getUserMessageCount(list) : 0,
+    [getUserMessageCount],
   );
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const isNearBottomRef = useRef(true);
   const prevUserMsgCount = useRef(0);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
 
-  // --- scroll detection ---
   const checkNearBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -48,36 +72,29 @@ export function MessageList({
     setShowScrollBtn(!near);
   }, []);
 
-  // --- auto-scroll on content change ---
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
 
-    const userMsgCount = items.filter((it) => it.kind === "user").length;
+    const userMsgCount = countUsers(items);
 
     if (userMsgCount > prevUserMsgCount.current) {
-      // New user message — always scroll to bottom
       el.scrollTop = el.scrollHeight;
       isNearBottomRef.current = true;
       setShowScrollBtn(false);
     } else if (isNearBottomRef.current) {
-      // Auto-scroll only when user is near bottom.
-      // If user scrolled up to read earlier content, respect that —
-      // never force-jump during streaming or tool card insertion.
       el.scrollTop = el.scrollHeight;
     }
 
     prevUserMsgCount.current = userMsgCount;
-  }, [items]);
+  }, [countUsers, items]);
 
-  // --- reset on thread change ---
   useEffect(() => {
     prevUserMsgCount.current = 0;
     isNearBottomRef.current = true;
     setShowScrollBtn(false);
-  }, [threadId]);
+  }, [resetKey]);
 
-  // --- scroll to bottom (button click) ---
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -86,18 +103,10 @@ export function MessageList({
     setShowScrollBtn(false);
   }, []);
 
-  if (!threadId) {
-    return (
-      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        在左侧选择或创建一个 thread
-      </div>
-    );
-  }
-
   if (items.length === 0) {
     return (
       <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        说点什么开始
+        {emptyText}
       </div>
     );
   }
@@ -107,13 +116,11 @@ export function MessageList({
       <div
         ref={scrollRef}
         onScroll={checkNearBottom}
-        className="h-full overflow-y-auto"
+        className="h-full overflow-y-auto scrollbar-overlay"
       >
         <div className="mx-auto w-full max-w-3xl p-6">
           <div className="flex flex-col gap-4">
-            {items.map((it) => (
-              <MessageWithDebugBadge key={it.id} item={it} />
-            ))}
+            {items.map((item, index) => renderItem(item, index))}
           </div>
         </div>
       </div>
@@ -132,6 +139,34 @@ export function MessageList({
   );
 }
 
+export function MessageList({
+  threadId,
+}: {
+  threadId: string | undefined;
+}) {
+  const items = useChatStore((s) =>
+    threadId ? (s.itemsByThread[threadId] ?? EMPTY_ITEMS) : EMPTY_ITEMS,
+  );
+
+  if (!threadId) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+        在左侧选择或创建一个 thread
+      </div>
+    );
+  }
+
+  return (
+    <MessageViewport
+      items={items}
+      emptyText="说点什么开始"
+      resetKey={threadId}
+      getUserMessageCount={(list) => list.filter((it) => it.kind === "user").length}
+      renderItem={(item) => <ChatMessageItem key={item.id} item={item} />}
+    />
+  );
+}
+
 /**
  * Debug 包装：debug 开启时给每条 ChatItem 角上贴 monospace 小 badge，
  * 内容 `${id前8} │ ${runId后6} │ t${turn}`。仅 debug 模式下渲染，避免污染正常视图。
@@ -139,11 +174,11 @@ export function MessageList({
  * 用途：肉眼验证 (threadId, runId, turn) 复合 key 是否正确生成；修非流式
  * 多轮覆盖 bug 后的快速回归手段。
  */
-function MessageWithDebugBadge({ item }: { item: ChatItem }) {
+export function ChatMessageItem({ item }: { item: ChatItem }) {
   // 同步读一次 debug 开关；不响应式，避免不必要的 re-render
   const debug = useMemo(() => isDebugMode(), []);
   if (!debug) {
-    return <Message item={item} />;
+    return <MessageContent item={item} />;
   }
 
   const turn =
@@ -154,7 +189,7 @@ function MessageWithDebugBadge({ item }: { item: ChatItem }) {
 
   return (
     <div className="relative" data-testid="debug-badge-wrap">
-      <Message item={item} />
+      <MessageContent item={item} />
       <div
         data-testid="debug-badge"
         className="pointer-events-none absolute right-0 top-0 z-10 rounded-bl-md rounded-tr-md border border-border bg-background/90 px-1.5 py-0.5 font-mono text-[10px] leading-tight text-muted-foreground shadow-sm backdrop-blur-sm"
@@ -165,7 +200,7 @@ function MessageWithDebugBadge({ item }: { item: ChatItem }) {
   );
 }
 
-function Message({ item }: { item: ChatItem }) {
+function MessageContent({ item }: { item: ChatItem }) {
   switch (item.kind) {
     case "user":
       return (
@@ -190,6 +225,8 @@ function Message({ item }: { item: ChatItem }) {
     }
     case "tool":
       return <ToolCard item={item} />;
+    case "system":
+      return <SystemNoticeCard item={item} />;
     case "approval":
       return (
         <div className="rounded-md border border-warning bg-warning/10 px-4 py-2 text-xs text-foreground">
@@ -229,6 +266,15 @@ function AssistantMessage({
   // 这里再加一道防御兜底）。
   const hasContent = Boolean(item.content);
   const hasReasoning = Boolean(item.reasoning);
+  const hasUsage = Boolean(item.usage);
+  const formattedTime = useMemo(
+    () =>
+      new Date(item.timestampMs).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+    [item.timestampMs],
+  );
   if (!hasContent && !item.streaming && !hasReasoning) return null;
   return (
     <div className="flex flex-col gap-2">
@@ -252,18 +298,48 @@ function AssistantMessage({
         </pre>
       ) : null}
       {hasContent || item.streaming ? (
-        <div className="rounded-2xl rounded-bl-md bg-card px-4 py-2 text-sm shadow-sm">
-          <Markdown text={item.content} />
-          {item.streaming ? (
-            <span
-              aria-label="streaming"
-              className="ml-1 inline-block h-4 w-1 animate-pulse bg-accent align-middle"
-            />
+        <div className="w-full">
+          <div className="rounded-2xl rounded-bl-md bg-card px-4 py-2 text-sm shadow-sm">
+            <Markdown text={item.content} />
+            {item.streaming ? (
+              <span
+                aria-label="streaming"
+                className="ml-1 inline-block h-4 w-1 animate-pulse bg-accent align-middle"
+              />
+            ) : null}
+          </div>
+          {hasUsage ? (
+            <div
+              className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 pl-2 text-[11px] text-muted-foreground"
+              data-testid="assistant-usage-footer"
+            >
+              <span>{formattedTime}</span>
+              <span className="inline-flex items-center gap-1">
+                <ArrowUp className="h-3 w-3" />
+                {fmtCompact(item.usage!.prompt)}
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <ArrowDown className="h-3 w-3" />
+                {fmtCompact(item.usage!.completion)}
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <Sigma className="h-3 w-3" />
+                {fmtCompact(item.usage!.total)}
+              </span>
+            </div>
           ) : null}
         </div>
       ) : null}
     </div>
   );
+}
+
+function fmtCompact(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  if (Math.abs(value) >= 1000) {
+    return `${(value / 1000).toFixed(1)}K`;
+  }
+  return String(value);
 }
 
 function ToolCard({
@@ -341,4 +417,256 @@ function ToolCard({
       ) : null}
     </div>
   );
+}
+
+function SystemNoticeCard({
+  item,
+}: {
+  item: Extract<ChatItem, { kind: "system" }>;
+}) {
+  const [open, setOpen] = useState(false);
+  const applyEvolutionReview = useChatStore((s) => s.applyEvolutionReview);
+  const Icon = iconForSystemNotice(item.icon, item.status);
+  const cardTone = toneForSystemNotice(item.status);
+  const reviewId =
+    item.detailsData &&
+    !Array.isArray(item.detailsData) &&
+    typeof item.detailsData.review_id === "string"
+      ? item.detailsData.review_id
+      : null;
+  const canDecide =
+    item.source === "self_evolution" &&
+    item.status === "success" &&
+    Boolean(reviewId);
+  const applyStats = evolutionApplyStatsFromNotice(item);
+
+  return (
+    <>
+      <div className="flex justify-center" data-testid="system-notice-wrap">
+        <div
+          className={cn(
+            "w-full max-w-2xl rounded-2xl border px-4 py-3 shadow-sm",
+            cardTone.container,
+          )}
+          data-testid="system-notice-card"
+        >
+          <div className="flex items-start gap-3">
+            <div
+              className={cn(
+                "mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border",
+                cardTone.iconWrap,
+              )}
+            >
+              <Icon
+                className={cn(
+                  "h-4 w-4",
+                  cardTone.icon,
+                  item.status === "running" ? "animate-spin" : "",
+                )}
+              />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <div className="text-sm font-semibold tracking-tight">{item.title}</div>
+                  <Badge variant={badgeVariantForSystemNotice(item.status)}>
+                    {labelForSystemNotice(item.status)}
+                  </Badge>
+                </div>
+                {canDecide ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setOpen(true)}
+                    data-testid="evolution-open-decision"
+                    className="shrink-0"
+                  >
+                    查看并处理
+                  </Button>
+                ) : null}
+              </div>
+              <div className="mt-1 text-sm leading-relaxed text-foreground/90">
+                {item.message}
+              </div>
+              {applyStats.length > 0 ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {applyStats.map((stat) => (
+                    <Badge key={stat.label} variant={stat.variant}>
+                      {stat.label}
+                    </Badge>
+                  ))}
+                </div>
+              ) : null}
+              {item.details.length > 0 ? (
+                <div className="mt-3 space-y-2">
+                  {item.details.map((detail, index) => (
+                    <div
+                      key={`${item.noticeKey}-${index}`}
+                      className="rounded-xl border border-border/60 bg-background/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground"
+                    >
+                      {detail}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+      {canDecide && reviewId ? (
+        <EvolutionDecisionModal
+          open={open}
+          onOpenChange={setOpen}
+          threadId={item.threadId}
+          reviewId={reviewId}
+          onReviewUpdated={(review) => applyEvolutionReview(item.threadId, review)}
+        />
+      ) : null}
+    </>
+  );
+}
+
+function evolutionApplyStatsFromNotice(
+  item: Extract<ChatItem, { kind: "system" }>,
+): Array<{
+  label: string;
+  variant: "secondary" | "success" | "warning" | "destructive";
+}> {
+  if (
+    item.source !== "self_evolution" ||
+    !item.detailsData ||
+    Array.isArray(item.detailsData)
+  ) {
+    return [];
+  }
+
+  const written = numberFromDetails(item.detailsData.applied_written_count);
+  const skipped = numberFromDetails(item.detailsData.applied_skipped_count);
+  const failed = numberFromDetails(item.detailsData.applied_failed_count);
+  const pending = numberFromDetails(item.detailsData.applied_pending_count);
+
+  const stats: Array<{
+    label: string;
+    variant: "secondary" | "success" | "warning" | "destructive";
+  }> = [];
+
+  if (written > 0) {
+    stats.push({ label: `已写入 ${written}`, variant: "success" });
+  }
+  if (skipped > 0) {
+    stats.push({ label: `已命中 ${skipped}`, variant: "warning" });
+  }
+  if (failed > 0) {
+    stats.push({ label: `失败 ${failed}`, variant: "destructive" });
+  }
+  if (pending > 0) {
+    stats.push({ label: `待写入 ${pending}`, variant: "secondary" });
+  }
+
+  return stats;
+}
+
+function numberFromDetails(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function labelForSystemNotice(
+  status: Extract<ChatItem, { kind: "system" }>["status"],
+): string {
+  switch (status) {
+    case "running":
+      return "复盘中";
+    case "success":
+      return "已沉淀";
+    case "warning":
+      return "超时";
+    case "error":
+      return "未写入";
+    default: {
+      const _exhaustive: never = status;
+      return _exhaustive;
+    }
+  }
+}
+
+function badgeVariantForSystemNotice(
+  status: Extract<ChatItem, { kind: "system" }>["status"],
+): "secondary" | "success" | "warning" | "destructive" {
+  switch (status) {
+    case "running":
+      return "secondary";
+    case "success":
+      return "success";
+    case "warning":
+      return "warning";
+    case "error":
+      return "destructive";
+    default: {
+      const _exhaustive: never = status;
+      return _exhaustive;
+    }
+  }
+}
+
+function iconForSystemNotice(
+  icon: Extract<ChatItem, { kind: "system" }>["icon"],
+  status: Extract<ChatItem, { kind: "system" }>["status"],
+) {
+  switch (icon) {
+    case "success":
+      return CheckCircle2;
+    case "warning":
+      return AlertTriangle;
+    case "error":
+      return XCircle;
+    case "running":
+      return LoaderCircle;
+    default:
+      return status === "success"
+        ? CheckCircle2
+        : status === "warning"
+          ? AlertTriangle
+          : status === "error"
+            ? XCircle
+            : LoaderCircle;
+  }
+}
+
+function toneForSystemNotice(
+  status: Extract<ChatItem, { kind: "system" }>["status"],
+): {
+  container: string;
+  iconWrap: string;
+  icon: string;
+} {
+  switch (status) {
+    case "running":
+      return {
+        container: "border-border/70 bg-card/70 text-foreground",
+        iconWrap: "border-border/70 bg-muted/70",
+        icon: "text-muted-foreground",
+      };
+    case "success":
+      return {
+        container: "border-success/25 bg-success/10 text-foreground",
+        iconWrap: "border-success/30 bg-success/15",
+        icon: "text-success",
+      };
+    case "warning":
+      return {
+        container: "border-warning/25 bg-warning/10 text-foreground",
+        iconWrap: "border-warning/30 bg-warning/15",
+        icon: "text-warning-foreground",
+      };
+    case "error":
+      return {
+        container: "border-destructive/25 bg-destructive/10 text-foreground",
+        iconWrap: "border-destructive/30 bg-destructive/15",
+        icon: "text-destructive",
+      };
+    default: {
+      const _exhaustive: never = status;
+      return _exhaustive;
+    }
+  }
 }

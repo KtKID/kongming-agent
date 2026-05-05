@@ -5,6 +5,10 @@ import { Layout } from "@/components/Layout";
 import { useAuthStore } from "@/stores/auth";
 import { useThreadsStore } from "@/stores/threads";
 
+vi.mock("@/components/ThemeToggle", () => ({
+  ThemeToggle: () => <button type="button">theme</button>,
+}));
+
 // 阻断 auth.logout 真请求
 vi.mock("@/lib/api", () => ({
   apiPost: vi.fn().mockResolvedValue(undefined),
@@ -46,6 +50,7 @@ describe("Layout", () => {
     expect(screen.getByText("kongming")).toBeInTheDocument();
     expect(screen.getByLabelText("退出登录")).toBeInTheDocument();
     expect(screen.getByTestId("chat")).toBeInTheDocument();
+    expect(screen.getByTestId("app-header").className).toContain("z-30");
   });
 
   it("/manage 路径下显示 '运行管理' 标题", () => {

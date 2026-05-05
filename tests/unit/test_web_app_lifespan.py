@@ -19,6 +19,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from config_loader.models import Config
+from evolution.apply_executor import build_apply_job
+from evolution.models import (
+    DecisionItem,
+    DecisionRecord,
+    DecisionSummary,
+    EvolutionNutrient,
+    ReviewResult,
+    ReviewWritePayload,
+)
+from evolution.state_store import EvolutionStateStore
+from evolution.store import EvolutionStore
 from web.app import create_app
 
 
@@ -39,6 +50,15 @@ def _make_cfg(*, dev_mode: bool = True) -> Config:
             },
         }
     )
+
+
+def _run_async(awaitable):  # type: ignore[no-untyped-def]
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(awaitable)
+    finally:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
 
 
 class FakeThreadManager:
@@ -99,6 +119,17 @@ class FakeThreadManager:
 
     def get_cell(self, thread_id: str) -> Any:
         return None
+
+    def find_thread_by_sdk_session_id(self, sdk_session_id: str) -> Any:
+        return None  # 默认无命中；测试可 monkeypatch
+
+    async def bind_sdk_session(
+        self,
+        thread_id: str,
+        sdk_session_id: str,
+        cwd: str,
+    ) -> Any:
+        raise NotImplementedError  # 默认；测试 mock 时按需 override
 
     def resolve_approval(self, thread_id: str, call_id: str, approved: bool) -> None:
         return None
@@ -181,3 +212,108 @@ def test_password_not_configured_raises(tmp_path: Path) -> None:
 
     with pytest.raises(WebAuthNotConfiguredError):
         create_app(cfg, tm, home_dir=tmp_path)
+
+
+def test_lifespan_startup_recovers_pending_evolution_apply_jobs(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    evolution_root = tmp_path / ".kongming" / "evolution"
+    store = EvolutionStore(root_dir=evolution_root, state_store=EvolutionStateStore(evolution_root))
+    review = ReviewResult(
+        run_id="run-parent-1",
+        session_id="thread-demo",
+        reviewed_at_ms=123,
+        review_summary="captured one nutrient",
+        nutrients=(
+            EvolutionNutrient(
+                nutrient_id="nutrient-1",
+                kind="memory",
+                title="Memory One",
+                content="workspace keeps a stable note layout",
+                summary="workspace keeps a stable note layout",
+                confidence=0.9,
+                evidence_turns=(1,),
+                source_run_id="run-parent-1",
+                source_session_id="thread-demo",
+                suggested_target="memory",
+                tags=("memory",),
+            ),
+        ),
+        skip_reasons=(),
+    )
+    decision = DecisionRecord(
+        review_id="evo-review:run-parent-1",
+        session_id="thread-demo",
+        run_id="run-parent-1",
+        summary=DecisionSummary(
+            total=1,
+            accepted_memory=1,
+            accepted_skill=0,
+            ignored=0,
+            pending=0,
+        ),
+        items=(
+            DecisionItem(
+                nutrient_id="nutrient-1",
+                decision="accept_memory",
+                target="memory",
+                decided_at_ms=1000,
+            ),
+        ),
+    )
+    _run_async(
+        store.write_review(
+            ReviewWritePayload(
+                review_result=review,
+                trigger_reason="cadence",
+            )
+        )
+    )
+    _run_async(store.write_decision(decision))
+    _run_async(
+        store.write_apply_job(
+            build_apply_job(
+                review_id=decision.review_id,
+                session_id=decision.session_id,
+                run_id=decision.run_id,
+                nutrient_id="nutrient-1",
+                decision=decision.items[0],
+                workspace_root=workspace,
+                created_at_ms=1001,
+            )
+        )
+    )
+
+    cfg = Config.model_validate(
+        {
+            "model": {
+                "name": "fake",
+                "base_url": "http://127.0.0.1:1234/v1",
+                "api_key": "",
+            },
+            "web": {"enabled": True, "dev_mode": True},
+            "evolution": {
+                "learning": {
+                    "enabled": True,
+                    "root_path": str(evolution_root),
+                }
+            },
+        }
+    )
+    tm = FakeThreadManager()
+    _seed_password(tmp_path)
+
+    app = create_app(cfg, tm, home_dir=tmp_path)
+
+    with TestClient(app):
+        pass
+
+    memory_path = workspace / ".kongming" / "memory" / "MEMORY.md"
+    assert memory_path.exists()
+    content = memory_path.read_text(encoding="utf-8")
+    assert "workspace keeps a stable note layout" in content
+    recovered_decision = _run_async(store.read_decision(decision.review_id))
+    assert recovered_decision is not None
+    assert recovered_decision.items[0].applied_status == "written"
+    recovered_job = _run_async(store.read_apply_job("apply:evo-review:run-parent-1:nutrient-1"))
+    assert recovered_job is not None
+    assert recovered_job.status == "finished"

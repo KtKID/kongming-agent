@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +86,19 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("evolution", "memory", "inject_prompt"),
     ("evolution", "memory", "read_max_chars"),
     ("evolution", "memory", "view_max_chars"),
+    ("evolution", "learning", "enabled"),
+    ("evolution", "learning", "mode"),
+    ("evolution", "learning", "background"),
+    ("evolution", "learning", "model_name"),
+    ("evolution", "learning", "reasoning_effort"),
+    ("evolution", "learning", "every_n_runs"),
+    ("evolution", "learning", "min_user_turns"),
+    ("evolution", "learning", "max_history_messages"),
+    ("evolution", "learning", "max_nutrients"),
+    ("evolution", "learning", "nutrient_confidence_threshold"),
+    ("evolution", "learning", "review_timeout_seconds"),
+    ("evolution", "learning", "drain_on_close_seconds"),
+    ("evolution", "learning", "root_path"),
     ("stream", "enabled"),
     ("stream", "read_timeout"),
     ("stream", "suppress_content_after_tool_call"),
@@ -177,7 +191,82 @@ def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
         env_name = _env_var_name(field_path)
         if env_name in os.environ:
             _set_nested(data, field_path, os.environ[env_name])
+    _apply_scheduler_env_overrides(data)
     return data
+
+
+# ---------------------------------------------------------------------------
+# Scheduler env overrides（v0.2）
+# ---------------------------------------------------------------------------
+#
+# 与通用 env 覆盖的差异：scheduler 字段的非法值（如 INTERVAL=abc）走"stderr
+# warning + 用默认值"路径，而不是抛 ConfigValidationError。这是 cron v0.2 的
+# 显式产品决策——env 给出来历未必清晰，不应让 cron 配置错让整个进程起不来。
+#
+# 实现：在 dict 进入 pydantic 之前先解析 / 校验；解析失败 → 不写入 dict（即
+# 走默认值）+ 一行 stderr warning。
+_BOOL_TRUE_TOKENS: frozenset[str] = frozenset({"1", "true", "yes", "on"})
+_BOOL_FALSE_TOKENS: frozenset[str] = frozenset({"0", "false", "no", "off"})
+
+
+def _parse_bool_env(raw: str) -> bool | None:
+    """解析 0/1/true/false/yes/no/on/off（大小写不敏感）；非法返回 None。"""
+    token = raw.strip().lower()
+    if token in _BOOL_TRUE_TOKENS:
+        return True
+    if token in _BOOL_FALSE_TOKENS:
+        return False
+    return None
+
+
+def _warn(msg: str) -> None:
+    """env 解析失败的统一 stderr 提示。集中一个出口便于将来切到 logger。"""
+    print(f"[config_loader] warning: {msg}", file=sys.stderr)
+
+
+def _apply_scheduler_env_overrides(data: dict[str, Any]) -> None:
+    """把 ``KONGMING_SCHEDULER_*`` env 写入 ``data["scheduler"]``。
+
+    支持三个 env：
+
+    - ``KONGMING_SCHEDULER_ENABLED``：bool（0/1/true/false/yes/no/on/off）
+    - ``KONGMING_SCHEDULER_INTERVAL``：float
+    - ``KONGMING_SCHEDULER_MAX_INFLIGHT``：int
+
+    非法值统一 stderr warning + 不写入 dict（保留 yaml / 默认值）。
+    """
+    raw_enabled = os.environ.get("KONGMING_SCHEDULER_ENABLED")
+    if raw_enabled is not None:
+        parsed_bool = _parse_bool_env(raw_enabled)
+        if parsed_bool is None:
+            _warn(
+                f"KONGMING_SCHEDULER_ENABLED={raw_enabled!r} is not a valid boolean; using default."
+            )
+        else:
+            _set_nested(data, ("scheduler", "enabled"), parsed_bool)
+
+    raw_interval = os.environ.get("KONGMING_SCHEDULER_INTERVAL")
+    if raw_interval is not None:
+        try:
+            value = float(raw_interval)
+        except ValueError:
+            _warn(
+                f"KONGMING_SCHEDULER_INTERVAL={raw_interval!r} is not a valid float; using default."
+            )
+        else:
+            _set_nested(data, ("scheduler", "interval"), value)
+
+    raw_max_inflight = os.environ.get("KONGMING_SCHEDULER_MAX_INFLIGHT")
+    if raw_max_inflight is not None:
+        try:
+            value_int = int(raw_max_inflight)
+        except ValueError:
+            _warn(
+                f"KONGMING_SCHEDULER_MAX_INFLIGHT={raw_max_inflight!r} is not a "
+                "valid int; using default."
+            )
+        else:
+            _set_nested(data, ("scheduler", "max_inflight"), value_int)
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

@@ -9,7 +9,7 @@ import {
 
 describe("stores/chat", () => {
   beforeEach(() => {
-    useChatStore.setState({ itemsByThread: {} });
+    useChatStore.setState({ itemsByThread: {}, usageByThread: {} });
     clearBuffers();
     // 同步 rAF：commit 立刻发生，便于断言
     __setRafForTest((cb) => cb());
@@ -185,5 +185,322 @@ describe("stores/chat", () => {
     expect(a2.content).toBe("second");
     expect(a1.runId).toBe("run-1");
     expect(a2.runId).toBe("run-2");
+  });
+
+  it("appendSystemNotice 按 noticeKey + runId 原地更新同一条卡片", () => {
+    const store = useChatStore.getState();
+    store.appendSystemNotice("t1", {
+      kind: "system.notice",
+      timestamp_ms: 100,
+      notice_key: "evolution.review",
+      source: "self_evolution",
+      status: "started",
+      title: "进化复盘",
+      message: "后台复盘中",
+      details: ["turns: 1,2,3"],
+      icon: "running",
+      run_id: "run-1",
+    });
+    store.appendSystemNotice("t1", {
+      kind: "system.notice",
+      timestamp_ms: 200,
+      notice_key: "evolution.review",
+      source: "self_evolution",
+      status: "completed",
+      title: "进化复盘",
+      message: "已沉淀 2 条进化养料",
+      details: ["2 nutrients written"],
+      icon: "success",
+      run_id: "run-1",
+    });
+
+    const items = useChatStore.getState().itemsByThread["t1"]!;
+    expect(items).toHaveLength(1);
+    const item = items[0]!;
+    if (item.kind !== "system") throw new Error("expected system notice");
+    expect(item.id).toBe("system-t1-run-1-evolution.review");
+    expect(item.runId).toBe("run-1");
+    expect(item.noticeKey).toBe("evolution.review");
+    expect(item.status).toBe("success");
+    expect(item.icon).toBe("success");
+    expect(item.message).toBe("已沉淀 2 条进化养料");
+    expect(item.details).toEqual(["2 nutrients written"]);
+    expect(item.timestampMs).toBe(200);
+  });
+
+  it("appendSystemNotice 同 noticeKey 不同 runId 保留独立卡片", () => {
+    const store = useChatStore.getState();
+    store.appendSystemNotice("t1", {
+      kind: "system.notice",
+      timestamp_ms: 100,
+      notice_key: "evolution.review",
+      source: "self_evolution",
+      status: "started",
+      title: "进化复盘",
+      message: "run-1",
+      details: [],
+      run_id: "run-1",
+    });
+    store.appendSystemNotice("t1", {
+      kind: "system.notice",
+      timestamp_ms: 200,
+      notice_key: "evolution.review",
+      source: "self_evolution",
+      status: "failed",
+      title: "进化复盘",
+      message: "run-2",
+      details: ["timeout"],
+      run_id: "run-2",
+    });
+
+    const items = useChatStore.getState().itemsByThread["t1"]!;
+    expect(items).toHaveLength(2);
+    const first = items[0]!;
+    const second = items[1]!;
+    if (first.kind !== "system" || second.kind !== "system") {
+      throw new Error("expected system notices");
+    }
+    expect(first.runId).toBe("run-1");
+    expect(second.runId).toBe("run-2");
+    expect(second.status).toBe("error");
+    expect(second.icon).toBe("error");
+  });
+
+  it("applyEvolutionReview 回写系统卡片进度", () => {
+    const store = useChatStore.getState();
+    store.appendSystemNotice("t1", {
+      kind: "system.notice",
+      timestamp_ms: 100,
+      notice_key: "self_evolution.review",
+      source: "self_evolution",
+      status: "completed",
+      title: "进化复盘",
+      message: "发现 2 条进化养料",
+      details: {
+        review_id: "evo-review:run-1",
+        review_run_id: "run-1",
+        session_id: "t1",
+        write_status: "written",
+        nutrient_count: 2,
+        handled_count: 0,
+        pending_count: 2,
+      },
+      icon: "success",
+      run_id: "run-1",
+    });
+
+    store.applyEvolutionReview("t1", {
+      review_id: "evo-review:run-1",
+      run_id: "run-1",
+      session_id: "t1",
+      reviewed_at_ms: 200,
+      review_summary: "captured",
+      nutrients: [
+        {
+          nutrient_id: "n1",
+          kind: "workflow",
+          title: "N1",
+          content: "c1",
+          summary: "s1",
+          confidence: 0.9,
+          evidence_turns: [1],
+          source_run_id: "run-1",
+          source_session_id: "t1",
+          suggested_target: "skill",
+          tags: [],
+        },
+        {
+          nutrient_id: "n2",
+          kind: "memory",
+          title: "N2",
+          content: "c2",
+          summary: "s2",
+          confidence: 0.8,
+          evidence_turns: [2],
+          source_run_id: "run-1",
+          source_session_id: "t1",
+          suggested_target: "memory",
+          tags: [],
+        },
+      ],
+      decision_summary: {
+        total: 2,
+        accepted_memory: 1,
+        accepted_skill: 0,
+        ignored: 0,
+        pending: 1,
+      },
+      decisions: [
+        {
+          nutrient_id: "n1",
+          decision: "accept_skill",
+          target: "skill",
+          decided_at_ms: 122,
+          applied_status: "failed",
+          applied_mode: "update",
+          applied_path: "/tmp/.kongming/skills/review/SKILL.md",
+          applied_at_ms: 124,
+          applied_error: "write conflict",
+        },
+        {
+          nutrient_id: "n2",
+          decision: "accept_memory",
+          target: "memory",
+          decided_at_ms: 123,
+          applied_status: "written",
+          applied_mode: "append",
+          applied_path: "/tmp/.kongming/memory/MEMORY.md",
+          applied_at_ms: 125,
+          applied_error: null,
+        },
+      ],
+    });
+
+    const items = useChatStore.getState().itemsByThread["t1"]!;
+    const item = items[0]!;
+    if (item.kind !== "system") throw new Error("expected system notice");
+    expect(item.message).toBe("已写入 1/2 条进化养料，失败 1 条");
+    expect(item.details).toContain("pending_count: 1");
+    expect(item.details).toContain("applied_written_count: 1");
+    expect(item.details).toContain("applied_failed_count: 1");
+  });
+
+  it("appendUsage 累加 thread 级 prompt / completion / total", () => {
+    const store = useChatStore.getState();
+    store.appendUsage("t1", {
+      kind: "usage",
+      prompt_tokens: 100,
+      completion_tokens: 40,
+      total_tokens: 140,
+      turn: 1,
+      run_id: "run-1",
+      timestamp_ms: 100,
+    });
+    store.appendUsage("t1", {
+      kind: "usage",
+      prompt_tokens: 60,
+      completion_tokens: 25,
+      total_tokens: 85,
+      turn: 2,
+      run_id: "run-1",
+      timestamp_ms: 200,
+    });
+
+    expect(useChatStore.getState().usageByThread["t1"]).toEqual({
+      lastPrompt: 60,
+      lastCompletion: 25,
+      lastTotal: 85,
+      cumulativePrompt: 160,
+      cumulativeCompletion: 65,
+      cumulativeTotal: 225,
+    });
+  });
+
+  it("appendUsage 用 runId + turn 回填对应 assistant item", () => {
+    const store = useChatStore.getState();
+    store.appendAssistantFinal("t1", {
+      kind: "assistant.final",
+      content: "first",
+      turn: 1,
+      run_id: "run-1",
+      timestamp_ms: 100,
+    });
+    store.appendAssistantFinal("t1", {
+      kind: "assistant.final",
+      content: "second",
+      turn: 1,
+      run_id: "run-2",
+      timestamp_ms: 200,
+    });
+
+    store.appendUsage("t1", {
+      kind: "usage",
+      prompt_tokens: 120,
+      completion_tokens: 30,
+      total_tokens: 150,
+      turn: 1,
+      run_id: "run-2",
+      timestamp_ms: 210,
+    });
+
+    const items = useChatStore.getState().itemsByThread["t1"]!;
+    const first = items[0]!;
+    const second = items[1]!;
+    if (first.kind !== "assistant" || second.kind !== "assistant") {
+      throw new Error("expected assistants");
+    }
+
+    expect(first.usage).toBeUndefined();
+    expect(second.usage).toEqual({
+      prompt: 120,
+      completion: 30,
+      total: 150,
+    });
+  });
+
+  it("hydrateUsageFromThreads 用 metadata 累计值初始化并保留较新的内存值", () => {
+    const store = useChatStore.getState();
+    store.hydrateUsageFromThreads([
+      {
+        id: "thread-aaaaaaaaaaaa",
+        name: "demo",
+        preset_id: "p1",
+        backend_kind: "generic_chat",
+        sdk_session_id: "",
+        cwd: "",
+        created_at: 1,
+        updated_at: 2,
+        message_count: 0,
+        cumulative_prompt_tokens: 1200,
+        cumulative_completion_tokens: 340,
+        cumulative_total_tokens: 1540,
+        schema_version: 4,
+      },
+    ]);
+
+    expect(useChatStore.getState().usageByThread["thread-aaaaaaaaaaaa"]).toEqual({
+      lastPrompt: 0,
+      lastCompletion: 0,
+      lastTotal: 0,
+      cumulativePrompt: 1200,
+      cumulativeCompletion: 340,
+      cumulativeTotal: 1540,
+    });
+
+    store.appendUsage("thread-aaaaaaaaaaaa", {
+      kind: "usage",
+      prompt_tokens: 20,
+      completion_tokens: 10,
+      total_tokens: 30,
+      turn: 1,
+      run_id: "run-1",
+      timestamp_ms: 3,
+    });
+    store.hydrateUsageFromThreads([
+      {
+        id: "thread-aaaaaaaaaaaa",
+        name: "demo",
+        preset_id: "p1",
+        backend_kind: "generic_chat",
+        sdk_session_id: "",
+        cwd: "",
+        created_at: 1,
+        updated_at: 2,
+        message_count: 0,
+        cumulative_prompt_tokens: 1200,
+        cumulative_completion_tokens: 340,
+        cumulative_total_tokens: 1540,
+        schema_version: 4,
+      },
+    ]);
+
+    expect(useChatStore.getState().usageByThread["thread-aaaaaaaaaaaa"]).toEqual({
+      lastPrompt: 20,
+      lastCompletion: 10,
+      lastTotal: 30,
+      cumulativePrompt: 1220,
+      cumulativeCompletion: 350,
+      cumulativeTotal: 1570,
+    });
   });
 });

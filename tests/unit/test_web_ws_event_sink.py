@@ -218,6 +218,29 @@ async def test_emit_tool_call_end_non_dict_data_falls_to_none() -> None:
     assert sent["data"] is None
 
 
+async def test_emit_usage_includes_run_id() -> None:
+    ws = _make_ws()
+    sink = WSEventSink(ws)
+    await sink.emit(
+        Event(
+            kind="usage",
+            run_id="run-42",
+            turn=3,
+            payload={
+                "prompt_tokens": 100,
+                "completion_tokens": 25,
+                "total_tokens": 125,
+            },
+        )
+    )
+    sent = ws.send_json.await_args.args[0]
+    assert sent["kind"] == "usage"
+    assert sent["run_id"] == "run-42"
+    assert sent["prompt_tokens"] == 100
+    assert sent["completion_tokens"] == 25
+    assert sent["total_tokens"] == 125
+
+
 # ---------------------------------------------------------------------------
 # 审批决策
 # ---------------------------------------------------------------------------
@@ -390,6 +413,144 @@ async def test_emit_error_approval_timeout_maps() -> None:
         )
     )
     assert ws.send_json.await_args.args[0]["error_code"] == "approval_timeout"
+
+
+# ---------------------------------------------------------------------------
+# self-evolution system notice
+# ---------------------------------------------------------------------------
+
+
+async def test_emit_evolution_review_started_notice() -> None:
+    ws = _make_ws()
+    sink = WSEventSink(ws)
+    await sink.emit(
+        Event(
+            kind="evolution.review.started",
+            run_id="run-parent-1",
+            payload={
+                "review_id": "evo-review:run-parent-1",
+                "session_id": "sess-1",
+                "user_turn_count": 6,
+                "included_turns": [3, 4, 5],
+                "timeout_seconds": 30.0,
+            },
+        )
+    )
+    sent = ws.send_json.await_args.args[0]
+    assert sent["kind"] == "system.notice"
+    assert sent["notice_key"] == "self_evolution.review"
+    assert sent["source"] == "self_evolution"
+    assert sent["status"] == "started"
+    assert sent["title"] == "进化复盘"
+    assert sent["message"] == "后台复盘中"
+    assert sent["icon"] == "running"
+    assert sent["run_id"] == "run-parent-1"
+    assert sent["details"] == {
+        "review_id": "evo-review:run-parent-1",
+        "session_id": "sess-1",
+        "user_turn_count": 6,
+        "included_turns": [3, 4, 5],
+        "timeout_seconds": 30.0,
+    }
+
+
+async def test_emit_evolution_review_completed_notice() -> None:
+    ws = _make_ws()
+    sink = WSEventSink(ws)
+    await sink.emit(
+        Event(
+            kind="evolution.review.completed",
+            run_id="run-parent-2",
+            payload={
+                "review_id": "evo-review:run-parent-2",
+                "review_run_id": "run-child-9",
+                "session_id": "sess-2",
+                "write_status": "written",
+                "duration_ms": 3456,
+                "timeout_hit": False,
+                "timeout_seconds": 30.0,
+                "nutrients_written": 2,
+                "written_nutrient_ids": ["n-1", "n-2"],
+            },
+        )
+    )
+    sent = ws.send_json.await_args.args[0]
+    assert sent["kind"] == "system.notice"
+    assert sent["status"] == "completed"
+    assert sent["title"] == "进化复盘"
+    assert sent["message"] == "发现 2 条进化养料"
+    assert sent["icon"] == "success"
+    assert sent["details"] == {
+        "review_id": "evo-review:run-parent-2",
+        "review_run_id": "run-child-9",
+        "session_id": "sess-2",
+        "write_status": "written",
+        "duration_ms": 3456,
+        "timeout_hit": False,
+        "timeout_seconds": 30.0,
+        "nutrients_written": 2,
+        "written_nutrient_ids": ["n-1", "n-2"],
+    }
+
+
+async def test_emit_evolution_review_failed_notice() -> None:
+    ws = _make_ws()
+    sink = WSEventSink(ws)
+    await sink.emit(
+        Event(
+            kind="evolution.review.failed",
+            run_id="run-parent-3",
+            payload={
+                "review_id": "evo-review:run-parent-3",
+                "session_id": "sess-3",
+                "error_kind": "RuntimeError",
+                "message": "write path failed",
+                "duration_ms": 30005,
+                "timeout_hit": True,
+                "timeout_seconds": 30.0,
+            },
+        )
+    )
+    sent = ws.send_json.await_args.args[0]
+    assert sent["kind"] == "system.notice"
+    assert sent["status"] == "failed"
+    assert sent["title"] == "进化复盘"
+    assert sent["message"] == "本轮未写入：write path failed"
+    assert sent["icon"] == "error"
+    assert sent["details"] == {
+        "review_id": "evo-review:run-parent-3",
+        "session_id": "sess-3",
+        "error_kind": "RuntimeError",
+        "error_message": "write path failed",
+        "duration_ms": 30005,
+        "timeout_hit": True,
+        "timeout_seconds": 30.0,
+    }
+
+
+async def test_emit_evolution_review_drain_timeout_notice() -> None:
+    ws = _make_ws()
+    sink = WSEventSink(ws)
+    await sink.emit(
+        Event(
+            kind="evolution.review.drain_timeout",
+            run_id="runtime-close",
+            payload={
+                "pending_review_ids": ["evo-review:run-1", "evo-review:run-2"],
+                "timeout_seconds": 3.5,
+            },
+        )
+    )
+    sent = ws.send_json.await_args.args[0]
+    assert sent["kind"] == "system.notice"
+    assert sent["status"] == "drain_timeout"
+    assert sent["title"] == "进化复盘"
+    assert sent["message"] == "关闭前复盘超时，仍有 2 条待处理复盘"
+    assert sent["icon"] == "warning"
+    assert sent["details"] == {
+        "pending_review_ids": ["evo-review:run-1", "evo-review:run-2"],
+        "timeout_seconds": 3.5,
+    }
 
 
 # ---------------------------------------------------------------------------

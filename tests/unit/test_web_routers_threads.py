@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi.testclient import TestClient
 
@@ -50,7 +50,13 @@ class FakeTM:
     async def aclose_all(self) -> None:
         self._closed = True
 
-    async def create_thread(self, name: str, preset_id: str) -> ThreadMetadata:
+    async def create_thread(
+        self,
+        name: str,
+        preset_id: str = "",
+        *,
+        backend_kind: Literal["generic_chat", "claude_code"] = "generic_chat",
+    ) -> ThreadMetadata:
         # 用确定 ID 便于断言
         idx = len(self._threads)
         thread_id = f"thread-{'a' * 11}{idx}"
@@ -58,6 +64,7 @@ class FakeTM:
             id=thread_id,
             name=name,
             preset_id=preset_id,
+            backend_kind=backend_kind,
             created_at=1.0,
             updated_at=2.0,
             message_count=0,
@@ -107,6 +114,17 @@ class FakeTM:
 
     def get_cell(self, thread_id: str) -> Any:
         return None
+
+    def find_thread_by_sdk_session_id(self, sdk_session_id: str) -> Any:
+        return None  # 默认无命中；测试可 monkeypatch
+
+    async def bind_sdk_session(
+        self,
+        thread_id: str,
+        sdk_session_id: str,
+        cwd: str,
+    ) -> Any:
+        raise NotImplementedError  # 默认；测试 mock 时按需 override
 
     def resolve_approval(self, thread_id: str, call_id: str, approved: bool) -> None:
         del thread_id, call_id, approved

@@ -1,0 +1,4 @@
+{"id":"019dee38-c689-7341-9011-d8cd06e8aeca","thread_name":"test minimal session","updated_at":"2026-05-03T14:23:22.000Z"}
+{"id":"019dee40-aaaa-7341-9011-aabbccddeeff","thread_name":"test tool call session","updated_at":"2026-05-03T15:00:07.000Z"}
+{"id":"019dee50-bbbb-7341-9011-112233445566","thread_name":"aborted session","updated_at":"2026-05-03T16:00:03.000Z"}
+{"id":"019dee60-cccc-0000-0000-000000000000","thread_name":"index-only session (not on disk)","updated_at":"2026-05-03T17:00:00.000Z"}

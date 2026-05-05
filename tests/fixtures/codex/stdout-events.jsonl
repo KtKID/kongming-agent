@@ -1,0 +1,14 @@
+{"type":"thread.started","thread_id":"019dee38-c689-7341-9011-d8cd06e8aeca"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"hello"}}
+{"type":"item.started","item":{"id":"i1","type":"command_execution","command":"ls","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"i1","type":"command_execution","command":"ls","aggregated_output":"a\nb","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"i2","type":"reasoning","text":"let me think about this"}}
+{"type":"item.completed","item":{"id":"i3","type":"file_change","changes":[{"path":"test.py","diff":"+hello"}],"status":"completed"}}
+{"type":"item.completed","item":{"id":"i4","type":"mcp_tool_call","server":"srv","tool":"fn","arguments":{"x":1},"result":"ok","error":null,"status":"completed"}}
+{"type":"item.completed","item":{"id":"i5","type":"web_search","query":"test query"}}
+{"type":"item.completed","item":{"id":"i6","type":"todo_list","items":["task1","task2"]}}
+{"type":"item.completed","item":{"id":"i7","type":"error","message":"something went wrong"}}
+{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20,"reasoning_output_tokens":10}}
+{"type":"turn.failed","error":{"message":"turn failed"}}
+{"type":"unknown.future.event","foo":"bar"}

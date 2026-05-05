@@ -1,11 +1,13 @@
 import { create } from "zustand";
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
 import type {
+  BackendKind,
   CreateThreadRequest,
   LLMPresetDTO,
   RenameThreadRequest,
   ThreadMetadataDTO,
 } from "@/protocol";
+import { useChatStore } from "@/stores/chat";
 
 interface ThreadsState {
   threads: ThreadMetadataDTO[];
@@ -13,9 +15,19 @@ interface ThreadsState {
   loading: boolean;
   fetchThreads: () => Promise<void>;
   fetchPresets: () => Promise<void>;
+  /**
+   * 创建 thread。
+   *
+   * v0.1.6：
+   * - `backendKind` 缺省 `"generic_chat"`
+   * - `backendKind="claude_code"` 时 `presetId` 可传空字符串（后端忽略）
+   * - `backendKind="generic_chat"` 时 `presetId` 必须非空
+   */
   createThread: (
     name: string,
     presetId: string,
+    backendKind?: BackendKind,
+    cwd?: string,
   ) => Promise<ThreadMetadataDTO>;
   renameThread: (id: string, name: string) => Promise<void>;
   deleteThread: (id: string) => Promise<void>;
@@ -36,6 +48,7 @@ export const useThreadsStore = create<ThreadsState>((set, get) => ({
       const list = await apiGet<ThreadMetadataDTO[]>("/api/threads");
       // updated_at 倒序
       list.sort((a, b) => b.updated_at - a.updated_at);
+      useChatStore.getState().hydrateUsageFromThreads(list);
       set({ threads: list });
     } finally {
       set({ loading: false });
@@ -47,8 +60,13 @@ export const useThreadsStore = create<ThreadsState>((set, get) => ({
     set({ presets: list });
   },
 
-  createThread: async (name, presetId) => {
-    const body: CreateThreadRequest = { name, preset_id: presetId };
+  createThread: async (name, presetId, backendKind = "generic_chat", cwd = "") => {
+    const body: CreateThreadRequest = {
+      name,
+      preset_id: presetId,
+      backend_kind: backendKind,
+      cwd,
+    };
     const t = await apiPost<ThreadMetadataDTO>("/api/threads", body);
     set({ threads: [t, ...get().threads] });
     return t;

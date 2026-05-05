@@ -30,14 +30,18 @@ beforeEach(() => {
 });
 
 describe("NewThreadDialog", () => {
-  it("提交触发 createThread(name, presetId)", async () => {
+  it("默认 backend=generic_chat 时提交带 preset", async () => {
     createThread.mockResolvedValue({
       id: "thread-xyz",
       name: "test",
       preset_id: "preset-a",
+      backend_kind: "generic_chat",
       created_at: 1,
       updated_at: 1,
       message_count: 0,
+      cumulative_prompt_tokens: 0,
+      cumulative_completion_tokens: 0,
+      cumulative_total_tokens: 0,
     });
     const onOpenChange = vi.fn();
     render(
@@ -46,13 +50,48 @@ describe("NewThreadDialog", () => {
       </MemoryRouter>,
     );
     const user = userEvent.setup();
-    await user.type(
-      screen.getByPlaceholderText(/会话名/),
-      "my thread",
-    );
+    await user.type(screen.getByPlaceholderText(/会话名/), "my thread");
     await user.click(screen.getByRole("button", { name: /创建/ }));
     await waitFor(() =>
-      expect(createThread).toHaveBeenCalledWith("my thread", "preset-a"),
+      expect(createThread).toHaveBeenCalledWith(
+        "my thread",
+        "preset-a",
+        "generic_chat",
+        "",
+      ),
+    );
+  });
+
+  it("generic_chat 可带 cwd 创建 workspace thread", async () => {
+    createThread.mockResolvedValue({
+      id: "thread-cwd",
+      name: "workspace run",
+      preset_id: "preset-a",
+      backend_kind: "generic_chat",
+      created_at: 1,
+      updated_at: 1,
+      message_count: 0,
+      cumulative_prompt_tokens: 0,
+      cumulative_completion_tokens: 0,
+      cumulative_total_tokens: 0,
+      cwd: "/tmp/workspace",
+    });
+    render(
+      <MemoryRouter>
+        <NewThreadDialog open={true} onOpenChange={vi.fn()} />
+      </MemoryRouter>,
+    );
+    const user = userEvent.setup();
+    await user.type(screen.getByPlaceholderText(/会话名/), "workspace run");
+    await user.type(screen.getByLabelText("cwd"), "/tmp/workspace");
+    await user.click(screen.getByRole("button", { name: /创建/ }));
+    await waitFor(() =>
+      expect(createThread).toHaveBeenCalledWith(
+        "workspace run",
+        "preset-a",
+        "generic_chat",
+        "/tmp/workspace",
+      ),
     );
   });
 
@@ -63,5 +102,95 @@ describe("NewThreadDialog", () => {
       </MemoryRouter>,
     );
     expect(screen.getByRole("button", { name: /创建/ })).toBeDisabled();
+  });
+
+  it("选 claude_code 时 preset select 隐藏，提交带空 preset", async () => {
+    createThread.mockResolvedValue({
+      id: "thread-claude",
+      name: "claude",
+      preset_id: "",
+      backend_kind: "claude_code",
+      created_at: 1,
+      updated_at: 1,
+      message_count: 0,
+      cumulative_prompt_tokens: 0,
+      cumulative_completion_tokens: 0,
+      cumulative_total_tokens: 0,
+    });
+    render(
+      <MemoryRouter>
+        <NewThreadDialog open={true} onOpenChange={vi.fn()} />
+      </MemoryRouter>,
+    );
+    const user = userEvent.setup();
+    await user.type(screen.getByPlaceholderText(/会话名/), "claude run");
+    // 切 backend 到 claude_code
+    const backendSel = screen.getByLabelText("backend") as HTMLSelectElement;
+    await user.selectOptions(backendSel, "claude_code");
+    // preset select 应消失
+    expect(screen.queryByLabelText("preset")).toBeNull();
+    await user.click(screen.getByRole("button", { name: /创建/ }));
+    await waitFor(() =>
+      expect(createThread).toHaveBeenCalledWith(
+        "claude run",
+        "",
+        "claude_code",
+        "",
+      ),
+    );
+  });
+
+  it("backend=claude_code 时即使没有 preset 也能创建", async () => {
+    // 清空 presets 模拟 fresh 环境
+    useThreadsStore.setState({
+      threads: [],
+      presets: [],
+      loading: false,
+      createThread,
+      renameThread: vi.fn(),
+      deleteThread: vi.fn(),
+      fetchThreads: vi.fn(),
+      fetchPresets: vi.fn(),
+    });
+    createThread.mockResolvedValue({
+      id: "thread-claude",
+      name: "c",
+      preset_id: "",
+      backend_kind: "claude_code",
+      created_at: 1,
+      updated_at: 1,
+      message_count: 0,
+      cumulative_prompt_tokens: 0,
+      cumulative_completion_tokens: 0,
+      cumulative_total_tokens: 0,
+    });
+    render(
+      <MemoryRouter>
+        <NewThreadDialog open={true} onOpenChange={vi.fn()} />
+      </MemoryRouter>,
+    );
+    const user = userEvent.setup();
+    await user.type(screen.getByPlaceholderText(/会话名/), "c");
+    const backendSel = screen.getByLabelText("backend") as HTMLSelectElement;
+    await user.selectOptions(backendSel, "claude_code");
+    const btn = screen.getByRole("button", { name: /创建/ });
+    expect(btn).not.toBeDisabled();
+    await user.click(btn);
+    await waitFor(() =>
+      expect(createThread).toHaveBeenCalledWith("c", "", "claude_code", ""),
+    );
+  });
+
+  it("相对 cwd 会禁用创建", async () => {
+    render(
+      <MemoryRouter>
+        <NewThreadDialog open={true} onOpenChange={vi.fn()} />
+      </MemoryRouter>,
+    );
+    const user = userEvent.setup();
+    await user.type(screen.getByPlaceholderText(/会话名/), "bad cwd");
+    await user.type(screen.getByLabelText("cwd"), "relative/path");
+    expect(screen.getByRole("button", { name: /创建/ })).toBeDisabled();
+    expect(screen.getByText(/工作目录需要绝对路径/)).toBeInTheDocument();
   });
 });

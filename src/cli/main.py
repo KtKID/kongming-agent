@@ -23,11 +23,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import click
 
@@ -49,7 +50,12 @@ from host.cli_adapter import CLIAdapter, CLIEventSink
 from host.session_bridge import SessionBridge
 from memory import MemoryStore
 from observability import JsonlTraceSink, PromptDebugDumpSink
-from tools import build_default_approval, build_default_registry
+from tools import (
+    build_default_approval,
+    build_default_registry,
+    register_evolution_write_tool_if_enabled,
+    register_schedule_tool_if_enabled,
+)
 
 _CLI_SESSION_ID_HEX_LEN = 12
 
@@ -285,7 +291,28 @@ async def _run(
         show_reasoning if show_reasoning is not None else cfg.cli.show_reasoning
     )
 
-    adapter = CLIAdapter(verbose=verbose)
+    # v0.3 cron-delivery M5：cron 关时不构造 sink，避免不必要的拉模块。
+    # 当 scheduler.enabled 时构造 CliDeliverySink + 注入 pre_prompt_hook
+    # 让 REPL 在每次 prompt 之前 flush 投递 buffer。
+    cli_cron_sink: Any = None
+    cron_dispatcher: Any = None
+    cli_pre_prompt_hook: Any = None
+    if cfg.scheduler.enabled:
+        from cli.cron_delivery import CliDeliverySink
+        from scheduler.delivery import DeliveryDispatcher
+
+        cli_cron_sink = CliDeliverySink()
+        cron_dispatcher = DeliveryDispatcher(cli_sink=cli_cron_sink)
+
+        async def _flush_cron_buffer() -> None:
+            pending = await cli_cron_sink.drain_pending()
+            if pending:
+                # 用 click.echo 与 CLIAdapter.write_output 风格一致
+                click.echo(pending, nl=False)
+
+        cli_pre_prompt_hook = _flush_cron_buffer
+
+    adapter = CLIAdapter(verbose=verbose, pre_prompt_hook=cli_pre_prompt_hook)
 
     # 事件 sink 装配：默认挂 JsonlTraceSink（--no-trace 可关）；verbose 或
     # show_reasoning 时挂 CLIEventSink。runner 会 fan-out 到 list 里所有 sink。
@@ -334,6 +361,32 @@ async def _run(
         file_read_max_bytes=cfg.tool.file.read_max_bytes,
         skill_specs=skill_specs or None,
         skill_event_sinks=event_sinks,
+    )
+
+    # v0.2 cron：跟 memory_tool 一致的"外部 register"模式。
+    # ticker_factory 闭包：schedule_tool.run_now 路径会调它装配 fresh runtime；
+    # 必须 lazy 导入 build_cron_execution_bridge 以遵循"cron 关时不拉模块"。
+    # v0.3 M4/M5：cron_dispatcher 已在上方按 cfg.scheduler.enabled 构造；
+    # 这里透传给 bridge 让 schedule_tool.run_now 触发的 cron run 也走投递。
+    def _scheduler_runtime_factory(_store):  # type: ignore[no-untyped-def]
+        from scheduler.runtime_factory import build_cron_execution_bridge
+
+        return build_cron_execution_bridge(
+            cfg,
+            _store,
+            event_sinks=event_sinks,
+            dispatcher=cron_dispatcher,
+        )
+
+    scheduler_store = register_schedule_tool_if_enabled(
+        registry,
+        cfg,
+        runtime_factory_fn=_scheduler_runtime_factory,
+    )
+    register_evolution_write_tool_if_enabled(
+        registry,
+        cfg,
+        event_sinks=event_sinks,
     )
 
     # approval 按配置模式选：interactive 时让 adapter 提供 prompt_fn，
@@ -407,7 +460,9 @@ async def _run(
             )
             event_sinks = [*event_sinks, memory_refresh_sink]
 
-    enabled_tool_names = registry.names()  # 含 memory 的工具列表（若启用）
+    enabled_tool_names = [
+        name for name in registry.names() if name != "evolution_write"
+    ]  # child reviewer 专用工具不暴露给主 agent
 
     # session bootstrap：收集 CLI 阶段可得的稳定元数据，file backend 需要它。
     import hashlib
@@ -441,6 +496,37 @@ async def _run(
         prompt_debug_sink=PromptDebugDumpSink() if prompt_debug else None,
         instruction_origins=instruction_origins,
     )
+
+    # v0.2 cron：scheduler.enabled 时拉起后台 ticker 循环；ticker 自身装配
+    # 一份独立的 cron-用 NativeRuntime（fresh agent run 走它），不复用主聊天
+    # runtime（后者带交互上下文）。退出路径必须 set stop_event + await，
+    # 否则 KeyboardInterrupt 之后 ticker 还在跑、httpx client 未释放。
+    ticker_task: asyncio.Task[None] | None = None
+    ticker_stop: asyncio.Event | None = None
+    ticker_runtime = None
+    if cfg.scheduler.enabled and not smoke and scheduler_store is not None:
+        from scheduler.runtime_factory import build_cron_execution_bridge
+        from scheduler.ticker import run_ticker_loop
+
+        # v0.3 M4/M5：ticker 主循环 build cron bridge 时也传 dispatcher，
+        # 与 _scheduler_runtime_factory 闭包共用同一 cron_dispatcher 实例 ——
+        # 两条路径触发的 cron run 投递最终都走同一个 cli_cron_sink。
+        ticker_runtime, ticker_bridge = build_cron_execution_bridge(
+            cfg,
+            scheduler_store,
+            event_sinks=event_sinks,
+            dispatcher=cron_dispatcher,
+        )
+        ticker_stop = asyncio.Event()
+        ticker_task = asyncio.create_task(
+            run_ticker_loop(
+                scheduler_store,
+                ticker_bridge,
+                ticker_stop,
+                interval=cfg.scheduler.interval,
+                max_inflight=cfg.scheduler.max_inflight,
+            )
+        )
 
     # try/finally 确保 smoke / 交互循环 / KeyboardInterrupt / 其它异常
     # 三种退出路径都会 aclose runtime（释放 provider httpx client）。
@@ -477,6 +563,21 @@ async def _run(
         )
         await bridge.run_loop()
     finally:
+        # cron ticker 收尾：set stop_event → 等 ticker_task 自然退出（带超时
+        # 兜底，超时则 cancel）；ticker_runtime 必须随后 aclose 以释放 httpx
+        # 连接池。顺序：先停 ticker → 再 aclose runtime。
+        if ticker_task is not None and ticker_stop is not None:
+            ticker_stop.set()
+            try:
+                await asyncio.wait_for(ticker_task, timeout=30.0)
+            except (TimeoutError, asyncio.CancelledError):
+                ticker_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await ticker_task
+            if ticker_runtime is not None:
+                aclose_fn = getattr(ticker_runtime, "aclose", None)
+                if aclose_fn is not None:
+                    await aclose_fn()
         await runtime.aclose()
 
 

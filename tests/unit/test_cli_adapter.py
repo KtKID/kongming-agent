@@ -375,3 +375,80 @@ async def test_close_idempotent():
     adapter = CLIAdapter()
     await adapter.close()
     await adapter.close()  # 多次调用不报错
+
+
+# ---------------------------------------------------------------------------
+# v0.3 cron-delivery M5：pre_prompt_hook 钩子在 prompt 之前调
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pre_prompt_hook_called_before_prompt(monkeypatch):
+    """v0.3 M5：read_input 在 prompt_async 之前 await 注入的 hook。
+
+    典型场景：CliDeliverySink.drain_pending → click.echo flush cron 投递 buffer。
+    """
+    call_log: list[str] = []
+
+    async def hook() -> None:
+        call_log.append("hook")
+
+    class _FakePromptSession:
+        async def prompt_async(self, prompt: str) -> str:
+            call_log.append(f"prompt({prompt!r})")
+            return "user-input"
+
+    adapter = CLIAdapter(pre_prompt_hook=hook)
+    monkeypatch.setattr(adapter, "_ensure_session", lambda: _FakePromptSession())
+
+    text = await adapter.read_input()
+
+    assert text == "user-input"
+    # hook 在 prompt_async 之前被调
+    assert call_log == ["hook", "prompt('kongming > ')"]
+
+
+@pytest.mark.asyncio
+async def test_pre_prompt_hook_exception_does_not_block_prompt(monkeypatch, caplog):
+    """v0.3 M5（R2 fix P1-2）：hook 抛异常不阻塞 prompt；
+    用 logger.warning 留诊断线索（exc_info=True）。"""
+    import logging
+
+    async def bad_hook() -> None:
+        raise RuntimeError("hook boom")
+
+    class _FakePromptSession:
+        async def prompt_async(self, prompt: str) -> str:
+            return "still-works"
+
+    adapter = CLIAdapter(pre_prompt_hook=bad_hook)
+    monkeypatch.setattr(adapter, "_ensure_session", lambda: _FakePromptSession())
+
+    with caplog.at_level(logging.WARNING):
+        text = await adapter.read_input()
+
+    # hook 抛错不阻塞：用户仍能输入
+    assert text == "still-works"
+    # 但 logger.warning 记下来：避免 silent loss
+    assert any("pre_prompt_hook" in record.getMessage() for record in caplog.records), (
+        f"expected pre_prompt_hook warning in logs, got {[r.getMessage() for r in caplog.records]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pre_prompt_hook_none_skips_call(monkeypatch):
+    """pre_prompt_hook=None 时 read_input 直接进 prompt_async，不调任何 hook。"""
+    call_log: list[str] = []
+
+    class _FakePromptSession:
+        async def prompt_async(self, prompt: str) -> str:
+            call_log.append(prompt)
+            return "ok"
+
+    adapter = CLIAdapter()  # 默认 pre_prompt_hook=None
+    monkeypatch.setattr(adapter, "_ensure_session", lambda: _FakePromptSession())
+
+    text = await adapter.read_input()
+
+    assert text == "ok"
+    assert call_log == ["kongming > "]

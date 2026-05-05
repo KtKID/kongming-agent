@@ -40,6 +40,7 @@ class FakeBridge:
 class FakeAdapter:
     def __init__(self) -> None:
         self.attach_calls: list[Any] = []
+        self.detach_calls: list[Any] = []
         self.resolve_calls: list[tuple[str, bool]] = []
         self._closed = False
         self.pending_approval_count = 0
@@ -47,6 +48,9 @@ class FakeAdapter:
     def attach_ws(self, new_ws: Any) -> None:
         self.attach_calls.append(new_ws)
         self._closed = False
+
+    def detach_ws(self, ws: Any) -> None:
+        self.detach_calls.append(ws)
 
     def resolve_approval(self, call_id: str, action: Any) -> None:
         self.resolve_calls.append((call_id, action))
@@ -79,6 +83,9 @@ class FakeCell:
 
     def attach_ws(self, new_ws: Any) -> None:
         self.adapter.attach_ws(new_ws)
+
+    def detach_ws(self, ws: Any) -> None:
+        self.adapter.detach_ws(ws)
 
     def touch(self) -> None:
         self.last_active_at += 1.0
@@ -274,6 +281,27 @@ def test_ws_user_input_without_reasoning_effort(tmp_path: Path) -> None:
         assert ("normal", None) in cell.bridge.run_once_calls
     finally:
         client.__exit__(None, None, None)
+
+
+def test_ws_disconnect_detaches_current_socket_only(tmp_path: Path) -> None:
+    tm = WSFakeTM()
+    client = _login(tmp_path, tm)
+    try:
+        with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
+            _ = ws.receive_json()
+            cell = tm.get_cell(THREAD_ID)
+            assert cell is not None
+            assert len(cell.adapter.attach_calls) == 1
+            assert len(cell.adapter.detach_calls) == 0
+        cell = tm.get_cell(THREAD_ID)
+        assert cell is not None
+        assert len(cell.adapter.detach_calls) == 1
+        assert cell.adapter._closed is False
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_ws_user_input_spawns_background_run_task(tmp_path: Path) -> None:
     tm = WSFakeTM()
     client = _login(tmp_path, tm)
     try:

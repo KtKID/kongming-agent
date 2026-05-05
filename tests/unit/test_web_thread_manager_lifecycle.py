@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from config_loader.models import Config
 from web.thread_manager import ThreadManager
-from web.thread_metadata import ThreadMetadata, write_thread_metadata
+from web.thread_metadata import ThreadMetadata, read_thread_metadata, write_thread_metadata
 
 
 def _make_cfg() -> Config:
@@ -133,6 +133,39 @@ async def test_list_threads_merges_disk_and_memory(tmp_path: Path) -> None:
     listed = mgr.list_threads()
     assert len(listed) == 1
     assert listed[0].name == "memory-only-name"
+
+
+async def test_add_thread_usage_persists_cumulative_totals(tmp_path: Path) -> None:
+    cfg = _make_cfg()
+    factory = _make_factory()
+    mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
+    meta = await mgr.create_thread("usage", "p1")
+
+    updated = await mgr.add_thread_usage(
+        meta.id,
+        prompt_tokens=120,
+        completion_tokens=30,
+        total_tokens=150,
+    )
+    assert updated.cumulative_prompt_tokens == 120
+    assert updated.cumulative_completion_tokens == 30
+    assert updated.cumulative_total_tokens == 150
+
+    updated2 = await mgr.add_thread_usage(
+        meta.id,
+        prompt_tokens=20,
+        completion_tokens=5,
+        total_tokens=25,
+    )
+    assert updated2.cumulative_prompt_tokens == 140
+    assert updated2.cumulative_completion_tokens == 35
+    assert updated2.cumulative_total_tokens == 175
+
+    loaded = read_thread_metadata(tmp_path, meta.id)
+    assert loaded is not None
+    assert loaded.cumulative_prompt_tokens == 140
+    assert loaded.cumulative_completion_tokens == 35
+    assert loaded.cumulative_total_tokens == 175
 
 
 async def test_list_cells_returns_only_active_cells(tmp_path: Path) -> None:

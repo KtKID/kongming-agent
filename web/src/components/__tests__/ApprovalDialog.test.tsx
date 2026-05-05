@@ -50,6 +50,16 @@ describe("ApprovalDialog", () => {
     expect(useApprovalDialogStore.getState().pending.length).toBe(0);
   });
 
+  it("审批参数区域启用自动换行，长内容留在弹窗内", async () => {
+    const sock = makeStubSocket();
+    render(<ApprovalDialog socket={sock} />);
+    pushApproval();
+    const block = await screen.findByTestId("approval-arguments");
+    expect(block).toHaveClass("whitespace-pre-wrap");
+    expect(block).toHaveClass("break-all");
+    expect(block).toHaveClass("overflow-x-hidden");
+  });
+
   it("点 '本 session 同意' → action=accept_for_session", async () => {
     const sock = makeStubSocket();
     render(<ApprovalDialog socket={sock} />);

@@ -203,17 +203,19 @@ class SQLiteSession:
 
     # -- Session 协议实现 ----------------------------------------------------
 
-    async def append(self, message: Message) -> None:
+    async def append(self, message: Message, *, usage: dict[str, Any] | None = None) -> None:
         """追加一条消息到末尾。"""
         await self._ensure_init()
-        await asyncio.to_thread(self._append_sync, message)
+        await asyncio.to_thread(self._append_sync, message, usage)
 
-    def _append_sync(self, message: Message) -> None:
+    def _append_sync(self, message: Message, usage: dict[str, Any] | None = None) -> None:
         """同步 append：查最大 seq + 1，再 insert。"""
         payload_obj = {
             "schema_version": _SCHEMA_VERSION,
             "message": _message_to_dict(message),
         }
+        if usage is not None:
+            payload_obj["usage"] = dict(usage)
         payload = json.dumps(payload_obj, ensure_ascii=False)
         now = time.time()
         with sqlite3.connect(self._db_path) as conn:

@@ -34,7 +34,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING
 
 from config_loader.models import Config
 from context import HistoryCompactor
@@ -46,6 +49,7 @@ from core.contracts import (
     ApprovalDecision,
     ApprovalProvider,
     ApprovalRequest,
+    Event,
     EventSink,
     LLMProvider,
     MessageCompactor,
@@ -66,6 +70,9 @@ from safety import (
     SafetyGatedApproval,
     build_safety_chain,
 )
+
+if TYPE_CHECKING:
+    from evolution import EvolutionStateStore, TranscriptWindow
 
 # ---------------------------------------------------------------------------
 # 占位实现
@@ -163,6 +170,7 @@ class NativeRuntime:
         # 单 agent、单 run loop 语义：运行时开一个 session cache，让外部多次
         # ``run(session_id=same)`` 落到同一个 Session 实例（多轮对话连续性）。
         self._sessions: dict[str, Session] = {}
+        self._pending_review_tasks: dict[str, asyncio.Task[None]] = {}
 
     # ------------------------------------------------------------------
     # 构造方法
@@ -233,6 +241,8 @@ class NativeRuntime:
                 model_config=config.model,
                 max_retries=config.retry.max_retries,
                 retry_backoff=config.retry.retry_backoff,
+                enable_raw_dump=config.trace.raw_llm,
+                stream_read_timeout=config.stream.read_timeout,
             )
         else:
             llm = OpenAIResponsesProvider(
@@ -366,12 +376,13 @@ class NativeRuntime:
           本次 run 结束后恢复原值。Provider 每次调用都读 model_config，无需改动。
         """
         session = self._get_or_create_session(session_id)
+        result: Result
 
         if reasoning_effort is not None:
             saved = self._config.model.reasoning_effort
             self._config.model.reasoning_effort = reasoning_effort  # type: ignore[assignment]
             try:
-                return await self._runner.run(
+                result = await self._runner.run(
                     user_input,
                     session=session,
                     agent_spec=self._agent_spec,
@@ -383,17 +394,20 @@ class NativeRuntime:
                 )
             finally:
                 self._config.model.reasoning_effort = saved
+        else:
+            result = await self._runner.run(
+                user_input,
+                session=session,
+                agent_spec=self._agent_spec,
+                llm=self._llm,
+                tools=self._tools,
+                approval=self._approval,
+                max_turns=self._config.runner.max_turns,
+                enabled_tools=self._resolve_enabled_tools(),
+            )
 
-        return await self._runner.run(
-            user_input,
-            session=session,
-            agent_spec=self._agent_spec,
-            llm=self._llm,
-            tools=self._tools,
-            approval=self._approval,
-            max_turns=self._config.runner.max_turns,
-            enabled_tools=self._resolve_enabled_tools(),
-        )
+        await self._maybe_start_evolution_review(session=session, result=result)
+        return result
 
     # ------------------------------------------------------------------
     # 访问器（便于 host / cli / tests 观察装配结果）
@@ -422,6 +436,35 @@ class NativeRuntime:
         return self._llm
 
     @property
+    def tools(self) -> ToolLookup:
+        """暴露已装配的 ToolLookup。
+
+        scheduler / cron 装配层（:mod:`scheduler.runtime_factory`）需要
+        从 runtime 拿到 tool 散件以构造 :class:`ExecutionBridge`。
+        """
+        return self._tools
+
+    @property
+    def enabled_tool_names(self) -> list[str]:
+        """暴露已装配的 enabled tool 白名单（副本）。"""
+        return list(self._enabled_tool_names)
+
+    @property
+    def approval(self) -> ApprovalProvider:
+        """暴露已装配的高层 :class:`ApprovalProvider`（已包 SafetyGatedApproval）。"""
+        return self._approval
+
+    @property
+    def session_factory(self) -> Callable[[str], Session]:
+        """暴露 session 工厂（``session_id -> Session``）。"""
+        return self._session_factory
+
+    @property
+    def event_sinks(self) -> list[EventSink]:
+        """暴露 event sink 列表（副本，避免外部直改影响 runner fan-out）。"""
+        return list(self._event_sinks)
+
+    @property
     def grant_store(self):  # type: ignore[no-untyped-def]
         """暴露底层 :class:`safety.grant_store.GrantStore`（如有）。
 
@@ -448,6 +491,7 @@ class NativeRuntime:
         幂等：provider 自身的 ``aclose`` 已做 None 检查，多次调不会抛。
         由 CLI / SessionBridge 退出路径或测试 finally 触发。
         """
+        await self._drain_pending_reviews()
         aclose = getattr(self._llm, "aclose", None)
         if aclose is not None:
             await aclose()
@@ -488,6 +532,248 @@ class NativeRuntime:
                 return None
             resolved.append(self._tools[name])
         return resolved
+
+    async def _maybe_start_evolution_review(self, *, session: Session, result: Result) -> None:
+        if result.status != "completed":
+            return
+        if self._agent_spec.metadata.get("evolution_role") == "reviewer":
+            return
+        learning = getattr(self._config.evolution, "learning", None)
+        if learning is None or not learning.enabled:
+            return
+        if "evolution_write" not in self._tools:
+            return
+
+        from evolution import (
+            EvolutionStateStore,
+            build_transcript_window,
+            count_user_turns,
+            resolve_evolution_root,
+        )
+
+        history = await session.history()
+        user_turn_count = count_user_turns(history)
+        if user_turn_count < learning.min_user_turns:
+            return
+
+        root_dir = resolve_evolution_root(learning.root_path)
+        state_store = EvolutionStateStore(root_dir)
+        session_state = await state_store.record_parent_run(
+            session_id=result.session_id,
+            user_turn_count=user_turn_count,
+        )
+        if session_state.run_count % learning.every_n_runs != 0:
+            return
+
+        window = build_transcript_window(
+            session_id=result.session_id,
+            run_id=result.run_id,
+            history=history,
+            final_message=result.final_message,
+            max_messages=learning.max_history_messages,
+        )
+        review_id = f"evo-review:{result.run_id}"
+        await self._emit_runtime_event(
+            kind="evolution.review.started",
+            run_id=result.run_id,
+            payload={
+                "review_id": review_id,
+                "session_id": result.session_id,
+                "user_turn_count": user_turn_count,
+                "included_turns": list(window.included_turns),
+                "timeout_seconds": learning.review_timeout_seconds,
+            },
+        )
+        task = asyncio.create_task(
+            self._run_evolution_review_task(
+                review_id=review_id,
+                parent_result=result,
+                state_store=state_store,
+                transcript_window=window,
+            ),
+            name=review_id,
+        )
+        self._pending_review_tasks[review_id] = task
+
+    async def _run_evolution_review_task(
+        self,
+        *,
+        review_id: str,
+        parent_result: Result,
+        state_store: EvolutionStateStore,
+        transcript_window: TranscriptWindow,
+    ) -> None:
+        learning = self._config.evolution.learning
+        try:
+            from evolution import run_child_review
+
+            child_outcome = await run_child_review(
+                parent_runtime=self,
+                window=transcript_window,
+                trigger_reason="cadence",
+                timeout_seconds=learning.review_timeout_seconds,
+                max_nutrients=learning.max_nutrients,
+                min_confidence=learning.nutrient_confidence_threshold,
+            )
+            for event in child_outcome.visible_events:
+                await self._emit_runtime_event(
+                    kind=event.kind,
+                    run_id=event.run_id or "",
+                    payload=dict(event.payload or {}),
+                    turn=event.turn,
+                )
+            child_result = child_outcome.result
+            if child_outcome.write_ok:
+                await self._emit_runtime_event(
+                    kind="evolution.review.completed",
+                    run_id=parent_result.run_id,
+                    payload={
+                        "review_id": review_id,
+                        "review_run_id": child_result.run_id,
+                        "session_id": parent_result.session_id,
+                        "write_status": child_outcome.write_status,
+                        "duration_ms": child_outcome.duration_ms,
+                        "timeout_hit": child_outcome.timed_out,
+                        "timeout_seconds": child_outcome.timeout_seconds,
+                        "nutrients_written": child_outcome.write_data.get("nutrients_written")
+                        if isinstance(child_outcome.write_data, dict)
+                        else None,
+                        "written_nutrient_ids": child_outcome.write_data.get("written_nutrient_ids")
+                        if isinstance(child_outcome.write_data, dict)
+                        else None,
+                        "timed_out_after_write": child_outcome.timed_out,
+                    },
+                )
+                return
+            if child_result.status != "completed":
+                child_error = child_result.error
+                child_error_kind = (
+                    type(child_error).__name__ if child_error is not None else "ChildReviewerError"
+                )
+                child_error_message = (
+                    child_error.message
+                    if child_error is not None
+                    else f"child reviewer finished with status={child_result.status}"
+                )
+                await state_store.mark_review_result(
+                    session_id=parent_result.session_id,
+                    run_id=parent_result.run_id,
+                    status="failed",
+                )
+                await self._emit_runtime_event(
+                    kind="evolution.review.failed",
+                    run_id=parent_result.run_id,
+                    payload={
+                        "review_id": review_id,
+                        "review_run_id": child_result.run_id,
+                        "session_id": parent_result.session_id,
+                        "error_kind": child_error_kind,
+                        "message": child_error_message,
+                        "child_status": child_result.status,
+                        "duration_ms": child_outcome.duration_ms,
+                        "timeout_hit": child_outcome.timed_out,
+                        "timeout_seconds": child_outcome.timeout_seconds,
+                    },
+                )
+                return
+            write_error_message = child_outcome.write_error or (
+                f"evolution_write did not succeed status={child_outcome.write_status}"
+            )
+            await state_store.mark_review_result(
+                session_id=parent_result.session_id,
+                run_id=parent_result.run_id,
+                status="failed",
+            )
+            await self._emit_runtime_event(
+                kind="evolution.review.failed",
+                run_id=parent_result.run_id,
+                payload={
+                    "review_id": review_id,
+                    "review_run_id": child_result.run_id,
+                    "session_id": parent_result.session_id,
+                    "error_kind": "EvolutionWriteError",
+                    "message": write_error_message,
+                    "write_status": child_outcome.write_status,
+                    "duration_ms": child_outcome.duration_ms,
+                    "timeout_hit": child_outcome.timed_out,
+                    "timeout_seconds": child_outcome.timeout_seconds,
+                },
+            )
+        except asyncio.CancelledError:
+            await state_store.mark_review_result(
+                session_id=parent_result.session_id,
+                run_id=parent_result.run_id,
+                status="cancelled",
+            )
+            await self._emit_runtime_event(
+                kind="evolution.review.failed",
+                run_id=parent_result.run_id,
+                payload={
+                    "review_id": review_id,
+                    "session_id": parent_result.session_id,
+                    "error_kind": "cancelled",
+                    "timeout_hit": False,
+                },
+            )
+            raise
+        except Exception as exc:
+            await state_store.mark_review_result(
+                session_id=parent_result.session_id,
+                run_id=parent_result.run_id,
+                status="failed",
+            )
+            await self._emit_runtime_event(
+                kind="evolution.review.failed",
+                run_id=parent_result.run_id,
+                payload={
+                    "review_id": review_id,
+                    "session_id": parent_result.session_id,
+                    "error_kind": type(exc).__name__,
+                    "message": str(exc),
+                    "timeout_hit": isinstance(exc, TimeoutError),
+                },
+            )
+        finally:
+            self._pending_review_tasks.pop(review_id, None)
+
+    async def _drain_pending_reviews(self) -> None:
+        if not self._pending_review_tasks:
+            return
+        learning = getattr(self._config.evolution, "learning", None)
+        timeout_seconds = (
+            learning.drain_on_close_seconds if learning is not None and learning.enabled else 0.0
+        )
+        pending_items = list(self._pending_review_tasks.items())
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(task for _, task in pending_items), return_exceptions=True),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            await self._emit_runtime_event(
+                kind="evolution.review.drain_timeout",
+                run_id="runtime-close",
+                payload={
+                    "pending_review_ids": [review_id for review_id, _ in pending_items],
+                    "timeout_seconds": timeout_seconds,
+                },
+            )
+            for _, task in pending_items:
+                task.cancel()
+            with contextlib.suppress(Exception):
+                await asyncio.gather(*(task for _, task in pending_items), return_exceptions=True)
+
+    async def _emit_runtime_event(
+        self,
+        *,
+        kind: str,
+        run_id: str,
+        payload: dict[str, object],
+        turn: int | None = None,
+    ) -> None:
+        event = Event(kind=kind, run_id=run_id, turn=turn, payload=payload)
+        for sink in self._event_sinks:
+            await sink.emit(event)
 
 
 __all__ = ["NativeRuntime"]

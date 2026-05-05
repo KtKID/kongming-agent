@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 import click
@@ -52,17 +53,39 @@ class CLIAdapter(HostAdapter):
         *,
         prompt: str = "kongming > ",
         verbose: bool = False,
+        pre_prompt_hook: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
+        """v0.3 cron-delivery M5：``pre_prompt_hook`` 在每次 prompt **之前**
+        调用，给 cron-delivery sink 等需要"在 prompt 间隙 flush"的组件用。
+        hook 内部抛异常会被静默捕获（不影响主 prompt 流程）。
+        """
         self._prompt = prompt
         self._verbose = verbose
         self._session: _PromptSession[Any] | None = None
         self._closed = False
+        self._pre_prompt_hook = pre_prompt_hook
 
     # ------------------------------------------------------------------
     # HostAdapter 实现
     # ------------------------------------------------------------------
 
     async def read_input(self) -> str | None:
+        # v0.3 M5：pre_prompt_hook 在 prompt_async 之前调；典型场景是
+        # CliDeliverySink.drain_pending → click.echo flush cron 投递 buffer。
+        # hook 失败不阻塞 prompt；用户仍能输入。
+        # 失败用 logger.warning 留诊断线索（避免 silent failure 让 cron 通知
+        # 永远丢但用户不知道为什么 —— R2 round 1 P1-2 修复）。
+        if self._pre_prompt_hook is not None:
+            try:
+                await self._pre_prompt_hook()
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "pre_prompt_hook failed; cron delivery buffer may be stuck",
+                    exc_info=True,
+                )
+
         session = self._ensure_session()
         try:
             text: str = await session.prompt_async(self._prompt)

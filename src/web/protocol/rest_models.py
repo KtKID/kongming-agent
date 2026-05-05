@@ -80,10 +80,18 @@ class CellSummaryDTO(_FrameBase):
 
 
 class CreateThreadRequest(_FrameBase):
-    """创建 thread 请求体（``POST /api/threads``）。"""
+    """创建 thread 请求体（``POST /api/threads``）。
+
+    v0.1.6 加 ``backend_kind`` 字段，并把 ``preset_id`` 改成可选（默认 ``""``）：
+    ``backend_kind="claude_code"`` 路径不需要 preset，此时 preset_id 留空字符串占位。
+    路由层在校验 ``backend_kind="generic_chat"`` 时强制 ``preset_id`` 非空。
+    ``cwd`` 是可选 workspace 根目录；传入时要求绝对路径。
+    """
 
     name: Annotated[str, Field(max_length=200)]
-    preset_id: str
+    preset_id: str = ""
+    backend_kind: Literal["generic_chat", "claude_code"] = "generic_chat"
+    cwd: str = ""
 
 
 class ErrorResponseDTO(_FrameBase):
@@ -135,18 +143,256 @@ class RenameThreadRequest(_FrameBase):
 class ThreadMetadataDTO(_FrameBase):
     """Thread 元数据，落盘形态 + ``GET /api/threads/{id}`` 响应体。
 
-    ``schema_version`` 默认 ``1``，未来字段演进时 bump 该值，旧文件读入后由
-    迁移层升级；``id`` 严格匹配 ``^thread-[a-f0-9]{12}$``，防止用户在 URL
-    里手写 thread id 时绕过命名约束。
+    v0.1.6 加 ``backend_kind`` 字段并把 ``schema_version`` 升至 ``2``。
+    v0.2 加 ``sdk_session_id`` + ``cwd`` 字段，``schema_version`` 升至 ``3``。
+    v0.2.1 加 thread 级累计 usage 字段，``schema_version`` 升至 ``4``
+    （同时接受老 v1/v2 文件，懒升级在 :func:`web.thread_metadata.read_thread_metadata`
+    里完成；DTO 这里只负责出/入参形态对齐 ThreadMetadata 模型）。
+    ``id`` 严格匹配 ``^thread-[a-f0-9]{12}$``，防止用户在 URL 里手写 thread id
+    时绕过命名约束。
     """
 
     id: Annotated[str, Field(pattern=r"^thread-[a-f0-9]{12}$")]
     name: Annotated[str, Field(max_length=200)]
     preset_id: str
+    backend_kind: Literal["generic_chat", "claude_code"] = "generic_chat"
+    sdk_session_id: str = ""
+    cwd: str = ""
     created_at: float
     updated_at: float
     message_count: Annotated[int, Field(ge=0)]
-    schema_version: Literal[1] = 1
+    cumulative_prompt_tokens: Annotated[int, Field(ge=0)] = 0
+    cumulative_completion_tokens: Annotated[int, Field(ge=0)] = 0
+    cumulative_total_tokens: Annotated[int, Field(ge=0)] = 0
+    schema_version: Literal[1, 2, 3, 4] = 4
+
+
+class WorkspaceContextDTO(_FrameBase):
+    """当前 thread 的共享 workspace 上下文（workspace-shell 第一波）。
+
+    这是 `Files` / `Shell` 面板共用的上游状态：
+
+    - `workspace_root` 直接来自 thread metadata 的 `cwd`
+    - `files_available` 表示当前 thread 已绑定有效 workspace
+    - `shell_available` 表示当前 thread 已具备可进入的 workspace cwd
+    - `shell_provider` 首版支持 `claude_code | system_shell | none`
+    """
+
+    thread_id: Annotated[str, Field(pattern=r"^thread-[a-f0-9]{12}$")]
+    backend_kind: Literal["generic_chat", "claude_code"] = "generic_chat"
+    workspace_root: str = ""
+    sdk_session_id: str = ""
+    shell_provider: Literal["claude_code", "system_shell", "none"] = "none"
+    files_available: bool = False
+    shell_available: bool = False
+    unavailable_reason: str | None = None
+
+
+class WorkspaceTreeNodeDTO(_FrameBase):
+    """workspace 文件树节点。"""
+
+    path: str
+    name: str
+    kind: Literal["file", "dir"]
+    has_children: bool = False
+
+
+class WorkspaceTreeDTO(_FrameBase):
+    """单个目录层级的文件树响应。"""
+
+    path: str = ""
+    entries: list[WorkspaceTreeNodeDTO]
+
+
+class WorkspaceFileDTO(_FrameBase):
+    """workspace 文本文件读取结果。"""
+
+    path: str
+    name: str
+    content: str
+    size_bytes: Annotated[int, Field(ge=0)]
+    is_text: bool = True
+    too_large: bool = False
+    encoding: str = "utf-8"
+
+
+class WorkspaceGitStatusEntryDTO(_FrameBase):
+    """workspace git 改动条目。"""
+
+    path: str
+    name: str
+    staged_status: str
+    unstaged_status: str
+    previous_path: str | None = None
+
+
+class WorkspaceGitStatusDTO(_FrameBase):
+    """workspace git 状态快照。"""
+
+    workspace_root: str
+    repo_root: str
+    current_branch: str
+    tracking_branch: str | None = None
+    ahead_count: Annotated[int, Field(ge=0)] = 0
+    behind_count: Annotated[int, Field(ge=0)] = 0
+    changes: list[WorkspaceGitStatusEntryDTO]
+
+
+class WorkspaceGitBranchesDTO(_FrameBase):
+    """workspace git 分支列表。"""
+
+    current_branch: str
+    local_branches: list[str]
+    remote_branches: list[str]
+
+
+class WorkspaceGitCommitDTO(_FrameBase):
+    """单条 git 提交摘要。"""
+
+    commit: str
+    short_commit: str
+    author: str
+    authored_at: str
+    subject: str
+
+
+class WorkspaceGitCommitsDTO(_FrameBase):
+    """最近 git 提交列表。"""
+
+    commits: list[WorkspaceGitCommitDTO]
+
+
+class WorkspaceGitFileDiffDTO(_FrameBase):
+    """单文件 diff 结果。"""
+
+    path: str
+    diff: str
+
+
+class WorkspaceGitPathsRequest(_FrameBase):
+    """按路径批量执行 git 动作。"""
+
+    paths: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1)
+
+
+class WorkspaceGitCheckoutRequest(_FrameBase):
+    """切换现有分支请求体。"""
+
+    branch: Annotated[str, Field(min_length=1, max_length=255)]
+
+
+class WorkspaceGitCreateBranchRequest(_FrameBase):
+    """创建分支请求体。"""
+
+    branch: Annotated[str, Field(min_length=1, max_length=255)]
+    checkout: bool = True
+
+
+class WorkspaceGitCommitRequest(_FrameBase):
+    """git commit 请求体。"""
+
+    message: Annotated[str, Field(min_length=1, max_length=4000)]
+
+
+class WorkspaceGitActionResultDTO(_FrameBase):
+    """git 写操作通用响应。"""
+
+    detail: str
+    current_branch: str | None = None
+    commit: str | None = None
+    short_commit: str | None = None
+
+
+class UpdateWorkspaceFileRequest(_FrameBase):
+    """保存 workspace 文本文件请求体。"""
+
+    path: Annotated[str, Field(min_length=1)]
+    content: str
+
+
+class EvolutionDecisionSummaryDTO(_FrameBase):
+    total: Annotated[int, Field(ge=0)]
+    accepted_memory: Annotated[int, Field(ge=0)]
+    accepted_skill: Annotated[int, Field(ge=0)]
+    ignored: Annotated[int, Field(ge=0)]
+    pending: Annotated[int, Field(ge=0)]
+
+
+class EvolutionDecisionItemDTO(_FrameBase):
+    nutrient_id: Annotated[str, Field(min_length=1)]
+    decision: Literal["accept_memory", "accept_skill", "ignore"]
+    target: Literal["memory", "skill"] | None = None
+    decided_at_ms: Annotated[int, Field(ge=0)] = 0
+    applied_status: Literal["pending", "written", "skipped", "failed"] | None = None
+    applied_path: str | None = None
+    applied_mode: Literal["append", "update", "create", "ignore"] | None = None
+    applied_at_ms: Annotated[int, Field(ge=0)] | None = None
+    applied_error: str | None = None
+
+
+class EvolutionNutrientDTO(_FrameBase):
+    nutrient_id: Annotated[str, Field(min_length=1)]
+    kind: Literal["memory", "workflow", "error"]
+    title: Annotated[str, Field(min_length=1)]
+    content: Annotated[str, Field(min_length=1)]
+    summary: Annotated[str, Field(min_length=1)]
+    confidence: float
+    evidence_turns: list[int]
+    source_run_id: Annotated[str, Field(min_length=1)]
+    source_session_id: Annotated[str, Field(min_length=1)]
+    suggested_target: Literal["memory", "skill", "errorbook"] | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class EvolutionReviewDTO(_FrameBase):
+    review_id: Annotated[str, Field(min_length=1)]
+    run_id: Annotated[str, Field(min_length=1)]
+    session_id: Annotated[str, Field(min_length=1)]
+    reviewed_at_ms: Annotated[int, Field(ge=0)]
+    review_summary: Annotated[str, Field(min_length=1)]
+    nutrients: list[EvolutionNutrientDTO]
+    decision_summary: EvolutionDecisionSummaryDTO
+    decisions: list[EvolutionDecisionItemDTO] = Field(default_factory=list)
+
+
+class EvolutionDecisionRequest(_FrameBase):
+    nutrient_id: Annotated[str, Field(min_length=1)]
+    decision: Literal["accept_memory", "accept_skill", "ignore"]
+
+
+class EvolutionDecisionResponse(_FrameBase):
+    review: EvolutionReviewDTO
+
+
+class ImportClaudeSessionRequest(_FrameBase):
+    """``POST /api/threads/import-claude-session`` 请求体（v0.2.0 dev #8）。
+
+    把已有 Claude Agent SDK 的 jsonl session 导入为 kongming thread：
+
+    - ``sdk_session_id``：SDK session UUID（jsonl 文件名，去 ``.jsonl``）。
+    - ``cwd``：SDK 工作目录绝对路径，用于定位 ``~/.claude/projects/<encoded-cwd>/<id>.jsonl``。
+    - ``name``：新 thread 名（前端用 jsonl 第 1 条 user message 前 40 字带过来）。
+
+    校验细节：``cwd`` 必须以 ``/`` 开头（绝对路径）；``sdk_session_id`` / ``name``
+    长度上限与 :class:`ThreadMetadataDTO` 保持一致。
+    """
+
+    sdk_session_id: Annotated[str, Field(min_length=1, max_length=100)]
+    cwd: Annotated[str, Field(pattern=r"^/")]
+    name: Annotated[str, Field(min_length=1, max_length=200)]
+
+
+class ImportClaudeSessionResponse(_FrameBase):
+    """``POST /api/threads/import-claude-session`` 响应体（v0.2.0 dev #8）。
+
+    ``imported``：
+
+    - ``True`` 表示新建了 thread 并完成 ``bind_sdk_session``。
+    - ``False`` 表示 ``sdk_session_id`` 已经被绑过（防重复，返回原 thread）。
+    """
+
+    thread: ThreadMetadataDTO
+    imported: bool
 
 
 class WhiteboardCardDTO(_FrameBase):
@@ -221,13 +467,25 @@ __all__: list[str] = [
     "CreateWhiteboardCardRequest",
     "ErrorResponseDTO",
     "HistoryMessageDTO",
+    "ImportClaudeSessionRequest",
+    "ImportClaudeSessionResponse",
     "LLMPresetDTO",
     "LoginRequest",
     "RenameThreadRequest",
     "ThreadMetadataDTO",
     "UpdateWhiteboardCardRequest",
     "UpdateWhiteboardLayoutRequest",
+    "UpdateWorkspaceFileRequest",
     "WhiteboardCardDTO",
     "WhiteboardCardLayoutDTO",
     "WhiteboardDTO",
+    "WorkspaceContextDTO",
+    "WorkspaceFileDTO",
+    "WorkspaceGitActionResultDTO",
+    "WorkspaceGitCheckoutRequest",
+    "WorkspaceGitCommitRequest",
+    "WorkspaceGitCreateBranchRequest",
+    "WorkspaceGitPathsRequest",
+    "WorkspaceTreeDTO",
+    "WorkspaceTreeNodeDTO",
 ]

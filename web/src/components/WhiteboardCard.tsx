@@ -50,7 +50,7 @@ export function WhiteboardCard({
     <article
       className={cn(
         "group overflow-hidden rounded-[1.35rem] border shadow-sm backdrop-blur-sm transition-shadow",
-        "hover:shadow-md",
+        "hover:shadow-md dark:hover:shadow-black/20",
         tone.shellClassName,
       )}
       style={card.collapsed ? undefined : { height: cardHeight }}
@@ -75,7 +75,7 @@ export function WhiteboardCard({
           }}
         />
         {card.collapsed ? (
-          <div className={cn("border-t px-4 py-3 text-xs text-stone-500", tone.summaryClassName)}>
+          <div className={cn("border-t px-4 py-3 text-xs text-muted-foreground", tone.summaryClassName)}>
             <div className="truncate">{summary}</div>
           </div>
         ) : (
@@ -99,14 +99,14 @@ export function WhiteboardCard({
                 />
               )}
             </div>
-            <div className={cn("flex items-center justify-between border-t px-4 py-2 text-[11px] text-stone-500", tone.footerClassName)}>
+            <div className={cn("flex items-center justify-between border-t px-4 py-2 text-[11px] text-muted-foreground", tone.footerClassName)}>
               <span className="inline-flex items-center gap-1">
-                <span className="h-1.5 w-1.5 rounded-full bg-blue-500" />
+                <span className="h-1.5 w-1.5 rounded-full bg-accent" />
                 内部滚动区
               </span>
               <button
                 type="button"
-                className="inline-flex cursor-row-resize items-center gap-1 rounded-full border border-stone-700 bg-stone-900 px-2.5 py-1 text-white transition-colors hover:bg-stone-800"
+                className="inline-flex cursor-row-resize items-center gap-1 rounded-full border border-border bg-foreground px-2.5 py-1 text-background transition-colors hover:opacity-90"
                 aria-label="调整卡片高度"
                 onPointerDown={onResizePointerDown}
               >
@@ -126,51 +126,51 @@ function getCardTone(category: string) {
   if (value.includes("todo") || value.includes("task")) {
     return {
       shellClassName:
-        "border-amber-300/80 bg-[linear-gradient(180deg,rgba(255,248,220,0.98),rgba(255,252,239,0.98))] text-stone-900",
-      bodyClassName: "border-amber-200/80 bg-transparent",
-      summaryClassName: "border-amber-200/80 bg-white/45",
-      footerClassName: "border-amber-200/80 bg-white/30",
-      panelClassName: "border-amber-200/90 bg-white/92",
+        "border-amber-200/80 bg-[linear-gradient(180deg,hsl(var(--card)/0.98),rgba(251,191,36,0.12))] text-card-foreground dark:border-amber-900/70 dark:bg-[linear-gradient(180deg,hsl(var(--card)/0.98),rgba(251,191,36,0.1))]",
+      bodyClassName: "border-amber-200/70 bg-transparent dark:border-amber-900/60",
+      summaryClassName: "border-amber-200/70 bg-amber-50/35 dark:border-amber-900/60 dark:bg-amber-950/20",
+      footerClassName: "border-amber-200/70 bg-amber-50/20 dark:border-amber-900/60 dark:bg-amber-950/10",
+      panelClassName: "border-amber-200/80 bg-background/88 dark:border-amber-900/60 dark:bg-background/40",
       categoryClassName:
-        "border-amber-400/70 bg-amber-100/95 text-amber-900",
-      toolbarClassName: "text-stone-700",
+        "border-amber-300/80 bg-amber-100/90 text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200",
+      toolbarClassName: "text-muted-foreground",
     };
   }
   if (value.includes("detail")) {
     return {
       shellClassName:
-        "border-emerald-300/80 bg-[linear-gradient(180deg,rgba(245,252,247,0.98),rgba(253,255,254,0.98))] text-stone-900",
-      bodyClassName: "border-emerald-200/80 bg-transparent",
-      summaryClassName: "border-emerald-200/80 bg-white/45",
-      footerClassName: "border-emerald-200/80 bg-white/30",
-      panelClassName: "border-emerald-200/90 bg-white/92",
+        "border-emerald-200/80 bg-[linear-gradient(180deg,hsl(var(--card)/0.98),rgba(16,185,129,0.1))] text-card-foreground dark:border-emerald-900/70 dark:bg-[linear-gradient(180deg,hsl(var(--card)/0.98),rgba(16,185,129,0.08))]",
+      bodyClassName: "border-emerald-200/70 bg-transparent dark:border-emerald-900/60",
+      summaryClassName: "border-emerald-200/70 bg-emerald-50/35 dark:border-emerald-900/60 dark:bg-emerald-950/18",
+      footerClassName: "border-emerald-200/70 bg-emerald-50/20 dark:border-emerald-900/60 dark:bg-emerald-950/10",
+      panelClassName: "border-emerald-200/80 bg-background/88 dark:border-emerald-900/60 dark:bg-background/40",
       categoryClassName:
-        "border-emerald-400/70 bg-emerald-100/95 text-emerald-900",
-      toolbarClassName: "text-stone-700",
+        "border-emerald-300/80 bg-emerald-100/90 text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-200",
+      toolbarClassName: "text-muted-foreground",
     };
   }
   if (value.includes("quick")) {
     return {
       shellClassName:
-        "border-rose-300/80 bg-[linear-gradient(180deg,rgba(255,244,238,0.98),rgba(255,251,249,0.98))] text-stone-900",
-      bodyClassName: "border-rose-200/80 bg-transparent",
-      summaryClassName: "border-rose-200/80 bg-white/45",
-      footerClassName: "border-rose-200/80 bg-white/30",
-      panelClassName: "border-rose-200/90 bg-white/92",
+        "border-sky-200/80 bg-[linear-gradient(180deg,hsl(var(--card)/0.98),rgba(56,189,248,0.11))] text-card-foreground dark:border-sky-900/70 dark:bg-[linear-gradient(180deg,hsl(var(--card)/0.98),rgba(56,189,248,0.08))]",
+      bodyClassName: "border-sky-200/70 bg-transparent dark:border-sky-900/60",
+      summaryClassName: "border-sky-200/70 bg-sky-50/35 dark:border-sky-900/60 dark:bg-sky-950/18",
+      footerClassName: "border-sky-200/70 bg-sky-50/20 dark:border-sky-900/60 dark:bg-sky-950/10",
+      panelClassName: "border-sky-200/80 bg-background/88 dark:border-sky-900/60 dark:bg-background/40",
       categoryClassName:
-        "border-rose-400/70 bg-rose-100/95 text-rose-900",
-      toolbarClassName: "text-stone-700",
+        "border-sky-300/80 bg-sky-100/90 text-sky-900 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200",
+      toolbarClassName: "text-muted-foreground",
     };
   }
   return {
     shellClassName:
-      "border-violet-300/80 bg-[linear-gradient(180deg,rgba(249,246,255,0.98),rgba(255,253,255,0.98))] text-stone-900",
-    bodyClassName: "border-violet-200/80 bg-transparent",
-    summaryClassName: "border-violet-200/80 bg-white/45",
-    footerClassName: "border-violet-200/80 bg-white/30",
-    panelClassName: "border-violet-200/90 bg-white/92",
+      "border-border/80 bg-[linear-gradient(180deg,hsl(var(--card)/0.98),hsl(var(--muted)/0.38))] text-card-foreground dark:bg-[linear-gradient(180deg,hsl(var(--card)/0.98),hsl(var(--muted)/0.18))]",
+    bodyClassName: "border-border/80 bg-transparent",
+    summaryClassName: "border-border/80 bg-muted/25 dark:bg-muted/20",
+    footerClassName: "border-border/80 bg-muted/15 dark:bg-muted/10",
+    panelClassName: "border-border/80 bg-background/88 dark:bg-background/40",
     categoryClassName:
-      "border-violet-400/70 bg-violet-100/95 text-violet-900",
-    toolbarClassName: "text-stone-700",
+      "border-border/80 bg-muted/85 text-foreground dark:bg-muted/55 dark:text-foreground",
+    toolbarClassName: "text-muted-foreground",
   };
 }

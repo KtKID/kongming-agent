@@ -1,0 +1,7 @@
+{"timestamp": "2026-05-03T14:23:18.702Z", "type": "session_meta", "payload": {"id": "019dee38-c689-7341-9011-d8cd06e8aeca", "timestamp": "2026-05-03T14:23:11.513Z", "cwd": "/test/path/proj", "originator": "codex_exec", "cli_version": "0.128.0", "source": "exec", "model_provider": "openai"}}
+{"timestamp": "2026-05-03T14:23:19.000Z", "type": "event_msg", "payload": {"type": "task_started"}}
+{"timestamp": "2026-05-03T14:23:19.100Z", "type": "response_item", "payload": {"type": "message", "role": "developer", "content": "system prompt"}}
+{"timestamp": "2026-05-03T14:23:19.200Z", "type": "turn_context", "payload": {"turn_id": "turn-1", "cwd": "/test/path/proj", "approval_policy": "untrusted", "sandbox_policy": "workspace-write", "model": "gpt-5"}}
+{"timestamp": "2026-05-03T14:23:20.000Z", "type": "event_msg", "payload": {"type": "agent_message", "text": "hello from codex"}}
+{"timestamp": "2026-05-03T14:23:21.000Z", "type": "event_msg", "payload": {"type": "token_count", "usage": {"input_tokens": 100, "cached_input_tokens": 50, "output_tokens": 20, "reasoning_output_tokens": 10}}}
+{"timestamp": "2026-05-03T14:23:22.000Z", "type": "event_msg", "payload": {"type": "task_complete"}}

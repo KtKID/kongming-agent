@@ -3,7 +3,10 @@ import type {
   ApprovalRequestFrame,
   AssistantFinalFrame,
   ErrorFrame,
+  EvolutionReviewDTO,
   HistoryMessageDTO,
+  SystemNoticeFrame,
+  ThreadMetadataDTO,
   ToolCallEndFrame,
   ToolCallStartFrame,
   UsageFrame,
@@ -40,8 +43,19 @@ export interface UsageSnapshot {
   lastPrompt: number;
   lastCompletion: number;
   lastTotal: number;
+  cumulativePrompt: number;
+  cumulativeCompletion: number;
   cumulativeTotal: number;
 }
+
+export interface AssistantUsage {
+  prompt: number;
+  completion: number;
+  total: number;
+}
+
+export type SystemChatStatus = "running" | "success" | "warning" | "error";
+export type SystemChatIcon = SystemChatStatus;
 
 export type ChatItem =
   | {
@@ -60,6 +74,7 @@ export type ChatItem =
       runId: string;
       content: string;
       reasoning: string;
+      usage?: AssistantUsage;
       timestampMs: number;
       streaming: boolean;
     }
@@ -93,6 +108,21 @@ export type ChatItem =
     }
   | {
       id: string;
+      kind: "system";
+      threadId: string;
+      runId: string;
+      noticeKey: string;
+      source: string;
+      title: string;
+      message: string;
+      details: string[];
+      detailsData?: Record<string, unknown> | string[] | null;
+      status: SystemChatStatus;
+      icon: SystemChatIcon;
+      timestampMs: number;
+    }
+  | {
+      id: string;
       kind: "error";
       threadId: string;
       message: string;
@@ -114,8 +144,11 @@ interface ChatState {
     threadId: string,
     frame: ApprovalRequestFrame,
   ) => void;
+  appendSystemNotice: (threadId: string, frame: SystemNoticeFrame) => void;
+  applyEvolutionReview: (threadId: string, review: EvolutionReviewDTO) => void;
   appendError: (threadId: string, frame: ErrorFrame) => void;
   appendUsage: (threadId: string, frame: UsageFrame) => void;
+  hydrateUsageFromThreads: (threads: ThreadMetadataDTO[]) => void;
   /** 仅供 hooks/tests 用：清空某 thread */
   clear: (threadId: string) => void;
 }
@@ -136,6 +169,192 @@ export function __setRafForTest(impl: ((cb: () => void) => void) | null) {
 
 function bufferKey(threadId: string, runId: string, turn: number): string {
   return `${threadId}:${runId}:${turn}`;
+}
+
+function normalizeSystemNoticeStatus(
+  status: SystemNoticeFrame["status"],
+): SystemChatStatus {
+  switch (status) {
+    case "started":
+      return "running";
+    case "completed":
+      return "success";
+    case "failed":
+      return "error";
+    case "drain_timeout":
+      return "warning";
+    default: {
+      const _exhaustive: never = status;
+      return _exhaustive;
+    }
+  }
+}
+
+function normalizeSystemNoticeIcon(
+  icon: SystemNoticeFrame["icon"],
+  status: SystemChatStatus,
+): SystemChatIcon {
+  switch (icon) {
+    case "running":
+    case "success":
+    case "warning":
+    case "error":
+      return icon;
+    default:
+      return status;
+  }
+}
+
+function normalizeSystemNoticeDetails(
+  details: SystemNoticeFrame["details"],
+): string[] {
+  if (Array.isArray(details)) {
+    return details.map((detail) => String(detail));
+  }
+  if (details && typeof details === "object") {
+    return Object.entries(details).map(([key, value]) => {
+      if (Array.isArray(value)) {
+        return `${key}: ${value.map((item) => String(item)).join(", ")}`;
+      }
+      if (value && typeof value === "object") {
+        return `${key}: ${JSON.stringify(value)}`;
+      }
+      return `${key}: ${String(value)}`;
+    });
+  }
+  return [];
+}
+
+interface EvolutionApplyProgress {
+  written: number;
+  skipped: number;
+  failed: number;
+  pending: number;
+  ignored: number;
+  actionable: number;
+}
+
+function getEvolutionApplyProgress(
+  review: EvolutionReviewDTO,
+): EvolutionApplyProgress {
+  let written = 0;
+  let skipped = 0;
+  let failed = 0;
+  let pending = 0;
+  let ignored = 0;
+  let actionable = 0;
+
+  for (const decision of review.decisions) {
+    if (decision.decision === "ignore") {
+      ignored += 1;
+      continue;
+    }
+    actionable += 1;
+    switch (decision.applied_status) {
+      case "written":
+        written += 1;
+        break;
+      case "skipped":
+        skipped += 1;
+        break;
+      case "failed":
+        failed += 1;
+        break;
+      case "pending":
+      case null:
+      case undefined:
+        pending += 1;
+        break;
+      default:
+        pending += 1;
+        break;
+    }
+  }
+
+  return {
+    written,
+    skipped,
+    failed,
+    pending,
+    ignored,
+    actionable,
+  };
+}
+
+function messageForEvolutionReview(review: EvolutionReviewDTO): string {
+  const total = review.decision_summary.total;
+  const handled =
+    review.decision_summary.accepted_memory +
+    review.decision_summary.accepted_skill +
+    review.decision_summary.ignored;
+  const progress = getEvolutionApplyProgress(review);
+
+  if (progress.actionable > 0) {
+    const parts = [`已写入 ${progress.written}/${total} 条进化养料`];
+    if (progress.skipped > 0) {
+      parts.push(`已命中 ${progress.skipped} 条`);
+    }
+    if (progress.failed > 0) {
+      parts.push(`失败 ${progress.failed} 条`);
+    }
+    if (progress.pending > 0) {
+      parts.push(`待写入 ${progress.pending} 条`);
+    }
+    if (progress.ignored > 0) {
+      parts.push(`已忽略 ${progress.ignored} 条`);
+    }
+    return parts.join("，");
+  }
+
+  if (handled > 0) {
+    return `已处理 ${handled}/${total} 条进化养料`;
+  }
+  return `发现 ${total} 条进化养料`;
+}
+
+function detailsDataForEvolutionReview(
+  review: EvolutionReviewDTO,
+): Record<string, unknown> {
+  const progress = getEvolutionApplyProgress(review);
+  return {
+    review_id: review.review_id,
+    review_run_id: review.run_id,
+    session_id: review.session_id,
+    write_status: "written",
+    nutrient_count: review.decision_summary.total,
+    handled_count:
+      review.decision_summary.accepted_memory +
+      review.decision_summary.accepted_skill +
+      review.decision_summary.ignored,
+    pending_count: review.decision_summary.pending,
+    accepted_memory_count: review.decision_summary.accepted_memory,
+    accepted_skill_count: review.decision_summary.accepted_skill,
+    ignored_count: review.decision_summary.ignored,
+    applied_written_count: progress.written,
+    applied_skipped_count: progress.skipped,
+    applied_failed_count: progress.failed,
+    applied_pending_count: progress.pending,
+    ignored_decision_count: progress.ignored,
+  };
+}
+
+function detailsForEvolutionReview(review: EvolutionReviewDTO): string[] {
+  const progress = getEvolutionApplyProgress(review);
+  const details = [
+    `pending_count: ${review.decision_summary.pending}`,
+    `accepted_memory_count: ${review.decision_summary.accepted_memory}`,
+    `accepted_skill_count: ${review.decision_summary.accepted_skill}`,
+    `ignored_count: ${review.decision_summary.ignored}`,
+  ];
+
+  if (progress.actionable > 0) {
+    details.push(`applied_written_count: ${progress.written}`);
+    details.push(`applied_skipped_count: ${progress.skipped}`);
+    details.push(`applied_failed_count: ${progress.failed}`);
+    details.push(`applied_pending_count: ${progress.pending}`);
+  }
+
+  return details;
 }
 
 function scheduleCommit(): void {
@@ -470,6 +689,103 @@ export const useChatStore = create<ChatState>((set) => ({
     }));
   },
 
+  appendSystemNotice: (threadId, frame) => {
+    const runId = frame.run_id ?? "";
+    const status = normalizeSystemNoticeStatus(frame.status);
+    const item: Extract<ChatItem, { kind: "system" }> = {
+      id: `system-${threadId}-${runId}-${frame.notice_key}`,
+      kind: "system",
+      threadId,
+      runId,
+      noticeKey: frame.notice_key,
+      source: frame.source,
+      title: frame.title,
+      message: frame.message,
+      details: normalizeSystemNoticeDetails(frame.details),
+      detailsData:
+        Array.isArray(frame.details) || (frame.details && typeof frame.details === "object")
+          ? frame.details
+          : null,
+      status,
+      icon: normalizeSystemNoticeIcon(frame.icon, status),
+      timestampMs: frame.timestamp_ms,
+    };
+    set((s) => {
+      const list = s.itemsByThread[threadId] ?? [];
+      const idx = list.findIndex(
+        (it) =>
+          it.kind === "system" &&
+          it.runId === runId &&
+          it.noticeKey === frame.notice_key,
+      );
+      if (idx < 0) {
+        return {
+          itemsByThread: {
+            ...s.itemsByThread,
+            [threadId]: [...list, item],
+          },
+        };
+      }
+      return {
+        itemsByThread: {
+          ...s.itemsByThread,
+          [threadId]: [
+            ...list.slice(0, idx),
+            item,
+            ...list.slice(idx + 1),
+          ],
+        },
+      };
+    });
+  },
+
+  applyEvolutionReview: (threadId, review) => {
+    const runId = review.run_id;
+    const detailsData = detailsDataForEvolutionReview(review);
+    const item: Extract<ChatItem, { kind: "system" }> = {
+      id: `system-${threadId}-${runId}-self_evolution.review`,
+      kind: "system",
+      threadId,
+      runId,
+      noticeKey: "self_evolution.review",
+      source: "self_evolution",
+      title: "进化复盘",
+      message: messageForEvolutionReview(review),
+      details: detailsForEvolutionReview(review),
+      detailsData,
+      status: "success",
+      icon: "success",
+      timestampMs: review.reviewed_at_ms,
+    };
+    set((s) => {
+      const list = s.itemsByThread[threadId] ?? [];
+      const idx = list.findIndex(
+        (it) =>
+          it.kind === "system" &&
+          it.runId === runId &&
+          it.noticeKey === "self_evolution.review",
+      );
+      if (idx < 0) {
+        return {
+          itemsByThread: {
+            ...s.itemsByThread,
+            [threadId]: [...list, item],
+          },
+        };
+      }
+      return {
+        itemsByThread: {
+          ...s.itemsByThread,
+          [threadId]: [
+            ...list.slice(0, idx),
+            item,
+            ...list.slice(idx + 1),
+          ],
+        },
+      };
+    });
+  },
+
   appendError: (threadId, frame) => {
     const item: ChatItem = {
       id: `error-${threadId}-${frame.timestamp_ms}-${Math.random().toString(36).slice(2, 6)}`,
@@ -490,13 +806,42 @@ export const useChatStore = create<ChatState>((set) => ({
   appendUsage: (threadId, frame) => {
     set((s) => {
       const prev = s.usageByThread[threadId];
+      const runId = frame.run_id ?? "";
+      const list = s.itemsByThread[threadId] ?? [];
+      const idx = list.findIndex(
+        (it) =>
+          it.kind === "assistant" &&
+          it.turn === frame.turn &&
+          it.runId === runId,
+      );
+      const nextItemsByThread =
+        idx >= 0
+          ? {
+              ...s.itemsByThread,
+              [threadId]: [
+                ...list.slice(0, idx),
+                {
+                  ...list[idx]!,
+                  usage: {
+                    prompt: frame.prompt_tokens,
+                    completion: frame.completion_tokens,
+                    total: frame.total_tokens,
+                  },
+                },
+                ...list.slice(idx + 1),
+              ],
+            }
+          : s.itemsByThread;
       return {
+        itemsByThread: nextItemsByThread,
         usageByThread: {
           ...s.usageByThread,
           [threadId]: {
             lastPrompt: frame.prompt_tokens,
             lastCompletion: frame.completion_tokens,
             lastTotal: frame.total_tokens,
+            cumulativePrompt: (prev?.cumulativePrompt ?? 0) + frame.prompt_tokens,
+            cumulativeCompletion: (prev?.cumulativeCompletion ?? 0) + frame.completion_tokens,
             cumulativeTotal: (prev?.cumulativeTotal ?? 0) + frame.total_tokens,
           },
         },
@@ -504,11 +849,40 @@ export const useChatStore = create<ChatState>((set) => ({
     });
   },
 
+  hydrateUsageFromThreads: (threads) => {
+    set((s) => {
+      const nextUsage = { ...s.usageByThread };
+      for (const thread of threads) {
+        const prev = nextUsage[thread.id];
+        nextUsage[thread.id] = {
+          lastPrompt: prev?.lastPrompt ?? 0,
+          lastCompletion: prev?.lastCompletion ?? 0,
+          lastTotal: prev?.lastTotal ?? 0,
+          cumulativePrompt: Math.max(
+            prev?.cumulativePrompt ?? 0,
+            thread.cumulative_prompt_tokens ?? 0,
+          ),
+          cumulativeCompletion: Math.max(
+            prev?.cumulativeCompletion ?? 0,
+            thread.cumulative_completion_tokens ?? 0,
+          ),
+          cumulativeTotal: Math.max(
+            prev?.cumulativeTotal ?? 0,
+            thread.cumulative_total_tokens ?? 0,
+          ),
+        };
+      }
+      return { usageByThread: nextUsage };
+    });
+  },
+
   clear: (threadId) => {
     set((s) => {
       const next = { ...s.itemsByThread };
+      const nextUsage = { ...s.usageByThread };
       delete next[threadId];
-      return { itemsByThread: next };
+      delete nextUsage[threadId];
+      return { itemsByThread: next, usageByThread: nextUsage };
     });
     clearBuffers(threadId);
   },

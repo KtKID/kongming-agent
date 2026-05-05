@@ -88,7 +88,10 @@ export function ApprovalDialog({ socket }: { socket: ThreadSocket | null }) {
             </DialogDescription>
           </DialogHeader>
           <div className="my-3">
-            <pre className="max-h-60 overflow-auto rounded-md border border-border bg-muted p-3 font-mono text-xs">
+            <pre
+              className="max-h-60 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded-md border border-border bg-muted p-3 font-mono text-xs"
+              data-testid="approval-arguments"
+            >
               {JSON.stringify(head.arguments, null, 2)}
             </pre>
           </div>

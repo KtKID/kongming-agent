@@ -92,6 +92,49 @@ describe("useStreamingRender", () => {
     expect(items.find((it) => it.kind === "approval")).toBeDefined();
   });
 
+  it("system.notice started -> completed 按 noticeKey + runId 原地更新", () => {
+    const sock = new StubSocket("t1");
+    renderHook(() =>
+      useStreamingRender("t1", sock as unknown as ThreadSocket),
+    );
+    act(() => {
+      sock.emit({
+        kind: "system.notice",
+        timestamp_ms: 10,
+        notice_key: "evolution.review",
+        source: "self_evolution",
+        status: "started",
+        title: "进化复盘",
+        message: "后台复盘中",
+        details: ["included turns: 1,2,3"],
+        icon: "running",
+        run_id: "run-1",
+      });
+      sock.emit({
+        kind: "system.notice",
+        timestamp_ms: 20,
+        notice_key: "evolution.review",
+        source: "self_evolution",
+        status: "completed",
+        title: "进化复盘",
+        message: "已沉淀 1 条进化养料",
+        details: ["write_status: written"],
+        icon: "success",
+        run_id: "run-1",
+      });
+    });
+
+    const items = useChatStore.getState().itemsByThread["t1"]!;
+    expect(items).toHaveLength(1);
+    const item = items[0]!;
+    if (item.kind !== "system") throw new Error("expected system notice");
+    expect(item.runId).toBe("run-1");
+    expect(item.noticeKey).toBe("evolution.review");
+    expect(item.status).toBe("success");
+    expect(item.message).toBe("已沉淀 1 条进化养料");
+    expect(item.details).toEqual(["write_status: written"]);
+  });
+
   it("error 帧 → appendError 横幅项", () => {
     const sock = new StubSocket("t1");
     renderHook(() =>

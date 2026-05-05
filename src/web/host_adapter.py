@@ -29,8 +29,8 @@
   主链路（由 ThreadManager 在外层捕获 ``cell.evicted`` 时机）。
 - ``close()`` 只 cancel 内部 future + 标记 closed；不主动 ``ws.close()``
   —— WS 连接生命周期由路由层管理（接受连接 / 收到 disconnect 帧时关闭）。
-- ``attach_ws()`` 是显式 setter，重连时 ThreadManager 调用此方法替换 ws
-  引用；同时把 ``_closed`` 重置为 False，重连后允许继续 send。
+- ``attach_ws()`` / ``detach_ws()`` 走 thread 级 fanout，让同一 thread 的
+  多个聊天页共享同一条事件流。
 """
 
 from __future__ import annotations
@@ -248,7 +248,7 @@ class WebHostAdapter(HostAdapter):
         future.set_result(action)
 
     def attach_ws(self, new_ws: Any) -> None:
-        """重连时替换 WS 引用。
+        """向 thread fanout 注册一个新的 WS 连接。
 
         语义：
         - 替换 ``_ws`` 引用 + 重置 ``_closed=False``
@@ -257,8 +257,21 @@ class WebHostAdapter(HostAdapter):
           （前提是浏览器记住 call_id 并重发 ack）
         - 调用方应在替换后重新推 ``thread.history`` 帧，让 UI 同步
         """
-        self._ws = new_ws
+        attach = getattr(type(self._ws), "attach_ws", None)
+        if callable(attach):
+            attach(self._ws, new_ws)
+        else:
+            self._ws = new_ws
         self._closed = False
+
+    def detach_ws(self, ws: Any) -> None:
+        """从 thread fanout 注销一个 WS 连接。"""
+        detach = getattr(type(self._ws), "detach_ws", None)
+        if callable(detach):
+            detach(self._ws, ws)
+            return
+        if self._ws is ws:
+            self._closed = False
 
     @property
     def closed(self) -> bool:

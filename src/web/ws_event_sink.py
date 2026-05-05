@@ -45,6 +45,7 @@ from web.protocol import (
     UsageFrame,
 )
 from web.protocol._base import _S2CFrameBase
+from web.protocol.ws_frames import SystemNoticeFrame
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,9 @@ _ERROR_TYPE_TO_CODE: dict[str, ErrorCode] = {
     "ToolError": "tool_error",
     "ApprovalTimeout": "approval_timeout",
 }
+
+_EVOLUTION_NOTICE_KEY = "self_evolution.review"
+_EVOLUTION_NOTICE_SOURCE = "self_evolution"
 
 
 class WSEventSink:
@@ -101,9 +105,19 @@ class WSEventSink:
                     await close_call
 
     def attach_ws(self, new_ws: Any) -> None:
-        """重连时替换 WS 引用 + 重置 ``_closed``。"""
-        self._ws = new_ws
+        """向 thread fanout 注册一个新的 WS 连接。"""
+        attach = getattr(type(self._ws), "attach_ws", None)
+        if callable(attach):
+            attach(self._ws, new_ws)
+        else:
+            self._ws = new_ws
         self._closed = False
+
+    def detach_ws(self, ws: Any) -> None:
+        """从 thread fanout 注销一个 WS 连接。"""
+        detach = getattr(type(self._ws), "detach_ws", None)
+        if callable(detach):
+            detach(self._ws, ws)
 
     @property
     def closed(self) -> bool:
@@ -203,6 +217,7 @@ class WSEventSink:
                 completion_tokens=int(payload.get("completion_tokens", 0) or 0),
                 total_tokens=int(payload.get("total_tokens", 0) or 0),
                 turn=turn,
+                run_id=event.run_id or "",
                 timestamp_ms=ts,
             )
 
@@ -215,6 +230,20 @@ class WSEventSink:
                 error_code=code,
                 message=message,
                 turn=event.turn,  # 可为 None
+                timestamp_ms=ts,
+            )
+
+        # ----- 系统 notice -----
+        if kind in {
+            "evolution.review.started",
+            "evolution.review.completed",
+            "evolution.review.failed",
+            "evolution.review.drain_timeout",
+        }:
+            return _translate_evolution_notice(
+                kind=kind,
+                payload=payload,
+                run_id=run_id,
                 timestamp_ms=ts,
             )
 
@@ -236,6 +265,149 @@ def _optional_str(raw: Any) -> str | None:
     if raw is None:
         return None
     return str(raw)
+
+
+def _translate_evolution_notice(
+    *,
+    kind: str,
+    payload: dict[str, Any],
+    run_id: str,
+    timestamp_ms: int,
+) -> SystemNoticeFrame:
+    if kind == "evolution.review.started":
+        review_id = _optional_str(payload.get("review_id")) or ""
+        included_turns = _coerce_int_list(payload.get("included_turns"))
+        title = "进化复盘"
+        message = "后台复盘中"
+        return SystemNoticeFrame(
+            notice_key=_EVOLUTION_NOTICE_KEY,
+            source=_EVOLUTION_NOTICE_SOURCE,
+            status="started",
+            title=title,
+            message=message,
+            details={
+                "review_id": review_id,
+                "session_id": _optional_str(payload.get("session_id")),
+                "user_turn_count": _coerce_int(payload.get("user_turn_count")),
+                "included_turns": included_turns,
+                "timeout_seconds": _coerce_number(payload.get("timeout_seconds")),
+            },
+            icon="running",
+            run_id=run_id,
+            timestamp_ms=timestamp_ms,
+        )
+
+    if kind == "evolution.review.completed":
+        review_id = _optional_str(payload.get("review_id")) or ""
+        review_run_id = _optional_str(payload.get("review_run_id"))
+        nutrients_written = _coerce_int(payload.get("nutrients_written"))
+        handled_message = (
+            f"发现 {nutrients_written} 条进化养料"
+            if nutrients_written is not None
+            else "已完成复盘并写入进化养料"
+        )
+        title = "进化复盘"
+        return SystemNoticeFrame(
+            notice_key=_EVOLUTION_NOTICE_KEY,
+            source=_EVOLUTION_NOTICE_SOURCE,
+            status="completed",
+            title=title,
+            message=handled_message,
+            details={
+                "review_id": review_id,
+                "review_run_id": review_run_id,
+                "session_id": _optional_str(payload.get("session_id")),
+                "write_status": _optional_str(payload.get("write_status")),
+                "duration_ms": _coerce_int(payload.get("duration_ms")),
+                "timeout_hit": bool(payload.get("timeout_hit", False)),
+                "timeout_seconds": _coerce_number(payload.get("timeout_seconds")),
+                "nutrients_written": nutrients_written,
+                "written_nutrient_ids": _coerce_str_list(payload.get("written_nutrient_ids")),
+            },
+            icon="success",
+            run_id=run_id,
+            timestamp_ms=timestamp_ms,
+        )
+
+    if kind == "evolution.review.failed":
+        error_kind = _optional_str(payload.get("error_kind"))
+        error_message = _optional_str(payload.get("message"))
+        message = "本轮未写入"
+        if error_message:
+            message = f"本轮未写入：{error_message}"
+        elif error_kind:
+            message = f"本轮未写入：{error_kind}"
+        return SystemNoticeFrame(
+            notice_key=_EVOLUTION_NOTICE_KEY,
+            source=_EVOLUTION_NOTICE_SOURCE,
+            status="failed",
+            title="进化复盘",
+            message=message,
+            details={
+                "review_id": _optional_str(payload.get("review_id")),
+                "session_id": _optional_str(payload.get("session_id")),
+                "error_kind": error_kind,
+                "error_message": error_message,
+                "duration_ms": _coerce_int(payload.get("duration_ms")),
+                "timeout_hit": bool(payload.get("timeout_hit", False)),
+                "timeout_seconds": _coerce_number(payload.get("timeout_seconds")),
+            },
+            icon="error",
+            run_id=run_id,
+            timestamp_ms=timestamp_ms,
+        )
+
+    pending_review_ids = _coerce_str_list(payload.get("pending_review_ids"))
+    timeout_seconds = _coerce_number(payload.get("timeout_seconds"))
+    pending_count = len(pending_review_ids)
+    message = f"关闭前复盘超时，仍有 {pending_count} 条待处理复盘"
+    return SystemNoticeFrame(
+        notice_key=_EVOLUTION_NOTICE_KEY,
+        source=_EVOLUTION_NOTICE_SOURCE,
+        status="drain_timeout",
+        title="进化复盘",
+        message=message,
+        details={
+            "pending_review_ids": pending_review_ids,
+            "timeout_seconds": timeout_seconds,
+        },
+        icon="warning",
+        run_id=run_id,
+        timestamp_ms=timestamp_ms,
+    )
+
+
+def _coerce_int(raw: Any) -> int | None:
+    if isinstance(raw, bool):
+        return int(raw)
+    if isinstance(raw, int):
+        return raw
+    return None
+
+
+def _coerce_number(raw: Any) -> int | float | None:
+    if isinstance(raw, bool):
+        return int(raw)
+    if isinstance(raw, (int, float)):
+        return raw
+    return None
+
+
+def _coerce_int_list(raw: Any) -> list[int]:
+    if not isinstance(raw, list):
+        return []
+    result: list[int] = []
+    for item in raw:
+        coerced = _coerce_int(item)
+        if coerced is not None:
+            result.append(coerced)
+    return result
+
+
+def _coerce_str_list(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw]
 
 
 __all__ = ["WSEventSink"]

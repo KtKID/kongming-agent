@@ -108,7 +108,13 @@ def _make_runtime_factory(cfg: object) -> object:
     from executors.agent_runtime.native_runtime import NativeRuntime
     from host.session_bridge import SessionBridge
     from observability import JsonlTraceSink
-    from tools import ToolRegistry, build_default_approval, build_default_registry
+    from tools import (
+        ToolRegistry,
+        build_default_approval,
+        build_default_registry,
+        register_evolution_write_tool_if_enabled,
+        register_schedule_tool_if_enabled,
+    )
 
     assert isinstance(cfg, Config)
     real_cfg: Config = cfg
@@ -200,8 +206,47 @@ def _make_runtime_factory(cfg: object) -> object:
                         skill_specs=skill_specs or None,
                         skill_event_sinks=sink_list,
                     )
+
+                    # v0.2 cron：跟 memory_tool 一致的"外部 register"模式。
+                    # 注意 web 路径每个 thread cell 都共享同一个 scheduler_store
+                    # （由 file lock 保证多 thread 写入安全）。runtime_factory_fn
+                    # 走全局 cfg（不是 preset_cfg），保证 ticker 用同一份配置。
+                    # v0.3 M4：构造 web cron_dispatcher（仅当 scheduler.enabled）；
+                    # broker 走模块级单例，与 /ws/cron endpoint 共享同一个实例。
+                    cron_dispatcher = None
+                    if real_cfg.scheduler.enabled:
+                        from scheduler.delivery import DeliveryDispatcher
+                        from web.cron_delivery import WebDeliverySink
+                        from web.cron_ws import get_broker
+
+                        cron_dispatcher = DeliveryDispatcher(
+                            web_sink=WebDeliverySink(get_broker()),
+                        )
+
+                    def _scheduler_runtime_factory(_store):  # type: ignore[no-untyped-def]
+                        from scheduler.runtime_factory import build_cron_execution_bridge
+
+                        return build_cron_execution_bridge(
+                            real_cfg,
+                            _store,
+                            event_sinks=sink_list,
+                            dispatcher=cron_dispatcher,
+                        )
+
+                    register_schedule_tool_if_enabled(
+                        new_registry,
+                        real_cfg,
+                        runtime_factory_fn=_scheduler_runtime_factory,
+                    )
+                    register_evolution_write_tool_if_enabled(
+                        new_registry,
+                        real_cfg,
+                        event_sinks=sink_list,
+                    )
                     _registry_cache[0] = new_registry
-                    _enabled_tools_cache[0] = new_registry.names()
+                    _enabled_tools_cache[0] = [
+                        name for name in new_registry.names() if name != "evolution_write"
+                    ]
                     _instructions_cache[0] = rendered
                     _origins_cache[0] = origins
         instructions = _instructions_cache[0]

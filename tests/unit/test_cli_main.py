@@ -10,6 +10,7 @@ from config_loader.models import (
     Config,
     ModelConfig,
     RunnerConfig,
+    SchedulerConfig,
     SessionConfig,
     TraceConfig,
 )
@@ -63,6 +64,9 @@ def _build_cfg() -> Config:
         session=SessionConfig(backend="memory", store_path=".kongming/sessions.db"),
         trace=TraceConfig(output_path=".kongming/traces/test.jsonl"),
         approval=ApprovalConfig(mode="auto_allow"),
+        # 显式关 scheduler：本测专注 session/runtime 装配，cron ticker 由
+        # test_cli_main_scheduler.py 单独覆盖。
+        scheduler=SchedulerConfig(enabled=False),
     )
 
 

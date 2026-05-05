@@ -1,0 +1,8 @@
+{"timestamp":"2026-05-03T15:00:00.000Z","type":"session_meta","payload":{"id":"019dee40-aaaa-7341-9011-aabbccddeeff","cwd":"/test/path/proj","originator":"codex_exec","cli_version":"0.128.0","source":"exec","model_provider":"openai"}}
+{"timestamp":"2026-05-03T15:00:01.000Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-05-03T15:00:02.000Z","type":"event_msg","payload":{"type":"agent_message","text":"I will run ls and edit a file."}}
+{"timestamp":"2026-05-03T15:00:03.000Z","type":"event_msg","payload":{"type":"command_execution","command":"ls -la","exit_code":0,"output":"file1.txt\nfile2.txt"}}
+{"timestamp":"2026-05-03T15:00:04.000Z","type":"event_msg","payload":{"type":"file_edit","path":"/test/path/proj/file1.txt","diff":"+new line"}}
+{"timestamp":"2026-05-03T15:00:05.000Z","type":"event_msg","payload":{"type":"mcp_tool_call","server":"test-server","tool":"search","arguments":{"q":"test"},"result":"found 3"}}
+{"timestamp":"2026-05-03T15:00:06.000Z","type":"event_msg","payload":{"type":"token_count","usage":{"input_tokens":500,"cached_input_tokens":200,"output_tokens":100,"reasoning_output_tokens":50}}}
+{"timestamp":"2026-05-03T15:00:07.000Z","type":"event_msg","payload":{"type":"task_complete"}}

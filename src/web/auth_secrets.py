@@ -4,7 +4,7 @@
 
 1. **session signing secret**：itsdangerous 用的 32 字节 secret。env > 文件 > 首次
    随机生成 + 0600 落盘。
-2. **password bcrypt hash**：登录密码的 bcrypt 哈希。env > 文件 > 缺失则报错。
+2. **password bcrypt hash**：登录密码的 bcrypt 哈希。文件 > env 引导初始化 > 缺失则报错。
 
 落盘路径：
 
@@ -14,8 +14,9 @@
 设计要点：
 
 - **0600 权限**：写文件后立即 ``os.chmod(path, 0o600)``，防止其他用户读到。
-- **首次 env 必须清空**：``KONGMING_WEB_PASSWORD`` 写盘后调
-  ``os.environ.pop`` 把进程内变量清掉，防止 fork 子进程再用到明文。
+- **env 只做首次引导**：已有 ``password.hash`` 时始终以文件为准；env 只在缺文件
+  时参与首次初始化。写盘后调 ``os.environ.pop`` 把进程内变量清掉，防止 fork
+  子进程再用到明文。
 - **不依赖 web.protocol / fastapi**：本模块是底层 IO + 哈希，独立可测。
 - **bcrypt rounds**：用 :mod:`bcrypt` 默认（12，~250ms 单次）。
 - **>72 字节自动截断**：bcrypt 协议固有限制，超长直接截断（单用户场景的
@@ -238,9 +239,9 @@ def load_or_init_password_hash(home_dir: Path) -> str:
 
     优先级：
 
-    1. env :data:`ENV_WEB_PASSWORD`（明文）→ ``hash_password`` 后写盘 0600，
+    1. 盘上 ``<home>/web/password.hash`` 存在 → 读返回。
+    2. env :data:`ENV_WEB_PASSWORD`（明文）→ ``hash_password`` 后写盘 0600，
        并 ``os.environ.pop`` 清空 env。**不**回读文件，直接返回新算的 hash。
-    2. 盘上 ``<home>/web/password.hash`` 存在 → 读返回。
     3. 都没有 → 抛 :class:`WebAuthNotConfiguredError`。
 
     Args:
@@ -252,19 +253,6 @@ def load_or_init_password_hash(home_dir: Path) -> str:
     Raises:
         WebAuthNotConfiguredError: env 与文件都缺。
     """
-    env_val = os.environ.get(ENV_WEB_PASSWORD)
-    if env_val:
-        # env 可能是 ""；strip 后为空也视作未设置（避免误把空字符串当合法密码）
-        plain = env_val.strip()
-        if plain:
-            new_hash = hash_password(plain)
-            path = _password_hash_path(home_dir)
-            _ensure_web_dir(home_dir)
-            _write_secret_text(path, new_hash)
-            # 清掉 env，防止子进程 / 错误日志泄露
-            os.environ.pop(ENV_WEB_PASSWORD, None)
-            return new_hash
-
     path = _password_hash_path(home_dir)
     if path.is_file():
         try:
@@ -275,6 +263,18 @@ def load_or_init_password_hash(home_dir: Path) -> str:
             ) from exc
         if existing:
             return existing
+
+    env_val = os.environ.get(ENV_WEB_PASSWORD)
+    if env_val:
+        # env 可能是 ""；strip 后为空也视作未设置（避免误把空字符串当合法密码）
+        plain = env_val.strip()
+        if plain:
+            new_hash = hash_password(plain)
+            _ensure_web_dir(home_dir)
+            _write_secret_text(path, new_hash)
+            # 清掉 env，防止子进程 / 错误日志泄露
+            os.environ.pop(ENV_WEB_PASSWORD, None)
+            return new_hash
 
     raise WebAuthNotConfiguredError(
         f"web auth not configured: set {ENV_WEB_PASSWORD} env on first run (checked file at {path})"

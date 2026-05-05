@@ -7,7 +7,7 @@
  *
  * - Python `src/web/protocol/_base.py`        → 本文件「公共枚举」段
  * - Python `src/web/protocol/rest_models.py`  → 本文件「REST DTO」段（8 个）
- * - Python `src/web/protocol/ws_frames.py`    → 本文件「C2S 帧」+「S2C 帧」+「Unions」三段（17 帧 + 2 union）
+ * - Python `src/web/protocol/ws_frames.py`    → 本文件「C2S 帧」+「S2C 帧」+「Unions」三段（18 帧 + 2 union）
  *
  * 字段名 / 类型 / 必选与 Python 侧严格对应；可选字段（Python `X | None = None`）
  * 用 TS 的 `field?: X` 表达；Pydantic `Literal["x"]` 单值用 TS 字面量类型。
@@ -16,7 +16,7 @@
  *
  * 本文件**由人手维护**——v0.1.5 暂不引入 OpenAPI / msgspec / datamodel-codegen
  * 这类自动生成工具，理由：
- * - 17 帧 + 8 DTO 体量小，手写一次即可，引入 codegen 工具会带来构建链复杂度
+ * - 18 帧 + 8 DTO 体量小，手写一次即可，引入 codegen 工具会带来构建链复杂度
  * - 漂移由两道护栏兜底：
  *   1. Python 侧 110 个 round-trip + 拒绝场景单测（保证 Python 模型与 wire 一致）
  *   2. PR 审查时必须同时改 Python + TS，review checklist 强制对照
@@ -81,6 +81,34 @@ export type ApprovalOutcome = "approved" | "rejected" | "cancelled";
  */
 export type HistoryMessageRole = "user" | "assistant" | "tool";
 
+/**
+ * Thread 后端类型（v0.1.6 新增）。
+ *
+ * - `generic_chat`：走 InputAssembler + LLM provider 的原有路径，
+ *   使用 `/ws/threads/{thread_id}` endpoint
+ * - `claude_code`：走 Claude Agent SDK，使用 `/ws/claude-code?thread_id={thread_id}`
+ * - `codex`：走 /ws/codex + codex CLI 子进程
+ *
+ * 默认 `generic_chat`；老 v1 thread 文件读入时由后端自动补 `generic_chat`。
+ */
+export type BackendKind = "generic_chat" | "claude_code" | "codex";
+
+/**
+ * `system.notice` 的系统提示状态（由后端语义层直接给出）。
+ */
+export type SystemNoticeStatus =
+  | "started"
+  | "completed"
+  | "failed"
+  | "drain_timeout";
+
+/**
+ * `system.notice` 的建议图标语义。
+ *
+ * 前端卡片直接用这四态映射图标；缺失时可按 `status` 回退。
+ */
+export type SystemNoticeIcon = "running" | "success" | "warning" | "error";
+
 // ============================================================================
 // ===== REST DTO（对应 Python src/web/protocol/rest_models.py，共 8 个）=====
 // ============================================================================
@@ -130,10 +158,18 @@ export interface CellSummaryDTO {
  * 创建 thread 请求体（`POST /api/threads`）。
  *
  * `name.length <= 200`（Python 侧 Pydantic 校验，TS 侧不重复校验）。
+ *
+ * v0.1.6：
+ * - `preset_id` 从必填改为可选；`backend_kind="generic_chat"` 时必须传非空字符串，
+ *   `backend_kind="claude_code"` 时可省略（后端忽略）
+ * - `backend_kind` 默认 `generic_chat`，可省略
+ * - `cwd` 可选；传入时必须是绝对路径，用作 workspace 根目录
  */
 export interface CreateThreadRequest {
   name: string;
-  preset_id: string;
+  preset_id?: string;
+  backend_kind?: BackendKind;
+  cwd?: string;
 }
 
 /**
@@ -195,17 +231,233 @@ export interface RenameThreadRequest {
  * `id` 形如 `thread-<12 位 hex>`；
  * `name.length <= 200`；
  * `message_count >= 0`；
- * `schema_version` 默认 1，未来字段演进时 bump 该值，旧文件读入后由迁移层升级。
+ * `schema_version`：v0.2 起接受 1 / 2 / 3；老 v1/v2 文件由后端读盘时懒升级到 v3。
+ *
+ * v0.1.6 新增 `backend_kind`；老 v1 文件读入默认 `generic_chat`。
+ * v0.2 新增 `sdk_session_id` + `cwd`（claude_code thread 与 SDK session 持久化绑定）；
+ * 老 v2 文件读入默认空字符串。
+ * v0.2.1 新增 thread 级累计 `cumulative_*_tokens`；老 v3 文件读入默认 0。
+ * `preset_id` 在 `backend_kind="claude_code"` 时允许空字符串占位。
  */
 export interface ThreadMetadataDTO {
   id: string;
   name: string;
   preset_id: string;
+  backend_kind: BackendKind;
+  sdk_session_id: string;
+  cwd: string;
   created_at: number;
   updated_at: number;
   message_count: number;
-  schema_version?: 1;
+  cumulative_prompt_tokens: number;
+  cumulative_completion_tokens: number;
+  cumulative_total_tokens: number;
+  schema_version?: 1 | 2 | 3 | 4;
 }
+
+/**
+ * 当前 thread 的共享 workspace 上下文。
+ *
+ * 首版用于 `Chat / Files / Shell` 三 tab 共用：
+ * - `workspace_root` 取 thread metadata 的 `cwd`
+ * - `files_available` 表示当前 thread 已绑定 workspace
+ * - `shell_available` 表示当前 thread 已具备可进入的 workspace cwd
+ */
+export interface WorkspaceContextDTO {
+  thread_id: string;
+  backend_kind: BackendKind;
+  workspace_root: string;
+  sdk_session_id: string;
+  shell_provider: "claude_code" | "system_shell" | "none";
+  files_available: boolean;
+  shell_available: boolean;
+  unavailable_reason?: string | null;
+}
+
+export interface WorkspaceTreeNodeDTO {
+  path: string;
+  name: string;
+  kind: "file" | "dir";
+  has_children: boolean;
+}
+
+export interface WorkspaceTreeDTO {
+  path: string;
+  entries: WorkspaceTreeNodeDTO[];
+}
+
+export interface WorkspaceFileDTO {
+  path: string;
+  name: string;
+  content: string;
+  size_bytes: number;
+  is_text: boolean;
+  too_large: boolean;
+  encoding: string;
+}
+
+export interface WorkspaceGitStatusEntryDTO {
+  path: string;
+  name: string;
+  staged_status: string;
+  unstaged_status: string;
+  previous_path?: string | null;
+}
+
+export interface WorkspaceGitStatusDTO {
+  workspace_root: string;
+  repo_root: string;
+  current_branch: string;
+  tracking_branch?: string | null;
+  ahead_count: number;
+  behind_count: number;
+  changes: WorkspaceGitStatusEntryDTO[];
+}
+
+export interface WorkspaceGitBranchesDTO {
+  current_branch: string;
+  local_branches: string[];
+  remote_branches: string[];
+}
+
+export interface WorkspaceGitCommitDTO {
+  commit: string;
+  short_commit: string;
+  author: string;
+  authored_at: string;
+  subject: string;
+}
+
+export interface WorkspaceGitCommitsDTO {
+  commits: WorkspaceGitCommitDTO[];
+}
+
+export interface WorkspaceGitFileDiffDTO {
+  path: string;
+  diff: string;
+}
+
+export interface WorkspaceGitPathsRequest {
+  paths: string[];
+}
+
+export interface WorkspaceGitCheckoutRequest {
+  branch: string;
+}
+
+export interface WorkspaceGitCreateBranchRequest {
+  branch: string;
+  checkout?: boolean;
+}
+
+export interface WorkspaceGitCommitRequest {
+  message: string;
+}
+
+export interface WorkspaceGitActionResultDTO {
+  detail: string;
+  current_branch?: string | null;
+  commit?: string | null;
+  short_commit?: string | null;
+}
+
+export interface UpdateWorkspaceFileRequest {
+  path: string;
+  content: string;
+}
+
+export interface EvolutionDecisionSummaryDTO {
+  total: number;
+  accepted_memory: number;
+  accepted_skill: number;
+  ignored: number;
+  pending: number;
+}
+
+export type EvolutionDecisionValue =
+  | "accept_memory"
+  | "accept_skill"
+  | "ignore";
+
+export type EvolutionAppliedStatus =
+  | "pending"
+  | "written"
+  | "skipped"
+  | "failed";
+
+export type EvolutionAppliedMode =
+  | "append"
+  | "update"
+  | "create"
+  | "ignore";
+
+export interface EvolutionDecisionItemDTO {
+  nutrient_id: string;
+  decision: EvolutionDecisionValue;
+  target?: "memory" | "skill" | null;
+  decided_at_ms: number;
+  applied_status?: EvolutionAppliedStatus | null;
+  applied_path?: string | null;
+  applied_mode?: EvolutionAppliedMode | null;
+  applied_at_ms?: number | null;
+  applied_error?: string | null;
+}
+
+export interface EvolutionNutrientDTO {
+  nutrient_id: string;
+  kind: "memory" | "workflow" | "error";
+  title: string;
+  content: string;
+  summary: string;
+  confidence: number;
+  evidence_turns: number[];
+  source_run_id: string;
+  source_session_id: string;
+  suggested_target?: "memory" | "skill" | "errorbook" | null;
+  tags: string[];
+}
+
+export interface EvolutionReviewDTO {
+  review_id: string;
+  run_id: string;
+  session_id: string;
+  reviewed_at_ms: number;
+  review_summary: string;
+  nutrients: EvolutionNutrientDTO[];
+  decision_summary: EvolutionDecisionSummaryDTO;
+  decisions: EvolutionDecisionItemDTO[];
+}
+
+export interface EvolutionDecisionRequest {
+  nutrient_id: string;
+  decision: EvolutionDecisionValue;
+}
+
+export interface EvolutionDecisionResponse {
+  review: EvolutionReviewDTO;
+}
+
+export type WorkspaceShellC2SFrame =
+  | { type: "shell-input"; data: string }
+  | { type: "shell-resize"; cols: number; rows: number }
+  | { type: "shell-terminate" };
+
+export type WorkspaceShellS2CFrame =
+  | {
+      type: "shell-status";
+      status: "starting" | "running" | "exited" | "terminated";
+      cwd: string;
+      command: string[];
+      exitCode?: number;
+    }
+  | {
+      type: "shell-output";
+      data: string;
+    }
+  | {
+      type: "shell-error";
+      detail: string;
+    };
 
 /**
  * 白板中的单张卡片。
@@ -279,6 +531,54 @@ export interface UpdateWhiteboardLayoutRequest {
   cards: WhiteboardCardLayoutDTO[];
 }
 
+// ----------------------------------------------------------------------------
+// claude_code 历史浏览相关 DTO（v0.2，对应后端 ProjectSummary / SessionSummary）
+//
+// `GET /api/claude/projects` 返回 `{ projects: ClaudeProjectSummaryDTO[] }`；
+// `POST /api/threads/import-claude-session` 入参 / 出参见下两个接口。
+// 这些类型与 generic_chat 的 thread / preset 流无关，只服务于左栏 Claude tab
+// 的"历史 session 树 + 一键续聊"路径。
+// ----------------------------------------------------------------------------
+
+/** 单条 Claude SDK session 摘要（从 `~/.claude/projects/<dir>/<sid>.jsonl` 抽取）。 */
+export interface ClaudeSessionSummaryDTO {
+  sdk_session_id: string;
+  title: string;
+  last_modified: number; // Unix 秒
+  message_count: number;
+}
+
+/** 单个项目目录的 Claude session 列表（按 last_modified desc 排序）。 */
+export interface ClaudeProjectSummaryDTO {
+  name: string; // 编码目录名
+  cwd: string; // 解码后绝对路径
+  display_name: string; // cwd 末段
+  sessions: ClaudeSessionSummaryDTO[];
+}
+
+/** Claude 项目树刷新过程中的进度帧。 */
+export interface ClaudeProjectsRefreshProgressDTO {
+  current: number;
+  total: number;
+  current_project: string;
+}
+
+/** `POST /api/threads/import-claude-session` 请求体。 */
+export interface ImportClaudeSessionRequest {
+  sdk_session_id: string;
+  cwd: string;
+  name: string;
+}
+
+/**
+ * `POST /api/threads/import-claude-session` 响应。
+ * `imported=false` 表示该 sdk_session_id 已绑定旧 thread，直接复用。
+ */
+export interface ImportClaudeSessionResponse {
+  thread: ThreadMetadataDTO;
+  imported: boolean;
+}
+
 // ============================================================================
 // ===== C2S 帧（浏览器 → 后端，3 个；对应 Python ws_frames.py）=====
 //
@@ -326,7 +626,7 @@ export interface UserInputFrame {
 }
 
 // ============================================================================
-// ===== S2C 帧（后端 → 浏览器，14 个；对应 Python ws_frames.py）=====
+// ===== S2C 帧（后端 → 浏览器，15 个；对应 Python ws_frames.py）=====
 //
 // 所有 S2C 帧必带 `timestamp_ms` 服务端时间戳，让前端按时序重排。
 // 流式增量类（content.delta / reasoning.delta）额外带 `turn` 和 `seq`。
@@ -378,6 +678,25 @@ export interface CellEvictedFrame {
   thread_id: string;
   reason: EvictReason;
   message?: string;
+}
+
+/**
+ * 系统提示卡片帧。
+ *
+ * 第一版用于 self-evolution 复盘链路，把 started / completed / failed /
+ * drain_timeout 显式送到聊天时间线。
+ */
+export interface SystemNoticeFrame {
+  kind: "system.notice";
+  timestamp_ms: number;
+  notice_key: string;
+  source: string;
+  status: SystemNoticeStatus;
+  title: string;
+  message: string;
+  details?: Record<string, unknown> | string[] | null;
+  icon?: SystemNoticeIcon | null;
+  run_id?: string;
 }
 
 /**
@@ -496,6 +815,7 @@ export interface UsageFrame {
   completion_tokens: number;
   total_tokens: number;
   turn: number;
+  run_id?: string;
 }
 
 // ============================================================================
@@ -514,6 +834,7 @@ export type WSFrameS2C =
   | AssistantFinalFrame
   | ContentDeltaFrame
   | ReasoningDeltaFrame
+  | SystemNoticeFrame
   | ToolCallStartFrame
   | ToolCallEndFrame
   | ApprovalRequestFrame
@@ -576,6 +897,10 @@ export function isToolCallStart(f: WSFrameS2C): f is ToolCallStartFrame {
   return f.kind === "tool.call.start";
 }
 
+export function isSystemNotice(f: WSFrameS2C): f is SystemNoticeFrame {
+  return f.kind === "system.notice";
+}
+
 export function isToolCallEnd(f: WSFrameS2C): f is ToolCallEndFrame {
   return f.kind === "tool.call.end";
 }
@@ -618,4 +943,95 @@ export function isApprovalAck(f: WSFrameC2S): f is ApprovalAckFrame {
 
 export function isPing(f: WSFrameC2S): f is PingFrame {
   return f.kind === "ping";
+}
+
+// ============================================================================
+// ===== claude_code 路径协议（v0.1.6，对应 Python src/web/claude_code/llm_protocol.py）
+//
+// 这是 `/ws/claude-code` endpoint 的协议，与上面的 generic_chat（/ws/threads/{id}）
+// 协议**完全独立**——形态不同：generic_chat 是严格 discriminated union，claude_code
+// 是扁平 dict + `kind` 判别字段，字段大多可选（来自 Claude Agent SDK 流式输出的
+// 异构特性）。
+//
+// 不要把两者 union 在一起——前端按 thread.backend_kind 选不同路径渲染。
+// ============================================================================
+
+/**
+ * `NormalizedMessage` 的 provider 维度（与 Python `LLMProvider` 一致）。
+ *
+ * v0.1 仅 claude；保留 codex/gemini/cursor 占位以便后续扩展同协议接入。
+ */
+export type NormalizedProvider = "claude" | "codex" | "gemini" | "cursor";
+
+/**
+ * `NormalizedMessage` 的 14 种 kind（与 Python `MessageKind` 一致）。
+ */
+export type NormalizedMessageKind =
+  | "text"
+  | "tool_use"
+  | "tool_result"
+  | "thinking"
+  | "stream_delta"
+  | "stream_end"
+  | "session_created"
+  | "permission_request"
+  | "permission_cancelled"
+  | "complete"
+  | "error"
+  | "status"
+  | "interactive_prompt"
+  | "task_notification";
+
+/**
+ * `/ws/claude-code` endpoint 的归一化消息（来自 Claude Agent SDK 流的翻译）。
+ *
+ * 形态选择说明：
+ *
+ * - 这里**有意**用扁平 interface + 大量可选字段，不用 discriminated union——
+ *   原因是 SDK 流式 partial message 的字段组合非常稀疏（同一类 kind 在不同
+ *   消息序列里也可能字段缺失），用严格 union 反而要为每个 kind 写三五份变体
+ * - 消费方按 `kind` 分支渲染：`text` / `thinking` 用普通气泡；`stream_delta`
+ *   累加到当前流式 buffer；`stream_end` 收尾；`tool_use` / `tool_result`
+ *   渲染工具卡片；`permission_request` 弹审批 dialog；`session_created` 不
+ *   渲染只记 newSessionId；`complete` 显示对话结束 + tokenBudget；`error` 报错
+ * - 字段命名走 camelCase 与 SDK / ccui 对齐（与 Python wire 已通过
+ *   `ClaudeNormalizer._snake_to_camel` 规范化）
+ */
+export interface NormalizedMessage {
+  /** 消息类型；用作前端 switch 分支主键 */
+  kind: NormalizedMessageKind;
+  /** SDK provider（v0.1 总是 "claude"） */
+  provider?: NormalizedProvider;
+  /** SDK session_id（首条 session_created 之后切换到真实 id） */
+  sessionId?: string | null;
+  /** ISO 时间戳，由 normalizer 填充 */
+  timestamp?: string;
+  /** 消息 id（SDK 提供） */
+  id?: string;
+  /** assistant / user 角色 */
+  role?: "user" | "assistant";
+  /** kind="text" / "thinking" / "tool_result" 的内容；类型不固定（SDK 透传） */
+  content?: unknown;
+  /** kind="tool_use" 的工具名 */
+  toolName?: string;
+  /** kind="tool_use" 的工具入参；与 `input` 同义（normalizer 出 toolInput） */
+  toolInput?: unknown;
+  /** kind="tool_use" / "tool_result" 关联的 SDK tool_use_id */
+  toolId?: string;
+  /** kind="tool_result" 是否错误 */
+  isError?: boolean;
+  /** kind="permission_request" 的 requestId（用于回 claude-permission-response） */
+  requestId?: string;
+  /** kind="permission_request" 的入参（与 toolInput 等价的别名，normalizer 选填） */
+  input?: unknown;
+  /** kind="session_created" 的真实 SDK session_id */
+  newSessionId?: string;
+  /** kind="complete" 的退出码（SDK 提供） */
+  exitCode?: number;
+  /** kind="complete" 是否被 abort */
+  aborted?: boolean;
+  /** kind="complete" 的 token 用量摘要（camelCase） */
+  tokenBudget?: Record<string, unknown>;
+  /** kind="error" 的错误描述 */
+  error?: string;
 }

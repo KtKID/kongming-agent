@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from context.file_session import FileSession
 from context.session_bootstrap import SessionBootstrap
 from context.session_store import build_session
 from core.agent_spec import AgentSpec
+from core.contracts import ApprovalDecision, ApprovalRequest, LLMRequest, LLMResponse
 from core.message import Message
 from core.run_state import RunState
 from core.runner import Runner
@@ -44,6 +46,20 @@ def _default_config(
 @pytest.fixture
 def store_path(tmp_path: Path) -> str:
     return str(tmp_path / "sessions")
+
+
+class _StubLLM:
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        return LLMResponse(
+            message=Message.assistant("hello from llm"),
+            finish_reason="stop",
+            usage={"prompt_tokens": 12, "completion_tokens": 7, "total_tokens": 19},
+        )
+
+
+class _AllowApproval:
+    async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        return ApprovalDecision(outcome="approved")
 
 
 # ---------------------------------------------------------------------------
@@ -147,3 +163,31 @@ class TestTC12BackendSwitch:
         history = await session.history()
         assert len(history) == 1
         assert history[0].content == "hello"
+
+
+class TestTC13AssistantUsagePersisted:
+    async def test_runner_persists_assistant_usage_to_file_session(self, store_path: str) -> None:
+        bootstrap = _bootstrap()
+        session = FileSession("usage-test", bootstrap, store_path)
+        runner = Runner()
+        spec = AgentSpec(name="test-agent", instructions="SYS", default_model="test-model")
+
+        result = await runner.run(
+            "hello",
+            session=session,
+            agent_spec=spec,
+            llm=_StubLLM(),
+            tools={},
+            approval=_AllowApproval(),
+        )
+
+        assert result.status == "completed"
+        jsonl_path = Path(store_path) / "usage-test" / "usage-test.jsonl"
+        records = [json.loads(line) for line in jsonl_path.read_text(encoding="utf-8").splitlines()]
+        assistant_record = records[-1]
+        assert assistant_record["message"]["role"] == "assistant"
+        assert assistant_record["usage"] == {
+            "prompt_tokens": 12,
+            "completion_tokens": 7,
+            "total_tokens": 19,
+        }

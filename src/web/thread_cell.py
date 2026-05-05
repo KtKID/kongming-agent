@@ -79,7 +79,7 @@ class ThreadCell:
     current_run_task: asyncio.Task[Result] | None = None
 
     def attach_ws(self, new_ws: Any) -> None:
-        """重连时同步替换 adapter / 所有 sink 的 WS 引用。
+        """把一个新连接注册到 adapter / 所有 sink。
 
         约定：所有 sink 必须实现 ``attach_ws(new_ws)`` 接口才会被替换；
         没实现的 sink（如 JsonlTraceSink）不需要 ws，跳过即可。
@@ -89,6 +89,16 @@ class ThreadCell:
             attach = getattr(sink, "attach_ws", None)
             if callable(attach):
                 attach(new_ws)
+
+    def detach_ws(self, ws: Any) -> None:
+        """把一个断开的连接从 adapter / 所有 sink 注销。"""
+        detach = getattr(self.adapter, "detach_ws", None)
+        if callable(detach):
+            detach(ws)
+        for sink in self.event_sinks:
+            detach_sink = getattr(sink, "detach_ws", None)
+            if callable(detach_sink):
+                detach_sink(ws)
 
     def touch(self) -> None:
         """更新 ``last_active_at``。
