@@ -446,7 +446,9 @@ class Store:
         # 防御：极端情况下同秒多次启动；用 counter 避免覆盖已有备份
         counter = 1
         while backup.exists():
-            backup = self._tasks_path.with_name(f"{_TASKS_FILENAME}.{bak_label}.bak.{ts}.{counter}")
+            backup = self._tasks_path.with_name(
+                f"{_TASKS_FILENAME}.{bak_label}.bak.{ts}.{counter}"
+            )
             counter += 1
         self._tasks_path.rename(backup)
 

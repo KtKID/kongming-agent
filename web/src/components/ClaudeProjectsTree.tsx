@@ -6,12 +6,14 @@ import {
   Folder,
   FolderOpen,
   MessageSquare,
+  Plus,
   RefreshCw,
   Search,
   X,
 } from "lucide-react";
 
 import { apiRefreshClaudeProjects } from "@/lib/api";
+import { useThreadsStore } from "@/stores/threads";
 import { formatRelative } from "@/lib/relative-time";
 import type {
   ClaudeProjectSummaryDTO,
@@ -35,6 +37,7 @@ interface ClaudeProjectsTreeProps {
     project: ClaudeProjectSummaryDTO,
     session: ClaudeSessionSummaryDTO,
   ) => void;
+  onNewSession: (project: ClaudeProjectSummaryDTO) => void;
 }
 
 const DEFAULT_VISIBLE = 10;
@@ -64,6 +67,7 @@ function formatCurrentProject(encodedName: string): string {
 
 export function ClaudeProjectsTree({
   onSessionClick,
+  onNewSession,
 }: ClaudeProjectsTreeProps): JSX.Element {
   const [projects, setProjects] = useState<ClaudeProjectSummaryDTO[] | null>(
     null,
@@ -155,6 +159,15 @@ export function ClaudeProjectsTree({
   useEffect(() => {
     void refreshProjects();
   }, []);
+
+  const claudeProjectsRefreshKey = useThreadsStore(
+    (s) => s.claudeProjectsRefreshKey,
+  );
+  useEffect(() => {
+    if (claudeProjectsRefreshKey > 0) {
+      void refreshProjects();
+    }
+  }, [claudeProjectsRefreshKey]);
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
   const filteredProjects = useMemo(() => {
@@ -329,6 +342,7 @@ export function ClaudeProjectsTree({
             onToggleExpand={() => toggleExpand(project.name)}
             onShowAll={() => showAll(project.name)}
             onSessionClick={(session) => onSessionClick(project, session)}
+            onNewSession={() => onNewSession(project)}
           />
         ))}
       </div>
@@ -346,6 +360,7 @@ interface ProjectNodeProps {
   onToggleExpand: () => void;
   onShowAll: () => void;
   onSessionClick: (session: ClaudeSessionSummaryDTO) => void;
+  onNewSession: () => void;
 }
 
 function ProjectNode({
@@ -356,6 +371,7 @@ function ProjectNode({
   onToggleExpand,
   onShowAll,
   onSessionClick,
+  onNewSession,
 }: ProjectNodeProps): JSX.Element {
   const visibleSessions = expanded
     ? searching
@@ -392,6 +408,14 @@ function ProjectNode({
 
       {expanded && (
         <div className="ml-4 flex flex-col gap-0.5 border-l pl-2">
+          <button
+            type="button"
+            onClick={onNewSession}
+            className="hover:bg-accent flex items-center gap-1.5 rounded px-2 py-1 text-left text-xs font-medium text-primary transition-colors"
+          >
+            <Plus className="h-3.5 w-3.5 shrink-0" />
+            新建会话
+          </button>
           {visibleSessions.map((s) => (
             <SessionCard
               key={s.sdk_session_id}

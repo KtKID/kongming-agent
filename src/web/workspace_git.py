@@ -63,16 +63,14 @@ def read_git_branches(root: Path) -> dict[str, object]:
     current_branch = _current_branch(root)
     local = [
         line.strip()
-        for line in _run_git(
-            root, "for-each-ref", "--format=%(refname:short)", "refs/heads"
-        ).stdout.splitlines()
+        for line in _run_git(root, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+        .stdout.splitlines()
         if line.strip()
     ]
     remote = [
         line.strip()
-        for line in _run_git(
-            root, "for-each-ref", "--format=%(refname:short)", "refs/remotes"
-        ).stdout.splitlines()
+        for line in _run_git(root, "for-each-ref", "--format=%(refname:short)", "refs/remotes")
+        .stdout.splitlines()
         if line.strip() and not line.endswith("/HEAD")
     ]
     return {

@@ -146,6 +146,8 @@ class ThreadMetadataDTO(_FrameBase):
     v0.1.6 加 ``backend_kind`` 字段并把 ``schema_version`` 升至 ``2``。
     v0.2 加 ``sdk_session_id`` + ``cwd`` 字段，``schema_version`` 升至 ``3``。
     v0.2.1 加 thread 级累计 usage 字段，``schema_version`` 升至 ``4``
+    v0.2.2 加 ``codex_thread_id`` 并允许 ``backend_kind="codex"``，
+    ``schema_version`` 升至 ``5``
     （同时接受老 v1/v2 文件，懒升级在 :func:`web.thread_metadata.read_thread_metadata`
     里完成；DTO 这里只负责出/入参形态对齐 ThreadMetadata 模型）。
     ``id`` 严格匹配 ``^thread-[a-f0-9]{12}$``，防止用户在 URL 里手写 thread id
@@ -155,8 +157,9 @@ class ThreadMetadataDTO(_FrameBase):
     id: Annotated[str, Field(pattern=r"^thread-[a-f0-9]{12}$")]
     name: Annotated[str, Field(max_length=200)]
     preset_id: str
-    backend_kind: Literal["generic_chat", "claude_code"] = "generic_chat"
+    backend_kind: Literal["generic_chat", "claude_code", "codex"] = "generic_chat"
     sdk_session_id: str = ""
+    codex_thread_id: str = ""
     cwd: str = ""
     created_at: float
     updated_at: float
@@ -164,7 +167,7 @@ class ThreadMetadataDTO(_FrameBase):
     cumulative_prompt_tokens: Annotated[int, Field(ge=0)] = 0
     cumulative_completion_tokens: Annotated[int, Field(ge=0)] = 0
     cumulative_total_tokens: Annotated[int, Field(ge=0)] = 0
-    schema_version: Literal[1, 2, 3, 4] = 4
+    schema_version: Literal[1, 2, 3, 4, 5] = 5
 
 
 class WorkspaceContextDTO(_FrameBase):

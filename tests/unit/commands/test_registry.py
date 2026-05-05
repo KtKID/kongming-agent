@@ -6,12 +6,12 @@ from commands.models import CommandDefinition
 from commands.registry import CommandRegistry, build_builtin_registry
 
 
-def test_builtin_registry_contains_review():
+def test_builtin_registry_contains_hello():
     registry = build_builtin_registry()
-    command = registry.lookup("review", "cli")
+    command = registry.lookup("hello", "cli")
     assert command is not None
-    assert command.slash == "/review"
-    assert registry.lookup_slash("/review", "web") == command
+    assert command.slash == "/hello"
+    assert registry.lookup_slash("/hello", "web") == command
 
 
 def test_registry_rejects_duplicate_slash():

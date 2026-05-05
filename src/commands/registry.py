@@ -39,9 +39,9 @@ class CommandRegistry:
 
 
 def build_builtin_registry() -> CommandRegistry:
-    from commands.review_action import build_review_command_definition
+    from commands.builtins import BUILTIN_COMMANDS
 
-    return CommandRegistry([build_review_command_definition()])
+    return CommandRegistry(BUILTIN_COMMANDS)
 
 
 def _visible_to_host(visibility: HostVisibility, host_kind: HostVisibility | str) -> bool:

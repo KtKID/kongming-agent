@@ -430,9 +430,9 @@ async def test_pre_prompt_hook_exception_does_not_block_prompt(monkeypatch, capl
     # hook 抛错不阻塞：用户仍能输入
     assert text == "still-works"
     # 但 logger.warning 记下来：避免 silent loss
-    assert any("pre_prompt_hook" in record.getMessage() for record in caplog.records), (
-        f"expected pre_prompt_hook warning in logs, got {[r.getMessage() for r in caplog.records]}"
-    )
+    assert any(
+        "pre_prompt_hook" in record.getMessage() for record in caplog.records
+    ), f"expected pre_prompt_hook warning in logs, got {[r.getMessage() for r in caplog.records]}"
 
 
 @pytest.mark.asyncio

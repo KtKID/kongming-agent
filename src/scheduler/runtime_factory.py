@@ -118,7 +118,9 @@ def build_cron_execution_bridge(
           手动 ``run`` 调用。
     """
     sinks = list(event_sinks or [])
-    resolved_factory = session_factory or _default_cron_session_factory(config, session_bootstrap)
+    resolved_factory = session_factory or _default_cron_session_factory(
+        config, session_bootstrap
+    )
     runtime = NativeRuntime.build(
         config,
         event_sinks=sinks,

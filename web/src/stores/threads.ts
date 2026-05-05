@@ -9,20 +9,20 @@ import type {
 } from "@/protocol";
 import { useChatStore } from "@/stores/chat";
 
+export interface PendingNewClaudeSession {
+  cwd: string;
+  projectName: string;
+}
+
 interface ThreadsState {
   threads: ThreadMetadataDTO[];
   presets: LLMPresetDTO[];
   loading: boolean;
+  pendingNewClaudeSession: PendingNewClaudeSession | null;
+  initialMessage: string | null;
+  claudeProjectsRefreshKey: number;
   fetchThreads: () => Promise<void>;
   fetchPresets: () => Promise<void>;
-  /**
-   * 创建 thread。
-   *
-   * v0.1.6：
-   * - `backendKind` 缺省 `"generic_chat"`
-   * - `backendKind="claude_code"` 时 `presetId` 可传空字符串（后端忽略）
-   * - `backendKind="generic_chat"` 时 `presetId` 必须非空
-   */
   createThread: (
     name: string,
     presetId: string,
@@ -31,6 +31,9 @@ interface ThreadsState {
   ) => Promise<ThreadMetadataDTO>;
   renameThread: (id: string, name: string) => Promise<void>;
   deleteThread: (id: string) => Promise<void>;
+  setPendingNewClaudeSession: (p: PendingNewClaudeSession | null) => void;
+  setInitialMessage: (msg: string | null) => void;
+  triggerClaudeProjectsRefresh: () => void;
 }
 
 /**
@@ -41,6 +44,9 @@ export const useThreadsStore = create<ThreadsState>((set, get) => ({
   threads: [],
   presets: [],
   loading: false,
+  pendingNewClaudeSession: null,
+  initialMessage: null,
+  claudeProjectsRefreshKey: 0,
 
   fetchThreads: async () => {
     set({ loading: true });
@@ -89,4 +95,9 @@ export const useThreadsStore = create<ThreadsState>((set, get) => ({
     await apiDelete(`/api/threads/${id}`);
     set({ threads: get().threads.filter((t) => t.id !== id) });
   },
+
+  setPendingNewClaudeSession: (p) => set({ pendingNewClaudeSession: p }),
+  setInitialMessage: (msg) => set({ initialMessage: msg }),
+  triggerClaudeProjectsRefresh: () =>
+    set((s) => ({ claudeProjectsRefreshKey: s.claudeProjectsRefreshKey + 1 })),
 }));

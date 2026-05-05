@@ -1,14 +1,14 @@
-"""ThreadMetadata schema_version=2/3/4 + v1/v2/v3 兼容懒升级单测。
+"""ThreadMetadata schema_version=2/3/4/5 + v1/v2/v3 兼容懒升级单测。
 
 历史：v0.1.6 引入 backend_kind（v1→v2）；v0.2 引入 sdk_session_id+cwd（v2→v3）。
-v0.2.1 引入累计 usage 字段（v3→v4）。v1 文件读盘时一次性升级到 v4
-（v1→v2→v3→v4 连续懒升级）。
+v0.2.1 引入累计 usage 字段（v3→v4）。v0.2.2 引入 codex_thread_id（v4→v5）。
+v1 文件读盘时一次性升级到 v5（v1→v2→v3→v4→v5 连续懒升级）。
 
 覆盖：
 
-1. v4 默认值：schema_version=4、backend_kind="generic_chat"、sdk_session_id=""、cwd=""
+1. v5 默认值：schema_version=5、backend_kind="generic_chat"、sdk_session_id=""、cwd=""
 2. v4 显式 backend_kind="claude_code"：preset_id 允许空字符串
-3. 读盘 v1 文件（无 backend_kind） → 自动补 backend_kind+sdk_session_id+cwd+累计 usage 升 v4
+3. 读盘 v1 文件（无 backend_kind） → 自动补 backend_kind+sdk_session_id+cwd+累计 usage+codex_thread_id 升 v5
 4. 读盘 v4 文件 → 字段保真
 5. 读盘 v4 + claude_code → 字段保真
 6. 读盘未知 schema_version=99 → 返回 None
@@ -30,12 +30,12 @@ from web.thread_metadata import (
 )
 
 
-def test_schema_version_constant_is_4() -> None:
-    """v0.2.1 起常量为 4（v0.2 是 3）。"""
-    assert THREAD_METADATA_SCHEMA_VERSION == 4
+def test_schema_version_constant_is_5() -> None:
+    """v0.2.2 起常量为 5（v0.2.1 是 4）。"""
+    assert THREAD_METADATA_SCHEMA_VERSION == 5
 
 
-def test_default_construction_uses_v4_and_generic_chat() -> None:
+def test_default_construction_uses_v5_and_generic_chat() -> None:
     meta = ThreadMetadata(
         id="thread-aaaaaaaaaaaa",
         name="t",
@@ -43,7 +43,7 @@ def test_default_construction_uses_v4_and_generic_chat() -> None:
         created_at=1.0,
         updated_at=1.0,
     )
-    assert meta.schema_version == 4
+    assert meta.schema_version == 5
     assert meta.backend_kind == "generic_chat"
     assert meta.preset_id == "p1"
     # v0.2/v0.2.1 新字段默认空 / 0
@@ -80,7 +80,7 @@ def test_read_v1_file_auto_upgrades_to_v4(tmp_path: Path) -> None:
     loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
     assert loaded is not None
     assert loaded.backend_kind == "generic_chat"
-    assert loaded.schema_version == 4
+    assert loaded.schema_version == 5
     assert loaded.sdk_session_id == ""
     assert loaded.cwd == ""
     assert loaded.cumulative_prompt_tokens == 0
@@ -141,7 +141,7 @@ def test_invalid_backend_kind_raises() -> None:
                 "id": "thread-eeeeeeeeeeee",
                 "name": "x",
                 "preset_id": "p",
-                "backend_kind": "codex",  # 不在 Literal 里
+                "backend_kind": "unknown",
                 "created_at": 1.0,
                 "updated_at": 1.0,
                 "message_count": 0,

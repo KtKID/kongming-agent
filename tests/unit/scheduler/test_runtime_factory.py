@@ -96,7 +96,9 @@ async def test_cron_session_persists_messages_to_disk(tmp_path: Path) -> None:
         await session.append(Message(role="assistant", content="pong"))
 
         session_dir = tmp_path / "sessions" / sid
-        assert session_dir.is_dir(), f"session dir {session_dir} 不存在；fresh session 未落盘"
+        assert session_dir.is_dir(), (
+            f"session dir {session_dir} 不存在；fresh session 未落盘"
+        )
         manifest = session_dir / "manifest.json"
         messages_jsonl = session_dir / f"{sid}.jsonl"
         assert manifest.is_file(), "manifest.json 缺失"
@@ -104,7 +106,8 @@ async def test_cron_session_persists_messages_to_disk(tmp_path: Path) -> None:
 
         # 验证内容包含两条消息（每行一条）
         lines = [
-            line for line in messages_jsonl.read_text(encoding="utf-8").splitlines() if line.strip()
+            line for line in messages_jsonl.read_text(encoding="utf-8").splitlines()
+            if line.strip()
         ]
         assert len(lines) == 2
     finally:
@@ -129,7 +132,9 @@ async def test_cron_runtime_accepts_external_session_factory(tmp_path: Path) -> 
 
         return InMemorySession(session_id=sid)
 
-    runtime, _bridge = build_cron_execution_bridge(cfg, store, session_factory=custom_factory)
+    runtime, _bridge = build_cron_execution_bridge(
+        cfg, store, session_factory=custom_factory
+    )
     try:
         s = runtime.session_factory("sched-task-custom")
         assert received_sids == ["sched-task-custom"]
@@ -152,7 +157,9 @@ async def test_cron_runtime_threads_dispatcher_to_bridge(tmp_path: Path) -> None
     store = Store(tmp_path / "cron")
     dispatcher = DeliveryDispatcher()
 
-    runtime, bridge = build_cron_execution_bridge(cfg, store, dispatcher=dispatcher)
+    runtime, bridge = build_cron_execution_bridge(
+        cfg, store, dispatcher=dispatcher
+    )
     try:
         # 透传不变量：bridge._dispatcher 是同一个对象
         assert bridge._dispatcher is dispatcher

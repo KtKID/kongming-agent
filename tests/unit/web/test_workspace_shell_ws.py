@@ -79,9 +79,7 @@ class FakeTM:
         del sdk_session_id
         return None
 
-    async def bind_sdk_session(
-        self, thread_id: str, sdk_session_id: str, cwd: str
-    ) -> ThreadMetadata:
+    async def bind_sdk_session(self, thread_id: str, sdk_session_id: str, cwd: str) -> ThreadMetadata:
         self.bind_calls.append((thread_id, sdk_session_id, cwd))
         self._meta = self._meta.model_copy(
             update={

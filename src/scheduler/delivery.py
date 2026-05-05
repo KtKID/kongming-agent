@@ -65,16 +65,24 @@ class DeliveryResult:
         delivered_at=None），从而把诡异状态写入 ScheduledRun 字段。
         """
         if not isinstance(self.status, DeliveryStatus):
-            raise TypeError(f"status must be DeliveryStatus, got {type(self.status).__name__}")
+            raise TypeError(
+                f"status must be DeliveryStatus, got {type(self.status).__name__}"
+            )
         if self.status is DeliveryStatus.DELIVERED:
             if self.delivered_at is None:
-                raise ValueError("DeliveryResult(status=DELIVERED) requires delivered_at")
+                raise ValueError(
+                    "DeliveryResult(status=DELIVERED) requires delivered_at"
+                )
         elif self.status is DeliveryStatus.FAILED:
             if not self.error_message:
-                raise ValueError("DeliveryResult(status=FAILED) requires non-empty error_message")
+                raise ValueError(
+                    "DeliveryResult(status=FAILED) requires non-empty error_message"
+                )
         elif self.status is DeliveryStatus.SKIPPED:
             if not self.skip_reason:
-                raise ValueError("DeliveryResult(status=SKIPPED) requires non-empty skip_reason")
+                raise ValueError(
+                    "DeliveryResult(status=SKIPPED) requires non-empty skip_reason"
+                )
         elif self.status is DeliveryStatus.PENDING:
             # PENDING 不应出现在投递返回值里；用于 ScheduledRun 初始默认值
             raise ValueError(
@@ -195,8 +203,9 @@ class DeliveryDispatcher:
         from scheduler.domain import RunStatus
 
         is_silent_by_status = run.status is RunStatus.SILENT
-        is_silent_by_marker = task.policy.silent_marker_enabled and final_message.startswith(
-            SILENT_MARKER
+        is_silent_by_marker = (
+            task.policy.silent_marker_enabled
+            and final_message.startswith(SILENT_MARKER)
         )
         if is_silent_by_status or is_silent_by_marker:
             return DeliveryResult.skipped("silent_marker")

@@ -3,7 +3,7 @@
 每个 thread 在 ``.kongming/web/threads/<thread_id>/metadata.json`` 落一份
 :class:`ThreadMetadata` 文件。本文件提供：
 
-- :class:`ThreadMetadata` Pydantic 模型（当前 schema_version=4，v0.2.1 起）
+- :class:`ThreadMetadata` Pydantic 模型（当前 schema_version=5，v0.2.2 起）
 - :func:`thread_metadata_path` —— 路径常量
 - :func:`write_thread_metadata` —— 原子写入（``tmp.replace(path)``）
 - :func:`read_thread_metadata` —— 读 + 校验；schema_version 不匹配 / JSON
@@ -70,8 +70,8 @@ class ThreadMetadata(BaseModel):
             加上本次 ``Result.metadata.usage.prompt_tokens``。
         cumulative_completion_tokens: thread 级累计输出 token 总量。
         cumulative_total_tokens: thread 级累计总 token。
-        schema_version: 当前 ``4``；``Literal[1, 2, 3, 4]`` 同时接受老文件，
-            写盘时永远写 ``4``。
+        schema_version: 当前 ``5``；``Literal[1, 2, 3, 4, 5]`` 同时接受老文件，
+            写盘时永远写 ``5``。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -140,7 +140,7 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
 
     - 文件不存在 / 不是普通文件
     - JSON 解析失败（损坏 / 编码异常）
-    - schema_version 不在 ``{1, 2, 3, 4}``（更高版本 = 该进程不认识，拒绝）
+    - schema_version 不在 ``{1, 2, 3, 4, 5}``（更高版本 = 该进程不认识，拒绝）
     - 字段校验失败（缺字段 / 类型不对 / 正则不匹配）
 
     **v1 → v2 懒升级**：``schema_version=1`` 且缺 ``backend_kind`` 时，
@@ -152,8 +152,11 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
     **v3 → v4 懒升级**：``schema_version=3`` 且缺累计 usage 字段时，
     自动在内存里补 3 个累计字段与 ``schema_version=4``。
 
-    返回的 :class:`ThreadMetadata` 实例已是最新 v4 形态。下次
-    :func:`write_thread_metadata` 会以 v4 写盘（默认 ``schema_version=4``，
+    **v4 → v5 懒升级**：``schema_version=4`` 且缺 ``codex_thread_id`` 时，
+    自动在内存里补 ``codex_thread_id=""`` 与 ``schema_version=5``。
+
+    返回的 :class:`ThreadMetadata` 实例已是最新 v5 形态。下次
+    :func:`write_thread_metadata` 会以 v5 写盘（默认 ``schema_version=5``，
     无需调用方关心）。本函数**不**自己回写——避免读盘函数有副作用。
 
     所有 ``None`` 路径都会记 warning 日志，便于排查。

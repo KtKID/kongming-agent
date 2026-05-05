@@ -216,6 +216,7 @@ def _make_thread_metadata() -> ThreadMetadataDTO:
         preset_id="preset-default",
         backend_kind="generic_chat",
         sdk_session_id="",
+        codex_thread_id="",
         cwd="",
         created_at=1_700_000_000.0,
         updated_at=1_700_000_010.5,
@@ -223,7 +224,7 @@ def _make_thread_metadata() -> ThreadMetadataDTO:
         cumulative_prompt_tokens=1200,
         cumulative_completion_tokens=340,
         cumulative_total_tokens=1540,
-        schema_version=4,
+        schema_version=5,
     )
 
 
@@ -632,7 +633,7 @@ def test_kind_default_cell_evicted():
 
 
 def test_thread_metadata_schema_version_default():
-    """``ThreadMetadataDTO.schema_version`` 默认 ``4``（v0.2.1 bump，加累计 usage 字段）。"""
+    """``ThreadMetadataDTO.schema_version`` 默认 ``5``（v0.2.2 bump，加 codex thread 字段）。"""
     dto = ThreadMetadataDTO(
         id="thread-abcdef012345",
         name="x",
@@ -642,4 +643,4 @@ def test_thread_metadata_schema_version_default():
         updated_at=0.0,
         message_count=0,
     )
-    assert dto.schema_version == 4
+    assert dto.schema_version == 5

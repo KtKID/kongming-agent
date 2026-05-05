@@ -1,6 +1,6 @@
 """unit：commands.service 覆盖。
 
-测试 CommandService 三路分流：text → runtime / command → executor / unknown → error。
+测试 CommandService 分流：text → runtime / prompt command → runtime / unknown → error。
 """
 
 from __future__ import annotations
@@ -23,12 +23,12 @@ def _review_def() -> CommandDefinition:
     return CommandDefinition(
         id="builtin.review",
         slash="/review",
-        title="Run Review",
-        description="d",
-        kind="action",
+        title="Review",
+        description="Review current workspace changes.",
+        kind="prompt",
         host_visibility="both",
         accepts_args=True,
-        executor_key="review_action",
+        executor_key="prompt",
     )
 
 
@@ -51,15 +51,6 @@ def _ok_result() -> Result:
     )
 
 
-def _ok_command_result() -> CommandResult:
-    return CommandResult(
-        status="completed",
-        command_name="/review",
-        output_text="/review completed.",
-        invocation_id="cmd-abc",
-    )
-
-
 class TestCommandServiceRouting:
     @pytest.mark.asyncio
     async def test_text_delegates_to_runtime(self) -> None:
@@ -69,15 +60,11 @@ class TestCommandServiceRouting:
             calls.append(text)
             return _ok_result()
 
-        async def action_executor(inv, ctx):  # type: ignore[no-untyped-def]
-            pytest.fail("action_executor should not be called for text")
-
         from commands.registry import CommandRegistry
 
         svc = CommandService(
             registry=CommandRegistry([_review_def()]),
             runtime_delegate=runtime_delegate,
-            action_executor=action_executor,
             host_kind="cli",
         )
         result = await svc.handle_input("hello world", context=_context())
@@ -85,43 +72,55 @@ class TestCommandServiceRouting:
         assert calls == ["hello world"]
 
     @pytest.mark.asyncio
-    async def test_command_routes_to_executor(self) -> None:
-        executor_calls: list[str] = []
+    async def test_prompt_command_delegates_args_to_runtime(self) -> None:
+        """prompt 命令带参数时，args_text 发给主 agent。"""
+        calls: list[str] = []
 
         async def runtime_delegate(text: str, effort: str | None = None) -> Result:
-            pytest.fail("runtime should not be called for commands")
-
-        async def action_executor(inv, ctx):  # type: ignore[no-untyped-def]
-            executor_calls.append(inv.command.slash)
-            return _ok_command_result()
+            calls.append(text)
+            return _ok_result()
 
         from commands.registry import CommandRegistry
 
         svc = CommandService(
             registry=CommandRegistry([_review_def()]),
             runtime_delegate=runtime_delegate,
-            action_executor=action_executor,
             host_kind="cli",
         )
         result = await svc.handle_input("/review auth module", context=_context())
-        assert isinstance(result, CommandResult)
-        assert result.status == "completed"
-        assert executor_calls == ["/review"]
+        assert isinstance(result, Result)
+        assert calls == ["auth module"]
+
+    @pytest.mark.asyncio
+    async def test_prompt_command_no_args_uses_description(self) -> None:
+        """prompt 命令无参数时，发 description 给主 agent。"""
+        calls: list[str] = []
+
+        async def runtime_delegate(text: str, effort: str | None = None) -> Result:
+            calls.append(text)
+            return _ok_result()
+
+        from commands.registry import CommandRegistry
+
+        svc = CommandService(
+            registry=CommandRegistry([_review_def()]),
+            runtime_delegate=runtime_delegate,
+            host_kind="cli",
+        )
+        result = await svc.handle_input("/review", context=_context())
+        assert isinstance(result, Result)
+        assert calls == ["Review current workspace changes."]
 
     @pytest.mark.asyncio
     async def test_unknown_command_returns_failed(self) -> None:
         async def runtime_delegate(text: str, effort: str | None = None) -> Result:
             pytest.fail("runtime should not be called for unknown commands")
 
-        async def action_executor(inv, ctx):  # type: ignore[no-untyped-def]
-            pytest.fail("executor should not be called for unknown commands")
-
         from commands.registry import CommandRegistry
 
         svc = CommandService(
             registry=CommandRegistry([_review_def()]),
             runtime_delegate=runtime_delegate,
-            action_executor=action_executor,
             host_kind="cli",
         )
         result = await svc.handle_input("/deploy", context=_context())
@@ -137,15 +136,11 @@ class TestCommandServiceRouting:
             calls.append(text)
             return _ok_result()
 
-        async def action_executor(inv, ctx):  # type: ignore[no-untyped-def]
-            pytest.fail("paths should not be treated as commands")
-
         from commands.registry import CommandRegistry
 
         svc = CommandService(
             registry=CommandRegistry([_review_def()]),
             runtime_delegate=runtime_delegate,
-            action_executor=action_executor,
             host_kind="cli",
         )
         result = await svc.handle_input("/tmp/project/foo.py", context=_context())
@@ -153,15 +148,12 @@ class TestCommandServiceRouting:
         assert calls == ["/tmp/project/foo.py"]
 
     @pytest.mark.asyncio
-    async def test_reasoning_effort_passes_through_to_delegate(self) -> None:
+    async def test_reasoning_effort_passes_through(self) -> None:
         received_effort: list[str | None] = []
 
         async def runtime_delegate(text: str, effort: str | None = None) -> Result:
             received_effort.append(effort)
             return _ok_result()
-
-        async def action_executor(inv, ctx):  # type: ignore[no-untyped-def]
-            pytest.fail("should not be called")
 
         from commands.registry import CommandRegistry
 
@@ -174,10 +166,9 @@ class TestCommandServiceRouting:
         svc = CommandService(
             registry=CommandRegistry([_review_def()]),
             runtime_delegate=runtime_delegate,
-            action_executor=action_executor,
             host_kind="cli",
         )
-        await svc.handle_input("hi", context=ctx)
+        await svc.handle_input("/review check auth", context=ctx)
         assert received_effort == ["high"]
 
     @pytest.mark.asyncio
@@ -187,24 +178,20 @@ class TestCommandServiceRouting:
             slash="/clionly",
             title="CLI Only",
             description="d",
-            kind="action",
+            kind="prompt",
             host_visibility="cli",
             accepts_args=False,
-            executor_key="noop",
+            executor_key="prompt",
         )
 
         async def runtime_delegate(text: str, effort: str | None = None) -> Result:
             pytest.fail("should not reach runtime")
-
-        async def action_executor(inv, ctx):  # type: ignore[no-untyped-def]
-            pytest.fail("should not reach executor")
 
         from commands.registry import CommandRegistry
 
         svc = CommandService(
             registry=CommandRegistry([cli_only]),
             runtime_delegate=runtime_delegate,
-            action_executor=action_executor,
             host_kind="web",
         )
         result = await svc.handle_input("/clionly", context=_context())

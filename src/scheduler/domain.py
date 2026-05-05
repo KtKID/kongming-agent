@@ -382,7 +382,9 @@ class ScheduleDelivery:
 
     def __post_init__(self) -> None:
         if not isinstance(self.channel, DeliveryChannel):
-            raise TypeError(f"channel must be DeliveryChannel, got {type(self.channel).__name__}")
+            raise TypeError(
+                f"channel must be DeliveryChannel, got {type(self.channel).__name__}"
+            )
 
 
 @dataclass(frozen=True)
@@ -443,7 +445,8 @@ class ScheduledTask:
             raise ValueError("updated_at is required (ISO8601 str)")
         if self.delivery is not None and not isinstance(self.delivery, ScheduleDelivery):
             raise TypeError(
-                f"delivery must be ScheduleDelivery or None, got {type(self.delivery).__name__}"
+                "delivery must be ScheduleDelivery or None, "
+                f"got {type(self.delivery).__name__}"
             )
         if not self.enabled and self.state not in _DISABLED_TASK_STATES:
             raise ValueError(
@@ -540,7 +543,8 @@ class ScheduledRun:
         _ensure_iso_or_none("delivered_at", self.delivered_at)
         if not isinstance(self.delivery_status, DeliveryStatus):
             raise TypeError(
-                f"delivery_status must be DeliveryStatus, got {type(self.delivery_status).__name__}"
+                "delivery_status must be DeliveryStatus, "
+                f"got {type(self.delivery_status).__name__}"
             )
         _ensure_iso_or_none("seen_at", self.seen_at)
 

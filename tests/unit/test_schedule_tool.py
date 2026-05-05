@@ -489,7 +489,9 @@ class TestScheduleToolDefaults:
     被解释成北京 21:52。本测试组锁定这两个回归口。
     """
 
-    async def test_create_uses_default_delivery_when_not_specified(self, tmp_path: Path) -> None:
+    async def test_create_uses_default_delivery_when_not_specified(
+        self, tmp_path: Path
+    ) -> None:
         """LLM 创建任务**不传 delivery** → schedule_tool 自动填
         ``ScheduleDelivery(channel=default_delivery_channel)``。
 
@@ -518,7 +520,9 @@ class TestScheduleToolDefaults:
         assert isinstance(task.delivery, ScheduleDelivery)
         assert task.delivery.channel is DeliveryChannel.WEB
 
-    async def test_create_default_delivery_channel_cli_variant(self, tmp_path: Path) -> None:
+    async def test_create_default_delivery_channel_cli_variant(
+        self, tmp_path: Path
+    ) -> None:
         """default_delivery_channel='cli' → task.delivery.channel == CLI。"""
         from scheduler.domain import DeliveryChannel
 
@@ -538,7 +542,9 @@ class TestScheduleToolDefaults:
         assert task.delivery is not None
         assert task.delivery.channel is DeliveryChannel.CLI
 
-    async def test_create_uses_default_timezone_when_not_specified(self, tmp_path: Path) -> None:
+    async def test_create_uses_default_timezone_when_not_specified(
+        self, tmp_path: Path
+    ) -> None:
         """LLM 创建任务**不传 timezone** → schedule_tool 用 default_timezone。
 
         关键回归：v0.3 之前 default 写死 'UTC' → LLM 在 Asia/Shanghai 时区
@@ -562,7 +568,9 @@ class TestScheduleToolDefaults:
             "task.trigger.timezone 必须用 default_timezone 填；不让 LLM 凭空填 UTC"
         )
 
-    async def test_create_explicit_timezone_overrides_default(self, tmp_path: Path) -> None:
+    async def test_create_explicit_timezone_overrides_default(
+        self, tmp_path: Path
+    ) -> None:
         """显式传 timezone 仍然覆盖默认值（不是被默认值挤掉）。"""
         store = Store(home_dir=tmp_path / "cron")
         tool = build_schedule_tool(store, default_timezone="Asia/Shanghai")

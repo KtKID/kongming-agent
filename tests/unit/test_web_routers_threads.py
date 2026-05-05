@@ -56,6 +56,7 @@ class FakeTM:
         preset_id: str = "",
         *,
         backend_kind: Literal["generic_chat", "claude_code"] = "generic_chat",
+        cwd: str = "",
     ) -> ThreadMetadata:
         # 用确定 ID 便于断言
         idx = len(self._threads)
@@ -65,6 +66,7 @@ class FakeTM:
             name=name,
             preset_id=preset_id,
             backend_kind=backend_kind,
+            cwd=cwd,
             created_at=1.0,
             updated_at=2.0,
             message_count=0,

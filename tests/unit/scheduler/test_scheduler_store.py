@@ -1030,7 +1030,9 @@ def test_init_v2_data_migrates_to_current(
     """v0.3：显式 schema_version=2（v0.2 数据）→ 迁移到 v3。
     备份 ``.v2.bak.<ts>`` + audit ``schema_migrated_v2_to_v3``。"""
     (tmp_path / "scheduled_tasks.json").write_text(
-        json.dumps({"schema_version": 2, "updated_at": _t(0), "tasks": [{"task_id": "old-v2"}]}),
+        json.dumps(
+            {"schema_version": 2, "updated_at": _t(0), "tasks": [{"task_id": "old-v2"}]}
+        ),
         encoding="utf-8",
     )
 

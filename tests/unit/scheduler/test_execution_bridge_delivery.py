@@ -101,7 +101,9 @@ def _make_task(
         enabled=True,
         state=TaskState.SCHEDULED,
         origin=TaskOrigin.CLI,
-        trigger=ScheduleTrigger(trigger_type=TriggerType.INTERVAL, expr="5", timezone="UTC"),
+        trigger=ScheduleTrigger(
+            trigger_type=TriggerType.INTERVAL, expr="5", timezone="UTC"
+        ),
         policy=TaskExecutionPolicy(
             session_mode=SessionMode.FRESH_SESSION,
             concurrency_policy=ConcurrencyPolicy.FORBID,
@@ -110,7 +112,9 @@ def _make_task(
             inactivity_timeout_seconds=600,
             silent_marker_enabled=silent_marker_enabled,
         ),
-        target=TaskTarget(agent_name="agent-x", input_text="do thing", metadata={}),
+        target=TaskTarget(
+            agent_name="agent-x", input_text="do thing", metadata={}
+        ),
         next_run_at=now,
         last_run_at=None,
         created_by="cli",
@@ -122,7 +126,9 @@ def _make_task(
 
 def _make_reservation(task: ScheduledTask) -> DueTaskReservation:
     now = to_iso(utc_now())
-    return DueTaskReservation(task=task, scheduled_for=task.next_run_at or now, reserved_at=now)
+    return DueTaskReservation(
+        task=task, scheduled_for=task.next_run_at or now, reserved_at=now
+    )
 
 
 def _build_bridge(
@@ -141,7 +147,9 @@ def _build_bridge(
         inner_approval=_AllowApproval(),  # type: ignore[arg-type]
         session_factory=lambda sid: InMemorySession(sid),
         event_sinks=event_sinks,
-        agent_spec=AgentSpec(name="agent-x", instructions="you are an agent", default_model="m"),
+        agent_spec=AgentSpec(
+            name="agent-x", instructions="you are an agent", default_model="m"
+        ),
         store=store,
         dispatcher=dispatcher,
         watchdog_poll_interval_seconds=0.02,
@@ -151,7 +159,9 @@ def _build_bridge(
 class _StubSink(DeliverySink):
     def __init__(self, *, return_result: DeliveryResult | None = None) -> None:
         self.calls: list[tuple[ScheduledTask, ScheduledRun, str]] = []
-        self._return = return_result or DeliveryResult.delivered(at="2026-05-04T01:00:00+00:00")
+        self._return = return_result or DeliveryResult.delivered(
+            at="2026-05-04T01:00:00+00:00"
+        )
 
     async def deliver(self, task, run, final_message):  # type: ignore[no-untyped-def]
         self.calls.append((task, run, final_message))
@@ -264,7 +274,9 @@ async def test_bridge_sink_exception_does_not_break_run(store: Store) -> None:
 async def test_bridge_run_is_persisted_with_delivery_fields(store: Store) -> None:
     """delivery 字段经过 store.supersede_and_append_run 落盘 + 重 load 不丢。"""
     runner = _CompletedRunner(final_text="persist test")
-    web_sink = _StubSink(return_result=DeliveryResult.delivered(at="2026-05-04T02:00:00+00:00"))
+    web_sink = _StubSink(
+        return_result=DeliveryResult.delivered(at="2026-05-04T02:00:00+00:00")
+    )
     dispatcher = DeliveryDispatcher(web_sink=web_sink)
     task = _make_task(delivery=ScheduleDelivery(channel=DeliveryChannel.WEB))
     bridge = _build_bridge(store=store, runner=runner, dispatcher=dispatcher)

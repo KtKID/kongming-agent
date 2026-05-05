@@ -237,22 +237,44 @@ export interface RenameThreadRequest {
  * v0.2 新增 `sdk_session_id` + `cwd`（claude_code thread 与 SDK session 持久化绑定）；
  * 老 v2 文件读入默认空字符串。
  * v0.2.1 新增 thread 级累计 `cumulative_*_tokens`；老 v3 文件读入默认 0。
+ * v0.2.2 新增 `codex_thread_id`，`backend_kind` 支持 `codex`。
  * `preset_id` 在 `backend_kind="claude_code"` 时允许空字符串占位。
  */
 export interface ThreadMetadataDTO {
+  /** thread 唯一 ID，格式 `thread-{12位hex}`（如 `thread-a1b2c3d4e5f6`），由 ThreadManager 通过 secrets.token_hex(6) 生成 */
   id: string;
+  /** 用户给 thread 起的名字，最长 200 字符；通用 tab 用户手填，Claude tab 延迟创建时自动取 project display_name */
   name: string;
+  /** 创建时选的 LLM preset ID；generic_chat 必须非空，claude_code/codex 为空字符串（不需要 preset） */
   preset_id: string;
+  /**
+   * 该 thread 使用哪种后端引擎驱动对话。
+   * 类型 BackendKind 当前有三个值：
+   * - "generic_chat" — 通用 LLM 对话，走 InputAssembler + LLM provider
+   * - "claude_code"  — Claude Agent SDK，走 /ws/claude-code
+   * - "codex"        — Codex CLI 子进程，走 /ws/codex
+   */
   backend_kind: BackendKind;
+  /** Claude SDK 分配的 session UUID；空字符串=未绑定（首次对话前），绑定后用于定位 ~/.claude/projects/ 下的 .jsonl 历史 */
   sdk_session_id: string;
+  /** Codex CLI 的 UUIDv7 thread id；仅 backend_kind="codex" 时有值，其他后端为空字符串 */
+  codex_thread_id?: string;
+  /** workspace 工作目录绝对路径；Files/Git/Shell 面板绑定此目录；空字符串=纯聊天不绑 workspace */
   cwd: string;
+  /** 创建时间，Unix 时间戳（秒） */
   created_at: number;
+  /** 最近更新时间，Unix 时间戳（秒）；rename / 一轮对话结束时更新 */
   updated_at: number;
+  /** 历史消息总数（≥0），UI 上"X 条消息"展示用 */
   message_count: number;
+  /** thread 级累计输入 token 总量，每次 run 结束后累加 */
   cumulative_prompt_tokens: number;
+  /** thread 级累计输出 token 总量 */
   cumulative_completion_tokens: number;
+  /** thread 级累计总 token */
   cumulative_total_tokens: number;
-  schema_version?: 1 | 2 | 3 | 4;
+  /** 元数据 schema 版本号，当前 5；接受 1-5（老文件兼容），写盘永远写最新版 */
+  schema_version?: 1 | 2 | 3 | 4 | 5;
 }
 
 /**

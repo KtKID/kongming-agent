@@ -50,7 +50,7 @@ describe("ClaudeProjectsTree", () => {
     vi.spyOn(api, "apiRefreshClaudeProjects").mockImplementation(
       () => new Promise(() => {}),  // 永不 resolve
     );
-    render(<ClaudeProjectsTree onSessionClick={vi.fn()} />);
+    render(<ClaudeProjectsTree onSessionClick={vi.fn()} onNewSession={vi.fn()} />);
     expect(screen.getByText(/加载项目中/)).toBeInTheDocument();
   });
 
@@ -58,7 +58,7 @@ describe("ClaudeProjectsTree", () => {
     vi.spyOn(api, "apiRefreshClaudeProjects").mockRejectedValue(
       new Error("network down"),
     );
-    render(<ClaudeProjectsTree onSessionClick={vi.fn()} />);
+    render(<ClaudeProjectsTree onSessionClick={vi.fn()} onNewSession={vi.fn()} />);
     await waitFor(() =>
       expect(screen.getByText(/network down/)).toBeInTheDocument(),
     );
@@ -68,7 +68,7 @@ describe("ClaudeProjectsTree", () => {
     vi.spyOn(api, "apiRefreshClaudeProjects").mockResolvedValue({
       projects: [],
     });
-    render(<ClaudeProjectsTree onSessionClick={vi.fn()} />);
+    render(<ClaudeProjectsTree onSessionClick={vi.fn()} onNewSession={vi.fn()} />);
     await waitFor(() =>
       expect(screen.getByText(/尚无 Claude 历史会话/)).toBeInTheDocument(),
     );
@@ -76,7 +76,7 @@ describe("ClaudeProjectsTree", () => {
 
   it("渲染项目 + 自动展开最近一周内有活动的项目", async () => {
     vi.spyOn(api, "apiRefreshClaudeProjects").mockResolvedValue(fakeProjects);
-    render(<ClaudeProjectsTree onSessionClick={vi.fn()} />);
+    render(<ClaudeProjectsTree onSessionClick={vi.fn()} onNewSession={vi.fn()} />);
     // 项目名渲染
     await waitFor(() =>
       expect(screen.getByText("bar")).toBeInTheDocument(),
@@ -93,7 +93,7 @@ describe("ClaudeProjectsTree", () => {
   it("点击 session 卡片触发 onSessionClick(project, session)", async () => {
     vi.spyOn(api, "apiRefreshClaudeProjects").mockResolvedValue(fakeProjects);
     const onSessionClick = vi.fn();
-    render(<ClaudeProjectsTree onSessionClick={onSessionClick} />);
+    render(<ClaudeProjectsTree onSessionClick={onSessionClick} onNewSession={vi.fn()} />);
     await waitFor(() =>
       expect(screen.getByText("first session title")).toBeInTheDocument(),
     );
@@ -106,7 +106,7 @@ describe("ClaudeProjectsTree", () => {
 
   it("搜索会即时过滤并自动展开匹配项目", async () => {
     vi.spyOn(api, "apiRefreshClaudeProjects").mockResolvedValue(fakeProjects);
-    render(<ClaudeProjectsTree onSessionClick={vi.fn()} />);
+    render(<ClaudeProjectsTree onSessionClick={vi.fn()} onNewSession={vi.fn()} />);
 
     await waitFor(() =>
       expect(screen.getByText("bar")).toBeInTheDocument(),
@@ -125,7 +125,7 @@ describe("ClaudeProjectsTree", () => {
 
   it("支持全部展开和全部收起", async () => {
     vi.spyOn(api, "apiRefreshClaudeProjects").mockResolvedValue(fakeProjects);
-    render(<ClaudeProjectsTree onSessionClick={vi.fn()} />);
+    render(<ClaudeProjectsTree onSessionClick={vi.fn()} onNewSession={vi.fn()} />);
 
     await waitFor(() =>
       expect(screen.getByText("bar")).toBeInTheDocument(),
@@ -174,7 +174,7 @@ describe("ClaudeProjectsTree", () => {
         };
       });
 
-    render(<ClaudeProjectsTree onSessionClick={vi.fn()} />);
+    render(<ClaudeProjectsTree onSessionClick={vi.fn()} onNewSession={vi.fn()} />);
     await waitFor(() =>
       expect(screen.getByText("bar")).toBeInTheDocument(),
     );
@@ -203,7 +203,7 @@ describe("ClaudeProjectsTree", () => {
       },
     );
 
-    render(<ClaudeProjectsTree onSessionClick={vi.fn()} />);
+    render(<ClaudeProjectsTree onSessionClick={vi.fn()} onNewSession={vi.fn()} />);
 
     expect(screen.getByText("加载项目中...")).toBeInTheDocument();
     expect(screen.getByText("1/2 项目")).toBeInTheDocument();

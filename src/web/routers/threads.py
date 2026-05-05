@@ -100,6 +100,7 @@ def _to_dto(meta: ThreadMetadata) -> ThreadMetadataDTO:
         preset_id=meta.preset_id,
         backend_kind=meta.backend_kind,
         sdk_session_id=meta.sdk_session_id,
+        codex_thread_id=meta.codex_thread_id,
         cwd=meta.cwd,
         created_at=meta.created_at,
         updated_at=meta.updated_at,

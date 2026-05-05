@@ -179,9 +179,7 @@ async def post_workspace_git_create_branch(
     try:
         meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
         root = require_workspace_root(meta)
-        payload = await asyncio.to_thread(
-            create_git_branch, root, body.branch, checkout=body.checkout
-        )
+        payload = await asyncio.to_thread(create_git_branch, root, body.branch, checkout=body.checkout)
     except ThreadNotFoundError:
         raise
     except (WorkspaceError, WorkspaceGitError) as exc:

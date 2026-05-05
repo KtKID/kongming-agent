@@ -84,7 +84,11 @@ def list_claude_session_ids(
     project_dir = claude_project_dir_for(cwd, claude_home=claude_home)
     if not project_dir.is_dir():
         return set()
-    return {path.stem for path in project_dir.glob("*.jsonl") if path.is_file()}
+    return {
+        path.stem
+        for path in project_dir.glob("*.jsonl")
+        if path.is_file()
+    }
 
 
 def _is_confirmed_claude_session_file(

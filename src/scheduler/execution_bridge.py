@@ -611,7 +611,9 @@ class ExecutionBridge:
     # v0.3 cron-delivery：投递阶段
     # ------------------------------------------------------------------
 
-    async def _apply_delivery(self, *, task: ScheduledTask, run: ScheduledRun) -> ScheduledRun:
+    async def _apply_delivery(
+        self, *, task: ScheduledTask, run: ScheduledRun
+    ) -> ScheduledRun:
         """在 supersede 落盘前，调 ``DeliveryDispatcher.deliver`` 把投递结果
         合并进 :class:`ScheduledRun`。
 
@@ -642,7 +644,9 @@ class ExecutionBridge:
             # 极少见：dispatcher 自身崩（半坏对象 / mock 漏方法 / 内部装配 bug）
             # 写 traceback 后两帧（避免 RunRecord 单字段过大），帮定位
             tb_tail = "".join(traceback.format_exception(exc)[-2:]).strip()
-            result = DeliveryResult.failed(f"dispatcher_{type(exc).__name__}: {exc}\n{tb_tail}")
+            result = DeliveryResult.failed(
+                f"dispatcher_{type(exc).__name__}: {exc}\n{tb_tail}"
+            )
 
         return replace(
             run,

@@ -45,6 +45,7 @@ export function LeftSidebar({
   const [tab, setTab] = useState<LeftSidebarTab>(() => loadPersistedTab());
   const navigate = useNavigate();
   const fetchThreads = useThreadsStore((s) => s.fetchThreads);
+  const setPendingNewClaudeSession = useThreadsStore((s) => s.setPendingNewClaudeSession);
 
   // mount 时无条件 fetch threads —— Claude tab 下 ThreadList 不渲染时也要拿
   // 数据，否则 Chat.tsx 在刷新页面后找不到当前 thread 的 backend_kind，
@@ -56,6 +57,14 @@ export function LeftSidebar({
   const handleTabChange = (next: LeftSidebarTab): void => {
     setTab(next);
     persistTab(next);
+  };
+
+  const handleNewSession = (project: ClaudeProjectSummaryDTO): void => {
+    setPendingNewClaudeSession({
+      cwd: project.cwd,
+      projectName: project.display_name,
+    });
+    navigate("/chat");
   };
 
   const handleSessionClick = async (
@@ -135,7 +144,7 @@ export function LeftSidebar({
           {tab === "generic" ? (
             <ThreadList />
           ) : (
-            <ClaudeProjectsTree onSessionClick={handleSessionClick} />
+            <ClaudeProjectsTree onSessionClick={handleSessionClick} onNewSession={handleNewSession} />
           )}
         </div>
       </div>

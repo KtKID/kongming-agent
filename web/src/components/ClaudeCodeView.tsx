@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { toast } from "sonner";
 import { ChatMessageItem, MessageViewport } from "@/components/MessageList";
 import { Composer } from "@/components/Composer";
 import {
@@ -9,6 +11,7 @@ import { useClaudeCodeWS } from "@/hooks/useClaudeCodeWS";
 import { apiGet } from "@/lib/api";
 import type { NormalizedMessage, ThreadMetadataDTO } from "@/protocol";
 import type { ChatItem as GenericChatItem } from "@/stores/chat";
+import { useThreadsStore } from "@/stores/threads";
 
 type ClaudeMetaItem =
   | { kind: "status"; content?: unknown; id: string }
@@ -189,11 +192,12 @@ function convertHistoryToChatItems(
 }
 
 interface Props {
-  threadId: string;
+  threadId?: string;
   thread?: ThreadMetadataDTO;
 }
 
 export function ClaudeCodeView({ threadId, thread }: Props) {
+  const navigate = useNavigate();
   const { socket, state } = useClaudeCodeWS(threadId);
   const [items, setItems] = useState<ClaudeRenderItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -202,6 +206,23 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
   const streamIdRef = useRef<string | null>(null);
   const hadStreamThisTurnRef = useRef(false);
   const turnSeqRef = useRef(0);
+
+  // --- store selectors (#6 #7) ---
+  const pendingNewClaudeSession = useThreadsStore(
+    (s) => s.pendingNewClaudeSession,
+  );
+  const setPendingNewClaudeSession = useThreadsStore(
+    (s) => s.setPendingNewClaudeSession,
+  );
+  const initialMessage = useThreadsStore((s) => s.initialMessage);
+  const setInitialMessage = useThreadsStore((s) => s.setInitialMessage);
+  const createThread = useThreadsStore((s) => s.createThread);
+  const fetchThreads = useThreadsStore((s) => s.fetchThreads);
+  const triggerClaudeProjectsRefresh = useThreadsStore(
+    (s) => s.triggerClaudeProjectsRefresh,
+  );
+
+  const isPending = !threadId;
 
   const nextTurn = () => {
     turnSeqRef.current += 1;
@@ -217,9 +238,10 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
     turnSeqRef.current = 0;
   }, [threadId]);
 
+  // --- history loading (skip when pending) ---
   const sdkSessionId = thread?.sdk_session_id ?? "";
   useEffect(() => {
-    if (!sdkSessionId) return;
+    if (!threadId || !sdkSessionId) return;
     let cancelled = false;
     setHistoryLoading(true);
     apiGet<{ messages: NormalizedMessage[] }>(
@@ -251,8 +273,9 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
     };
   }, [threadId, sdkSessionId]);
 
+  // --- WS message listener (skip when pending / no socket) ---
   useEffect(() => {
-    if (!socket) return;
+    if (!socket || !threadId) return;
     const off = socket.on((frame) => {
       if ("type" in frame && frame.type === "session-status") {
         return;
@@ -483,7 +506,56 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
     return off;
   }, [pendingApproval, socket, threadId]);
 
-  const onSend = (text: string) => {
+  // --- #7: initialMessage buffer — auto-send after WS open ---
+  useEffect(() => {
+    if (!threadId || !socket || state !== "open" || !initialMessage) return;
+    const text = initialMessage;
+    setInitialMessage(null);
+    setItems((prev) => [
+      ...prev,
+      {
+        id: newId(),
+        kind: "user",
+        threadId,
+        content: text,
+        timestampMs: Date.now(),
+      },
+    ]);
+    socket.send({
+      type: "claude-command",
+      command: text,
+      options: {},
+    });
+    fetchThreads();
+    triggerClaudeProjectsRefresh();
+  }, [threadId, socket, state, initialMessage, setInitialMessage, fetchThreads, triggerClaudeProjectsRefresh]);
+
+  // --- #6: onSend with pending-mode create-thread flow ---
+  const onSend = async (text: string) => {
+    // #5/#6: pending mode — create thread first
+    if (isPending) {
+      const pending = pendingNewClaudeSession;
+      if (!pending) return;
+      try {
+        const created = await createThread(
+          pending.projectName,
+          "",
+          "claude_code",
+          pending.cwd,
+        );
+        setPendingNewClaudeSession(null);
+        setInitialMessage(text);
+        navigate(`/chat/${created.id}`, { replace: true });
+      } catch (err: unknown) {
+        // #8: error handling — toast + keep input
+        const msg =
+          err instanceof Error ? err.message : String(err);
+        toast.error(`创建会话失败：${msg}`);
+      }
+      return;
+    }
+
+    // normal mode — send via WS
     if (!socket || state !== "open") return;
     setItems((prev) => [
       ...prev,
@@ -529,11 +601,13 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
         <MessageViewport
           items={items}
           emptyText={
-            historyLoading
-              ? "加载历史中..."
-              : `Claude Code 会话已就绪（${state}）。发送一条消息开始。`
+            isPending
+              ? "输入消息开始新的 Claude Code 会话"
+              : historyLoading
+                ? "加载历史中..."
+                : `Claude Code 会话已就绪（${state}）。发送一条消息开始。`
           }
-          resetKey={threadId}
+          resetKey={threadId ?? "__pending__"}
           getUserMessageCount={(list) =>
             list.filter(
               (item) => isGenericChatItem(item) && item.kind === "user",
@@ -549,7 +623,7 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
         />
       </div>
       <Composer
-        disabled={state !== "open"}
+        disabled={isPending ? false : state !== "open"}
         onSubmit={(text) => onSend(text)}
         threadId={threadId}
       />

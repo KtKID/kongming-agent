@@ -2,27 +2,23 @@
 
 from __future__ import annotations
 
-import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from commands.models import (
     CommandExecutionContext,
-    CommandInvocation,
     CommandResult,
 )
 from commands.parser import parse_input
 from commands.registry import CommandRegistry, build_builtin_registry
-from commands.review_action import run_review_action
 from core.result import Result
-from executors.agent_runtime.native_runtime import NativeRuntime
 
 if TYPE_CHECKING:
+    from executors.agent_runtime.native_runtime import NativeRuntime
     from host.base import HostAdapter
 
 RuntimeDelegate = Callable[[str, str | None], Awaitable[Result]]
-ActionExecutor = Callable[[CommandInvocation, CommandExecutionContext], Awaitable[CommandResult]]
 
 
 class CommandService:
@@ -31,12 +27,10 @@ class CommandService:
         *,
         registry: CommandRegistry,
         runtime_delegate: RuntimeDelegate,
-        action_executor: ActionExecutor,
         host_kind: str,
     ) -> None:
         self._registry = registry
         self._runtime_delegate = runtime_delegate
-        self._action_executor = action_executor
         self._host_kind = host_kind
 
     async def handle_input(
@@ -57,22 +51,18 @@ class CommandService:
                 command_name=f"/{command_name}",
                 output_text=f"Unknown command: /{command_name}",
             )
-        if command.kind != "action":
-            return CommandResult(
-                status="failed",
-                command_name=command.slash,
-                output_text=f"Unsupported command kind for {command.slash}: {command.kind}",
-            )
 
-        invocation = CommandInvocation(
-            invocation_id=f"cmd-{uuid.uuid4().hex[:12]}",
-            session_id=context.session_id,
-            command=command,
-            raw_input=raw_input,
-            args_text=parsed.args_text,
-            cwd=context.cwd,
+        if command.kind == "prompt":
+            prompt_text = command.description
+            if parsed.args_text:
+                prompt_text = parsed.args_text
+            return await self._runtime_delegate(prompt_text, context.reasoning_effort)
+
+        return CommandResult(
+            status="failed",
+            command_name=command.slash,
+            output_text=f"Unsupported command kind for {command.slash}: {command.kind}",
         )
-        return await self._action_executor(invocation, context)
 
 
 def build_default_command_service(
@@ -84,29 +74,10 @@ def build_default_command_service(
 ) -> CommandService:
     registry = build_builtin_registry()
     host_kind = _infer_host_kind(adapter)
-
-    async def action_executor(
-        invocation: CommandInvocation,
-        context: CommandExecutionContext,
-    ) -> CommandResult:
-        if invocation.command.executor_key == "review_action":
-            return await run_review_action(
-                runtime=runtime,
-                invocation=invocation,
-                context=context,
-            )
-        return CommandResult(
-            status="failed",
-            command_name=invocation.command.slash,
-            output_text=f"No executor registered for {invocation.command.slash}",
-            invocation_id=invocation.invocation_id,
-        )
-
-    del session_id
+    del runtime, session_id
     return CommandService(
         registry=registry,
         runtime_delegate=runtime_delegate,
-        action_executor=action_executor,
         host_kind=host_kind,
     )
 

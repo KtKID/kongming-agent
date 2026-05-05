@@ -37,6 +37,7 @@ export function ChatPage() {
   const thread = useThreadsStore((s) =>
     threadId ? s.threads.find((t) => t.id === threadId) : undefined,
   );
+  const pendingNewClaudeSession = useThreadsStore((s) => s.pendingNewClaudeSession);
   const backendKind = thread?.backend_kind ?? "generic_chat";
   const isClaudeCode = backendKind === "claude_code";
   const isCodex = backendKind === "codex";
@@ -263,6 +264,8 @@ export function ChatPage() {
                 context={workspaceContext}
                 loading={workspaceLoading}
               />
+            ) : !threadId && pendingNewClaudeSession ? (
+              <ClaudeCodeView />
             ) : isClaudeCode && threadId ? (
               <ClaudeCodeView threadId={threadId} thread={thread} />
             ) : isCodex && threadId ? (

@@ -266,11 +266,11 @@ def create_app(
     from web.codex import router as codex_router
     from web.routers.auth import router as auth_router
     from web.routers.claude import router as claude_router
-    from web.routers.codex import router as codex_rest_router
     from web.routers.manage import router as manage_router
     from web.routers.presets import router as presets_router
     from web.routers.threads import router as threads_router
     from web.routers.whiteboard import router as whiteboard_router
+    from web.routers.codex import router as codex_rest_router
     from web.routers.workspace_git import router as workspace_git_router
     from web.routers.workspace_shell import router as workspace_shell_router
 

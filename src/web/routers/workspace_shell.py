@@ -114,9 +114,7 @@ async def workspace_shell_ws(
     process: WorkspaceShellProcess | None = None
     known_session_ids = (
         list_claude_session_ids(root, claude_home=claude_home)
-        if meta.backend_kind == "claude_code"
-        and not meta.sdk_session_id.strip()
-        and is_claude_command(command)
+        if meta.backend_kind == "claude_code" and not meta.sdk_session_id.strip() and is_claude_command(command)
         else set()
     )
 
@@ -142,10 +140,8 @@ async def workspace_shell_ws(
         process = make_process(command)
         await send_starting_status(command)
         await process.start()
-        if (
-            meta.backend_kind == "claude_code"
-            and not meta.sdk_session_id.strip()
-            and is_claude_command(command)
+        if meta.backend_kind == "claude_code" and not meta.sdk_session_id.strip() and is_claude_command(
+            command
         ):
             bind_task = asyncio.create_task(
                 _bind_new_claude_session_when_detected(

@@ -149,7 +149,8 @@ def test_lifespan_starts_ticker_when_scheduler_enabled(monkeypatch, tmp_path: Pa
         # （P0-1 R2 round 1 修复）；这里记下来给测试断言用
         captured["dispatcher_set"] = dispatcher is not None
         captured["dispatcher_has_web_sink"] = (
-            dispatcher is not None and getattr(dispatcher, "_web_sink", None) is not None
+            dispatcher is not None
+            and getattr(dispatcher, "_web_sink", None) is not None
         )
         return _FakeTickerRuntime(), object()
 

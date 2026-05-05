@@ -293,7 +293,7 @@ class ThreadManager:
                 "cumulative_prompt_tokens": meta.cumulative_prompt_tokens + prompt,
                 "cumulative_completion_tokens": meta.cumulative_completion_tokens + completion,
                 "cumulative_total_tokens": meta.cumulative_total_tokens + total,
-                "schema_version": 4,
+                "schema_version": 5,
             }
         )
         await asyncio.to_thread(write_thread_metadata, self._home, updated)
