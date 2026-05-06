@@ -68,7 +68,9 @@ class CliDeliverySink(DeliverySink):
         """
         line = f"\n📌 [cron:{task.name}] {final_message}\n"
         async with self._lock:
-            will_overflow = len(self._buffer) >= self._buffer.maxlen
+            will_overflow = (
+                self._buffer.maxlen is not None and len(self._buffer) >= self._buffer.maxlen
+            )
             self._buffer.append(line)
         if will_overflow:
             import logging

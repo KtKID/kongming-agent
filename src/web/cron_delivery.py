@@ -24,9 +24,14 @@ cron 触发完成后通过 :class:`web.cron_ws.CronWSBroker` 把 ``cron.run.comp
 
 from __future__ import annotations
 
+import logging
+from typing import Any
+
 from scheduler.delivery import DeliveryResult, DeliverySink
 from scheduler.domain import ScheduledRun, ScheduledTask
 from web.cron_ws import CronWSBroker
+
+logger = logging.getLogger(__name__)
 
 
 class WebDeliverySink(DeliverySink):
@@ -60,6 +65,7 @@ class WebDeliverySink(DeliverySink):
         broker.broadcast 失败不抛（内部已 catch）；本方法稳定返回
         ``DeliveryResult.delivered()``。
         """
+        delivery_target = task.delivery.target if task.delivery is not None else None
         await self._broker.broadcast(
             {
                 "kind": "cron.run.completed",
@@ -69,9 +75,37 @@ class WebDeliverySink(DeliverySink):
                 "final_message": final_message,
                 "delivered_at_iso": run.finished_at,
                 "scheduled_for": run.scheduled_for,
+                "delivery_target": delivery_target,
             }
         )
         return DeliveryResult.delivered()
 
 
-__all__ = ["WebDeliverySink"]
+class ThreadTargetSink:
+    """v0.4: 投递到 thread — 解析 target 前缀，调 ThreadManager API。"""
+
+    def __init__(self, thread_manager: Any) -> None:
+        self._tm = thread_manager
+
+    async def deliver_to_target(self, target: str, task_name: str, message: str) -> bool:
+        """按 target 前缀路由到具体投递实现。
+
+        当前仅支持 ``thread:<thread_id>`` 前缀；其他前缀静默返回 False。
+        """
+        if not target.startswith("thread:"):
+            return False
+        thread_id = target[len("thread:") :]
+        formatted = f"\U0001f4cc [cron:{task_name}] {message}"
+        try:
+            result = await self._tm.append_cron_message(thread_id, formatted)
+            return bool(result)
+        except Exception as exc:
+            logger.warning(
+                "ThreadTargetSink: deliver_to_target failed for %s: %s",
+                target,
+                exc,
+            )
+            return False
+
+
+__all__ = ["ThreadTargetSink", "WebDeliverySink"]

@@ -31,6 +31,8 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from core.agent_spec import AgentSpec
 from core.contracts import (
@@ -61,6 +63,10 @@ from scheduler.safety_wrapper import ScheduleApprovalProvider
 from scheduler.silent import is_silent, strip_silent_prefix
 from scheduler.store import Store
 from scheduler.timing import to_iso, utc_now
+
+if TYPE_CHECKING:
+    from config_loader.models import Config, LLMPresetConfig
+    from observability import JsonlTraceSink
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -237,6 +243,9 @@ class ExecutionBridge:
         store: Store,
         dispatcher: DeliveryDispatcher | None = None,
         watchdog_poll_interval_seconds: float = _DEFAULT_POLL_INTERVAL,
+        preset_map: dict[str, LLMPresetConfig] | None = None,
+        base_config: Config | None = None,
+        trace_dir: Path | None = None,
     ) -> None:
         self._runner = runner
         self._llm = llm
@@ -251,6 +260,25 @@ class ExecutionBridge:
         # 装配方（cli/web）通过 runtime_factory 传入；M4/M5 提供具体 sink 实现。
         self._dispatcher = dispatcher
         self._watchdog_poll_interval_seconds = watchdog_poll_interval_seconds
+        # v0.4 per-task LLM preset：根据 task.preset_id 构建独立 provider。
+        self._preset_map = preset_map
+        self._base_config = base_config
+        # v0.4 per-run trace：每次 cron run 写独立 jsonl trace 文件。
+        self._trace_dir = trace_dir
+
+    # ------------------------------------------------------------------
+    # per-task LLM provider 构建
+    # ------------------------------------------------------------------
+
+    def _build_provider(self, preset_id: str) -> LLMProvider:
+        """根据 ``preset_id`` 构建独立 LLM provider；无匹配时 fallback 到默认。"""
+        if not preset_id or not self._preset_map or preset_id not in self._preset_map:
+            return self._llm
+        from executors.llm.provider_factory import apply_preset, build_provider
+
+        preset = self._preset_map[preset_id]
+        cfg = apply_preset(self._base_config, preset)  # type: ignore[arg-type]
+        return build_provider(cfg)
 
     # ------------------------------------------------------------------
     # 公共入口
@@ -327,16 +355,26 @@ class ExecutionBridge:
             },
         )
 
-        # 真正跑 runner（含 watchdog + tool 裁剪 + approval wrap）
-        final_run = await self._drive_runner(
-            request=request,
-            task=task,
-            running_record=running_record,
-        )
+        # v0.4 per-task provider：根据 task.preset_id 构建独立 provider
+        provider = self._build_provider(task.preset_id)
+        is_per_task_provider = provider is not self._llm
 
-        # v0.3 cron-delivery M3：投递阶段（在 supersede 之前合并 delivery 字段）
-        if self._dispatcher is not None:
-            final_run = await self._apply_delivery(task=task, run=final_run)
+        try:
+            # 真正跑 runner（含 watchdog + tool 裁剪 + approval wrap）
+            final_run = await self._drive_runner(
+                request=request,
+                task=task,
+                running_record=running_record,
+                llm=provider,
+            )
+
+            # v0.3 cron-delivery M3：投递阶段（在 supersede 之前合并 delivery 字段）
+            if self._dispatcher is not None:
+                final_run = await self._apply_delivery(task=task, run=final_run)
+        finally:
+            if is_per_task_provider and hasattr(provider, "aclose"):
+                with contextlib.suppress(Exception):
+                    await provider.aclose()
 
         # 状态机变更：用 supersede 写最终行
         self._store.supersede_and_append_run(final_run)
@@ -369,6 +407,7 @@ class ExecutionBridge:
         request: ScheduledRunRequest,
         task: ScheduledTask,
         running_record: ScheduledRun,
+        llm: LLMProvider,
     ) -> ScheduledRun:
         """装配 fresh runner 调用 + watchdog；返回最终 ``ScheduledRun``。"""
         # 1) 工具裁剪
@@ -403,6 +442,15 @@ class ExecutionBridge:
         sinks_list: list[EventSink] = self._runner._event_sinks
         sinks_list.append(watchdog)
 
+        # 4b) v0.4 per-run trace sink：每次 cron run 独立 jsonl 记录
+        trace_sink: JsonlTraceSink | None = None
+        if self._trace_dir is not None:
+            from observability import JsonlTraceSink
+
+            trace_path = self._trace_dir / f"cron-{request.run_id}.jsonl"
+            trace_sink = JsonlTraceSink(trace_path, auto_flush=True)
+            sinks_list.append(trace_sink)
+
         # 5) fresh session
         session = self._session_factory(request.session_id)
 
@@ -420,7 +468,7 @@ class ExecutionBridge:
                     request.user_input,
                     session=session,
                     agent_spec=self._agent_spec,
-                    llm=self._llm,
+                    llm=llm,
                     tools=filtered_tools_lookup,
                     approval=wrapped_approval,
                     max_turns=max_turns,
@@ -453,6 +501,11 @@ class ExecutionBridge:
             # 移除 watchdog（保证不会污染下次 execute）
             with contextlib.suppress(ValueError):
                 sinks_list.remove(watchdog)
+            # 移除 per-run trace sink 并关闭
+            if trace_sink is not None:
+                with contextlib.suppress(ValueError):
+                    sinks_list.remove(trace_sink)
+                await trace_sink.close()
 
     # ------------------------------------------------------------------
     # 结果分类
@@ -611,9 +664,7 @@ class ExecutionBridge:
     # v0.3 cron-delivery：投递阶段
     # ------------------------------------------------------------------
 
-    async def _apply_delivery(
-        self, *, task: ScheduledTask, run: ScheduledRun
-    ) -> ScheduledRun:
+    async def _apply_delivery(self, *, task: ScheduledTask, run: ScheduledRun) -> ScheduledRun:
         """在 supersede 落盘前，调 ``DeliveryDispatcher.deliver`` 把投递结果
         合并进 :class:`ScheduledRun`。
 
@@ -644,9 +695,7 @@ class ExecutionBridge:
             # 极少见：dispatcher 自身崩（半坏对象 / mock 漏方法 / 内部装配 bug）
             # 写 traceback 后两帧（避免 RunRecord 单字段过大），帮定位
             tb_tail = "".join(traceback.format_exception(exc)[-2:]).strip()
-            result = DeliveryResult.failed(
-                f"dispatcher_{type(exc).__name__}: {exc}\n{tb_tail}"
-            )
+            result = DeliveryResult.failed(f"dispatcher_{type(exc).__name__}: {exc}\n{tb_tail}")
 
         return replace(
             run,

@@ -83,14 +83,14 @@ class CreateThreadRequest(_FrameBase):
     """创建 thread 请求体（``POST /api/threads``）。
 
     v0.1.6 加 ``backend_kind`` 字段，并把 ``preset_id`` 改成可选（默认 ``""``）：
-    ``backend_kind="claude_code"`` 路径不需要 preset，此时 preset_id 留空字符串占位。
+    ``backend_kind="claude_code"`` / ``"codex"`` 路径不需要 preset，此时 preset_id 留空字符串占位。
     路由层在校验 ``backend_kind="generic_chat"`` 时强制 ``preset_id`` 非空。
     ``cwd`` 是可选 workspace 根目录；传入时要求绝对路径。
     """
 
     name: Annotated[str, Field(max_length=200)]
     preset_id: str = ""
-    backend_kind: Literal["generic_chat", "claude_code"] = "generic_chat"
+    backend_kind: Literal["generic_chat", "claude_code", "codex"] = "generic_chat"
     cwd: str = ""
 
 
@@ -144,10 +144,12 @@ class ThreadMetadataDTO(_FrameBase):
     """Thread 元数据，落盘形态 + ``GET /api/threads/{id}`` 响应体。
 
     v0.1.6 加 ``backend_kind`` 字段并把 ``schema_version`` 升至 ``2``。
-    v0.2 加 ``sdk_session_id`` + ``cwd`` 字段，``schema_version`` 升至 ``3``。
+    v0.2 加 ``claude_thread_id`` + ``cwd`` 字段，``schema_version`` 升至 ``3``。
     v0.2.1 加 thread 级累计 usage 字段，``schema_version`` 升至 ``4``
     v0.2.2 加 ``codex_thread_id`` 并允许 ``backend_kind="codex"``，
-    ``schema_version`` 升至 ``5``
+    ``schema_version`` 升至 ``5``。
+    v0.2.3 将旧 ``sdk_session_id`` 改名为 ``claude_thread_id``，
+    ``schema_version`` 升至 ``6``。
     （同时接受老 v1/v2 文件，懒升级在 :func:`web.thread_metadata.read_thread_metadata`
     里完成；DTO 这里只负责出/入参形态对齐 ThreadMetadata 模型）。
     ``id`` 严格匹配 ``^thread-[a-f0-9]{12}$``，防止用户在 URL 里手写 thread id
@@ -158,7 +160,7 @@ class ThreadMetadataDTO(_FrameBase):
     name: Annotated[str, Field(max_length=200)]
     preset_id: str
     backend_kind: Literal["generic_chat", "claude_code", "codex"] = "generic_chat"
-    sdk_session_id: str = ""
+    claude_thread_id: str = ""
     codex_thread_id: str = ""
     cwd: str = ""
     created_at: float
@@ -167,7 +169,7 @@ class ThreadMetadataDTO(_FrameBase):
     cumulative_prompt_tokens: Annotated[int, Field(ge=0)] = 0
     cumulative_completion_tokens: Annotated[int, Field(ge=0)] = 0
     cumulative_total_tokens: Annotated[int, Field(ge=0)] = 0
-    schema_version: Literal[1, 2, 3, 4, 5] = 5
+    schema_version: Literal[1, 2, 3, 4, 5, 6] = 6
 
 
 class WorkspaceContextDTO(_FrameBase):
@@ -182,9 +184,9 @@ class WorkspaceContextDTO(_FrameBase):
     """
 
     thread_id: Annotated[str, Field(pattern=r"^thread-[a-f0-9]{12}$")]
-    backend_kind: Literal["generic_chat", "claude_code"] = "generic_chat"
+    backend_kind: Literal["generic_chat", "claude_code", "codex"] = "generic_chat"
     workspace_root: str = ""
-    sdk_session_id: str = ""
+    claude_thread_id: str = ""
     shell_provider: Literal["claude_code", "system_shell", "none"] = "none"
     files_available: bool = False
     shell_available: bool = False
@@ -372,15 +374,15 @@ class ImportClaudeSessionRequest(_FrameBase):
 
     把已有 Claude Agent SDK 的 jsonl session 导入为 kongming thread：
 
-    - ``sdk_session_id``：SDK session UUID（jsonl 文件名，去 ``.jsonl``）。
+    - ``claude_thread_id``：SDK session UUID（jsonl 文件名，去 ``.jsonl``）。
     - ``cwd``：SDK 工作目录绝对路径，用于定位 ``~/.claude/projects/<encoded-cwd>/<id>.jsonl``。
     - ``name``：新 thread 名（前端用 jsonl 第 1 条 user message 前 40 字带过来）。
 
-    校验细节：``cwd`` 必须以 ``/`` 开头（绝对路径）；``sdk_session_id`` / ``name``
+    校验细节：``cwd`` 必须以 ``/`` 开头（绝对路径）；``claude_thread_id`` / ``name``
     长度上限与 :class:`ThreadMetadataDTO` 保持一致。
     """
 
-    sdk_session_id: Annotated[str, Field(min_length=1, max_length=100)]
+    claude_thread_id: Annotated[str, Field(min_length=1, max_length=100)]
     cwd: Annotated[str, Field(pattern=r"^/")]
     name: Annotated[str, Field(min_length=1, max_length=200)]
 
@@ -390,9 +392,31 @@ class ImportClaudeSessionResponse(_FrameBase):
 
     ``imported``：
 
-    - ``True`` 表示新建了 thread 并完成 ``bind_sdk_session``。
-    - ``False`` 表示 ``sdk_session_id`` 已经被绑过（防重复，返回原 thread）。
+    - ``True`` 表示新建了 thread 并完成 ``bind_claude_thread``。
+    - ``False`` 表示 ``claude_thread_id`` 已经被绑过（防重复，返回原 thread）。
     """
+
+    thread: ThreadMetadataDTO
+    imported: bool
+
+
+class ImportCodexSessionRequest(_FrameBase):
+    """``POST /api/threads/import-codex-session`` 请求体。
+
+    把已有 Codex CLI session 导入为 kongming thread：
+
+    - ``codex_thread_id``：Codex CLI 的 UUIDv7 thread id。
+    - ``cwd``：工作目录绝对路径（来自 rollout session_meta.payload.cwd）。
+    - ``name``：新 thread 名。
+    """
+
+    codex_thread_id: Annotated[str, Field(min_length=1, max_length=100)]
+    cwd: Annotated[str, Field(pattern=r"^/")]
+    name: Annotated[str, Field(min_length=1, max_length=200)]
+
+
+class ImportCodexSessionResponse(_FrameBase):
+    """``POST /api/threads/import-codex-session`` 响应体。"""
 
     thread: ThreadMetadataDTO
     imported: bool

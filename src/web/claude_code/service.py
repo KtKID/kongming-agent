@@ -32,7 +32,7 @@ from web.claude_code.normalizer import ClaudeNormalizer
 
 logger = logging.getLogger(__name__)
 
-# thread_id 形如 thread-<12 hex>；其他形态（pending-XXX placeholder）跳过 sdk_session_id
+# thread_id 形如 thread-<12 hex>；其他形态（pending-XXX placeholder）跳过 claude_thread_id
 # 落盘。与 web.routers.threads.THREAD_ID_RE / web.claude_code.route._THREAD_ID_RE 同步。
 _THREAD_ID_RE: re.Pattern[str] = re.compile(r"^thread-[a-f0-9]{12}$")
 
@@ -98,7 +98,7 @@ class ClaudeCodeService:
         """
         session_id = options.get("sessionId") if isinstance(options, dict) else None
 
-        # v0.2 自动 resume：thread-bound 路径 + thread metadata 已绑定 sdk_session_id →
+        # v0.2 自动 resume：thread-bound 路径 + thread metadata 已绑定 claude_thread_id →
         # 注入 resume + cwd（用户显式 resume 不被覆盖）
         if (
             register_id_override
@@ -108,11 +108,11 @@ class ClaudeCodeService:
             with contextlib.suppress(Exception):
                 metas = self._thread_manager.list_threads()
                 meta = next((m for m in metas if m.id == register_id_override), None)
-                sdk_sid = getattr(meta, "sdk_session_id", "") if meta is not None else ""
-                if sdk_sid:
+                claude_tid = getattr(meta, "claude_thread_id", "") if meta is not None else ""
+                if claude_tid:
                     options = {
                         **(options if isinstance(options, dict) else {}),
-                        "resume": sdk_sid,
+                        "resume": claude_tid,
                     }
                     cwd_val = getattr(meta, "cwd", "") if meta is not None else ""
                     if cwd_val and "cwd" not in options:
@@ -238,7 +238,7 @@ class ClaudeCodeService:
                         renamed = await self._sessions.rename(active_sid, new_id)
                         if renamed:
                             active_sid = new_id
-                    # v0.2 落盘 sdk_session_id（thread-bound 路径才做；
+                    # v0.2 落盘 claude_thread_id（thread-bound 路径才做；
                     # placeholder pending-XXX 跳过；invariant：仅未绑定时落盘）
                     if (
                         self._thread_manager is not None
@@ -249,8 +249,8 @@ class ClaudeCodeService:
                         try:
                             metas = self._thread_manager.list_threads()
                             meta = next((m for m in metas if m.id == register_id), None)
-                            if meta is not None and not getattr(meta, "sdk_session_id", ""):
-                                await self._thread_manager.bind_sdk_session(
+                            if meta is not None and not getattr(meta, "claude_thread_id", ""):
+                                await self._thread_manager.bind_claude_thread(
                                     register_id,
                                     new_id,
                                     getattr(meta, "cwd", "") or "",
@@ -258,7 +258,7 @@ class ClaudeCodeService:
                         except Exception:
                             # 已绑定 / 冲突等异常不影响主对话流
                             logger.warning(
-                                "claude-code _consume bind_sdk_session failed",
+                                "claude-code _consume bind_claude_thread failed",
                                 exc_info=True,
                             )
                 # 把出站消息的 sessionId 字段同步成真实 id
@@ -270,7 +270,7 @@ class ClaudeCodeService:
     @staticmethod
     def _is_thread_id(s: str) -> bool:
         """thread_id 形如 ``thread-<12 hex>``；其他形态（pending-XXX placeholder）
-        跳过 sdk_session_id 落盘。"""
+        跳过 claude_thread_id 落盘。"""
         return bool(_THREAD_ID_RE.match(s))
 
     def _build_options(self, options: dict[str, Any]) -> ClaudeAgentOptions:

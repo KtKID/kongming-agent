@@ -222,7 +222,7 @@ def _translate_payload(
 
     if payload_type == "agent_message":
         return _handle_agent_message(payload, session_id, timestamp)
-    if payload_type == "reasoning":
+    if payload_type in ("reasoning", "agent_reasoning"):
         return _handle_reasoning(payload, session_id, timestamp)
     if payload_type == "command_execution":
         return _handle_command_execution(payload, session_id, timestamp)
@@ -236,10 +236,8 @@ def _translate_payload(
         return _handle_todo_list(payload, session_id, timestamp)
     if payload_type == "error":
         return _handle_error(payload, session_id, timestamp)
-    if payload_type == "token_count":
-        return _handle_token_count(payload, session_id, timestamp)
-
-    # task_started / task_complete / user_message 等 → 跳过
+    # token_count / task_started / task_complete / user_message 等 → 跳过
+    # token_count 在历史回放中不需要（每 turn 一条，会产出大量 complete 冲掉正常内容）
     return []
 
 
@@ -253,7 +251,8 @@ def _handle_agent_message(
     session_id: str,
     timestamp: str,
 ) -> list[dict[str, Any]]:
-    text = _strip_internal(str(payload.get("text", "")))
+    text = payload.get("text") or payload.get("message") or ""
+    text = _strip_internal(str(text))
     if not text:
         return []
     out = _base(session_id, timestamp)

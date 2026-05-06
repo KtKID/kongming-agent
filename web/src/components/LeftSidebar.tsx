@@ -12,6 +12,11 @@ import {
   type LeftSidebarTab,
 } from "@/components/LeftSidebarTabs";
 import { ClaudeProjectsTree } from "@/components/ClaudeProjectsTree";
+import {
+  CodexProjectsTree,
+  type CodexProjectSummary,
+  type CodexSessionSummary,
+} from "@/components/CodexProjectsTree";
 import { apiPost } from "@/lib/api";
 import { useThreadsStore } from "@/stores/threads";
 import type {
@@ -73,7 +78,7 @@ export function LeftSidebar({
   ): Promise<void> => {
     try {
       const body: ImportClaudeSessionRequest = {
-        sdk_session_id: session.sdk_session_id,
+        claude_thread_id: session.claude_thread_id,
         cwd: project.cwd,
         name: session.title,
       };
@@ -81,7 +86,6 @@ export function LeftSidebar({
         "/api/threads/import-claude-session",
         body,
       );
-      // 刷新 thread 列表（让 generic tab 看到新 thread；同时 useThreadsStore 缓存有新条目）
       await fetchThreads();
       navigate(`/chat/${resp.thread.id}`);
       if (!resp.imported) {
@@ -90,6 +94,31 @@ export function LeftSidebar({
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       toast.error(`导入会话失败：${msg}`);
+    }
+  };
+
+  const handleCodexSessionClick = async (
+    project: CodexProjectSummary,
+    session: CodexSessionSummary,
+  ): Promise<void> => {
+    try {
+      const body = {
+        codex_thread_id: session.session_id,
+        cwd: project.cwd,
+        name: session.title,
+      };
+      const resp = await apiPost<ImportClaudeSessionResponse>(
+        "/api/threads/import-codex-session",
+        body,
+      );
+      await fetchThreads();
+      navigate(`/chat/${resp.thread.id}`);
+      if (!resp.imported) {
+        toast.info("已打开已绑定的会话");
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`导入 Codex 会话失败：${msg}`);
     }
   };
 
@@ -143,8 +172,10 @@ export function LeftSidebar({
         <div className="min-h-0 flex-1 overflow-hidden">
           {tab === "generic" ? (
             <ThreadList />
-          ) : (
+          ) : tab === "claude" ? (
             <ClaudeProjectsTree onSessionClick={handleSessionClick} onNewSession={handleNewSession} />
+          ) : (
+            <CodexProjectsTree onSessionClick={handleCodexSessionClick} />
           )}
         </div>
       </div>

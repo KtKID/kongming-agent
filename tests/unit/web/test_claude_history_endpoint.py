@@ -4,7 +4,7 @@
 1. 未登录 → 401
 2. thread 不存在 → 400
 3. backend_kind=generic_chat → 400
-4. claude_code 但 sdk_session_id="" → 400
+4. claude_code 但 claude_thread_id="" → 400
 5. jsonl 文件不存在 → 404
 6. happy path → messages
 """
@@ -22,7 +22,7 @@ def _add_thread(
     tm: FakeTM,
     thread_id: str = "thread-aaaaaaaaaaaa",
     backend_kind: str = "claude_code",
-    sdk_session_id: str = "",
+    claude_thread_id: str = "",
     cwd: str = "",
 ) -> ThreadMetadata:
     meta = ThreadMetadata(
@@ -30,7 +30,7 @@ def _add_thread(
         name="t",
         preset_id="",
         backend_kind=backend_kind,  # type: ignore[arg-type]
-        sdk_session_id=sdk_session_id,
+        claude_thread_id=claude_thread_id,
         cwd=cwd,
         created_at=1.0,
         updated_at=1.0,
@@ -76,9 +76,9 @@ def test_backend_kind_mismatch_returns_400(tmp_path: Path) -> None:
         client.__exit__(None, None, None)
 
 
-def test_no_sdk_session_id_returns_400(tmp_path: Path) -> None:
+def test_no_claude_thread_id_returns_400(tmp_path: Path) -> None:
     tm = FakeTM()
-    _add_thread(tm, backend_kind="claude_code", sdk_session_id="")
+    _add_thread(tm, backend_kind="claude_code", claude_thread_id="")
     client = _login_client(tmp_path, tm)
     try:
         resp = client.get("/api/threads/thread-aaaaaaaaaaaa/claude_history")
@@ -92,7 +92,7 @@ def test_jsonl_missing_returns_404(tmp_path: Path, monkeypatch) -> None:
     _add_thread(
         tm,
         backend_kind="claude_code",
-        sdk_session_id="not-exist-uuid",
+        claude_thread_id="not-exist-uuid",
         cwd="/tmp/nonexistent",
     )
     # mock jsonl_path_for 返回不存在的路径
@@ -114,7 +114,7 @@ def test_happy_path_returns_messages(tmp_path: Path, monkeypatch) -> None:
     _add_thread(
         tm,
         backend_kind="claude_code",
-        sdk_session_id=sid,
+        claude_thread_id=sid,
         cwd="/tmp/work",
     )
     # 写一份小 jsonl

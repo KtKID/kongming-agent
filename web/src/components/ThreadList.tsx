@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { MoreHorizontal, Plus, Trash2, Pencil } from "lucide-react";
+import { MessageSquare, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -14,6 +14,20 @@ import {
 import { useThreadsStore } from "@/stores/threads";
 import { NewThreadDialog } from "@/components/NewThreadDialog";
 import { cn } from "@/lib/utils";
+import type { BackendKind } from "@/protocol";
+
+const THREAD_SOURCE_META: Record<
+  BackendKind,
+  {
+    label: string;
+    Icon?: typeof MessageSquare;
+    imageSrc?: string;
+  }
+> = {
+  generic_chat: { label: "普通聊天", Icon: MessageSquare },
+  claude_code: { label: "Claude", imageSrc: "/brand/claude-app-icon.png" },
+  codex: { label: "Codex", imageSrc: "/brand/codex-app-icon.png" },
+};
 
 /**
  * 左侧 thread 列表：
@@ -92,6 +106,7 @@ export function ThreadList() {
           ) : null}
           {threads.map((t) => {
             const active = params.thread_id === t.id;
+            const sourceMeta = THREAD_SOURCE_META[t.backend_kind];
             return (
               <div
                 key={t.id}
@@ -117,10 +132,29 @@ export function ThreadList() {
                 ) : (
                   <Link
                     to={`/chat/${t.id}`}
-                    className="min-w-0 flex-1 truncate"
+                    className="flex min-w-0 flex-1 items-center gap-2 truncate"
                     title={t.name}
                   >
-                    {t.name || "未命名"}
+                    <span
+                      aria-label={`${sourceMeta.label} 会话`}
+                      title={sourceMeta.label}
+                      className={cn(
+                        "flex h-5 w-5 shrink-0 items-center justify-center rounded-sm border border-border/60 bg-background/60 text-muted-foreground",
+                        active && "border-border bg-background text-foreground/80",
+                      )}
+                    >
+                      {sourceMeta.imageSrc ? (
+                        <img
+                          src={sourceMeta.imageSrc}
+                          alt=""
+                          aria-hidden="true"
+                          className="h-4 w-4 rounded-[4px] object-cover"
+                        />
+                      ) : sourceMeta.Icon ? (
+                        <sourceMeta.Icon className="h-3.5 w-3.5" aria-hidden="true" />
+                      ) : null}
+                    </span>
+                    <span className="truncate">{t.name || "未命名"}</span>
                   </Link>
                 )}
                 <DropdownMenu>

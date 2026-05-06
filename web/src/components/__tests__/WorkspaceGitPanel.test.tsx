@@ -30,7 +30,7 @@ const claudeContext: WorkspaceContextDTO = {
   thread_id: "thread-1",
   backend_kind: "claude_code",
   workspace_root: "/tmp/proj",
-  sdk_session_id: "sdk-1",
+  claude_thread_id: "sdk-1",
   shell_provider: "claude_code",
   files_available: true,
   shell_available: true,

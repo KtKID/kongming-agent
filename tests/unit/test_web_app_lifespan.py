@@ -120,13 +120,13 @@ class FakeThreadManager:
     def get_cell(self, thread_id: str) -> Any:
         return None
 
-    def find_thread_by_sdk_session_id(self, sdk_session_id: str) -> Any:
+    def find_thread_by_claude_thread_id(self, claude_thread_id: str) -> Any:
         return None  # 默认无命中；测试可 monkeypatch
 
-    async def bind_sdk_session(
+    async def bind_claude_thread(
         self,
         thread_id: str,
-        sdk_session_id: str,
+        claude_thread_id: str,
         cwd: str,
     ) -> Any:
         raise NotImplementedError  # 默认；测试 mock 时按需 override

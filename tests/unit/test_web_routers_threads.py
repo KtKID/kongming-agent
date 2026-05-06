@@ -55,7 +55,7 @@ class FakeTM:
         name: str,
         preset_id: str = "",
         *,
-        backend_kind: Literal["generic_chat", "claude_code"] = "generic_chat",
+        backend_kind: Literal["generic_chat", "claude_code", "codex"] = "generic_chat",
         cwd: str = "",
     ) -> ThreadMetadata:
         # 用确定 ID 便于断言
@@ -117,13 +117,13 @@ class FakeTM:
     def get_cell(self, thread_id: str) -> Any:
         return None
 
-    def find_thread_by_sdk_session_id(self, sdk_session_id: str) -> Any:
+    def find_thread_by_claude_thread_id(self, claude_thread_id: str) -> Any:
         return None  # 默认无命中；测试可 monkeypatch
 
-    async def bind_sdk_session(
+    async def bind_claude_thread(
         self,
         thread_id: str,
-        sdk_session_id: str,
+        claude_thread_id: str,
         cwd: str,
     ) -> Any:
         raise NotImplementedError  # 默认；测试 mock 时按需 override

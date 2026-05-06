@@ -171,3 +171,7 @@ forbidden_modules =
     observability
     memory
     prompts
+; web.slash_candidates_loader 是装配期 loader（同 web.run），
+; 仅在 lifespan startup 懒 import，允许触达 context / commands。
+ignore_imports =
+    web.app -> web.slash_candidates_loader

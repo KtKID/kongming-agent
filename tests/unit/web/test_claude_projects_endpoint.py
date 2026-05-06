@@ -35,13 +35,13 @@ def test_returns_projects_dict(tmp_path: Path, monkeypatch) -> None:
             display_name="bar",
             sessions=[
                 SessionSummary(
-                    sdk_session_id="sid-1",
+                    claude_thread_id="sid-1",
                     title="hello world",
                     last_modified=1000.0,
                     message_count=42,
                 ),
                 SessionSummary(
-                    sdk_session_id="sid-2",
+                    claude_thread_id="sid-2",
                     title="second",
                     last_modified=900.0,
                     message_count=10,
@@ -64,7 +64,7 @@ def test_returns_projects_dict(tmp_path: Path, monkeypatch) -> None:
         assert p["display_name"] == "bar"
         assert len(p["sessions"]) == 2
         s = p["sessions"][0]
-        assert s["sdk_session_id"] == "sid-1"
+        assert s["claude_thread_id"] == "sid-1"
         assert s["title"] == "hello world"
         assert s["last_modified"] == 1000.0
         assert s["message_count"] == 42
@@ -92,7 +92,7 @@ def test_refresh_stream_returns_progress_and_done(tmp_path: Path, monkeypatch) -
             display_name="bar",
             sessions=[
                 SessionSummary(
-                    sdk_session_id="sid-1",
+                    claude_thread_id="sid-1",
                     title="hello world",
                     last_modified=1000.0,
                     message_count=42,

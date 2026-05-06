@@ -102,13 +102,13 @@ class FakeThreadManager:
     def get_cell(self, thread_id: str) -> Any:
         return None
 
-    def find_thread_by_sdk_session_id(self, sdk_session_id: str) -> Any:
+    def find_thread_by_claude_thread_id(self, claude_thread_id: str) -> Any:
         return None
 
-    async def bind_sdk_session(
+    async def bind_claude_thread(
         self,
         thread_id: str,
-        sdk_session_id: str,
+        claude_thread_id: str,
         cwd: str,
     ) -> Any:
         raise NotImplementedError
@@ -149,8 +149,7 @@ def test_lifespan_starts_ticker_when_scheduler_enabled(monkeypatch, tmp_path: Pa
         # （P0-1 R2 round 1 修复）；这里记下来给测试断言用
         captured["dispatcher_set"] = dispatcher is not None
         captured["dispatcher_has_web_sink"] = (
-            dispatcher is not None
-            and getattr(dispatcher, "_web_sink", None) is not None
+            dispatcher is not None and getattr(dispatcher, "_web_sink", None) is not None
         )
         return _FakeTickerRuntime(), object()
 

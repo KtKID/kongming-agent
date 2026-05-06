@@ -1,4 +1,4 @@
-"""用例 25: ThreadMetadata schema v4 → v5 懒升级。"""
+"""用例 25: ThreadMetadata schema v4 → v6 懒升级。"""
 
 from __future__ import annotations
 
@@ -39,17 +39,17 @@ def _write_v4_metadata(home: Path) -> Path:
     return path
 
 
-# ── v4 → v5 懒升级 ──────────────────────────────────────────
+# ── v4 → v6 懒升级 ──────────────────────────────────────────
 
 
-class TestSchemaV4ToV5Upgrade:
-    """用例 25: v4 → v5 懒升级。"""
+class TestSchemaV4ToV6Upgrade:
+    """用例 25: v4 → v6 懒升级。"""
 
-    def test_v4_file_upgraded_to_v5(self, tmp_path: Path) -> None:
+    def test_v4_file_upgraded_to_v6(self, tmp_path: Path) -> None:
         _write_v4_metadata(tmp_path)
         meta = read_thread_metadata(tmp_path, _THREAD_ID)
         assert meta is not None
-        assert meta.schema_version == 5
+        assert meta.schema_version == 6
         assert meta.codex_thread_id == ""
 
     def test_v4_fields_preserved(self, tmp_path: Path) -> None:
@@ -59,7 +59,7 @@ class TestSchemaV4ToV5Upgrade:
         assert meta.id == _THREAD_ID
         assert meta.name == "test thread"
         assert meta.backend_kind == "claude_code"
-        assert meta.sdk_session_id == "abc-123"
+        assert meta.claude_thread_id == "abc-123"
         assert meta.cwd == "/test/path"
         assert meta.created_at == 1000.0
         assert meta.updated_at == 2000.0
@@ -98,5 +98,5 @@ class TestCodexBackendKind:
 
 
 class TestSchemaVersion:
-    def test_current_version_is_5(self) -> None:
-        assert THREAD_METADATA_SCHEMA_VERSION == 5
+    def test_current_version_is_6(self) -> None:
+        assert THREAD_METADATA_SCHEMA_VERSION == 6

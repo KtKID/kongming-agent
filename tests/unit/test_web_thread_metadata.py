@@ -91,9 +91,9 @@ def test_thread_metadata_name_max_200() -> None:
 
 def test_thread_metadata_default_schema_version() -> None:
     meta = _make_meta()
-    # v0.2.2 bump 到 5（加 codex_thread_id 字段）；老 v1/v2/v3/v4 文件由
+    # v0.2.3 bump 到 6（sdk_session_id -> claude_thread_id）；老文件由
     # read_thread_metadata 懒升级
-    assert meta.schema_version == THREAD_METADATA_SCHEMA_VERSION == 5
+    assert meta.schema_version == THREAD_METADATA_SCHEMA_VERSION == 6
 
 
 def test_thread_metadata_message_count_non_negative() -> None:
@@ -204,7 +204,7 @@ def test_read_v3_lazy_upgrades_usage_totals_to_v4(tmp_path: Path) -> None:
     )
     loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
     assert loaded is not None
-    assert loaded.schema_version == 5
+    assert loaded.schema_version == 6
     assert loaded.cumulative_prompt_tokens == 0
     assert loaded.cumulative_completion_tokens == 0
     assert loaded.cumulative_total_tokens == 0

@@ -170,9 +170,8 @@ def test_silent_marker_constant():
 
 
 def test_schema_version_constant():
-    # v0.3：cron-delivery-v0.3 引入 ScheduleDelivery + ScheduledRun 三个新字段
-    # + TaskState.DELETED；schema 升到 3。
-    assert SCHEMA_VERSION == 3
+    # v0.4：cron-thread-preset-v0.4 引入 ScheduleDelivery.target + ScheduledTask.preset_id
+    assert SCHEMA_VERSION == 4
 
 
 # ---------------------------------------------------------------------------

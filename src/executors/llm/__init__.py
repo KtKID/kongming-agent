@@ -15,5 +15,6 @@ from __future__ import annotations
 
 from executors.llm.base import BaseLLMProvider
 from executors.llm.openai_responses import OpenAIResponsesProvider
+from executors.llm.provider_factory import apply_preset, build_provider
 
-__all__ = ["BaseLLMProvider", "OpenAIResponsesProvider"]
+__all__ = ["BaseLLMProvider", "OpenAIResponsesProvider", "apply_preset", "build_provider"]

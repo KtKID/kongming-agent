@@ -397,7 +397,7 @@ def test_post_threads_invalid_backend_kind_returns_422(tmp_path: Path) -> None:
     try:
         resp = client.post(
             "/api/threads",
-            json={"name": "t", "preset_id": "p", "backend_kind": "codex"},
+            json={"name": "t", "preset_id": "p", "backend_kind": "bad_backend"},
             headers=CSRF_HEADERS,
         )
         assert resp.status_code == 422

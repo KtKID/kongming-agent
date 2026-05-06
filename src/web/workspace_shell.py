@@ -47,11 +47,11 @@ def _normalize_terminal_text(text: str) -> str:
     return "".join(out)
 
 
-def build_claude_command(*, sdk_session_id: str) -> list[str]:
+def build_claude_command(*, claude_thread_id: str) -> list[str]:
     """生成 Claude shell 启动命令。"""
     command = ["claude"]
-    if sdk_session_id.strip():
-        command.extend(["--resume", sdk_session_id.strip()])
+    if claude_thread_id.strip():
+        command.extend(["--resume", claude_thread_id.strip()])
     return command
 
 
@@ -84,11 +84,7 @@ def list_claude_session_ids(
     project_dir = claude_project_dir_for(cwd, claude_home=claude_home)
     if not project_dir.is_dir():
         return set()
-    return {
-        path.stem
-        for path in project_dir.glob("*.jsonl")
-        if path.is_file()
-    }
+    return {path.stem for path in project_dir.glob("*.jsonl") if path.is_file()}
 
 
 def _is_confirmed_claude_session_file(
@@ -115,9 +111,9 @@ def _is_confirmed_claude_session_file(
                 if entry.get("sessionId") != expected_session_id:
                     return False
                 entry_cwd = entry.get("cwd")
-                if cwd is not None and isinstance(entry_cwd, str) and entry_cwd != str(cwd):
-                    return False
-                return True
+                return not (
+                    cwd is not None and isinstance(entry_cwd, str) and entry_cwd != str(cwd)
+                )
     except OSError:
         return False
     return False

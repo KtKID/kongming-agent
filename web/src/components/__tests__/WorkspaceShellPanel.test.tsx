@@ -42,7 +42,7 @@ const baseContext: WorkspaceContextDTO = {
   thread_id: "thread-1",
   backend_kind: "claude_code",
   workspace_root: "/tmp/proj",
-  sdk_session_id: "sdk-1",
+  claude_thread_id: "sdk-1",
   shell_provider: "claude_code",
   files_available: true,
   shell_available: true,
@@ -58,7 +58,7 @@ describe("WorkspaceShellPanel", () => {
         context={{
           ...baseContext,
           backend_kind: "generic_chat",
-          sdk_session_id: "",
+          claude_thread_id: "",
           workspace_root: "/tmp/generic",
           shell_provider: "system_shell",
         }}
@@ -92,7 +92,7 @@ describe("WorkspaceShellPanel", () => {
         context={{
           ...baseContext,
           thread_id: "thread-2",
-          sdk_session_id: "sdk-2",
+          claude_thread_id: "sdk-2",
           workspace_root: "/tmp/other",
         }}
       />,

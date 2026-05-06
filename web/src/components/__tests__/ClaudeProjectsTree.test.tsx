@@ -12,13 +12,13 @@ const fakeProjects = {
       display_name: "bar",
       sessions: [
         {
-          sdk_session_id: "sid-1",
+          claude_thread_id: "sid-1",
           title: "first session title",
           last_modified: Math.floor(Date.now() / 1000) - 60,
           message_count: 42,
         },
         {
-          sdk_session_id: "sid-2",
+          claude_thread_id: "sid-2",
           title: "second session",
           last_modified: Math.floor(Date.now() / 1000) - 7200,
           message_count: 10,
@@ -31,7 +31,7 @@ const fakeProjects = {
       display_name: "project",
       sessions: [
         {
-          sdk_session_id: "sid-old",
+          claude_thread_id: "sid-old",
           title: "old session",
           last_modified: Math.floor(Date.now() / 1000) - 7 * 86400 - 100,
           message_count: 5,
@@ -101,7 +101,7 @@ describe("ClaudeProjectsTree", () => {
     expect(onSessionClick).toHaveBeenCalledTimes(1);
     const [project, session] = onSessionClick.mock.calls[0]!;
     expect(project.name).toBe("-foo-bar");
-    expect(session.sdk_session_id).toBe("sid-1");
+    expect(session.claude_thread_id).toBe("sid-1");
   });
 
   it("搜索会即时过滤并自动展开匹配项目", async () => {
@@ -163,7 +163,7 @@ describe("ClaudeProjectsTree", () => {
               display_name: "new-project",
               sessions: [
                 {
-                  sdk_session_id: "sid-new",
+                  claude_thread_id: "sid-new",
                   title: "fresh session",
                   last_modified: Math.floor(Date.now() / 1000),
                   message_count: 3,

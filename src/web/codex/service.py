@@ -64,8 +64,9 @@ class CodexService:
       用于 :meth:`abort` 找到当前子进程
     """
 
-    def __init__(self, session_manager: SessionManager) -> None:
+    def __init__(self, session_manager: SessionManager, *, thread_manager: Any = None) -> None:
         self.session_manager = session_manager
+        self.thread_manager = thread_manager
         self._processes: dict[str, asyncio.subprocess.Process] = {}
 
     # ------------------------------------------------------------------ query
@@ -79,6 +80,7 @@ class CodexService:
         permission_mode: str = "default",
         model: str | None = None,
         resume: bool = False,
+        kongming_thread_id: str | None = None,
         writer: Any,
     ) -> None:
         """spawn ``codex exec --json``，把事件流喂到 ``writer``。
@@ -93,6 +95,8 @@ class CodexService:
                 ``bypassPermissions``）；未知值走 default 兜底
             model: 可选 ``-m`` flag
             resume: True 时使用 ``codex exec resume <session_id>`` 形式
+            kongming_thread_id: Kongming 产品层 thread id；提供时会把 Codex
+                ``thread.started`` 的真实 id 回写到 ``codex_thread_id``。
             writer: duck-typed，任何有 ``async def send_json(msg: dict)`` 的对象
         """
         args = self._build_args(
@@ -145,6 +149,8 @@ class CodexService:
                 proc,
                 writer,
                 active_sid,
+                kongming_thread_id=kongming_thread_id,
+                cwd=cwd,
             )
 
             # 等 stderr 收尾 + 拿子进程退出码
@@ -311,6 +317,9 @@ class CodexService:
         proc: asyncio.subprocess.Process,
         writer: Any,
         session_id: str,
+        *,
+        kongming_thread_id: str | None,
+        cwd: str,
     ) -> tuple[str, bool]:
         """逐行读取 stdout，归一化后送 writer。
 
@@ -362,6 +371,21 @@ class CodexService:
                         if proc_ref is not None:
                             self._processes[new_sid] = proc_ref
                         active_sid = new_sid
+                if (
+                    isinstance(new_sid, str)
+                    and new_sid
+                    and kongming_thread_id
+                    and self.thread_manager is not None
+                ):
+                    with contextlib.suppress(Exception):
+                        metas = self.thread_manager.list_threads()
+                        meta = next((m for m in metas if m.id == kongming_thread_id), None)
+                        if meta is not None and not getattr(meta, "codex_thread_id", ""):
+                            await self.thread_manager.bind_codex_thread(
+                                kongming_thread_id,
+                                new_sid,
+                                cwd,
+                            )
 
             # 归一化 + 下发
             for msg in normalize(event, active_sid):

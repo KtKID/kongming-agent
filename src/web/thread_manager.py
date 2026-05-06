@@ -38,6 +38,7 @@ from typing import Any, Literal
 
 from config_loader.models import Config
 from core.contracts import ApprovalAction
+from core.message import Message
 from web.host_adapter import WebHostAdapter
 from web.protocol import CellEvictedFrame, CellSummaryDTO, EvictReason
 from web.thread_cell import ThreadCell
@@ -55,12 +56,20 @@ from web.ws_fanout import WebSocketFanout
 logger = logging.getLogger(__name__)
 
 
-class SdkSessionAlreadyBoundError(ValueError):
-    """thread.sdk_session_id 已经非空，禁止覆盖（v0.2 invariant：写入后只读）。"""
+class ClaudeThreadAlreadyBoundError(ValueError):
+    """thread.claude_thread_id 已经非空，禁止覆盖（v0.2 invariant：写入后只读）。"""
 
 
-class SdkSessionConflictError(ValueError):
-    """sdk_session_id 已被另一 thread 绑定，禁止重复绑定（v0.2 invariant：1:1 绑定）。"""
+class ClaudeThreadConflictError(ValueError):
+    """claude_thread_id 已被另一 thread 绑定，禁止重复绑定（v0.2 invariant：1:1 绑定）。"""
+
+
+class CodexThreadAlreadyBoundError(ValueError):
+    """thread.codex_thread_id 已经非空，禁止覆盖。"""
+
+
+class CodexThreadConflictError(ValueError):
+    """codex_thread_id 已被另一 thread 绑定，禁止重复绑定。"""
 
 
 # runtime_factory 签名：根据 thread_id + preset_id + adapter + sinks 构造
@@ -194,7 +203,7 @@ class ThreadManager:
         name: str,
         preset_id: str = "",
         *,
-        backend_kind: Literal["generic_chat", "claude_code"] = "generic_chat",
+        backend_kind: Literal["generic_chat", "claude_code", "codex"] = "generic_chat",
         cwd: str = "",
     ) -> ThreadMetadata:
         """创建一个新 thread 的 metadata（不 boot cell）。
@@ -204,9 +213,9 @@ class ThreadManager:
         Args:
             name: thread 名（剥前后空白后非空）。
             preset_id: ``backend_kind="generic_chat"`` 时必须非空，
-                ``backend_kind="claude_code"`` 时允许空字符串占位。
-            backend_kind: 后端类型；决定后续 WS endpoint 走 ``/ws/threads/<id>``
-                还是 ``/ws/claude-code?thread_id=<id>``。
+                ``backend_kind="claude_code"`` / ``"codex"`` 时允许空字符串占位。
+            backend_kind: 后端类型；决定后续 WS endpoint 走通用 chat、Claude Code
+                或 Codex 通道。
             cwd: 可选 workspace 根目录；为空表示纯聊天 thread。
         """
         if not name or not name.strip():
@@ -251,7 +260,8 @@ class ThreadManager:
             name=new_name.strip(),
             preset_id=meta.preset_id,
             backend_kind=meta.backend_kind,
-            sdk_session_id=meta.sdk_session_id,
+            claude_thread_id=meta.claude_thread_id,
+            codex_thread_id=meta.codex_thread_id,
             cwd=meta.cwd,
             created_at=meta.created_at,
             updated_at=_now(),
@@ -293,7 +303,7 @@ class ThreadManager:
                 "cumulative_prompt_tokens": meta.cumulative_prompt_tokens + prompt,
                 "cumulative_completion_tokens": meta.cumulative_completion_tokens + completion,
                 "cumulative_total_tokens": meta.cumulative_total_tokens + total,
-                "schema_version": 5,
+                "schema_version": 6,
             }
         )
         await asyncio.to_thread(write_thread_metadata, self._home, updated)
@@ -592,8 +602,8 @@ class ThreadManager:
         """同步查 cell；不触发 boot。"""
         return self._cells.get(thread_id)
 
-    def find_thread_by_sdk_session_id(self, sdk_session_id: str) -> ThreadMetadata | None:
-        """按 ``sdk_session_id`` 反查 thread metadata。
+    def find_thread_by_claude_thread_id(self, claude_thread_id: str) -> ThreadMetadata | None:
+        """按 ``claude_thread_id`` 反查 thread metadata。
 
         v0.2.0 claude-code-history-resume 用：
 
@@ -601,65 +611,120 @@ class ThreadManager:
         - 续聊路径上从 SDK session UUID 找回对应 thread
 
         实现：复用 :meth:`list_threads`（已合并扫盘 + 内存覆盖）线性扫，
-        命中第一个返回。空 ``sdk_session_id`` 不匹配任何 thread（默认值
+        命中第一个返回。空 ``claude_thread_id`` 不匹配任何 thread（默认值
         是空字符串，不能用作 key）。
 
         同步函数：扫盘 IO 量级与 list_threads 相同，路由层按需可在
         ``asyncio.to_thread`` 内调用。
         """
-        if not sdk_session_id:
+        if not claude_thread_id:
             return None
         for meta in self.list_threads():
-            if meta.sdk_session_id == sdk_session_id:
+            if meta.claude_thread_id == claude_thread_id:
                 return meta
         return None
 
-    async def bind_sdk_session(
+    def find_thread_by_codex_thread_id(self, codex_thread_id: str) -> ThreadMetadata | None:
+        """按 ``codex_thread_id`` 反查 thread metadata。"""
+        if not codex_thread_id:
+            return None
+        for meta in self.list_threads():
+            if meta.codex_thread_id == codex_thread_id:
+                return meta
+        return None
+
+    async def bind_claude_thread(
         self,
         thread_id: str,
-        sdk_session_id: str,
+        claude_thread_id: str,
         cwd: str,
     ) -> ThreadMetadata:
-        """把 ``sdk_session_id`` + ``cwd`` 持久化到已存在的 thread。
+        """把 ``claude_thread_id`` + ``cwd`` 持久化到已存在的 thread。
 
         v0.2.0 invariant：
 
-        - **写入后只读**：thread 当前 ``sdk_session_id != ""`` 时抛
-          :class:`SdkSessionAlreadyBoundError`，不允许覆盖
-        - **1:1 绑定**：``sdk_session_id`` 已被另一 thread 绑定时抛
-          :class:`SdkSessionConflictError`
-        - **空字符串非法**：``sdk_session_id == ""`` 抛 :class:`ValueError`
+        - **写入后只读**：thread 当前 ``claude_thread_id != ""`` 时抛
+          :class:`ClaudeThreadAlreadyBoundError`，不允许覆盖
+        - **1:1 绑定**：一个 Kongming thread 绑定一个 Claude session，
+          ``claude_thread_id`` 已被另一 thread 绑定时抛
+          :class:`ClaudeThreadConflictError`
+        - **空字符串非法**：``claude_thread_id == ""`` 抛 :class:`ValueError`
           （绑空等于不绑，禁止）
 
         失败：thread 不存在抛 :class:`KeyError`。
 
         若 cell 已 boot，同步更新 cell.metadata 引用（与 rename_thread 同款）。
         """
-        if not sdk_session_id:
-            raise ValueError("sdk_session_id must not be empty")
+        if not claude_thread_id:
+            raise ValueError("claude_thread_id must not be empty")
 
         meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
         if meta is None:
             raise KeyError(f"thread not found: {thread_id}")
 
         # invariant 双重检查
-        if meta.sdk_session_id:
-            raise SdkSessionAlreadyBoundError(
-                f"thread {thread_id} already bound to sdk_session_id="
-                f"{meta.sdk_session_id!r}; refuse to overwrite"
+        if meta.claude_thread_id:
+            raise ClaudeThreadAlreadyBoundError(
+                f"thread {thread_id} already bound to claude_thread_id="
+                f"{meta.claude_thread_id!r}; refuse to overwrite"
             )
-        existing = self.find_thread_by_sdk_session_id(sdk_session_id)
+        existing = self.find_thread_by_claude_thread_id(claude_thread_id)
         if existing is not None and existing.id != thread_id:
-            raise SdkSessionConflictError(
-                f"sdk_session_id={sdk_session_id!r} already bound to "
+            raise ClaudeThreadConflictError(
+                f"claude_thread_id={claude_thread_id!r} already bound to "
                 f"thread {existing.id}; refuse duplicate bind on {thread_id}"
             )
 
         updated = meta.model_copy(
             update={
-                "sdk_session_id": sdk_session_id,
+                "claude_thread_id": claude_thread_id,
                 "cwd": cwd,
-                "schema_version": 3,
+                "schema_version": 6,
+                "updated_at": _now(),
+            }
+        )
+        await asyncio.to_thread(write_thread_metadata, self._home, updated)
+        async with self._lock:
+            cell = self._cells.get(thread_id)
+            if cell is not None:
+                cell.metadata = updated
+        return updated
+
+    async def bind_codex_thread(
+        self,
+        thread_id: str,
+        codex_thread_id: str,
+        cwd: str,
+    ) -> ThreadMetadata:
+        """把 Codex 底层 thread id + cwd 持久化到已存在的 Kongming thread。
+
+        一个 Kongming thread 绑定一个 Codex session/thread。绑定后只读，防止
+        同一产品 thread 指向多个 provider session。
+        """
+        if not codex_thread_id:
+            raise ValueError("codex_thread_id must not be empty")
+
+        meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
+        if meta is None:
+            raise KeyError(f"thread not found: {thread_id}")
+
+        if meta.codex_thread_id:
+            raise CodexThreadAlreadyBoundError(
+                f"thread {thread_id} already bound to codex_thread_id="
+                f"{meta.codex_thread_id!r}; refuse to overwrite"
+            )
+        existing = self.find_thread_by_codex_thread_id(codex_thread_id)
+        if existing is not None and existing.id != thread_id:
+            raise CodexThreadConflictError(
+                f"codex_thread_id={codex_thread_id!r} already bound to "
+                f"thread {existing.id}; refuse duplicate bind on {thread_id}"
+            )
+
+        updated = meta.model_copy(
+            update={
+                "codex_thread_id": codex_thread_id,
+                "cwd": cwd,
+                "schema_version": 6,
                 "updated_at": _now(),
             }
         )
@@ -708,6 +773,68 @@ class ThreadManager:
         cell.touch()
 
     # ------------------------------------------------------------------
+    # Cron 定向投递（v0.4）
+    # ------------------------------------------------------------------
+
+    async def append_cron_message(self, thread_id: str, text: str) -> bool:
+        """Append a cron delivery message to an existing thread's session.
+
+        v0.4 cron-thread-preset：``ThreadTargetSink`` 调此方法把 cron 结果
+        追加到目标 thread 的会话历史里，并通过 WS fanout 通知前端。
+
+        策略：
+        - cell 未 boot（idle evicted / 从未启动）→ 返回 False（v0.4 不重建
+          session；后续可考虑 lazy boot 或 enqueue）
+        - cell 已 boot 但 session 不存在（理论不应该；防御性兜底）→ False
+        - 追加成功 → 通知 WS → True
+
+        Returns:
+            True if message was appended successfully, False otherwise.
+        """
+        async with self._lock:
+            cell = self._cells.get(thread_id)
+        if cell is None:
+            return False
+
+        # 从 runtime._sessions 获取该 thread 的 session 实例
+        # NativeRuntime._sessions 是 private attr，此处为内部集成跨层访问
+        sessions: dict[str, Any] | None = getattr(cell.runtime, "_sessions", None)
+        if sessions is None:
+            return False
+        session = sessions.get(thread_id)
+        if session is None:
+            return False
+
+        # 追加 assistant 消息
+        msg = Message(role="assistant", content=text)
+        try:
+            await session.append(msg)
+        except Exception as exc:
+            logger.warning(
+                "append_cron_message(%s): session.append failed: %s",
+                thread_id,
+                exc,
+            )
+            return False
+
+        # 通知 WS 前端（best-effort）
+        try:
+            fanout = getattr(cell.adapter, "_ws", None)
+            if fanout is not None and hasattr(fanout, "send_json"):
+                await fanout.send_json(
+                    {
+                        "kind": "cron.message.appended",
+                        "thread_id": thread_id,
+                        "content": text,
+                    }
+                )
+        except Exception:
+            pass  # WS 通知失败不影响投递结果
+
+        cell.touch()
+        return True
+
+    # ------------------------------------------------------------------
     # 路径辅助（供路由层 / 测试断言）
     # ------------------------------------------------------------------
 
@@ -745,8 +872,10 @@ class _NullWS:
 
 
 __all__ = [
+    "ClaudeThreadAlreadyBoundError",
+    "ClaudeThreadConflictError",
+    "CodexThreadAlreadyBoundError",
+    "CodexThreadConflictError",
     "RuntimeFactory",
-    "SdkSessionAlreadyBoundError",
-    "SdkSessionConflictError",
     "ThreadManager",
 ]

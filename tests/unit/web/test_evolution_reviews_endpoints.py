@@ -62,11 +62,11 @@ class FakeTM:
         del thread_id
         return None
 
-    def find_thread_by_sdk_session_id(self, sdk_session_id: str) -> ThreadMetadata | None:
-        del sdk_session_id
+    def find_thread_by_claude_thread_id(self, claude_thread_id: str) -> ThreadMetadata | None:
+        del claude_thread_id
         return None
 
-    async def bind_sdk_session(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+    async def bind_claude_thread(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
     async def add_thread_usage(self, *args, **kwargs):  # type: ignore[no-untyped-def]

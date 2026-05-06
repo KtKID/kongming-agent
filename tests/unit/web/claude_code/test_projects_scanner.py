@@ -52,7 +52,7 @@ def test_skip_agent_files(tmp_path: Path) -> None:
     )
     out = list_projects(claude_home=tmp_path)
     assert len(out) == 1
-    sids = [s.sdk_session_id for s in out[0].sessions]
+    sids = [s.claude_thread_id for s in out[0].sessions]
     assert "real" in sids
     assert not any(s.startswith("agent-") for s in sids)
 
@@ -68,7 +68,7 @@ def test_empty_jsonl_skipped(tmp_path: Path) -> None:
     out = list_projects(claude_home=tmp_path)
     assert len(out) == 1
     assert len(out[0].sessions) == 1
-    assert out[0].sessions[0].sdk_session_id == "valid"
+    assert out[0].sessions[0].claude_thread_id == "valid"
 
 
 def test_corrupt_jsonl_title_unparsable(tmp_path: Path) -> None:
@@ -154,7 +154,7 @@ def test_sessions_sorted_by_mtime_desc(tmp_path: Path) -> None:
     os.utime(old, (now - 100, now - 100))
     os.utime(new, (now, now))
     out = list_projects(claude_home=tmp_path)
-    assert [s.sdk_session_id for s in out[0].sessions] == ["new", "old"]
+    assert [s.claude_thread_id for s in out[0].sessions] == ["new", "old"]
 
 
 def test_projects_sorted_by_max_session_mtime_desc(tmp_path: Path) -> None:

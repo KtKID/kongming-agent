@@ -231,6 +231,7 @@ def _make_runtime_factory(cfg: object) -> object:
                             _store,
                             event_sinks=sink_list,
                             dispatcher=cron_dispatcher,
+                            preset_map=preset_map,
                         )
 
                     register_schedule_tool_if_enabled(

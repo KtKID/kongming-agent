@@ -17,7 +17,7 @@ def _make_tm(workspace_root: Path) -> FakeTM:
                 name="Claude",
                 preset_id="",
                 backend_kind="claude_code",
-                sdk_session_id="sdk-1",
+                claude_thread_id="sdk-1",
                 cwd=str(workspace_root),
                 created_at=1.0,
                 updated_at=2.0,

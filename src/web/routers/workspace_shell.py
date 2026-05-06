@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+from collections.abc import Awaitable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -50,10 +51,10 @@ async def _bind_new_claude_session_when_detected(
         return
     metas = await asyncio.to_thread(tm.list_threads)
     meta = get_thread_meta(thread_id, metas)
-    if meta is None or meta.sdk_session_id.strip():
+    if meta is None or meta.claude_thread_id.strip():
         return
     with contextlib.suppress(Exception):
-        await tm.bind_sdk_session(thread_id, new_session_id, str(cwd))
+        await tm.bind_claude_thread(thread_id, new_session_id, str(cwd))
 
 
 @router.websocket("/ws/workspace-shell")
@@ -104,17 +105,20 @@ async def workspace_shell_ws(
         return
 
     command = (
-        build_claude_command(sdk_session_id=meta.sdk_session_id)
+        build_claude_command(claude_thread_id=meta.claude_thread_id)
         if meta.backend_kind == "claude_code"
         else build_system_shell_command()
     )
-    emit_output = lambda text: send_frame({"type": "shell-output", "data": text})
+    def emit_output(text: str) -> Awaitable[None]:
+        return send_frame({"type": "shell-output", "data": text})
     claude_home = getattr(websocket.app.state, "claude_home", None)
     bind_task: asyncio.Task[None] | None = None
     process: WorkspaceShellProcess | None = None
     known_session_ids = (
         list_claude_session_ids(root, claude_home=claude_home)
-        if meta.backend_kind == "claude_code" and not meta.sdk_session_id.strip() and is_claude_command(command)
+        if meta.backend_kind == "claude_code"
+        and not meta.claude_thread_id.strip()
+        and is_claude_command(command)
         else set()
     )
 
@@ -140,8 +144,10 @@ async def workspace_shell_ws(
         process = make_process(command)
         await send_starting_status(command)
         await process.start()
-        if meta.backend_kind == "claude_code" and not meta.sdk_session_id.strip() and is_claude_command(
-            command
+        if (
+            meta.backend_kind == "claude_code"
+            and not meta.claude_thread_id.strip()
+            and is_claude_command(command)
         ):
             bind_task = asyncio.create_task(
                 _bind_new_claude_session_when_detected(

@@ -67,7 +67,7 @@ class ThreadManagerProtocol(Protocol):
         name: str,
         preset_id: str = "",
         *,
-        backend_kind: Literal["generic_chat", "claude_code"] = "generic_chat",
+        backend_kind: Literal["generic_chat", "claude_code", "codex"] = "generic_chat",
         cwd: str = "",
     ) -> ThreadMetadata: ...
 
@@ -93,12 +93,21 @@ class ThreadManagerProtocol(Protocol):
 
     def get_cell(self, thread_id: str) -> ThreadCellProtocol | None: ...
 
-    def find_thread_by_sdk_session_id(self, sdk_session_id: str) -> ThreadMetadata | None: ...
+    def find_thread_by_claude_thread_id(self, claude_thread_id: str) -> ThreadMetadata | None: ...
 
-    async def bind_sdk_session(
+    def find_thread_by_codex_thread_id(self, codex_thread_id: str) -> ThreadMetadata | None: ...
+
+    async def bind_claude_thread(
         self,
         thread_id: str,
-        sdk_session_id: str,
+        claude_thread_id: str,
+        cwd: str,
+    ) -> ThreadMetadata: ...
+
+    async def bind_codex_thread(
+        self,
+        thread_id: str,
+        codex_thread_id: str,
         cwd: str,
     ) -> ThreadMetadata: ...
 

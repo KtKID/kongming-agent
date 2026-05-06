@@ -127,6 +127,15 @@ def create_app(
             progress.done()
             progress.cleanup()
             logger.info("ThreadManager started")
+
+            try:
+                from web.slash_candidates_loader import load_slash_candidates
+
+                app.state.slash_candidates = await load_slash_candidates()
+                logger.info("slash candidates loaded: %d items", len(app.state.slash_candidates))
+            except Exception:
+                logger.exception("slash candidates loading failed; continuing with empty list")
+                app.state.slash_candidates = []
         except Exception:
             progress.fail("ThreadManager.start() failed")
             logger.exception("ThreadManager.start() failed; aborting app startup")
@@ -158,14 +167,20 @@ def create_app(
                 # 用户侧没有任何感知（修复 R2 round 1 P0-1）。
                 # broker 走模块级单例（与 /ws/cron endpoint + run.py 装配的
                 # WebDeliverySink 共享同一个实例）。
+                from web.cron_delivery import ThreadTargetSink
+
                 lifespan_cron_dispatcher = DeliveryDispatcher(
                     web_sink=WebDeliverySink(get_broker()),
+                    target_sink=ThreadTargetSink(thread_manager),
                 )
+                preset_map = {p.id: p for p in cfg.web.llm_presets}
                 ticker_runtime, ticker_bridge = build_cron_execution_bridge(
                     cfg,
                     scheduler_store,
                     event_sinks=[],
                     dispatcher=lifespan_cron_dispatcher,
+                    preset_map=preset_map,
+                    trace_dir=cron_home / "traces",
                 )
                 ticker_stop = asyncio.Event()
                 ticker_task = asyncio.create_task(
@@ -252,7 +267,10 @@ def create_app(
     app.state.claude_session_manager = _SharedSessionManager()
     # codex 通道（与 claude_code 平级，独立 SessionManager 单例）
     app.state.codex_session_manager = _SharedSessionManager()
-    app.state.codex_service = CodexService(app.state.codex_session_manager)
+    app.state.codex_service = CodexService(
+        app.state.codex_session_manager,
+        thread_manager=thread_manager,
+    )
 
     # 6. middleware（顺序：CSRF → Auth；先注册的最外层）
     app.add_middleware(AuthMiddleware, allow_docs=cfg.web.dev_mode)
@@ -266,11 +284,12 @@ def create_app(
     from web.codex import router as codex_router
     from web.routers.auth import router as auth_router
     from web.routers.claude import router as claude_router
+    from web.routers.codex import router as codex_rest_router
     from web.routers.manage import router as manage_router
     from web.routers.presets import router as presets_router
+    from web.routers.slash_candidates import router as slash_candidates_router
     from web.routers.threads import router as threads_router
     from web.routers.whiteboard import router as whiteboard_router
-    from web.routers.codex import router as codex_rest_router
     from web.routers.workspace_git import router as workspace_git_router
     from web.routers.workspace_shell import router as workspace_shell_router
 
@@ -285,6 +304,7 @@ def create_app(
     app.include_router(claude_router)
     app.include_router(workspace_git_router)
     app.include_router(workspace_shell_router)
+    app.include_router(slash_candidates_router)
 
     # 9. WS endpoint
     from web.cron_ws import register_cron_ws_routes

@@ -216,13 +216,13 @@ export function CodexView({ threadId, thread }: Props) {
     turnSeqRef.current = 0;
   }, [threadId]);
 
-  const sdkSessionId = thread?.sdk_session_id ?? "";
+  const codexThreadId = thread?.codex_thread_id ?? "";
   useEffect(() => {
-    if (!sdkSessionId) return;
+    if (!codexThreadId) return;
     let cancelled = false;
     setHistoryLoading(true);
     apiGet<{ messages: NormalizedMessage[] }>(
-      `/api/codex/sessions/${encodeURIComponent(sdkSessionId)}/history`,
+      `/api/codex/sessions/${encodeURIComponent(codexThreadId)}/history`,
     )
       .then((r) => {
         if (cancelled) return;
@@ -248,7 +248,7 @@ export function CodexView({ threadId, thread }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [threadId, sdkSessionId]);
+  }, [threadId, codexThreadId]);
 
   useEffect(() => {
     if (!socket) return;

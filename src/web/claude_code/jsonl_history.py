@@ -1,6 +1,6 @@
 """JSONL 持久化历史 parser（v0.2）。
 
-读 ``~/.claude/projects/<encoded-cwd>/<sdk_session_id>.jsonl``，把 Claude Code
+读 ``~/.claude/projects/<encoded-cwd>/<claude_thread_id>.jsonl``，把 Claude Code
 SDK 落盘的原始 entry 流翻译成 :class:`NormalizedMessage` 形态的 dict 列表，供
 ``/api/projects/<cwd>/sessions/<sid>/history`` 这类 history-resume 接口直接吐
 回前端。
@@ -55,10 +55,10 @@ _logger = logging.getLogger(__name__)
 
 def jsonl_path_for(
     cwd: str,
-    sdk_session_id: str,
+    claude_thread_id: str,
     claude_home: Path | None = None,
 ) -> Path:
-    """根据 cwd + sdk_session_id 拼出 jsonl 文件路径。
+    """根据 cwd + claude_thread_id 拼出 jsonl 文件路径。
 
     Args:
         cwd: 工作目录原文（如 ``/Volumes/machub_app/proj/kongming-agent``）。
@@ -66,17 +66,17 @@ def jsonl_path_for(
             落盘时一致；e2e 实测 ``/Volumes/machub_app/proj/kongming-agent``
             对应目录名 ``-Volumes-machub-app-proj-kongming-agent``，注意
             ``_`` 也变 ``-``）。
-        sdk_session_id: SDK session id（jsonl 文件名去掉 ``.jsonl`` 后缀）。
+        claude_thread_id: SDK session id（jsonl 文件名去掉 ``.jsonl`` 后缀）。
         claude_home: Claude 数据目录，默认 ``Path.home() / ".claude"``。
             单元测试可注入临时目录。
 
     Returns:
-        ``<claude_home>/projects/<encoded-cwd>/<sdk_session_id>.jsonl``。
+        ``<claude_home>/projects/<encoded-cwd>/<claude_thread_id>.jsonl``。
         **不校验文件存在**，只做路径拼接。
     """
     home = claude_home if claude_home is not None else Path.home() / ".claude"
     encoded = _encode_cwd(cwd)
-    return home / "projects" / encoded / f"{sdk_session_id}.jsonl"
+    return home / "projects" / encoded / f"{claude_thread_id}.jsonl"
 
 
 def _encode_cwd(cwd: str) -> str:
@@ -90,13 +90,13 @@ def _encode_cwd(cwd: str) -> str:
 
 def parse_jsonl_history(
     path: Path,
-    sdk_session_id: str,
+    claude_thread_id: str,
 ) -> list[dict[str, Any]]:
     """读取 jsonl 文件，过滤 sessionId 匹配的行，翻译成 NormalizedMessage 列表。
 
     Args:
         path: jsonl 文件路径。文件不存在 / 无权限 → 返回空列表。
-        sdk_session_id: 期望的 SDK session id。``entry.sessionId`` 不匹配
+        claude_thread_id: 期望的 SDK session id。``entry.sessionId`` 不匹配
             的行直接 skip。
 
     Returns:
@@ -124,10 +124,10 @@ def parse_jsonl_history(
                     continue
                 if not isinstance(entry, dict):
                     continue
-                if entry.get("sessionId") != sdk_session_id:
+                if entry.get("sessionId") != claude_thread_id:
                     continue
 
-                translated = _translate_entry(entry, sdk_session_id)
+                translated = _translate_entry(entry, claude_thread_id)
                 messages.extend(translated)
     except OSError as exc:
         _logger.warning("jsonl_history: read error on %s: %s", path, exc)
@@ -144,7 +144,7 @@ def parse_jsonl_history(
 
 def _translate_entry(
     entry: dict[str, Any],
-    sdk_session_id: str,
+    claude_thread_id: str,
 ) -> list[dict[str, Any]]:
     """把单条 entry 翻译成 0..N 条 NormalizedMessage dict。
 
@@ -155,7 +155,7 @@ def _translate_entry(
     if entry_type == "system":
         if entry.get("subtype") != "init":
             return []
-        out = _base(entry, sdk_session_id)
+        out = _base(entry, claude_thread_id)
         out["kind"] = "session_created"
         new_sid = entry.get("sessionId")
         if isinstance(new_sid, str):
@@ -163,17 +163,17 @@ def _translate_entry(
         return [out]
 
     if entry_type == "user":
-        return _translate_user(entry, sdk_session_id)
+        return _translate_user(entry, claude_thread_id)
 
     if entry_type == "assistant":
-        return _translate_assistant(entry, sdk_session_id)
+        return _translate_assistant(entry, claude_thread_id)
 
     return []
 
 
 def _translate_user(
     entry: dict[str, Any],
-    sdk_session_id: str,
+    claude_thread_id: str,
 ) -> list[dict[str, Any]]:
     """``type=user`` → ``text`` (str) 或 ``tool_result``（list of blocks）。"""
     message = entry.get("message")
@@ -182,7 +182,7 @@ def _translate_user(
     content = message.get("content")
 
     if isinstance(content, str):
-        out = _base(entry, sdk_session_id)
+        out = _base(entry, claude_thread_id)
         out["kind"] = "text"
         out["role"] = "user"
         out["content"] = content
@@ -198,7 +198,7 @@ def _translate_user(
             tool_use_id = block.get("tool_use_id")
             if not isinstance(tool_use_id, str):
                 continue
-            out = _base(entry, sdk_session_id)
+            out = _base(entry, claude_thread_id)
             out["kind"] = "tool_result"
             out["toolId"] = tool_use_id
             if "content" in block:
@@ -214,7 +214,7 @@ def _translate_user(
 
 def _translate_assistant(
     entry: dict[str, Any],
-    sdk_session_id: str,
+    claude_thread_id: str,
 ) -> list[dict[str, Any]]:
     """``type=assistant`` → 遍历 ``message.content`` blocks，按 block.type 翻译。"""
     message = entry.get("message")
@@ -234,7 +234,7 @@ def _translate_assistant(
             text = block.get("text")
             if not isinstance(text, str):
                 continue
-            out = _base(entry, sdk_session_id)
+            out = _base(entry, claude_thread_id)
             out["kind"] = "text"
             out["role"] = "assistant"
             out["content"] = text
@@ -244,7 +244,7 @@ def _translate_assistant(
             thinking = block.get("thinking")
             if not isinstance(thinking, str):
                 continue
-            out = _base(entry, sdk_session_id)
+            out = _base(entry, claude_thread_id)
             out["kind"] = "thinking"
             out["content"] = thinking
             results.append(out)
@@ -254,7 +254,7 @@ def _translate_assistant(
             tool_name = block.get("name")
             if not isinstance(tool_id, str) or not isinstance(tool_name, str):
                 continue
-            out = _base(entry, sdk_session_id)
+            out = _base(entry, claude_thread_id)
             out["kind"] = "tool_use"
             out["toolId"] = tool_id
             out["toolName"] = tool_name
@@ -268,7 +268,7 @@ def _translate_assistant(
 
 def _base(
     entry: dict[str, Any],
-    sdk_session_id: str,
+    claude_thread_id: str,
 ) -> dict[str, Any]:
     """构造 NormalizedMessage 的 base 字段（id / sessionId / timestamp / provider）。
 
@@ -276,7 +276,7 @@ def _base(
     为空串以保证排序稳定。``id`` 取自 ``entry.uuid``；缺失时设为空串。
     """
     base: dict[str, Any] = {
-        "sessionId": sdk_session_id,
+        "sessionId": claude_thread_id,
         "provider": "claude",
     }
     timestamp = entry.get("timestamp")

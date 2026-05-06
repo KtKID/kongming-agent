@@ -44,7 +44,7 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from web._shared.session_manager import SessionManager
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
@@ -76,7 +76,10 @@ class WebSocketWriter:
 
 
 @router.websocket("/ws/codex")
-async def codex_websocket(websocket: WebSocket) -> None:
+async def codex_websocket(
+    websocket: WebSocket,
+    thread_id: str | None = Query(default=None),
+) -> None:
     """Codex WebSocket endpoint。
 
     协议详见 docs/codex-web-integration-v0.1/02-protocol.md。
@@ -124,7 +127,15 @@ async def codex_websocket(websocket: WebSocket) -> None:
     try:
         while True:
             data = await websocket.receive_json()
-            await _dispatch(websocket, writer, data, service, sessions, bg_tasks)
+            await _dispatch(
+                websocket,
+                writer,
+                data,
+                service,
+                sessions,
+                bg_tasks,
+                thread_id=thread_id,
+            )
     except WebSocketDisconnect:
         # 客户端断连：保留活跃 session（不主动 kill 子进程），让用户重连后
         # 通过 check-session-status 重接 writer
@@ -150,12 +161,20 @@ async def _dispatch(
     service: CodexService,
     sessions: SessionManager,
     bg_tasks: set[asyncio.Task[Any]],
+    *,
+    thread_id: str | None,
 ) -> None:
     """单条入站帧分发。"""
     msg_type = data.get("type") if isinstance(data, dict) else None
 
     if msg_type == "codex-command":
-        await _handle_codex_command(writer, data, service, bg_tasks)
+        await _handle_codex_command(
+            writer,
+            data,
+            service,
+            bg_tasks,
+            thread_id=thread_id,
+        )
         return
 
     if msg_type == "abort-session":
@@ -200,6 +219,8 @@ async def _handle_codex_command(
     data: dict[str, Any],
     service: CodexService,
     bg_tasks: set[asyncio.Task[Any]],
+    *,
+    thread_id: str | None,
 ) -> None:
     """``codex-command`` 帧 → :meth:`CodexService.query` 后台 task。
 
@@ -249,6 +270,7 @@ async def _handle_codex_command(
             permission_mode=permission_mode,
             model=model,
             resume=resume,
+            kongming_thread_id=thread_id,
             writer=writer,
         ),
     )

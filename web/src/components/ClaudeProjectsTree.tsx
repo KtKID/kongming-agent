@@ -182,7 +182,7 @@ export function ClaudeProjectsTree({
       ].some((value) => value.toLowerCase().includes(normalizedQuery));
 
       const matchedSessions = project.sessions.filter((session) =>
-        [session.title, session.sdk_session_id].some((value) =>
+        [session.title, session.claude_thread_id].some((value) =>
           value.toLowerCase().includes(normalizedQuery),
         ),
       );
@@ -418,7 +418,7 @@ function ProjectNode({
           </button>
           {visibleSessions.map((s) => (
             <SessionCard
-              key={s.sdk_session_id}
+              key={s.claude_thread_id}
               session={s}
               onClick={() => onSessionClick(s)}
             />

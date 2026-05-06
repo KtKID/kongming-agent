@@ -77,9 +77,9 @@ export function WorkspaceShellPanel({
     if (context?.shell_provider === "system_shell") {
       return "workspace shell";
     }
-    if (!context?.sdk_session_id) return "claude";
-    return `claude --resume ${context.sdk_session_id}`;
-  }, [context?.sdk_session_id, context?.shell_provider, lastStatus?.command]);
+    if (!context?.claude_thread_id) return "claude";
+    return `claude --resume ${context.claude_thread_id}`;
+  }, [context?.claude_thread_id, context?.shell_provider, lastStatus?.command]);
 
   const providerLabel = useMemo(() => {
     if (lastStatus?.command?.length) {

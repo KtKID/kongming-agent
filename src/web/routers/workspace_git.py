@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Request
+
+if TYPE_CHECKING:
+    from web.thread_metadata import ThreadMetadata
+    from web.types import ThreadManagerProtocol
 
 from web.errors import ThreadNotFoundError
 from web.protocol import (
@@ -41,9 +46,12 @@ def _validate_thread_id(thread_id: str) -> None:
         raise HTTPException(status_code=422, detail="invalid thread id")
 
 
-def _require_thread_meta(request: Request, thread_id: str):
-    tm = request.app.state.thread_manager
-    meta = next((item for item in tm.list_threads() if item.id == thread_id), None)
+def _require_thread_meta(request: Request, thread_id: str) -> ThreadMetadata:
+    tm: ThreadManagerProtocol = request.app.state.thread_manager
+    meta: ThreadMetadata | None = next(
+        (item for item in tm.list_threads() if item.id == thread_id),
+        None,
+    )
     if meta is None:
         raise ThreadNotFoundError(f"thread not found: {thread_id}")
     return meta
@@ -179,7 +187,9 @@ async def post_workspace_git_create_branch(
     try:
         meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
         root = require_workspace_root(meta)
-        payload = await asyncio.to_thread(create_git_branch, root, body.branch, checkout=body.checkout)
+        payload = await asyncio.to_thread(
+            create_git_branch, root, body.branch, checkout=body.checkout
+        )
     except ThreadNotFoundError:
         raise
     except (WorkspaceError, WorkspaceGitError) as exc:

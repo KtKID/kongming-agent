@@ -72,17 +72,17 @@ class FakeTM:
         del thread_id
         return None
 
-    def find_thread_by_sdk_session_id(self, sdk_session_id: str) -> ThreadMetadata | None:
-        del sdk_session_id
+    def find_thread_by_claude_thread_id(self, claude_thread_id: str) -> ThreadMetadata | None:
+        del claude_thread_id
         return None
 
-    async def bind_sdk_session(
+    async def bind_claude_thread(
         self,
         thread_id: str,
-        sdk_session_id: str,
+        claude_thread_id: str,
         cwd: str,
     ) -> ThreadMetadata:
-        del thread_id, sdk_session_id, cwd
+        del thread_id, claude_thread_id, cwd
         raise NotImplementedError
 
     async def add_thread_usage(
@@ -138,7 +138,7 @@ def test_workspace_context_for_claude_code_thread(tmp_path: Path) -> None:
                 name="Claude",
                 preset_id="",
                 backend_kind="claude_code",
-                sdk_session_id="sdk-1",
+                claude_thread_id="sdk-1",
                 cwd="/tmp/project-a",
                 created_at=1.0,
                 updated_at=2.0,
@@ -170,7 +170,7 @@ def test_workspace_context_for_thread_without_cwd(tmp_path: Path) -> None:
                 name="Generic",
                 preset_id="preset-a",
                 backend_kind="generic_chat",
-                sdk_session_id="",
+                claude_thread_id="",
                 cwd="",
                 created_at=1.0,
                 updated_at=2.0,
@@ -203,7 +203,7 @@ def test_workspace_context_for_generic_thread_with_cwd_uses_system_shell(tmp_pat
                 name="Generic",
                 preset_id="preset-a",
                 backend_kind="generic_chat",
-                sdk_session_id="",
+                claude_thread_id="",
                 cwd="/tmp/project-b",
                 created_at=1.0,
                 updated_at=2.0,

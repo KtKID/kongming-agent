@@ -37,6 +37,7 @@ from scheduler.store import Store
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from config_loader.models import LLMPresetConfig
     from context.session_bootstrap import SessionBootstrap
     from core.contracts import EventSink, Session
     from scheduler.delivery import DeliveryDispatcher
@@ -89,6 +90,8 @@ def build_cron_execution_bridge(
     session_factory: Callable[[str], Session] | None = None,
     session_bootstrap: SessionBootstrap | None = None,
     dispatcher: DeliveryDispatcher | None = None,
+    preset_map: dict[str, LLMPresetConfig] | None = None,
+    trace_dir: Path | None = None,
 ) -> tuple[NativeRuntime, ExecutionBridge]:
     """装配 :class:`NativeRuntime` + :class:`ExecutionBridge`。
 
@@ -109,6 +112,9 @@ def build_cron_execution_bridge(
             时 bridge 跑 v0.2 行为（不投递）；M4/M5 装配方传入实例后，cron
             触发的 final_message 才会按 ``task.delivery.channel`` 路由到
             web / cli sink。
+        preset_map: v0.4 cron-thread-preset：per-task LLM preset 映射表。
+            ``task.preset_id`` 命中 key 时 bridge 按 preset 构建独立 provider；
+            ``None`` 时所有 task 用同一个默认 provider。
 
     Returns:
         ``(runtime, bridge)`` 二元组：
@@ -118,9 +124,7 @@ def build_cron_execution_bridge(
           手动 ``run`` 调用。
     """
     sinks = list(event_sinks or [])
-    resolved_factory = session_factory or _default_cron_session_factory(
-        config, session_bootstrap
-    )
+    resolved_factory = session_factory or _default_cron_session_factory(config, session_bootstrap)
     runtime = NativeRuntime.build(
         config,
         event_sinks=sinks,
@@ -138,6 +142,9 @@ def build_cron_execution_bridge(
         agent_spec=runtime.agent_spec,
         store=store,
         dispatcher=dispatcher,
+        preset_map=preset_map,
+        base_config=config,
+        trace_dir=trace_dir,
     )
     return runtime, bridge
 

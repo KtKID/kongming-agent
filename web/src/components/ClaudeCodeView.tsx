@@ -239,9 +239,9 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
   }, [threadId]);
 
   // --- history loading (skip when pending) ---
-  const sdkSessionId = thread?.sdk_session_id ?? "";
+  const claudeThreadId = thread?.claude_thread_id ?? "";
   useEffect(() => {
-    if (!threadId || !sdkSessionId) return;
+    if (!threadId || !claudeThreadId) return;
     let cancelled = false;
     setHistoryLoading(true);
     apiGet<{ messages: NormalizedMessage[] }>(
@@ -271,7 +271,7 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [threadId, sdkSessionId]);
+  }, [threadId, claudeThreadId]);
 
   // --- WS message listener (skip when pending / no socket) ---
   useEffect(() => {

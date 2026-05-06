@@ -58,6 +58,8 @@ from web.protocol import (
     EvolutionReviewDTO,
     ImportClaudeSessionRequest,
     ImportClaudeSessionResponse,
+    ImportCodexSessionRequest,
+    ImportCodexSessionResponse,
     RenameThreadRequest,
     ThreadMetadataDTO,
     UpdateWorkspaceFileRequest,
@@ -99,7 +101,7 @@ def _to_dto(meta: ThreadMetadata) -> ThreadMetadataDTO:
         name=meta.name,
         preset_id=meta.preset_id,
         backend_kind=meta.backend_kind,
-        sdk_session_id=meta.sdk_session_id,
+        claude_thread_id=meta.claude_thread_id,
         codex_thread_id=meta.codex_thread_id,
         cwd=meta.cwd,
         created_at=meta.created_at,
@@ -123,7 +125,7 @@ def _to_workspace_context(meta: ThreadMetadata) -> WorkspaceContextDTO:
         thread_id=meta.id,
         backend_kind=meta.backend_kind,
         workspace_root=workspace_root,
-        sdk_session_id=meta.sdk_session_id,
+        claude_thread_id=meta.claude_thread_id,
         shell_provider=(
             "claude_code"
             if shell_available and meta.backend_kind == "claude_code"
@@ -260,7 +262,7 @@ async def create_thread(
 
     校验：
     - ``backend_kind="generic_chat"`` 必须有非空 ``preset_id``，否则 400。
-    - ``backend_kind="claude_code"`` 时 ``preset_id`` 可空（前端通常省略 / 传 ""）。
+    - ``backend_kind="claude_code"`` / ``"codex"`` 时 ``preset_id`` 可空（前端通常省略 / 传 ""）。
     - ``cwd`` 传入时必须是绝对路径。
     """
     if body.backend_kind == "generic_chat" and (not body.preset_id or not body.preset_id.strip()):
@@ -293,21 +295,21 @@ async def import_claude_session(
 
     防重复语义：
 
-    1. ``find_thread_by_sdk_session_id(sdk_session_id)`` 命中 → 返回该 thread
+    1. ``find_thread_by_claude_thread_id(claude_thread_id)`` 命中 → 返回该 thread
        + ``imported=False``（用户重复点同一 session，不再多创建 thread）。
     2. 未命中 → ``create_thread(name, "", backend_kind="claude_code")`` 后
-       ``bind_sdk_session(thread_id, sdk_session_id, cwd)`` → ``imported=True``。
+       ``bind_claude_thread(thread_id, claude_thread_id, cwd)`` → ``imported=True``。
 
-    bind_sdk_session 内部已守 invariant（已绑 / 1:1 冲突会抛），这里不再
-    重复检查；竞态下两个 import 同时打到同 ``sdk_session_id`` 时，第二个会被
-    bind 阶段的全局反查拦下抛 ``SdkSessionConflictError``，走 500（v0.2 接受
+    bind_claude_thread 内部已守 invariant（已绑 / 1:1 冲突会抛），这里不再
+    重复检查；竞态下两个 import 同时打到同 ``claude_thread_id`` 时，第二个会被
+    bind 阶段的全局反查拦下抛 ``ClaudeThreadConflictError``，走 500（v0.2 接受
     极小概率失败 —— 单用户场景下不构成问题）。
 
-    校验：DTO 已强制 ``cwd`` 必须以 ``/`` 开头、``name`` / ``sdk_session_id``
+    校验：DTO 已强制 ``cwd`` 必须以 ``/`` 开头、``name`` / ``claude_thread_id``
     长度上限。鉴权由全局 :class:`web.auth.AuthMiddleware` 兜底。
     """
     tm: ThreadManagerProtocol = request.app.state.thread_manager
-    existing = tm.find_thread_by_sdk_session_id(body.sdk_session_id)
+    existing = tm.find_thread_by_claude_thread_id(body.claude_thread_id)
     if existing is not None:
         return ImportClaudeSessionResponse(
             thread=_to_dto(existing),
@@ -318,12 +320,44 @@ async def import_claude_session(
         "",
         backend_kind="claude_code",
     )
-    bound = await tm.bind_sdk_session(
+    bound = await tm.bind_claude_thread(
         new_thread.id,
-        body.sdk_session_id,
+        body.claude_thread_id,
         body.cwd,
     )
     return ImportClaudeSessionResponse(
+        thread=_to_dto(bound),
+        imported=True,
+    )
+
+
+@router.post("/import-codex-session")
+async def import_codex_session(
+    body: ImportCodexSessionRequest,
+    request: Request,
+) -> ImportCodexSessionResponse:
+    """导入已有 Codex CLI session 为 kongming thread。
+
+    防重复语义同 import-claude-session：codex_thread_id 已绑 → 返回原 thread。
+    """
+    tm: ThreadManagerProtocol = request.app.state.thread_manager
+    existing = tm.find_thread_by_codex_thread_id(body.codex_thread_id)
+    if existing is not None:
+        return ImportCodexSessionResponse(
+            thread=_to_dto(existing),
+            imported=False,
+        )
+    new_thread = await tm.create_thread(
+        body.name,
+        "",
+        backend_kind="codex",
+    )
+    bound = await tm.bind_codex_thread(
+        new_thread.id,
+        body.codex_thread_id,
+        body.cwd,
+    )
+    return ImportCodexSessionResponse(
         thread=_to_dto(bound),
         imported=True,
     )
@@ -370,8 +404,8 @@ async def get_claude_history(
 
     流程：
     1. 由 ``thread_id`` 反查 :class:`ThreadMetadata`（同 :func:`delete_thread`）。
-    2. 校验 ``backend_kind == "claude_code"`` 且已绑定非空 ``sdk_session_id``。
-    3. 用 ``cwd`` + ``sdk_session_id`` 拼出 JSONL 路径，存在性独立 404。
+    2. 校验 ``backend_kind == "claude_code"`` 且已绑定非空 ``claude_thread_id``。
+    3. 用 ``cwd`` + ``claude_thread_id`` 拼出 JSONL 路径，存在性独立 404。
     4. :func:`parse_jsonl_history` 同步 IO，用 :func:`asyncio.to_thread` 隔离。
 
     返回 ``{"messages": [<NormalizedMessage dict>, ...]}``——v0.2.0 暂不为
@@ -380,7 +414,7 @@ async def get_claude_history(
 
     错误：
 
-    - 400 thread 不存在 / ``backend_kind`` 非 ``claude_code`` / 未绑定 sdk_session_id
+    - 400 thread 不存在 / ``backend_kind`` 非 ``claude_code`` / 未绑定 claude_thread_id
     - 404 jsonl 文件不存在（thread 已绑但 SDK 文件被外部清理）
     """
     _validate_thread_id(thread_id)
@@ -394,15 +428,15 @@ async def get_claude_history(
             status_code=400,
             detail="thread backend_kind is not claude_code",
         )
-    if not meta.sdk_session_id:
+    if not meta.claude_thread_id:
         raise HTTPException(
             status_code=400,
-            detail="thread has no bound sdk_session_id",
+            detail="thread has no bound claude_thread_id",
         )
-    path = jsonl_path_for(meta.cwd, meta.sdk_session_id)
+    path = jsonl_path_for(meta.cwd, meta.claude_thread_id)
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"jsonl file not found: {path}")
-    messages = await asyncio.to_thread(parse_jsonl_history, path, meta.sdk_session_id)
+    messages = await asyncio.to_thread(parse_jsonl_history, path, meta.claude_thread_id)
     return {"messages": messages}
 
 

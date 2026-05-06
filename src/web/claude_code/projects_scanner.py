@@ -37,7 +37,7 @@ _TITLE_BROKEN_PLACEHOLDER = "(无法解析)"
 class SessionSummary:
     """单个 SDK session（jsonl 文件）的摘要。"""
 
-    sdk_session_id: str
+    claude_thread_id: str
     """jsonl 文件名（去掉 ``.jsonl`` 后缀），通常为 UUID 字符串。"""
 
     title: str
@@ -178,7 +178,7 @@ def _build_session_summary(jsonl_path: Path) -> tuple[SessionSummary, str] | Non
         return None
     last_modified = stat.st_mtime
 
-    sdk_session_id = jsonl_path.stem
+    claude_thread_id = jsonl_path.stem
 
     message_count = 0
     title: str | None = None
@@ -221,7 +221,7 @@ def _build_session_summary(jsonl_path: Path) -> tuple[SessionSummary, str] | Non
 
     return (
         SessionSummary(
-            sdk_session_id=sdk_session_id,
+            claude_thread_id=claude_thread_id,
             title=title,
             last_modified=last_modified,
             message_count=message_count,

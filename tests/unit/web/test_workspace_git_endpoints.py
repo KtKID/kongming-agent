@@ -1,10 +1,23 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tests.unit.web.test_workspace_context_endpoint import CSRF_HEADERS, FakeTM, _login_client
 from web.thread_metadata import ThreadMetadata
+
+
+def _clean_git_env() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
+@pytest.fixture(autouse=True)
+def _strip_git_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(key)
 
 
 def _run_git(repo: Path, *args: str) -> str:
@@ -14,6 +27,7 @@ def _run_git(repo: Path, *args: str) -> str:
         capture_output=True,
         text=True,
         encoding="utf-8",
+        env=_clean_git_env(),
     )
     return result.stdout
 
@@ -29,6 +43,7 @@ def _commit(repo: Path, message: str) -> None:
             "-c",
             "user.email=test@example.com",
             "commit",
+            "--no-verify",
             "-m",
             message,
         ],
@@ -36,6 +51,7 @@ def _commit(repo: Path, message: str) -> None:
         capture_output=True,
         text=True,
         encoding="utf-8",
+        env=_clean_git_env(),
     )
 
 
@@ -57,7 +73,7 @@ def _make_tm(workspace_root: Path) -> FakeTM:
                 name="Claude",
                 preset_id="",
                 backend_kind="claude_code",
-                sdk_session_id="sdk-1",
+                claude_thread_id="sdk-1",
                 cwd=str(workspace_root),
                 created_at=1.0,
                 updated_at=2.0,

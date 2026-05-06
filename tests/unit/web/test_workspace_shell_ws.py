@@ -19,7 +19,7 @@ class FakeTM:
         workspace_root: Path,
         *,
         backend_kind: str = "claude_code",
-        sdk_session_id: str = "sdk-1",
+        claude_thread_id: str = "sdk-1",
     ) -> None:
         self._started = False
         self._closed = False
@@ -29,7 +29,7 @@ class FakeTM:
             name="Claude",
             preset_id="",
             backend_kind=backend_kind,
-            sdk_session_id=sdk_session_id,
+            claude_thread_id=claude_thread_id,
             cwd=str(workspace_root),
             created_at=1.0,
             updated_at=2.0,
@@ -75,15 +75,17 @@ class FakeTM:
         del thread_id
         return None
 
-    def find_thread_by_sdk_session_id(self, sdk_session_id: str) -> ThreadMetadata | None:
-        del sdk_session_id
+    def find_thread_by_claude_thread_id(self, claude_thread_id: str) -> ThreadMetadata | None:
+        del claude_thread_id
         return None
 
-    async def bind_sdk_session(self, thread_id: str, sdk_session_id: str, cwd: str) -> ThreadMetadata:
-        self.bind_calls.append((thread_id, sdk_session_id, cwd))
+    async def bind_claude_thread(
+        self, thread_id: str, claude_thread_id: str, cwd: str
+    ) -> ThreadMetadata:
+        self.bind_calls.append((thread_id, claude_thread_id, cwd))
         self._meta = self._meta.model_copy(
             update={
-                "sdk_session_id": sdk_session_id,
+                "claude_thread_id": claude_thread_id,
                 "cwd": cwd,
             }
         )
@@ -250,7 +252,7 @@ def test_workspace_shell_ws_uses_system_shell_for_generic_chat(
     monkeypatch.setattr("web.routers.workspace_shell.WorkspaceShellProcess", FakeShellProcess)
     client = _login_client(
         tmp_path,
-        FakeTM(workspace, backend_kind="generic_chat", sdk_session_id=""),
+        FakeTM(workspace, backend_kind="generic_chat", claude_thread_id=""),
     )
     try:
         with client.websocket_connect("/ws/workspace-shell?thread_id=thread-000000000004") as ws:
@@ -278,7 +280,7 @@ def test_workspace_shell_ws_binds_new_claude_session_for_unbound_thread(
         "web.routers.workspace_shell.wait_for_new_claude_session",
         _fake_wait_for_new_claude_session,
     )
-    tm = FakeTM(workspace, backend_kind="claude_code", sdk_session_id="")
+    tm = FakeTM(workspace, backend_kind="claude_code", claude_thread_id="")
     client = _login_client(tmp_path, tm)
     try:
         with client.websocket_connect("/ws/workspace-shell?thread_id=thread-000000000004") as ws:

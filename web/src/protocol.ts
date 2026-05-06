@@ -231,13 +231,14 @@ export interface RenameThreadRequest {
  * `id` 形如 `thread-<12 位 hex>`；
  * `name.length <= 200`；
  * `message_count >= 0`；
- * `schema_version`：v0.2 起接受 1 / 2 / 3；老 v1/v2 文件由后端读盘时懒升级到 v3。
+ * `schema_version`：当前 v6；老文件由后端读盘时懒升级。
  *
  * v0.1.6 新增 `backend_kind`；老 v1 文件读入默认 `generic_chat`。
- * v0.2 新增 `sdk_session_id` + `cwd`（claude_code thread 与 SDK session 持久化绑定）；
+ * v0.2 新增 `claude_thread_id` + `cwd`（claude_code thread 与 SDK session 持久化绑定）；
  * 老 v2 文件读入默认空字符串。
  * v0.2.1 新增 thread 级累计 `cumulative_*_tokens`；老 v3 文件读入默认 0。
  * v0.2.2 新增 `codex_thread_id`，`backend_kind` 支持 `codex`。
+ * v0.2.3 将旧 `sdk_session_id` 改名为 `claude_thread_id`。
  * `preset_id` 在 `backend_kind="claude_code"` 时允许空字符串占位。
  */
 export interface ThreadMetadataDTO {
@@ -255,11 +256,11 @@ export interface ThreadMetadataDTO {
    * - "codex"        — Codex CLI 子进程，走 /ws/codex
    */
   backend_kind: BackendKind;
-  /** Claude SDK 分配的 session UUID；空字符串=未绑定（首次对话前），绑定后用于定位 ~/.claude/projects/ 下的 .jsonl 历史 */
-  sdk_session_id: string;
+  /** Claude 底层 thread/session id；空字符串=未绑定（首次对话前）；绑定后用于定位 ~/.claude/projects/ 下的 .jsonl 历史文件和 resume 对话 */
+  claude_thread_id: string;
   /** Codex CLI 的 UUIDv7 thread id；仅 backend_kind="codex" 时有值，其他后端为空字符串 */
-  codex_thread_id?: string;
-  /** workspace 工作目录绝对路径；Files/Git/Shell 面板绑定此目录；空字符串=纯聊天不绑 workspace */
+  codex_thread_id: string;
+  /** workspace 工作目录绝对路径（如 /Volumes/machub_app/proj/kongming-agent）；Files/Git/Shell 面板绑定此目录；空字符串=纯聊天不绑 workspace */
   cwd: string;
   /** 创建时间，Unix 时间戳（秒） */
   created_at: number;
@@ -273,8 +274,8 @@ export interface ThreadMetadataDTO {
   cumulative_completion_tokens: number;
   /** thread 级累计总 token */
   cumulative_total_tokens: number;
-  /** 元数据 schema 版本号，当前 5；接受 1-5（老文件兼容），写盘永远写最新版 */
-  schema_version?: 1 | 2 | 3 | 4 | 5;
+  /** 元数据 schema 版本号，当前 6；接受 1-6（老文件兼容），写盘永远写最新版 */
+  schema_version?: 1 | 2 | 3 | 4 | 5 | 6;
 }
 
 /**
@@ -289,7 +290,7 @@ export interface WorkspaceContextDTO {
   thread_id: string;
   backend_kind: BackendKind;
   workspace_root: string;
-  sdk_session_id: string;
+  claude_thread_id: string;
   shell_provider: "claude_code" | "system_shell" | "none";
   files_available: boolean;
   shell_available: boolean;
@@ -564,7 +565,7 @@ export interface UpdateWhiteboardLayoutRequest {
 
 /** 单条 Claude SDK session 摘要（从 `~/.claude/projects/<dir>/<sid>.jsonl` 抽取）。 */
 export interface ClaudeSessionSummaryDTO {
-  sdk_session_id: string;
+  claude_thread_id: string;
   title: string;
   last_modified: number; // Unix 秒
   message_count: number;
@@ -587,14 +588,14 @@ export interface ClaudeProjectsRefreshProgressDTO {
 
 /** `POST /api/threads/import-claude-session` 请求体。 */
 export interface ImportClaudeSessionRequest {
-  sdk_session_id: string;
+  claude_thread_id: string;
   cwd: string;
   name: string;
 }
 
 /**
  * `POST /api/threads/import-claude-session` 响应。
- * `imported=false` 表示该 sdk_session_id 已绑定旧 thread，直接复用。
+ * `imported=false` 表示该 claude_thread_id 已绑定旧 thread，直接复用。
  */
 export interface ImportClaudeSessionResponse {
   thread: ThreadMetadataDTO;

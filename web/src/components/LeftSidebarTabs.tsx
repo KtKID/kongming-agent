@@ -1,8 +1,8 @@
 import type { JSX } from "react";
-import { MessageSquare, Bot } from "lucide-react";
+import { MessageSquare, Bot, Terminal } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
-export type LeftSidebarTab = "generic" | "claude";
+export type LeftSidebarTab = "generic" | "claude" | "codex";
 
 interface LeftSidebarTabsProps {
   active: LeftSidebarTab;
@@ -14,7 +14,8 @@ const STORAGE_KEY = "kongming.left-sidebar-tab";
 export function loadPersistedTab(): LeftSidebarTab {
   try {
     const v = localStorage.getItem(STORAGE_KEY);
-    return v === "claude" ? "claude" : "generic";
+    if (v === "claude" || v === "codex") return v;
+    return "generic";
   } catch {
     return "generic";
   }
@@ -35,14 +36,18 @@ export function LeftSidebarTabs({ active, onChange }: LeftSidebarTabsProps): JSX
       onValueChange={(v) => onChange(v as LeftSidebarTab)}
       className="w-full"
     >
-      <TabsList className="grid w-full grid-cols-2">
-        <TabsTrigger value="generic" className="gap-1.5">
+      <TabsList className="grid w-full grid-cols-3">
+        <TabsTrigger value="generic" className="gap-1">
           <MessageSquare className="h-3.5 w-3.5" />
           通用
         </TabsTrigger>
-        <TabsTrigger value="claude" className="gap-1.5">
+        <TabsTrigger value="claude" className="gap-1">
           <Bot className="h-3.5 w-3.5" />
           Claude
+        </TabsTrigger>
+        <TabsTrigger value="codex" className="gap-1">
+          <Terminal className="h-3.5 w-3.5" />
+          Codex
         </TabsTrigger>
       </TabsList>
     </Tabs>

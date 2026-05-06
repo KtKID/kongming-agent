@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ClaudeCodeView } from "@/components/ClaudeCodeView";
 import type { NormalizedMessage, ThreadMetadataDTO } from "@/protocol";
@@ -55,10 +56,12 @@ describe("ClaudeCodeView", () => {
     mockApiGet.mockResolvedValue({ messages: history });
 
     render(
-      <ClaudeCodeView
-        threadId="thread-1"
-        thread={{ sdk_session_id: "sdk-1" } as ThreadMetadataDTO}
-      />,
+      <MemoryRouter>
+        <ClaudeCodeView
+          threadId="thread-1"
+          thread={{ claude_thread_id: "sdk-1" } as ThreadMetadataDTO}
+        />
+      </MemoryRouter>,
     );
 
     await waitFor(() =>

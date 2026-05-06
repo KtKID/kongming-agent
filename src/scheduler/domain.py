@@ -40,16 +40,18 @@ GRACE_MAX_SECONDS = 7200
 SILENT_MARKER = "[SILENT]"
 """final message 前缀触发投递抑制的标记。"""
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 """``scheduled_tasks.json`` / ``runs/*.jsonl`` 的持久化 schema 版本。
 
 v0.2 重构：引入 :attr:`TriggerType.SECONDS` 等新枚举值，**不兼容 v0.1 数据**。
 
 v0.3 新增（cron-delivery-v0.3）：``ScheduleDelivery`` 配置 +
 :class:`ScheduledRun` 的 ``delivered_at`` / ``delivery_status`` / ``seen_at``
-字段 + :class:`TaskState.DELETED` 软删除态。**不兼容 v0.2 数据**；
-旧版 ``tasks.json`` 由 Store 启动时迁移检测处理（重命名为 ``.v2.bak.<ts>``
-+ audit + 写空 v3）。
+字段 + :class:`TaskState.DELETED` 软删除态。**不兼容 v0.2 数据**。
+
+v0.4 新增（cron-thread-preset-v0.4）：``ScheduleDelivery.target`` 投递目标 +
+``ScheduledTask.preset_id`` LLM 选择。**不兼容 v0.3 数据**；
+旧版由 Store 启动时重置式迁移（备份 + 写空 v4）。
 """
 
 
@@ -363,28 +365,28 @@ class TaskTarget:
 
 @dataclass(frozen=True)
 class ScheduleDelivery:
-    """v0.3 新增：cron 任务触发后 ``final_message`` 的投递配置。
+    """cron 任务触发后 ``final_message`` 的投递配置。
 
-    - ``channel``: 投递渠道（web / cli）
+    - ``channel``: 广播渠道（web / cli）——始终走，决定 cron 区域的呈现方式
+    - ``target``: 投递目标（v0.4 新增）——非空时额外投递到具体目标
 
-    设计决策（v0.3 锁定）：
-    - **target 概念已取消**：v0.3 不再把投递结果绑定到具体 thread；所有
-      cron 触发结果统一进系统消息池（web 端用 ``/cron`` 触发记录 tab 查看，
-      cli 端下次提示符前 flush）。
-    - **不抽象 Protocol**：当前只两 channel，硬编码 enum 即可；远端 channel
-      （feishu / email / Slack 等）保留扩展点，不在 v0.3 实现。
+    target 格式约定（带前缀字符串）：
+    - ``None``: 只广播到 cron 区域，不投递到具体位置
+    - ``"thread:<thread_id>"``: 投递到该 thread（追加消息 + WS 通知）
+    - 未来扩展：``"feishu:<user_id>"`` 等（当前不实现）
 
     边界：仅承载配置数据；具体投递逻辑由 ``DeliveryDispatcher`` /
-    ``WebDeliverySink`` / ``CliDeliverySink`` 等运行时组件负责（见 M3-M5）。
+    ``WebDeliverySink`` / ``TargetDeliverySink`` 等运行时组件负责。
     """
 
     channel: DeliveryChannel
+    target: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.channel, DeliveryChannel):
-            raise TypeError(
-                f"channel must be DeliveryChannel, got {type(self.channel).__name__}"
-            )
+            raise TypeError(f"channel must be DeliveryChannel, got {type(self.channel).__name__}")
+        if self.target is not None and not isinstance(self.target, str):
+            raise TypeError(f"target must be str or None, got {type(self.target).__name__}")
 
 
 @dataclass(frozen=True)
@@ -414,7 +416,11 @@ class ScheduledTask:
     created_at: str
     updated_at: str
     delivery: ScheduleDelivery | None = None
-    """v0.3 新增：cron 触发后投递配置；``None`` 表示沿用默认（web channel）。"""
+    """cron 触发后投递配置；``None`` 表示沿用默认（web channel，无 target）。"""
+
+    preset_id: str = ""
+    """v0.4 新增：用哪个 LLM preset 执行。匹配 ``LLMPresetConfig.id``。
+    空串表示用全局默认（base_config.model）。创建时从来源 thread 继承。"""
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_id, str) or not self.task_id:
@@ -445,9 +451,10 @@ class ScheduledTask:
             raise ValueError("updated_at is required (ISO8601 str)")
         if self.delivery is not None and not isinstance(self.delivery, ScheduleDelivery):
             raise TypeError(
-                "delivery must be ScheduleDelivery or None, "
-                f"got {type(self.delivery).__name__}"
+                f"delivery must be ScheduleDelivery or None, got {type(self.delivery).__name__}"
             )
+        if not isinstance(self.preset_id, str):
+            raise TypeError(f"preset_id must be str, got {type(self.preset_id).__name__}")
         if not self.enabled and self.state not in _DISABLED_TASK_STATES:
             raise ValueError(
                 "enabled=False requires state in "
@@ -543,8 +550,7 @@ class ScheduledRun:
         _ensure_iso_or_none("delivered_at", self.delivered_at)
         if not isinstance(self.delivery_status, DeliveryStatus):
             raise TypeError(
-                "delivery_status must be DeliveryStatus, "
-                f"got {type(self.delivery_status).__name__}"
+                f"delivery_status must be DeliveryStatus, got {type(self.delivery_status).__name__}"
             )
         _ensure_iso_or_none("seen_at", self.seen_at)
 

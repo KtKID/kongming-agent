@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Send, Brain, ChevronUp } from "lucide-react";
 import { StatusLine } from "@/components/StatusLine";
+import { SlashMenu, useSlashMenu, type SlashCandidate } from "@/components/SlashMenu";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -51,6 +52,9 @@ export function Composer({
     ReasoningEffort | null
   >(null);
   const ref = useRef<HTMLTextAreaElement | null>(null);
+  const { showMenu, slashQuery, setShowMenu, handleInputChange } = useSlashMenu();
+  const [menuActiveIndex, setMenuActiveIndex] = useState(0);
+  const [menuFiltered, setMenuFiltered] = useState<SlashCandidate[]>([]);
 
   // 自适应高度
   useEffect(() => {
@@ -65,9 +69,43 @@ export function Composer({
     if (!text || disabled) return;
     onSubmit(text, reasoningEffort);
     setValue("");
+    setShowMenu(false);
+  };
+
+  const handleSlashSelect = (candidate: SlashCandidate) => {
+    setValue(candidate.slash + " ");
+    setShowMenu(false);
+    ref.current?.focus();
+  };
+
+  const handleChange = (text: string) => {
+    setValue(text);
+    handleInputChange(text);
   };
 
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showMenu && menuFiltered.length > 0) {
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setMenuActiveIndex((menuActiveIndex - 1 + menuFiltered.length) % menuFiltered.length);
+        return;
+      }
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setMenuActiveIndex((menuActiveIndex + 1) % menuFiltered.length);
+        return;
+      }
+      if (e.key === "Enter" && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        handleSlashSelect(menuFiltered[menuActiveIndex]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setShowMenu(false);
+        return;
+      }
+    }
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       submit();
@@ -81,18 +119,28 @@ export function Composer({
   return (
     <div className="border-t border-border bg-background p-4">
       <div className="mx-auto flex max-w-3xl flex-col gap-2">
-        <Textarea
-          ref={ref}
-          value={value}
-          disabled={disabled}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={onKey}
-          placeholder={
-            disabled ? "推理中，请稍候..." : "输入消息（⌘⏎ 发送）"
-          }
-          className="resize-none"
-          aria-label="消息输入"
-        />
+        <div className="relative">
+          <SlashMenu
+            query={slashQuery}
+            onSelect={handleSlashSelect}
+            onClose={() => setShowMenu(false)}
+            visible={showMenu}
+            onFilteredChange={(f) => { setMenuFiltered(f); setMenuActiveIndex(0); }}
+            activeIndex={menuActiveIndex}
+          />
+          <Textarea
+            ref={ref}
+            value={value}
+            disabled={disabled}
+            onChange={(e) => handleChange(e.target.value)}
+            onKeyDown={onKey}
+            placeholder={
+              disabled ? "推理中，请稍候..." : "输入消息（⌘⏎ 发送），/ 打开命令菜单"
+            }
+            className="resize-none"
+            aria-label="消息输入"
+          />
+        </div>
         <div className="flex items-center justify-between">
           <DropdownMenu>
             <DropdownMenuTrigger asChild>

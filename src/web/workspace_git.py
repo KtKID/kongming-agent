@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -202,6 +203,7 @@ def _run_git(
     allowed_returncodes: set[int] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """执行 git CLI。"""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     result = subprocess.run(
         ["git", "-C", str(root), *args],
         capture_output=True,
@@ -209,6 +211,7 @@ def _run_git(
         encoding="utf-8",
         errors="replace",
         check=False,
+        env=env,
     )
     allowed = allowed_returncodes if allowed_returncodes is not None else {0}
     if check and result.returncode not in allowed:

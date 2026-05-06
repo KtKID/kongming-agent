@@ -257,11 +257,16 @@ def _task_to_dict(task: ScheduledTask) -> dict[str, Any]:
         "created_at": task.created_at,
         "updated_at": task.updated_at,
     }
-    # v0.3 新增：delivery 配置；None 表示沿用默认（web channel）
+    # delivery 配置
     if task.delivery is not None:
-        payload["delivery"] = {"channel": task.delivery.channel.value}
+        delivery_dict: dict[str, Any] = {"channel": task.delivery.channel.value}
+        if task.delivery.target is not None:
+            delivery_dict["target"] = task.delivery.target
+        payload["delivery"] = delivery_dict
     else:
         payload["delivery"] = None
+    # v0.4：preset_id
+    payload["preset_id"] = task.preset_id
     return payload
 
 
@@ -291,13 +296,16 @@ def _dict_to_task(payload: dict[str, Any]) -> ScheduledTask:
         input_text=target_raw["input_text"],
         metadata={str(k): str(v) for k, v in metadata.items()},
     )
-    # v0.3 新增：delivery 字段；缺失或 None 为兼容旧任务（默认 web）
+    # delivery 字段；缺失或 None 为兼容旧任务（默认 web）
     delivery_raw = payload.get("delivery")
     delivery: ScheduleDelivery | None
     if delivery_raw is None:
         delivery = None
     else:
-        delivery = ScheduleDelivery(channel=DeliveryChannel(delivery_raw["channel"]))
+        delivery = ScheduleDelivery(
+            channel=DeliveryChannel(delivery_raw["channel"]),
+            target=delivery_raw.get("target"),
+        )
     return ScheduledTask(
         task_id=payload["task_id"],
         name=payload["name"],
@@ -313,6 +321,7 @@ def _dict_to_task(payload: dict[str, Any]) -> ScheduledTask:
         created_at=payload["created_at"],
         updated_at=payload["updated_at"],
         delivery=delivery,
+        preset_id=payload.get("preset_id", ""),
     )
 
 
@@ -446,9 +455,7 @@ class Store:
         # 防御：极端情况下同秒多次启动；用 counter 避免覆盖已有备份
         counter = 1
         while backup.exists():
-            backup = self._tasks_path.with_name(
-                f"{_TASKS_FILENAME}.{bak_label}.bak.{ts}.{counter}"
-            )
+            backup = self._tasks_path.with_name(f"{_TASKS_FILENAME}.{bak_label}.bak.{ts}.{counter}")
             counter += 1
         self._tasks_path.rename(backup)
 

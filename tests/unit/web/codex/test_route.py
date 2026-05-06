@@ -110,6 +110,28 @@ class TestCodexCommand:
         # 没传 sessionId → 生成 pending-XXX 占位
         sid = kwargs["session_id"]
         assert isinstance(sid, str) and sid.startswith("pending-")
+        assert kwargs["kongming_thread_id"] is None
+
+    def test_passes_thread_id_query_to_service(
+        self,
+        app_client: tuple[TestClient, AsyncMock, SessionManager],
+    ) -> None:
+        client, fake_service, _ = app_client
+        with client.websocket_connect("/ws/codex?thread_id=thread-aaaaaaaaaaaa") as ws:
+            ws.send_json(
+                {
+                    "type": "codex-command",
+                    "command": "hi",
+                    "options": {},
+                },
+            )
+            ws.send_json({"type": "_ping_unknown_"})
+            err = ws.receive_json()
+            assert err.get("kind") == "error"
+
+        fake_service.query.assert_called_once()
+        kwargs = fake_service.query.call_args.kwargs
+        assert kwargs["kongming_thread_id"] == "thread-aaaaaaaaaaaa"
 
     def test_resume_without_session_id_returns_error(
         self,

@@ -5,7 +5,7 @@
 - ``GET /api/claude/projects`` — 扫描 ``~/.claude/projects/`` 返回所有 project +
   每个 project 的 session 摘要树（按 ``last_modified`` 倒序）。
 
-后续任务（#8）将在此 router 追加 ``POST /api/claude/sessions/{sdk_session_id}/import``
+后续任务（#8）将在此 router 追加 ``POST /api/claude/sessions/{claude_thread_id}/import``
 等 endpoint，因此此模块只放 claude_code 相关的扫描 / 恢复路由，**不**与
 ``threads.py`` 混用。
 
@@ -49,7 +49,7 @@ def _serialize_projects(projects: list[ProjectSummary]) -> list[dict[str, Any]]:
             "display_name": p.display_name,
             "sessions": [
                 {
-                    "sdk_session_id": s.sdk_session_id,
+                    "claude_thread_id": s.claude_thread_id,
                     "title": s.title,
                     "last_modified": s.last_modified,
                     "message_count": s.message_count,
@@ -67,7 +67,7 @@ async def get_claude_projects() -> dict[str, Any]:
 
     Returns:
         dict: ``{"projects": [...]}``，每个 project 含 ``name`` / ``cwd``
-        / ``display_name`` / ``sessions``；session 含 ``sdk_session_id``
+        / ``display_name`` / ``sessions``；session 含 ``claude_thread_id``
         / ``title`` / ``last_modified`` / ``message_count``。
         ``~/.claude/projects/`` 不存在时 ``projects`` 为空列表。
     """
