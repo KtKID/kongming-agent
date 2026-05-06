@@ -207,6 +207,7 @@ def test_stream_event_text_delta_translates() -> None:
     assert len(out) == 1
     assert out[0]["kind"] == "stream_delta"
     assert out[0]["content"] == "Hel"
+    assert out[0]["deltaType"] == "text"
 
 
 def test_stream_event_thinking_delta_translates() -> None:
@@ -224,6 +225,28 @@ def test_stream_event_thinking_delta_translates() -> None:
     assert len(out) == 1
     assert out[0]["kind"] == "stream_delta"
     assert out[0]["content"] == "rea"
+    assert out[0]["deltaType"] == "thinking"
+
+
+def test_stream_event_input_json_delta_translates() -> None:
+    """v0.2 stream-progress：``input_json_delta`` 不再丢弃，产出
+    ``stream_delta(deltaType="input_json")``——前端用于增量渲染工具入参。
+    """
+    n = ClaudeNormalizer()
+    msg = StreamEvent(
+        uuid="uuid-input-json",
+        session_id="sid",
+        event={
+            "type": "content_block_delta",
+            "delta": {"type": "input_json_delta", "partial_json": '{"path":'},
+        },
+        parent_tool_use_id=None,
+    )
+    out = n.normalize(msg, SESSION_ID)
+    assert len(out) == 1
+    assert out[0]["kind"] == "stream_delta"
+    assert out[0]["content"] == '{"path":'
+    assert out[0]["deltaType"] == "input_json"
 
 
 def test_stream_event_signature_delta_dropped() -> None:
@@ -253,12 +276,120 @@ def test_stream_event_block_stop_emits_stream_end() -> None:
     assert out[0]["kind"] == "stream_end"
 
 
-def test_stream_event_message_start_dropped() -> None:
+def test_stream_event_message_start_emits_status() -> None:
+    """v0.2 stream-progress：``message_start`` 从丢弃改为产出
+    ``stream_status(phase="responding", model=...)``——首 token 前给前端开始信号。
+    """
     n = ClaudeNormalizer()
     msg = StreamEvent(
         uuid="uuid-5",
         session_id="sid",
-        event={"type": "message_start"},
+        event={
+            "type": "message_start",
+            "message": {"id": "msg_x", "model": "claude-sonnet-4-6"},
+        },
+        parent_tool_use_id=None,
+    )
+    out = n.normalize(msg, SESSION_ID)
+    assert len(out) == 1
+    assert out[0]["kind"] == "stream_status"
+    assert out[0]["phase"] == "responding"
+    assert out[0]["model"] == "claude-sonnet-4-6"
+
+
+def test_stream_event_message_start_without_model_omits_model_field() -> None:
+    """``message_start.message.model`` 缺失时不携带 ``model`` 字段（不产 None）。"""
+    n = ClaudeNormalizer()
+    msg = StreamEvent(
+        uuid="uuid-no-model",
+        session_id="sid",
+        event={"type": "message_start", "message": {}},
+        parent_tool_use_id=None,
+    )
+    out = n.normalize(msg, SESSION_ID)
+    assert len(out) == 1
+    assert out[0]["kind"] == "stream_status"
+    assert out[0]["phase"] == "responding"
+    assert "model" not in out[0]
+
+
+def test_stream_event_block_start_thinking_emits_status() -> None:
+    """``content_block_start(thinking)`` → ``stream_status(phase="thinking")``。"""
+    n = ClaudeNormalizer()
+    msg = StreamEvent(
+        uuid="uuid-blk-think",
+        session_id="sid",
+        event={
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking"},
+        },
+        parent_tool_use_id=None,
+    )
+    out = n.normalize(msg, SESSION_ID)
+    assert len(out) == 1
+    assert out[0]["kind"] == "stream_status"
+    assert out[0]["phase"] == "thinking"
+    assert out[0]["blockIndex"] == 0
+
+
+def test_stream_event_block_start_text_emits_status() -> None:
+    """``content_block_start(text)`` → ``stream_status(phase="responding")``。"""
+    n = ClaudeNormalizer()
+    msg = StreamEvent(
+        uuid="uuid-blk-text",
+        session_id="sid",
+        event={
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "text"},
+        },
+        parent_tool_use_id=None,
+    )
+    out = n.normalize(msg, SESSION_ID)
+    assert len(out) == 1
+    assert out[0]["kind"] == "stream_status"
+    assert out[0]["phase"] == "responding"
+    assert out[0]["blockIndex"] == 1
+
+
+def test_stream_event_block_start_tool_use_emits_status_with_tool_name() -> None:
+    """``content_block_start(tool_use)`` → ``stream_status(phase="tool_calling", toolName)``。"""
+    n = ClaudeNormalizer()
+    msg = StreamEvent(
+        uuid="uuid-blk-tool",
+        session_id="sid",
+        event={
+            "type": "content_block_start",
+            "index": 2,
+            "content_block": {
+                "type": "tool_use",
+                "id": "tu_1",
+                "name": "Read",
+                "input": {},
+            },
+        },
+        parent_tool_use_id=None,
+    )
+    out = n.normalize(msg, SESSION_ID)
+    assert len(out) == 1
+    assert out[0]["kind"] == "stream_status"
+    assert out[0]["phase"] == "tool_calling"
+    assert out[0]["blockIndex"] == 2
+    assert out[0]["toolName"] == "Read"
+
+
+def test_stream_event_block_start_unknown_type_dropped() -> None:
+    """未知 ``content_block.type`` 保守降级为不产出（避免发未识别 phase 给前端）。"""
+    n = ClaudeNormalizer()
+    msg = StreamEvent(
+        uuid="uuid-blk-unk",
+        session_id="sid",
+        event={
+            "type": "content_block_start",
+            "index": 3,
+            "content_block": {"type": "future_block_type"},
+        },
         parent_tool_use_id=None,
     )
     assert n.normalize(msg, SESSION_ID) == []

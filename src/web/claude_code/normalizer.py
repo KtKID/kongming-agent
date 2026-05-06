@@ -18,12 +18,22 @@ SDK message                   NormalizedMessage kind
 ``AssistantMessage[Thinking]``  ``thinking``
 ``AssistantMessage[ToolUse]`` ``tool_use``
 ``UserMessage[ToolResult]``   ``tool_result``（命中 deny 集合 → 丢弃 [E8]）
-``StreamEvent.text_delta``    ``stream_delta``
-``StreamEvent.thinking_delta``  ``stream_delta``（kind 复用）
+``StreamEvent.message_start``       ``stream_status``（phase=responding, model）
+``StreamEvent.content_block_start`` ``stream_status``（phase 按 block type 映射, blockIndex, toolName?）
+``StreamEvent.text_delta``    ``stream_delta``（deltaType=text）
+``StreamEvent.thinking_delta``  ``stream_delta``（deltaType=thinking）
+``StreamEvent.input_json_delta``  ``stream_delta``（deltaType=input_json）
 ``StreamEvent.content_block_stop``  ``stream_end``
 ``ResultMessage``             ``complete``（exitCode / durationMs / tokenBudget）
-其他类型（``RateLimitEvent`` 等）  丢弃
+其他类型（``RateLimitEvent`` / ``message_delta`` / ``message_stop``）  丢弃
 ============================  =============================================
+
+``content_block.type`` → ``phase`` 映射：
+
+- ``"thinking"`` / ``"redacted_thinking"`` → ``"thinking"``
+- ``"text"`` → ``"responding"``
+- ``"tool_use"`` / ``"server_tool_use"`` / ``"mcp_tool_use"`` → ``"tool_calling"``
+- 未知 type → 不产出 ``stream_status``（保守降级）
 
 INTERNAL_CONTENT 过滤：``TextBlock.text`` 命中预定义前缀（如 ``<system-reminder>``）
 则丢弃整条 text 事件——这是 Claude Code CLI 的内部 system 注入，不应泄漏给前端。
@@ -33,7 +43,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from claude_agent_sdk.types import (
     AssistantMessage,
@@ -66,6 +76,20 @@ INTERNAL_CONTENT_PREFIXES: tuple[str, ...] = (
 """命中任一前缀的 ``TextBlock.text`` 整条丢弃。
 
 参考 ccui ``claude-sessions.provider.ts`` 第 34 行 ``INTERNAL_CONTENT_PREFIXES``。
+"""
+
+_BLOCK_TYPE_TO_PHASE: dict[str, Literal["responding", "thinking", "tool_calling"]] = {
+    "text": "responding",
+    "thinking": "thinking",
+    "redacted_thinking": "thinking",
+    "tool_use": "tool_calling",
+    "server_tool_use": "tool_calling",
+    "mcp_tool_use": "tool_calling",
+}
+"""``content_block.type`` → ``stream_status.phase`` 映射。
+
+未列入的 block type（未来 SDK 新增）会被保守降级为不产出 ``stream_status``，
+避免给前端发送不可识别的 phase 值。
 """
 
 
@@ -270,9 +294,50 @@ class ClaudeNormalizer:
         msg: StreamEvent,
         session_id: str | None,
     ) -> list[NormalizedMessage]:
-        """``StreamEvent`` → ``stream_delta`` / ``stream_end``。"""
+        """``StreamEvent`` → ``stream_status`` / ``stream_delta`` / ``stream_end``。
+
+        翻译规则：
+
+        - ``message_start`` → ``stream_status(phase="responding", model=...)``——
+          首个 token 到达前给前端"开始生成"信号
+        - ``content_block_start`` → ``stream_status(phase=映射, blockIndex, toolName?)``——
+          按 block type 映射 phase，`tool_use` 类带工具名
+        - ``content_block_delta`` → ``stream_delta(deltaType=...)``——含
+          ``text`` / ``thinking`` / ``input_json`` 三种 delta
+        - ``content_block_stop`` → ``stream_end``
+        - ``message_delta`` / ``message_stop`` / 未知类型丢弃
+        """
         event = msg.event or {}
         event_type = event.get("type")
+
+        if event_type == "message_start":
+            out = _base(session_id)
+            out["kind"] = "stream_status"
+            out["phase"] = "responding"
+            inner = event.get("message") or {}
+            model = inner.get("model")
+            if isinstance(model, str) and model:
+                out["model"] = model
+            return [out]
+
+        if event_type == "content_block_start":
+            block = event.get("content_block") or {}
+            block_type = block.get("type")
+            phase = _BLOCK_TYPE_TO_PHASE.get(block_type) if isinstance(block_type, str) else None
+            if phase is None:
+                # 未知 block type：保守不产出 stream_status，避免误导前端
+                return []
+            out = _base(session_id)
+            out["kind"] = "stream_status"
+            out["phase"] = phase
+            index = event.get("index")
+            if isinstance(index, int):
+                out["blockIndex"] = index
+            if phase == "tool_calling":
+                tool_name = block.get("name")
+                if isinstance(tool_name, str) and tool_name:
+                    out["toolName"] = tool_name
+            return [out]
 
         if event_type == "content_block_delta":
             delta = event.get("delta") or {}
@@ -281,11 +346,19 @@ class ClaudeNormalizer:
                 out = _base(session_id)
                 out["kind"] = "stream_delta"
                 out["content"] = delta.get("text", "")
+                out["deltaType"] = "text"
                 return [out]
             if delta_type == "thinking_delta":
                 out = _base(session_id)
                 out["kind"] = "stream_delta"
                 out["content"] = delta.get("thinking", "")
+                out["deltaType"] = "thinking"
+                return [out]
+            if delta_type == "input_json_delta":
+                out = _base(session_id)
+                out["kind"] = "stream_delta"
+                out["content"] = delta.get("partial_json", "")
+                out["deltaType"] = "input_json"
                 return [out]
             # signature_delta / 未知 delta 类型丢弃
             return []
@@ -293,8 +366,7 @@ class ClaudeNormalizer:
             out = _base(session_id)
             out["kind"] = "stream_end"
             return [out]
-        # message_start / content_block_start / message_delta / message_stop
-        # 等 SSE 控制帧丢弃
+        # message_delta / message_stop / 未知 SSE 控制帧丢弃
         return []
 
     # ----- 工具方法 -----

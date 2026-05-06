@@ -987,7 +987,11 @@ export function isPing(f: WSFrameC2S): f is PingFrame {
 export type NormalizedProvider = "claude" | "codex" | "gemini" | "cursor";
 
 /**
- * `NormalizedMessage` 的 14 种 kind（与 Python `MessageKind` 一致）。
+ * `NormalizedMessage` 的 15 种 kind（与 Python `MessageKind` 一致）。
+ *
+ * `stream_status` 由 `StreamEvent.message_start` / `content_block_start`
+ * 控制帧翻译而来，前端用于在第一个 token 到达前显示当前阶段
+ * （思考中 / 生成中 / 调用工具）。
  */
 export type NormalizedMessageKind =
   | "text"
@@ -996,6 +1000,7 @@ export type NormalizedMessageKind =
   | "thinking"
   | "stream_delta"
   | "stream_end"
+  | "stream_status"
   | "session_created"
   | "permission_request"
   | "permission_cancelled"
@@ -1057,4 +1062,12 @@ export interface NormalizedMessage {
   tokenBudget?: Record<string, unknown>;
   /** kind="error" 的错误描述 */
   error?: string;
+  /** kind="stream_status"：当前阶段（responding=生成 / thinking=思考 / tool_calling=调用工具） */
+  phase?: "responding" | "thinking" | "tool_calling";
+  /** kind="stream_status"：SDK content_block 的 index（同一 turn 内自增） */
+  blockIndex?: number;
+  /** kind="stream_delta"：delta 子类型（text / thinking / input_json） */
+  deltaType?: "text" | "thinking" | "input_json";
+  /** kind="stream_status"：message_start 携带的 model 名 */
+  model?: string;
 }
