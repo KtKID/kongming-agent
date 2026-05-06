@@ -40,7 +40,7 @@ interface ClaudeProjectsTreeProps {
   onNewSession: (project: ClaudeProjectSummaryDTO) => void;
 }
 
-const DEFAULT_VISIBLE = 10;
+const DEFAULT_VISIBLE = 6;
 const ONE_WEEK_SEC = 7 * 86400;
 const MIN_REFRESH_PROGRESS_MS = 350;
 
