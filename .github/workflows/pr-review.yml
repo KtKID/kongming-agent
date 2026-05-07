@@ -26,5 +26,5 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           MINIMAX_API_URL: https://api.minimaxi.com/anthropic
-          MINIMAX_MODEL: MiniMax-M1
+          MINIMAX_MODEL: MiniMax-M2.7
           PR_NUMBER: ${{ github.event.pull_request.number }}
