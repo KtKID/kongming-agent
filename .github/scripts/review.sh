@@ -4,7 +4,7 @@ set -euo pipefail
 : "${PR_NUMBER:?PR_NUMBER is required}"
 : "${MINIMAX_API_KEY:?MINIMAX_API_KEY is required}"
 : "${MINIMAX_API_URL:=https://api.minimaxi.com/anthropic}"
-: "${MINIMAX_MODEL:=MiniMax-M1}"
+: "${MINIMAX_MODEL:=MiniMax-M2.7}"
 
 MAX_DIFF_CHARS=80000
 
@@ -83,7 +83,7 @@ fi
 
 # ── 4. 解析并发评论 ──
 
-REVIEW=$(echo "$BODY" | jq -r '.content[0].text // empty')
+REVIEW=$(echo "$BODY" | jq -r '(.content[] | select(.type == "text") | .text) // .content[0].text // empty')
 
 if [ -z "$REVIEW" ]; then
   echo "::error::API response has no content"
