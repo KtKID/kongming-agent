@@ -17,6 +17,8 @@ import { toast } from "sonner";
 
 import { apiPatch, apiRefreshClaudeProjects } from "@/lib/api";
 import { useThreadsStore } from "@/stores/threads";
+import { useThreadStatusStore } from "@/stores/threadStatus";
+import { PhaseIndicator } from "@/components/PhaseIndicator";
 import { formatRelative } from "@/lib/relative-time";
 import type {
   ClaudeProjectSummaryDTO,
@@ -458,6 +460,12 @@ interface SessionCardProps {
 function SessionCard({ session, cwd, onClick, onArchived }: SessionCardProps): JSX.Element {
   const [editing, setEditing] = useState(false);
   const [editValue, setEditValue] = useState(session.title);
+  const threads = useThreadsStore((s) => s.threads);
+  const statuses = useThreadStatusStore((s) => s.statuses);
+  const status = useMemo(() => {
+    const t = threads.find((th) => th.claude_thread_id === session.claude_thread_id);
+    return t ? statuses[t.id] : undefined;
+  }, [threads, statuses, session.claude_thread_id]);
 
   const onArchive = async () => {
     if (!window.confirm("确定归档这个会话？归档后将不再显示在列表中。")) return;
@@ -523,6 +531,7 @@ function SessionCard({ session, cwd, onClick, onArchived }: SessionCardProps): J
       className="group relative hover:bg-accent flex items-center gap-1.5 overflow-hidden rounded px-2 py-1 text-left transition-colors"
     >
       <MessageSquare className="text-muted-foreground h-3.5 w-3.5 shrink-0" />
+      <PhaseIndicator phase={status?.phase} toolName={status?.toolName} />
       <span className="flex-1 truncate">{session.title}</span>
       <span className="text-muted-foreground shrink-0 text-xs">
         {formatRelative(session.last_modified)}

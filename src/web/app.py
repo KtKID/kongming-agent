@@ -310,6 +310,7 @@ def create_app(
 
     # 9. WS endpoint
     from web.cron_ws import register_cron_ws_routes
+    from web.thread_status_ws import register_thread_status_routes
     from web.ws import register_ws_routes
 
     register_ws_routes(app)
@@ -317,6 +318,7 @@ def create_app(
     # broker 是模块级单例（web/cron_ws.py:get_broker），与 web/run.py 装配的
     # WebDeliverySink 共享同一个实例，无需通过 app.state 串引用。
     register_cron_ws_routes(app)
+    register_thread_status_routes(app)
 
     # 10. static / SPA fallback（catch-all，必须最后注册）
     from web.static import install_static

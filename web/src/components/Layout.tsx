@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { useAuthStore } from "@/stores/auth";
 import { useThreadsStore } from "@/stores/threads";
+import { useThreadStatusWS } from "@/hooks/useThreadStatusWS";
 import { cn } from "@/lib/utils";
 
 /**
@@ -12,6 +13,8 @@ import { cn } from "@/lib/utils";
  * <Outlet /> 渲染子路由。
  */
 export function Layout() {
+  useThreadStatusWS();
+
   const params = useParams<{ thread_id?: string }>();
   const location = useLocation();
   const threads = useThreadsStore((s) => s.threads);

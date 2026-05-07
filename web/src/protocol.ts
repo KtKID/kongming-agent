@@ -1071,3 +1071,23 @@ export interface NormalizedMessage {
   /** kind="stream_status"：message_start 携带的 model 名 */
   model?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Thread Status（全局 WS 广播 /ws/thread-status）
+// ---------------------------------------------------------------------------
+
+export type ThreadStatusPhase =
+  | "idle"
+  | "responding"
+  | "thinking"
+  | "tool_calling"
+  | "waiting_approval"
+  | "complete"
+  | "error";
+
+export interface ThreadStatusFrame {
+  type: "thread-status";
+  threadId: string;
+  phase: ThreadStatusPhase;
+  toolName?: string | null;
+}

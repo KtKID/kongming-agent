@@ -50,6 +50,7 @@ from web.thread_metadata import (
     thread_metadata_path,
     write_thread_metadata,
 )
+from web.thread_status_ws import ThreadStatusEventSink
 from web.ws_event_sink import UsagePersistSink, WSEventSink
 from web.ws_fanout import WebSocketFanout
 
@@ -436,7 +437,8 @@ class ThreadManager:
         ws_sink = WSEventSink(fanout)
         usage_sink = UsagePersistSink(meta.id, self.add_thread_usage)
 
-        sinks: list[Any] = [ws_sink, usage_sink]
+        status_sink = ThreadStatusEventSink(meta.id)
+        sinks: list[Any] = [ws_sink, usage_sink, status_sink]
         runtime, bridge = await self._runtime_factory(
             meta.id,
             meta.preset_id,

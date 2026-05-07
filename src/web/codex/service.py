@@ -33,6 +33,7 @@ from typing import Any
 from web._shared.session_manager import SessionManager
 from web.codex.approval import map_permission_mode
 from web.codex.normalizer import normalize
+from web.thread_status_ws import get_broadcaster
 
 logger = logging.getLogger(__name__)
 
@@ -330,6 +331,7 @@ class CodexService:
         """
         active_sid = session_id
         complete_already_sent = False
+        broadcaster = get_broadcaster()
 
         if proc.stdout is None:
             return active_sid, complete_already_sent
@@ -396,6 +398,8 @@ class CodexService:
                 if msg.get("kind") == "complete":
                     complete_already_sent = True
                 await self._safe_send(writer, dict(msg))
+                if kongming_thread_id is not None:
+                    await broadcaster.emit(kongming_thread_id, dict(msg))
 
         return active_sid, complete_already_sent
 

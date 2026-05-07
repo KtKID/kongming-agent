@@ -29,6 +29,7 @@ from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from web._shared.session_manager import SessionManager
 from web.claude_code.approval import ApprovalBridge
 from web.claude_code.normalizer import ClaudeNormalizer
+from web.thread_status_ws import get_broadcaster
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +111,10 @@ class ClaudeCodeService:
                         options = {**(options if isinstance(options, dict) else {}), "cwd": cwd_val}
                     claude_tid = getattr(meta, "claude_thread_id", "")
                     if claude_tid and not (isinstance(options, dict) and "resume" in options):
-                        options = {**(options if isinstance(options, dict) else {}), "resume": claude_tid}
+                        options = {
+                            **(options if isinstance(options, dict) else {}),
+                            "resume": claude_tid,
+                        }
 
         # 1. 装配 options
         opts = self._build_options(options)
@@ -221,6 +225,7 @@ class ClaudeCodeService:
 
         # 当前用于出站消息 sessionId 字段的真值——首次见到 session_created 后切换
         active_sid = register_id
+        broadcaster = get_broadcaster()
 
         async for msg in client.receive_response():
             normalized = self._normalizer.normalize(msg, active_sid)
@@ -260,6 +265,7 @@ class ClaudeCodeService:
                     n["sessionId"] = active_sid
                 with contextlib.suppress(Exception):
                     await writer.send_json(dict(n))
+                await broadcaster.emit(register_id, dict(n))
 
     @staticmethod
     def _is_thread_id(s: str) -> bool:

@@ -5,8 +5,10 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useThreadsStore } from "@/stores/threads";
+import { useThreadStatusStore } from "@/stores/threadStatus";
 import { NewThreadDialog } from "@/components/NewThreadDialog";
 import { cn } from "@/lib/utils";
+import { PhaseIndicator } from "@/components/PhaseIndicator";
 import type { BackendKind } from "@/protocol";
 
 const THREAD_SOURCE_META: Record<
@@ -37,6 +39,7 @@ export function ThreadList() {
   const fetchPresets = useThreadsStore((s) => s.fetchPresets);
   const renameThread = useThreadsStore((s) => s.renameThread);
   const deleteThread = useThreadsStore((s) => s.deleteThread);
+  const statuses = useThreadStatusStore((s) => s.statuses);
   const [newOpen, setNewOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
@@ -148,6 +151,10 @@ export function ThreadList() {
                           <sourceMeta.Icon className="h-3.5 w-3.5" aria-hidden="true" />
                         ) : null}
                       </span>
+                      <PhaseIndicator
+                        phase={statuses[t.id]?.phase}
+                        toolName={statuses[t.id]?.toolName}
+                      />
                       <span className="truncate">{t.name || "未命名"}</span>
                     </Link>
                     <div
