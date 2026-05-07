@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef } from "react";
-import { ChevronLeft, LayoutGrid, PanelRightClose, Plus } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ChevronLeft, LayoutGrid, Network, PanelRightClose, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { WhiteboardCard, type WhiteboardCardItem } from "@/components/WhiteboardCard";
+import { ArchitectureDiagramDialog } from "@/components/ArchitectureDiagramDialog";
 import { cn } from "@/lib/utils";
 
 export type { WhiteboardCardItem } from "@/components/WhiteboardCard";
@@ -44,6 +45,7 @@ export function WhiteboardPanel({
   onUpdateCardLayout,
   onBringToFront,
 }: WhiteboardPanelProps) {
+  const [diagramDialogOpen, setDiagramDialogOpen] = useState(false);
   const boardRef = useRef<HTMLDivElement | null>(null);
   const interactionRef = useRef<{
     type: "drag" | "resize";
@@ -215,6 +217,15 @@ export function WhiteboardPanel({
               <Button
                 type="button"
                 size="sm"
+                onClick={() => setDiagramDialogOpen(true)}
+                className="border-border/80 bg-card/85 text-foreground hover:bg-card"
+              >
+                <Network className="h-3.5 w-3.5" />
+                架构图
+              </Button>
+              <Button
+                type="button"
+                size="sm"
                 onClick={onCreateCard}
                 disabled={!canCreate || !onCreateCard}
                 className="border-border/80 bg-card/85 text-foreground hover:bg-card"
@@ -316,6 +327,10 @@ export function WhiteboardPanel({
         </button>
       </div>
     </aside>
+    <ArchitectureDiagramDialog
+      open={diagramDialogOpen}
+      onOpenChange={setDiagramDialogOpen}
+    />
     </>
   );
 }

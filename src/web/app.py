@@ -285,6 +285,7 @@ def create_app(
     from web.routers.auth import router as auth_router
     from web.routers.claude import router as claude_router
     from web.routers.codex import router as codex_rest_router
+    from web.routers.diagrams import router as diagrams_router
     from web.routers.manage import router as manage_router
     from web.routers.presets import router as presets_router
     from web.routers.slash_candidates import router as slash_candidates_router
@@ -298,6 +299,7 @@ def create_app(
     app.include_router(presets_router)
     app.include_router(manage_router)
     app.include_router(whiteboard_router)
+    app.include_router(diagrams_router)
     app.include_router(claude_code_router)
     app.include_router(codex_router)
     app.include_router(codex_rest_router)

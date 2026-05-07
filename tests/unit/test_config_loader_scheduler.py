@@ -219,6 +219,8 @@ def test_scheduler_config_has_expected_field_set() -> None:
     """SchedulerConfig 字段集合必须与 plan.md 模块 5 一致；防字段被悄悄删。"""
     fields: dict[str, Any] = SchedulerConfig.model_fields
     assert set(fields.keys()) == {
+        "default_delivery_channel",
+        "default_timezone",
         "enabled",
         "home",
         "interval",
