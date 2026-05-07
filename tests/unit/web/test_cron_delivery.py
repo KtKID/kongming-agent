@@ -55,9 +55,7 @@ def _make_task(*, name: str = "测试任务", task_id: str = "t-web") -> Schedul
         enabled=True,
         state=TaskState.SCHEDULED,
         origin=TaskOrigin.TOOL,
-        trigger=ScheduleTrigger(
-            trigger_type=TriggerType.INTERVAL, expr="10", timezone="UTC"
-        ),
+        trigger=ScheduleTrigger(trigger_type=TriggerType.INTERVAL, expr="10", timezone="UTC"),
         policy=TaskExecutionPolicy(
             session_mode=SessionMode.FRESH_SESSION,
             concurrency_policy=ConcurrencyPolicy.FORBID,

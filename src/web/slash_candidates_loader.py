@@ -19,21 +19,25 @@ async def load_slash_candidates() -> list[dict[str, str]]:
     for cmd in builtin_commands:
         key = cmd.slash.lstrip("/").lower()
         seen.add(key)
-        candidates.append({
-            "slash": cmd.slash,
-            "title": cmd.title,
-            "description": cmd.description,
-            "source": "command",
-        })
+        candidates.append(
+            {
+                "slash": cmd.slash,
+                "title": cmd.title,
+                "description": cmd.description,
+                "source": "command",
+            }
+        )
     for spec in skill_specs_list:
         key = spec.name.lower()
         if key in seen:
             continue
         seen.add(key)
-        candidates.append({
-            "slash": f"/{spec.name}",
-            "title": spec.name,
-            "description": spec.description,
-            "source": "skill",
-        })
+        candidates.append(
+            {
+                "slash": f"/{spec.name}",
+                "title": spec.name,
+                "description": spec.description,
+                "source": "skill",
+            }
+        )
     return candidates

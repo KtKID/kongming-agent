@@ -110,7 +110,10 @@ class ClaudeCodeService:
                         options = {**(options if isinstance(options, dict) else {}), "cwd": cwd_val}
                     claude_tid = getattr(meta, "claude_thread_id", "")
                     if claude_tid and not (isinstance(options, dict) and "resume" in options):
-                        options = {**(options if isinstance(options, dict) else {}), "resume": claude_tid}
+                        options = {
+                            **(options if isinstance(options, dict) else {}),
+                            "resume": claude_tid,
+                        }
 
         # 1. 装配 options
         opts = self._build_options(options)

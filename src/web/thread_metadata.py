@@ -205,9 +205,7 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
         data["schema_version"] = 5
     # v5 → v6 懒升级：旧 sdk_session_id 字段改名为 claude_thread_id
     if data.get("schema_version") == 5:
-        data["claude_thread_id"] = str(
-            data.pop("sdk_session_id", data.get("claude_thread_id", ""))
-        )
+        data["claude_thread_id"] = str(data.pop("sdk_session_id", data.get("claude_thread_id", "")))
         data.setdefault("codex_thread_id", "")
         data["schema_version"] = 6
     # 兜底：任何 version 下如果 sdk_session_id 仍残留，强制迁移
