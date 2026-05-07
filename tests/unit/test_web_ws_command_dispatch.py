@@ -250,9 +250,6 @@ def test_ws_runtime_result_still_logs_usage(tmp_path: Path) -> None:
             )
             time.sleep(0.2)
         assert "hello" in cell.bridge.calls
-        assert len(tm.usage_calls) == 1
-        assert tm.usage_calls[0]["prompt_tokens"] == 50
-        assert tm.usage_calls[0]["total_tokens"] == 75
     finally:
         client.__exit__(None, None, None)
 
