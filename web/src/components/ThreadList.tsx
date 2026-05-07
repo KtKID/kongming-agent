@@ -1,16 +1,10 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { MessageSquare, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import { MessageSquare, Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Input } from "@/components/ui/input";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { useThreadsStore } from "@/stores/threads";
 import { NewThreadDialog } from "@/components/NewThreadDialog";
 import { cn } from "@/lib/utils";
@@ -157,35 +151,35 @@ export function ThreadList() {
                     <span className="truncate">{t.name || "未命名"}</span>
                   </Link>
                 )}
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <button
-                      type="button"
-                      aria-label="会话操作"
-                      className="opacity-0 transition-opacity group-hover:opacity-100"
-                    >
-                      <MoreHorizontal className="h-4 w-4" />
-                    </button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-32">
-                    <DropdownMenuItem
-                      onSelect={() => {
-                        setEditingId(t.id);
-                        setEditName(t.name);
-                      }}
-                    >
-                      <Pencil className="h-3.5 w-3.5" />
-                      重命名
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      className="text-destructive focus:text-destructive"
-                      onSelect={() => void onDelete(t.id)}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                      删除
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                  <button
+                    type="button"
+                    aria-label="重命名"
+                    title="重命名"
+                    className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setEditingId(t.id);
+                      setEditName(t.name);
+                    }}
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="删除"
+                    title="删除"
+                    className="rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      void onDelete(t.id);
+                    }}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
             );
           })}
