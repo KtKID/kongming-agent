@@ -169,6 +169,8 @@ class ThreadMetadataDTO(_FrameBase):
     cumulative_prompt_tokens: Annotated[int, Field(ge=0)] = 0
     cumulative_completion_tokens: Annotated[int, Field(ge=0)] = 0
     cumulative_total_tokens: Annotated[int, Field(ge=0)] = 0
+    cumulative_cache_read_tokens: int | None = None
+    cumulative_cache_creation_tokens: int | None = None
     schema_version: Literal[1, 2, 3, 4, 5, 6] = 6
 
 

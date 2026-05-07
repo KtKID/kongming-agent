@@ -46,6 +46,8 @@ describe("ThreadList", () => {
           cumulative_prompt_tokens: 0,
           cumulative_completion_tokens: 0,
           cumulative_total_tokens: 0,
+          cumulative_cache_read_tokens: null,
+          cumulative_cache_creation_tokens: null,
         },
         {
           id: "thread-bbbbbb",
@@ -61,6 +63,8 @@ describe("ThreadList", () => {
           cumulative_prompt_tokens: 0,
           cumulative_completion_tokens: 0,
           cumulative_total_tokens: 0,
+          cumulative_cache_read_tokens: null,
+          cumulative_cache_creation_tokens: null,
         },
       ],
     });
@@ -93,6 +97,8 @@ describe("ThreadList", () => {
           cumulative_prompt_tokens: 0,
           cumulative_completion_tokens: 0,
           cumulative_total_tokens: 0,
+          cumulative_cache_read_tokens: null,
+          cumulative_cache_creation_tokens: null,
         },
         {
           id: "thread-claude",
@@ -108,6 +114,8 @@ describe("ThreadList", () => {
           cumulative_prompt_tokens: 0,
           cumulative_completion_tokens: 0,
           cumulative_total_tokens: 0,
+          cumulative_cache_read_tokens: null,
+          cumulative_cache_creation_tokens: null,
         },
         {
           id: "thread-codex",
@@ -123,6 +131,8 @@ describe("ThreadList", () => {
           cumulative_prompt_tokens: 0,
           cumulative_completion_tokens: 0,
           cumulative_total_tokens: 0,
+          cumulative_cache_read_tokens: null,
+          cumulative_cache_creation_tokens: null,
         },
       ],
     });

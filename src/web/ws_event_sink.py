@@ -97,12 +97,16 @@ class UsagePersistSink:
         total = int(payload.get("total_tokens", 0) or 0)
         if prompt == 0 and completion == 0 and total == 0:
             return
+        cr_raw = payload.get("cache_read_tokens")
+        cc_raw = payload.get("cache_creation_tokens")
         try:
             await self._persist_fn(
                 self._thread_id,
                 prompt_tokens=prompt,
                 completion_tokens=completion,
                 total_tokens=total,
+                cache_read_tokens=int(cr_raw) if cr_raw is not None else None,
+                cache_creation_tokens=int(cc_raw) if cc_raw is not None else None,
             )
         except Exception:
             logger.warning(
@@ -254,10 +258,14 @@ class WSEventSink:
         # 也单独 emit ``usage`` event。本 sink 接受 ``usage`` kind，把字段映射到
         # UsageFrame；其它字段缺失时给 0（不抛）。
         if kind == "usage":
+            cr = payload.get("cache_read_tokens")
+            cc = payload.get("cache_creation_tokens")
             return UsageFrame(
                 prompt_tokens=int(payload.get("prompt_tokens", 0) or 0),
                 completion_tokens=int(payload.get("completion_tokens", 0) or 0),
                 total_tokens=int(payload.get("total_tokens", 0) or 0),
+                cache_read_tokens=int(cr) if cr is not None else None,
+                cache_creation_tokens=int(cc) if cc is not None else None,
                 turn=turn,
                 run_id=event.run_id or "",
                 timestamp_ms=ts,

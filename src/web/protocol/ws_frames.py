@@ -221,12 +221,14 @@ class TurnStartFrame(_S2CFrameBase):
 
 
 class UsageFrame(_S2CFrameBase):
-    """一轮 token 用量回报（prompt / completion / total）。"""
+    """一轮 token 用量回报（prompt / completion / total + optional cache）。"""
 
     kind: Literal["usage"] = "usage"
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    cache_read_tokens: int | None = None
+    cache_creation_tokens: int | None = None
     turn: int
     run_id: str = ""
 

@@ -47,6 +47,7 @@ from evolution.models import (
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore, resolve_evolution_root
 from web.claude_code.jsonl_history import jsonl_path_for, parse_jsonl_history
+from web.claude_code.transcript_usage import parse_transcript_usage
 from web.errors import InvalidThreadIdError, ThreadNotFoundError
 from web.protocol import (
     CreateThreadRequest,
@@ -96,6 +97,20 @@ def _validate_thread_id(thread_id: str) -> None:
 
 
 def _to_dto(meta: ThreadMetadata) -> ThreadMetadataDTO:
+    prompt = meta.cumulative_prompt_tokens
+    completion = meta.cumulative_completion_tokens
+    total = meta.cumulative_total_tokens
+    cache_read: int | None = meta.cumulative_cache_read_tokens or None
+    cache_creation: int | None = meta.cumulative_cache_creation_tokens or None
+
+    if meta.backend_kind == "claude_code" and meta.claude_thread_id and meta.cwd:
+        usage = parse_transcript_usage(jsonl_path_for(meta.cwd, meta.claude_thread_id))
+        prompt = usage.input_tokens
+        completion = usage.output_tokens
+        total = usage.input_tokens + usage.output_tokens
+        cache_read = usage.cache_read_tokens or None
+        cache_creation = usage.cache_creation_tokens or None
+
     return ThreadMetadataDTO(
         id=meta.id,
         name=meta.name,
@@ -107,9 +122,11 @@ def _to_dto(meta: ThreadMetadata) -> ThreadMetadataDTO:
         created_at=meta.created_at,
         updated_at=meta.updated_at,
         message_count=meta.message_count,
-        cumulative_prompt_tokens=meta.cumulative_prompt_tokens,
-        cumulative_completion_tokens=meta.cumulative_completion_tokens,
-        cumulative_total_tokens=meta.cumulative_total_tokens,
+        cumulative_prompt_tokens=prompt,
+        cumulative_completion_tokens=completion,
+        cumulative_total_tokens=total,
+        cumulative_cache_read_tokens=cache_read,
+        cumulative_cache_creation_tokens=cache_creation,
         schema_version=meta.schema_version,
     )
 

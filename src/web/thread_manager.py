@@ -285,11 +285,16 @@ class ThreadManager:
         prompt_tokens: int,
         completion_tokens: int,
         total_tokens: int,
+        cache_read_tokens: int | None = None,
+        cache_creation_tokens: int | None = None,
     ) -> ThreadMetadata:
         """把一次 run 的累计 usage 回写到 thread metadata。
 
         用于 generic chat 路径在 ``bridge.run_once`` 结束后落盘 thread 级累计
         ``prompt / completion / total``。负数一律按 0 处理，避免上游异常值污染累计量。
+
+        ``cache_read_tokens`` / ``cache_creation_tokens`` 为 optional；generic_chat
+        的 usage event 可能不包含它们。非 None 时累加到 metadata 对应字段。
         """
         meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
         if meta is None:
@@ -298,15 +303,22 @@ class ThreadManager:
         prompt = max(0, int(prompt_tokens))
         completion = max(0, int(completion_tokens))
         total = max(0, int(total_tokens))
-        updated = meta.model_copy(
-            update={
-                "updated_at": _now(),
-                "cumulative_prompt_tokens": meta.cumulative_prompt_tokens + prompt,
-                "cumulative_completion_tokens": meta.cumulative_completion_tokens + completion,
-                "cumulative_total_tokens": meta.cumulative_total_tokens + total,
-                "schema_version": 6,
-            }
-        )
+        update: dict[str, object] = {
+            "updated_at": _now(),
+            "cumulative_prompt_tokens": meta.cumulative_prompt_tokens + prompt,
+            "cumulative_completion_tokens": meta.cumulative_completion_tokens + completion,
+            "cumulative_total_tokens": meta.cumulative_total_tokens + total,
+            "schema_version": 6,
+        }
+        if cache_read_tokens is not None:
+            update["cumulative_cache_read_tokens"] = (
+                meta.cumulative_cache_read_tokens + cache_read_tokens
+            )
+        if cache_creation_tokens is not None:
+            update["cumulative_cache_creation_tokens"] = (
+                meta.cumulative_cache_creation_tokens + cache_creation_tokens
+            )
+        updated = meta.model_copy(update=update)
         await asyncio.to_thread(write_thread_metadata, self._home, updated)
         async with self._lock:
             cell = self._cells.get(thread_id)

@@ -455,6 +455,8 @@ describe("stores/chat", () => {
         cumulative_prompt_tokens: 1200,
         cumulative_completion_tokens: 340,
         cumulative_total_tokens: 1540,
+        cumulative_cache_read_tokens: null,
+        cumulative_cache_creation_tokens: null,
         schema_version: 4,
       },
     ]);
@@ -466,6 +468,8 @@ describe("stores/chat", () => {
       cumulativePrompt: 1200,
       cumulativeCompletion: 340,
       cumulativeTotal: 1540,
+      cumulativeCacheRead: null,
+      cumulativeCacheCreation: null,
     });
 
     store.appendUsage("thread-aaaaaaaaaaaa", {
@@ -492,6 +496,8 @@ describe("stores/chat", () => {
         cumulative_prompt_tokens: 1200,
         cumulative_completion_tokens: 340,
         cumulative_total_tokens: 1540,
+        cumulative_cache_read_tokens: null,
+        cumulative_cache_creation_tokens: null,
         schema_version: 4,
       },
     ]);
@@ -503,6 +509,8 @@ describe("stores/chat", () => {
       cumulativePrompt: 1220,
       cumulativeCompletion: 350,
       cumulativeTotal: 1570,
+      cumulativeCacheRead: null,
+      cumulativeCacheCreation: null,
     });
   });
 });

@@ -274,6 +274,10 @@ export interface ThreadMetadataDTO {
   cumulative_completion_tokens: number;
   /** thread 级累计总 token */
   cumulative_total_tokens: number;
+  /** cache read token 累计；null 表示数据不可用（前端显示 "-"） */
+  cumulative_cache_read_tokens: number | null;
+  /** cache creation token 累计；null 表示数据不可用（前端显示 "-"） */
+  cumulative_cache_creation_tokens: number | null;
   /** 元数据 schema 版本号，当前 6；接受 1-6（老文件兼容），写盘永远写最新版 */
   schema_version?: 1 | 2 | 3 | 4 | 5 | 6;
 }
@@ -837,6 +841,8 @@ export interface UsageFrame {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  cache_read_tokens?: number | null;
+  cache_creation_tokens?: number | null;
   turn: number;
   run_id?: string;
 }
