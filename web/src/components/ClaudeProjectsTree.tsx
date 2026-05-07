@@ -1,18 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 import type { JSX } from "react";
 import {
+  Archive,
   ChevronDown,
   ChevronRight,
   Folder,
   FolderOpen,
   MessageSquare,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
   X,
 } from "lucide-react";
+import { toast } from "sonner";
 
-import { apiRefreshClaudeProjects } from "@/lib/api";
+import { apiPatch, apiRefreshClaudeProjects } from "@/lib/api";
 import { useThreadsStore } from "@/stores/threads";
 import { formatRelative } from "@/lib/relative-time";
 import type {
@@ -343,6 +346,7 @@ export function ClaudeProjectsTree({
             onShowAll={() => showAll(project.name)}
             onSessionClick={(session) => onSessionClick(project, session)}
             onNewSession={() => onNewSession(project)}
+            onArchived={() => void refreshProjects()}
           />
         ))}
       </div>
@@ -361,6 +365,7 @@ interface ProjectNodeProps {
   onShowAll: () => void;
   onSessionClick: (session: ClaudeSessionSummaryDTO) => void;
   onNewSession: () => void;
+  onArchived: () => void;
 }
 
 function ProjectNode({
@@ -372,6 +377,7 @@ function ProjectNode({
   onShowAll,
   onSessionClick,
   onNewSession,
+  onArchived,
 }: ProjectNodeProps): JSX.Element {
   const visibleSessions = expanded
     ? searching
@@ -420,7 +426,9 @@ function ProjectNode({
             <SessionCard
               key={s.claude_thread_id}
               session={s}
+              cwd={project.cwd}
               onClick={() => onSessionClick(s)}
+              onArchived={onArchived}
             />
           ))}
           {expanded && !showAll && hasMore && (
@@ -442,16 +450,77 @@ function ProjectNode({
 
 interface SessionCardProps {
   session: ClaudeSessionSummaryDTO;
+  cwd: string;
   onClick: () => void;
+  onArchived: () => void;
 }
 
-function SessionCard({ session, onClick }: SessionCardProps): JSX.Element {
+function SessionCard({ session, cwd, onClick, onArchived }: SessionCardProps): JSX.Element {
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState(session.title);
+
+  const onArchive = async () => {
+    if (!window.confirm("确定归档这个会话？归档后将不再显示在列表中。")) return;
+    try {
+      await apiPatch("/api/claude/sessions/archive", {
+        claude_thread_id: session.claude_thread_id,
+        cwd,
+      });
+      toast.success("已归档");
+      onArchived();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`归档失败：${msg}`);
+    }
+  };
+
+  const onRename = async () => {
+    const trimmed = editValue.trim();
+    if (!trimmed || trimmed === session.title) {
+      setEditing(false);
+      return;
+    }
+    try {
+      await apiPatch("/api/claude/sessions/rename", {
+        claude_thread_id: session.claude_thread_id,
+        cwd,
+        title: trimmed,
+      });
+      session.title = trimmed;
+      toast.success("已重命名");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`重命名失败：${msg}`);
+    } finally {
+      setEditing(false);
+    }
+  };
+
+  if (editing) {
+    return (
+      <div className="flex items-center gap-1.5 rounded px-2 py-1">
+        <MessageSquare className="text-muted-foreground h-3.5 w-3.5 shrink-0" />
+        <input
+          autoFocus
+          value={editValue}
+          onChange={(e) => setEditValue(e.target.value)}
+          onBlur={() => void onRename()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void onRename();
+            if (e.key === "Escape") setEditing(false);
+          }}
+          className="h-6 flex-1 rounded border border-border bg-background px-1.5 text-sm outline-none focus:ring-1 focus:ring-ring"
+        />
+      </div>
+    );
+  }
+
   return (
     <button
       type="button"
       onClick={onClick}
       title={session.title}
-      className="hover:bg-accent flex items-center gap-1.5 rounded px-2 py-1 text-left transition-colors"
+      className="group relative hover:bg-accent flex items-center gap-1.5 overflow-hidden rounded px-2 py-1 text-left transition-colors"
     >
       <MessageSquare className="text-muted-foreground h-3.5 w-3.5 shrink-0" />
       <span className="flex-1 truncate">{session.title}</span>
@@ -461,6 +530,38 @@ function SessionCard({ session, onClick }: SessionCardProps): JSX.Element {
       <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-xs">
         {session.message_count}
       </Badge>
+      <div
+        className="absolute right-0 top-0 flex h-full items-center pr-1 pl-4 opacity-0 transition-opacity group-hover:opacity-100 bg-gradient-to-l from-accent from-60% to-transparent"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          aria-label="重命名"
+          title="重命名"
+          className="rounded p-1 text-muted-foreground hover:bg-background/50 hover:text-foreground"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setEditValue(session.title);
+            setEditing(true);
+          }}
+        >
+          <Pencil className="h-3 w-3" />
+        </button>
+        <button
+          type="button"
+          aria-label="归档"
+          title="归档"
+          className="rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            void onArchive();
+          }}
+        >
+          <Archive className="h-3 w-3" />
+        </button>
+      </div>
     </button>
   );
 }

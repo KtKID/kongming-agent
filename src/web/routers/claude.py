@@ -29,12 +29,15 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
-from typing import Any
+from pathlib import Path
+from typing import Annotated, Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from web.claude_code.projects_scanner import ProjectSummary, list_projects
+from web.claude_code.session_writer import append_archived, append_custom_title
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +138,94 @@ async def refresh_claude_projects() -> StreamingResponse:
             await task
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
+# ---------------------------------------------------------------------------
+# Rename session
+# ---------------------------------------------------------------------------
+
+
+class RenameClaudeSessionRequest(BaseModel):
+    """重命名 Claude session 的请求体。"""
+
+    claude_thread_id: Annotated[str, Field(min_length=1, max_length=100)]
+    cwd: Annotated[str, Field(pattern=r"^/")]
+    title: Annotated[str, Field(min_length=1, max_length=200)]
+
+
+def _resolve_jsonl_path(
+    claude_thread_id: str,
+    cwd: str,
+    claude_home: Path | None = None,
+) -> Path | None:
+    """从 *cwd* 定位 jsonl 路径。
+
+    SDK 编码规则不止替换 ``/``（``_`` ``.`` 也会被替换成 ``-``），
+    无法纯文本逆转。改用遍历 projects 目录，找到含目标 jsonl 的那个。
+    """
+    home = claude_home or Path.home() / ".claude"
+    projects_dir = home / "projects"
+    if not projects_dir.is_dir():
+        return None
+    target = f"{claude_thread_id}.jsonl"
+    for entry in projects_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        candidate = entry / target
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+@router.patch("/sessions/rename")
+async def rename_claude_session(
+    body: RenameClaudeSessionRequest,
+) -> dict[str, bool]:
+    """往 Claude jsonl 文件追加 ``custom-title`` 条目以重命名 session。"""
+    jsonl_path = _resolve_jsonl_path(body.claude_thread_id, body.cwd)
+    if jsonl_path is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"jsonl not found for session {body.claude_thread_id}",
+        )
+    await asyncio.to_thread(
+        append_custom_title,
+        jsonl_path,
+        body.claude_thread_id,
+        body.title,
+    )
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Archive session
+# ---------------------------------------------------------------------------
+
+
+class ArchiveClaudeSessionRequest(BaseModel):
+    """归档 Claude session 的请求体。"""
+
+    claude_thread_id: Annotated[str, Field(min_length=1, max_length=100)]
+    cwd: Annotated[str, Field(pattern=r"^/")]
+
+
+@router.patch("/sessions/archive")
+async def archive_claude_session(
+    body: ArchiveClaudeSessionRequest,
+) -> dict[str, bool]:
+    """往 Claude jsonl 文件追加 ``archived`` 条目以归档 session。"""
+    jsonl_path = _resolve_jsonl_path(body.claude_thread_id, body.cwd)
+    if jsonl_path is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"jsonl not found for session {body.claude_thread_id}",
+        )
+    await asyncio.to_thread(
+        append_archived,
+        jsonl_path,
+        body.claude_thread_id,
+    )
+    return {"ok": True}
 
 
 __all__ = ["router"]

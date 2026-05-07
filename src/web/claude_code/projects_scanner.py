@@ -25,7 +25,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["ProjectSummary", "SessionSummary", "list_projects"]
+__all__ = [
+    "ProjectSummary",
+    "SessionSummary",
+    "list_projects",
+    "read_archived",
+    "read_custom_title",
+]
 
 
 _TITLE_MAX_LEN = 40
@@ -162,6 +168,80 @@ def _build_project_summary(name: str, project_path: Path) -> ProjectSummary | No
     )
 
 
+def read_custom_title(jsonl_path: Path) -> str | None:
+    """从 jsonl 文件尾部读取最后一条 ``custom-title`` 条目的标题。
+
+    CCUI 或 rename API 会追加 ``{"type":"custom-title","customTitle":"..."}``
+    到文件末尾。本函数从尾部倒读最后 4KB，逐行倒序查找最后一条匹配记录。
+
+    Args:
+        jsonl_path: jsonl 文件路径。
+
+    Returns:
+        找到 → ``customTitle`` 字符串；找不到或文件打不开 → ``None``。
+    """
+    TAIL_BYTES = 4096
+    try:
+        with jsonl_path.open("rb") as f:
+            f.seek(0, 2)  # seek to end
+            size = f.tell()
+            f.seek(max(0, size - TAIL_BYTES))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+    for line in reversed(tail.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            entry = json.loads(stripped)
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if (
+            isinstance(entry, dict)
+            and entry.get("type") == "custom-title"
+            and isinstance(entry.get("customTitle"), str)
+        ):
+            return str(entry["customTitle"])
+    return None
+
+
+def read_archived(jsonl_path: Path) -> bool:
+    """从 jsonl 文件尾部读取最后一条 ``archived`` 条目的归档状态。
+
+    archive API 会追加 ``{"type":"archived","archived":true}`` 到文件末尾。
+    本函数从尾部倒读最后 4KB，逐行倒序查找最后一条匹配记录。
+
+    Args:
+        jsonl_path: jsonl 文件路径。
+
+    Returns:
+        找到 → ``archived`` 字段布尔值；找不到或文件打不开 → ``False``。
+    """
+    TAIL_BYTES = 4096
+    try:
+        with jsonl_path.open("rb") as f:
+            f.seek(0, 2)  # seek to end
+            size = f.tell()
+            f.seek(max(0, size - TAIL_BYTES))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return False
+
+    for line in reversed(tail.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            entry = json.loads(stripped)
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(entry, dict) and entry.get("type") == "archived":
+            return bool(entry.get("archived", False))
+    return False
+
+
 def _build_session_summary(jsonl_path: Path) -> tuple[SessionSummary, str] | None:
     """读取 jsonl 文件，统计行数 + 提取 title + 取 mtime + 真实 cwd。
 
@@ -171,6 +251,8 @@ def _build_session_summary(jsonl_path: Path) -> tuple[SessionSummary, str] | Non
     空 jsonl（0 行）→ 返回 None。
     无法 stat / 打开 → 返回 None（损坏到完全没法访问就跳过）。
     打开但 json 全损坏 → message_count 仍按行数算，title 用 ``(无法解析)``。
+
+    title 优先级：custom-title（用户重命名） > 第 1 条 user message > 占位符。
     """
     try:
         stat = jsonl_path.stat()
@@ -180,8 +262,15 @@ def _build_session_summary(jsonl_path: Path) -> tuple[SessionSummary, str] | Non
 
     claude_thread_id = jsonl_path.stem
 
+    # 优先从尾部取 custom-title
+    custom_title = read_custom_title(jsonl_path)
+
+    # 已归档的 session 不展示
+    if read_archived(jsonl_path):
+        return None
+
     message_count = 0
-    title: str | None = None
+    title: str | None = custom_title
     real_cwd = ""
     parse_failed = False
     saw_any_json = False
