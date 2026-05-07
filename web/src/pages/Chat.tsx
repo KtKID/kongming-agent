@@ -239,6 +239,7 @@ export function ChatPage() {
               <WorkspaceTabs
                 active={activeWorkspaceTab}
                 onChange={(tab) => setActiveWorkspaceTab(threadId, tab)}
+                threadId={thread?.claude_thread_id || thread?.codex_thread_id || threadId}
               />
             </div>
           ) : null}
