@@ -18,9 +18,9 @@ export function WorkspaceTabs({
     <Tabs
       value={active}
       onValueChange={(value) => onChange(value as WorkspaceTab)}
-      className="w-full"
+      className="flex justify-end"
     >
-      <TabsList className="grid w-full grid-cols-4">
+      <TabsList className="inline-flex w-auto">
         <TabsTrigger value="chat" className="gap-1.5" disabled={disabled}>
           <MessageSquare className="h-3.5 w-3.5" />
           Chat
