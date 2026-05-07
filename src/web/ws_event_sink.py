@@ -28,6 +28,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from core.contracts import Event
@@ -68,6 +69,47 @@ _ERROR_TYPE_TO_CODE: dict[str, ErrorCode] = {
 
 _EVOLUTION_NOTICE_KEY = "self_evolution.review"
 _EVOLUTION_NOTICE_SOURCE = "self_evolution"
+
+
+class UsagePersistSink:
+    """每 turn 把 usage 增量写盘的 EventSink。
+
+    只关心 ``kind="usage"`` 事件；其余静默跳过。
+    由 ThreadManager._build_cell 注册到 sinks 列表，替代
+    _run_once_safely 中的 run 结束一次性持久化，保证刷新页面
+    后 hydrateUsageFromThreads 能拿到最新累计值。
+    """
+
+    def __init__(
+        self,
+        thread_id: str,
+        persist_fn: Callable[..., Awaitable[Any]],
+    ) -> None:
+        self._thread_id = thread_id
+        self._persist_fn = persist_fn
+
+    async def emit(self, event: Event) -> None:
+        if event.kind != "usage":
+            return
+        payload = event.payload or {}
+        prompt = int(payload.get("prompt_tokens", 0) or 0)
+        completion = int(payload.get("completion_tokens", 0) or 0)
+        total = int(payload.get("total_tokens", 0) or 0)
+        if prompt == 0 and completion == 0 and total == 0:
+            return
+        try:
+            await self._persist_fn(
+                self._thread_id,
+                prompt_tokens=prompt,
+                completion_tokens=completion,
+                total_tokens=total,
+            )
+        except Exception:
+            logger.warning(
+                "UsagePersistSink: failed to persist usage for thread %s",
+                self._thread_id,
+                exc_info=True,
+            )
 
 
 class WSEventSink:

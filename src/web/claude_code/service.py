@@ -100,23 +100,17 @@ class ClaudeCodeService:
 
         # v0.2 自动 resume：thread-bound 路径 + thread metadata 已绑定 claude_thread_id →
         # 注入 resume + cwd（用户显式 resume 不被覆盖）
-        if (
-            register_id_override
-            and self._thread_manager is not None
-            and not (isinstance(options, dict) and "resume" in options)
-        ):
+        if register_id_override and self._thread_manager is not None:
             with contextlib.suppress(Exception):
                 metas = self._thread_manager.list_threads()
                 meta = next((m for m in metas if m.id == register_id_override), None)
-                claude_tid = getattr(meta, "claude_thread_id", "") if meta is not None else ""
-                if claude_tid:
-                    options = {
-                        **(options if isinstance(options, dict) else {}),
-                        "resume": claude_tid,
-                    }
-                    cwd_val = getattr(meta, "cwd", "") if meta is not None else ""
-                    if cwd_val and "cwd" not in options:
-                        options["cwd"] = cwd_val
+                if meta is not None:
+                    cwd_val = getattr(meta, "cwd", "")
+                    if cwd_val and (not isinstance(options, dict) or "cwd" not in options):
+                        options = {**(options if isinstance(options, dict) else {}), "cwd": cwd_val}
+                    claude_tid = getattr(meta, "claude_thread_id", "")
+                    if claude_tid and not (isinstance(options, dict) and "resume" in options):
+                        options = {**(options if isinstance(options, dict) else {}), "resume": claude_tid}
 
         # 1. 装配 options
         opts = self._build_options(options)

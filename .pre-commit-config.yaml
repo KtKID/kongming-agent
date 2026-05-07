@@ -27,6 +27,18 @@ repos:
         name: ruff format
 
   # ---------------------------------------------------------------------------
+  # commit 分离 —— 代码和文档不能混在同一个 commit
+  # ---------------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: check-commit-separation
+        name: check code/docs separation
+        entry: bin/check-commit-separation.sh
+        language: script
+        always_run: true
+        pass_filenames: false
+
+  # ---------------------------------------------------------------------------
   # local hooks —— 依赖项目 .venv（通过 uv run 调度）
   # ---------------------------------------------------------------------------
   - repo: local

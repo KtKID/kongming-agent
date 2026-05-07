@@ -219,21 +219,13 @@ async def _run_once_safely(
     *,
     reasoning_effort: str | None = None,
 ) -> None:
-    """在后台跑 ``cell.bridge.run_once``；异常推 ``error`` 帧不沉默死掉。"""
-    tm: ThreadManagerProtocol = websocket.app.state.thread_manager
-    thread_id = str(cell.thread_id)
+    """在后台跑 ``cell.bridge.run_once``；异常推 ``error`` 帧不沉默死掉。
+
+    token 持久化由 :class:`UsagePersistSink` 在每个 turn 的 ``usage``
+    event 时增量写盘，不在此处做 run 结束一次性写入。
+    """
     try:
-        result = await cell.bridge.run_once(text, reasoning_effort=reasoning_effort)
-        if hasattr(result, "run_id"):
-            usage = result.metadata.get("usage")
-            if isinstance(usage, dict) and usage:
-                with contextlib.suppress(Exception):
-                    await tm.add_thread_usage(
-                        thread_id,
-                        prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
-                        completion_tokens=int(usage.get("completion_tokens", 0) or 0),
-                        total_tokens=int(usage.get("total_tokens", 0) or 0),
-                    )
+        await cell.bridge.run_once(text, reasoning_effort=reasoning_effort)
     except asyncio.CancelledError:
         raise
     except Exception as exc:

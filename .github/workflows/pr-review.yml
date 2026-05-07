@@ -1,0 +1,30 @@
+name: LLM PR Review
+
+on:
+  pull_request:
+    types: [opened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Review PR
+        uses: nick-fields/retry@v3
+        with:
+          max_attempts: 3
+          retry_wait_seconds: 10
+          timeout_minutes: 10
+          command: bash .github/scripts/review.sh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          MINIMAX_API_URL: https://api.minimaxi.com/anthropic
+          MINIMAX_MODEL: MiniMax-M1
+          PR_NUMBER: ${{ github.event.pull_request.number }}

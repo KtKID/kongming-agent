@@ -21,6 +21,7 @@ root_packages =
     config_loader
     memory
     prompts
+    scheduler
     web
 source_paths = src
 include_external_packages = True
@@ -61,7 +62,7 @@ layers =
     cli | web
     host
     safety
-    tools | context | executors | observability
+    tools | context | executors | observability | scheduler
     memory
     config_loader
     core
@@ -78,6 +79,16 @@ ignore_imports =
     executors.agent_runtime.native_runtime -> context.history_compactor
     executors.agent_runtime.native_runtime -> context.input_assembler
     executors.agent_runtime.native_runtime -> context.instruction_loader
+    scheduler.runtime_factory -> executors.agent_runtime.native_runtime
+    scheduler.runtime_factory -> context
+    scheduler.execution_bridge -> executors.llm.provider_factory
+    scheduler.execution_bridge -> observability
+    tools -> scheduler.store
+    tools.schedule_tool -> scheduler.domain
+    tools.schedule_tool -> scheduler.store
+    tools.schedule_tool -> scheduler.schedule_parser
+    tools.schedule_tool -> scheduler.timing
+    scheduler.runtime_factory -> context.session_bootstrap
 
 ; ---------------------------------------------------------------------------
 ; Contract 4: tools 不允许直接 import safety 内部 policy / guards / decision_engine
@@ -175,3 +186,21 @@ forbidden_modules =
 ; 仅在 lifespan startup 懒 import，允许触达 context / commands。
 ignore_imports =
     web.app -> web.slash_candidates_loader
+    web.app -> scheduler.runtime_factory
+    web.app -> scheduler.store
+    web.app -> scheduler.ticker
+    web.app -> scheduler.delivery
+
+; ---------------------------------------------------------------------------
+; Contract 7: scheduler 不允许 import web 模块
+;             scheduler 通过 Protocol（TargetDeliverySink）与 web 解耦；
+;             具体实现（ThreadTargetSink）在 web 侧，装配层注入。
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:scheduler-no-web]
+name = scheduler must not import web
+type = forbidden
+source_modules =
+    scheduler
+forbidden_modules =
+    web

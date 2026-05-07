@@ -206,6 +206,9 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
   const streamIdRef = useRef<string | null>(null);
   const hadStreamThisTurnRef = useRef(false);
   const turnSeqRef = useRef(0);
+  const pendingProjectsRefreshRef = useRef(false);
+  const [streamPhase, setStreamPhase] = useState<"idle" | "responding" | "thinking" | "tool_calling">("idle");
+  const [streamToolName, setStreamToolName] = useState<string | undefined>();
 
   // --- store selectors (#6 #7) ---
   const pendingNewClaudeSession = useThreadsStore(
@@ -236,6 +239,8 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
     streamIdRef.current = null;
     hadStreamThisTurnRef.current = false;
     turnSeqRef.current = 0;
+    setStreamPhase("idle");
+    setStreamToolName(undefined);
   }, [threadId]);
 
   // --- history loading (skip when pending) ---
@@ -284,6 +289,10 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
       const msg = frame as NormalizedMessage;
       switch (msg.kind) {
         case "text": {
+          if (pendingProjectsRefreshRef.current) {
+            pendingProjectsRefreshRef.current = false;
+            triggerClaudeProjectsRefresh();
+          }
           const role = msg.role ?? "assistant";
           if (role === "assistant" && hadStreamThisTurnRef.current) {
             return;
@@ -333,6 +342,10 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
           return;
         }
         case "stream_delta": {
+          if (pendingProjectsRefreshRef.current) {
+            pendingProjectsRefreshRef.current = false;
+            triggerClaudeProjectsRefresh();
+          }
           const delta = stringifyContent(msg.content);
           hadStreamThisTurnRef.current = true;
           setItems((prev) => {
@@ -376,6 +389,14 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
             ),
           );
           streamIdRef.current = null;
+          return;
+        }
+        case "stream_status": {
+          const phase = msg.phase as "responding" | "thinking" | "tool_calling" | undefined;
+          if (phase) {
+            setStreamPhase(phase);
+            setStreamToolName(phase === "tool_calling" ? (msg.toolName ?? undefined) : undefined);
+          }
           return;
         }
         case "tool_use": {
@@ -442,6 +463,10 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
           return;
         }
         case "complete": {
+          if (pendingProjectsRefreshRef.current) {
+            pendingProjectsRefreshRef.current = false;
+            triggerClaudeProjectsRefresh();
+          }
           setItems((prev) => [
             ...prev.map((item) =>
               isGenericChatItem(item) &&
@@ -459,6 +484,8 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
           ]);
           streamIdRef.current = null;
           hadStreamThisTurnRef.current = false;
+          setStreamPhase("idle");
+          setStreamToolName(undefined);
           return;
         }
         case "error": {
@@ -474,6 +501,8 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
             },
           ]);
           streamIdRef.current = null;
+          setStreamPhase("idle");
+          setStreamToolName(undefined);
           return;
         }
         case "permission_request": {
@@ -496,7 +525,10 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
           }
           return;
         }
-        case "session_created":
+        case "session_created": {
+          pendingProjectsRefreshRef.current = true;
+          return;
+        }
         case "interactive_prompt":
         case "task_notification": {
           return;
@@ -527,8 +559,7 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
       options: {},
     });
     fetchThreads();
-    triggerClaudeProjectsRefresh();
-  }, [threadId, socket, state, initialMessage, setInitialMessage, fetchThreads, triggerClaudeProjectsRefresh]);
+  }, [threadId, socket, state, initialMessage, setInitialMessage, fetchThreads]);
 
   // --- #6: onSend with pending-mode create-thread flow ---
   const onSend = async (text: string) => {
@@ -622,6 +653,16 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
           }
         />
       </div>
+      {streamPhase !== "idle" && (
+        <div className="flex items-center gap-2 px-4 py-1.5 text-xs text-muted-foreground">
+          <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+          {streamPhase === "thinking"
+            ? "思考中..."
+            : streamPhase === "tool_calling"
+              ? `调用工具: ${streamToolName ?? ""}...`
+              : "生成中..."}
+        </div>
+      )}
       <Composer
         disabled={isPending ? false : state !== "open"}
         onSubmit={(text) => onSend(text)}
