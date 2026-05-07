@@ -3,7 +3,6 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { MessageSquare, Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Input } from "@/components/ui/input";
 import { useThreadsStore } from "@/stores/threads";
 import { NewThreadDialog } from "@/components/NewThreadDialog";
@@ -77,7 +76,7 @@ export function ThreadList() {
   };
 
   return (
-    <aside className="flex h-full w-80 shrink-0 flex-col border-r border-border bg-card">
+    <aside className="flex h-full w-full flex-col">
       <div className="flex items-center justify-between border-b border-border p-3">
         <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           会话
@@ -91,7 +90,7 @@ export function ThreadList() {
           <Plus className="h-4 w-4" />
         </Button>
       </div>
-      <ScrollArea className="flex-1">
+      <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="flex flex-col gap-0.5 p-2">
           {threads.length === 0 ? (
             <div className="px-3 py-6 text-center text-xs text-muted-foreground">
@@ -105,10 +104,10 @@ export function ThreadList() {
               <div
                 key={t.id}
                 className={cn(
-                  "group flex items-center gap-2 rounded-md px-2.5 py-2 text-sm transition-colors",
+                  "group relative flex items-center gap-2 overflow-hidden rounded-md px-2.5 py-2 text-sm transition-colors",
                   active
-                    ? "bg-secondary text-foreground"
-                    : "hover:bg-secondary/60",
+                    ? "bg-accent text-accent-foreground"
+                    : "hover:bg-accent/60",
                 )}
               >
                 {editingId === t.id ? (
@@ -124,67 +123,76 @@ export function ThreadList() {
                     className="h-7"
                   />
                 ) : (
-                  <Link
-                    to={`/chat/${t.id}`}
-                    className="flex min-w-0 flex-1 items-center gap-2 truncate"
-                    title={t.name}
-                  >
-                    <span
-                      aria-label={`${sourceMeta.label} 会话`}
-                      title={sourceMeta.label}
+                  <>
+                    <Link
+                      to={`/chat/${t.id}`}
+                      className="flex min-w-0 flex-1 items-center gap-2 truncate"
+                      title={t.name}
+                    >
+                      <span
+                        aria-label={`${sourceMeta.label} 会话`}
+                        title={sourceMeta.label}
+                        className={cn(
+                          "flex h-5 w-5 shrink-0 items-center justify-center rounded-sm border border-border/60 bg-background/60 text-muted-foreground",
+                          active && "border-border bg-background text-foreground/80",
+                        )}
+                      >
+                        {sourceMeta.imageSrc ? (
+                          <img
+                            src={sourceMeta.imageSrc}
+                            alt=""
+                            aria-hidden="true"
+                            className="h-4 w-4 rounded-[4px] object-cover"
+                          />
+                        ) : sourceMeta.Icon ? (
+                          <sourceMeta.Icon className="h-3.5 w-3.5" aria-hidden="true" />
+                        ) : null}
+                      </span>
+                      <span className="truncate">{t.name || "未命名"}</span>
+                    </Link>
+                    <div
                       className={cn(
-                        "flex h-5 w-5 shrink-0 items-center justify-center rounded-sm border border-border/60 bg-background/60 text-muted-foreground",
-                        active && "border-border bg-background text-foreground/80",
+                        "absolute right-0 top-0 flex h-full items-center gap-0.5 pr-2 pl-6 opacity-0 transition-opacity group-hover:opacity-100",
+                        active
+                          ? "bg-gradient-to-l from-accent from-60% to-transparent"
+                          : "bg-gradient-to-l from-card from-60% group-hover:from-accent/60 to-transparent",
                       )}
                     >
-                      {sourceMeta.imageSrc ? (
-                        <img
-                          src={sourceMeta.imageSrc}
-                          alt=""
-                          aria-hidden="true"
-                          className="h-4 w-4 rounded-[4px] object-cover"
-                        />
-                      ) : sourceMeta.Icon ? (
-                        <sourceMeta.Icon className="h-3.5 w-3.5" aria-hidden="true" />
-                      ) : null}
-                    </span>
-                    <span className="truncate">{t.name || "未命名"}</span>
-                  </Link>
+                      <button
+                        type="button"
+                        aria-label="重命名"
+                        title="重命名"
+                        className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setEditingId(t.id);
+                          setEditName(t.name);
+                        }}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="删除"
+                        title="删除"
+                        className="rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          void onDelete(t.id);
+                        }}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </>
                 )}
-                <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                  <button
-                    type="button"
-                    aria-label="重命名"
-                    title="重命名"
-                    className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setEditingId(t.id);
-                      setEditName(t.name);
-                    }}
-                  >
-                    <Pencil className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    aria-label="删除"
-                    title="删除"
-                    className="rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      void onDelete(t.id);
-                    }}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
               </div>
             );
           })}
         </div>
-      </ScrollArea>
+      </div>
       <NewThreadDialog open={newOpen} onOpenChange={setNewOpen} />
     </aside>
   );
