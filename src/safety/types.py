@@ -149,6 +149,26 @@ class SensitivePathRule:
 
 
 @dataclass(frozen=True)
+class DestructivePattern:
+    """``destructive_always_ask`` 表条目：命中即强制 consent，无视任何 grant。
+
+    决策链优先级第 ② 层（HardBlock → **DestructiveForceAsk** → Trust → Consent）。
+    复用 ``HardDenyCommand`` 的字段结构，但语义不同：
+    - HardDenyCommand 命中 → ``rejected``（硬拒绝，不可绕过）
+    - DestructivePattern 命中 → 跳过 Trust 直接进 ConsentResolver（强制 elevated 审批）
+
+    匹配逻辑：对命令按 shell 分隔符（``&&`` / ``||`` / ``;`` / ``|``）拆段，
+    每段独立用 ``re.search`` 检查。
+    """
+
+    name: str
+    matcher: str  # regex
+    match_mode: Literal["segment_regex"]
+    boundary_scope: BoundaryScope
+    reason: str
+
+
+@dataclass(frozen=True)
 class SkillCallRule:
     """``skill_call_rules`` 表条目：skill 调用按 ``effect`` 区分 block / elevated / allow。
 
@@ -311,6 +331,7 @@ __all__ = [
     "BoundaryZone",
     "DecisionClass",
     "DecisionSource",
+    "DestructivePattern",
     "Grant",
     "GrantKey",
     "HardDenyCommand",

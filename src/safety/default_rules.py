@@ -13,6 +13,7 @@ from __future__ import annotations
 from safety.types import (
     ApprovalRequiredCommand,
     BoundaryScope,
+    DestructivePattern,
     HardDenyCommand,
     SensitivePathRule,
     SkillCallRule,
@@ -108,6 +109,36 @@ DEFAULT_HARD_DENY_COMMANDS: tuple[HardDenyCommand, ...] = (
         match_mode="profile",
         boundary_scope=BoundaryScope.ANY,
         reason="试图扩大 agent 默认安全边界到根目录或 HOME",
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
+# destructive_always_ask —— 决策链第 ② 层：命中即强制 consent，无视任何 grant
+# ---------------------------------------------------------------------------
+
+DEFAULT_DESTRUCTIVE_ALWAYS_ASK: tuple[DestructivePattern, ...] = (
+    DestructivePattern(
+        # 递归删除：rm -r / rm -rf / rm -R / rm --recursive，任意选项簇顺序
+        name="rm-recursive",
+        matcher=r"^rm\s+(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b",
+        match_mode="segment_regex",
+        boundary_scope=BoundaryScope.ANY,
+        reason="递归删除：最高优先级，必须审批",
+    ),
+    DestructivePattern(
+        name="shred",
+        matcher=r"\bshred\b",
+        match_mode="segment_regex",
+        boundary_scope=BoundaryScope.ANY,
+        reason="安全擦除：不可逆",
+    ),
+    DestructivePattern(
+        name="srm",
+        matcher=r"\bsrm\b",
+        match_mode="segment_regex",
+        boundary_scope=BoundaryScope.ANY,
+        reason="安全删除：不可逆",
     ),
 )
 
@@ -301,6 +332,15 @@ DEFAULT_SENSITIVE_PATHS: tuple[SensitivePathRule, ...] = (
         boundary_scope=BoundaryScope.ANY,
         reason="项目级安全规则目录",
     ),
+    SensitivePathRule(
+        name="kongming-skills-dir",
+        matcher=".kongming/skills/",
+        match_mode="project_relative",
+        ops=frozenset({"write"}),
+        effect="elevated",
+        boundary_scope=BoundaryScope.ANY,
+        reason="agent skill 目录，删除或修改需人工确认",
+    ),
     # allow：低风险 scratch 目录
     SensitivePathRule(
         name="kongming-workdir",
@@ -403,6 +443,7 @@ __all__ = [
     "DEFAULT_ALLOW_WRITES",
     "DEFAULT_APPROVAL_REQUIRED_COMMANDS",
     "DEFAULT_CONSENT_THEN_TRUST_TOOLS",
+    "DEFAULT_DESTRUCTIVE_ALWAYS_ASK",
     "DEFAULT_HARD_DENY_COMMANDS",
     "DEFAULT_SENSITIVE_PATHS",
     "DEFAULT_SKILL_CALL_RULES",
