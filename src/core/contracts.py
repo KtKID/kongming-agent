@@ -109,7 +109,7 @@ class ToolLookup(Protocol):
 # ---------------------------------------------------------------------------
 
 
-ApprovalOutcome = Literal["approved", "rejected", "cancelled"]
+ApprovalOutcome = Literal["approved", "rejected", "cancelled", "pending"]
 
 
 @dataclass(frozen=True)
@@ -139,7 +139,9 @@ class ApprovalDecision:
     """一次审批结果。
 
     Attributes:
-        outcome: approved / rejected / cancelled 之一。
+        outcome: approved / rejected / cancelled / pending 之一。
+                 ``pending`` 仅用于 trace 占位（如 destructive_force_ask / approval_required），
+                 不参与控制流决策。
         reason: 人工或策略给出的理由文本。
         metadata: 附加信息，比如操作者身份、来源 UI 等。
 

@@ -18,12 +18,14 @@ ConsentResolver（elevated 审批），**无视任何已有 grant**。
 
 from __future__ import annotations
 
-import contextlib
+import logging
 import re
 from typing import TYPE_CHECKING, Any
 
 from safety.default_rules import DEFAULT_DESTRUCTIVE_ALWAYS_ASK
 from safety.types import BoundaryScope, DestructivePattern
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from config_loader.models import Config
@@ -54,8 +56,15 @@ class DestructiveForceAskGuard:
         self._compiled: list[tuple[DestructivePattern, re.Pattern[str]]] = []
         for p in patterns:
             if p.match_mode == "segment_regex":
-                with contextlib.suppress(re.error):
+                try:
                     self._compiled.append((p, re.compile(p.matcher)))
+                except re.error as exc:
+                    logger.warning(
+                        "DestructiveForceAskGuard: skipping rule %r — invalid regex %r: %s",
+                        p.name,
+                        p.matcher,
+                        exc,
+                    )
 
     @classmethod
     def from_config(cls, config: Config) -> DestructiveForceAskGuard:
@@ -87,36 +96,27 @@ class DestructiveForceAskGuard:
 
         非 shell 工具直接返回 ``False``。shell 命令按段拆分后逐段检查。
         """
-        if request.tool_name not in _SHELL_TOOLS:
-            return False
-        command = (request.arguments or {}).get("command")
-        if not isinstance(command, str) or not command.strip():
-            return False
-        return self._match_command(command)
+        return self.matched_rule(request) is not None
 
     def matched_rule(self, request: ApprovalRequest) -> DestructivePattern | None:
         """返回命中的第一条规则（用于 trace），不命中返回 ``None``。"""
+        command = self._extract_command(request)
+        if command is None:
+            return None
+        return self._find_matched_rule(command)
+
+    @staticmethod
+    def _extract_command(request: ApprovalRequest) -> str | None:
+        """从 ApprovalRequest 提取有效 shell 命令，非 shell 或空命令返回 None。"""
         if request.tool_name not in _SHELL_TOOLS:
             return None
         command = (request.arguments or {}).get("command")
         if not isinstance(command, str) or not command.strip():
             return None
-        return self._find_matched_rule(command)
-
-    def _match_command(self, command: str) -> bool:
-        """段级匹配：按 shell 分隔符拆段，每段独立检查。"""
-        segments = _SHELL_SEGMENT_SPLITTER.split(command)
-        for segment in segments:
-            segment = segment.strip()
-            if not segment:
-                continue
-            for _pattern, compiled in self._compiled:
-                if compiled.search(segment):
-                    return True
-        return False
+        return command
 
     def _find_matched_rule(self, command: str) -> DestructivePattern | None:
-        """返回命中的第一条规则。"""
+        """段级匹配：按 shell 分隔符拆段，每段独立检查，返回命中的第一条规则。"""
         segments = _SHELL_SEGMENT_SPLITTER.split(command)
         for segment in segments:
             segment = segment.strip()

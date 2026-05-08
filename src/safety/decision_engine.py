@@ -20,8 +20,9 @@
   sandbox 分支。
 - **ConsentResolver 是终点 guard**：永远返回 ``ApprovalDecision``，本类不再做
   fallback。
-- **DestructiveForceAskGuard 不产出 decision**：只做 bool 判断，命中后由
-  SafetyDecisionEngine 直接跳到 ConsentResolver。
+- **DestructiveForceAskGuard 不直接产出 decision**：Guard 只做 bool 判断，
+  命中后由 Engine 构造占位 preview（``placeholder=True``）并 emit
+  ``tool.destructive_force_ask``，随后跳到 ConsentResolver 取得真实 decision。
 """
 
 from __future__ import annotations
@@ -116,27 +117,31 @@ class SafetyDecisionEngine:
         boundary_decision = self._boundary.resolve(request, runtime)
 
         # 3. DestructiveForceAsk：命中 → 跳过 Trust，强制进 Consent
-        if self._destructive is not None and self._destructive.matches(request):
+        if self._destructive is not None:
             matched = self._destructive.matched_rule(request)
-            force_preview = ApprovalDecision(
-                outcome="approved",  # 占位
-                reason="destructive command: forced consent",
-                metadata={
-                    ApprovalMetadataKeys.DECISION_CLASS: "explicit_consent",
-                    ApprovalMetadataKeys.BOUNDARY_KIND: "host",
-                    ApprovalMetadataKeys.MATCHED_RULE: (
-                        f"destructive:{matched.name}" if matched else "destructive:unknown"
-                    ),
-                },
-            )
-            self._emit("tool.destructive_force_ask", force_preview, request)
+            if matched is not None:
+                force_preview = ApprovalDecision(
+                    outcome="pending",  # trace 占位：实际结果由 ConsentResolver 决定
+                    reason="destructive command: forced consent",
+                    metadata={
+                        ApprovalMetadataKeys.DECISION_CLASS: "explicit_consent",
+                        ApprovalMetadataKeys.BOUNDARY_KIND: "host",
+                        ApprovalMetadataKeys.MATCHED_RULE: f"destructive:{matched.name}",
+                        "placeholder": True,
+                    },
+                )
+                self._emit("tool.destructive_force_ask", force_preview, request)
 
-            consent_decision = await self._consent.evaluate(request, boundary_decision, runtime)
-            if consent_decision.outcome == "approved":
-                self._emit("tool.silently_allowed", consent_decision, request)
-            else:
-                self._emit("tool.denied", consent_decision, request)
-            return consent_decision
+                consent_decision = await self._consent.evaluate(
+                    request,
+                    boundary_decision,
+                    runtime,
+                )
+                if consent_decision.outcome == "approved":
+                    self._emit("tool.silently_allowed", consent_decision, request)
+                else:
+                    self._emit("tool.denied", consent_decision, request)
+                return consent_decision
 
         # 4. Trust 消费已有证据
         trust_decision = self._trust.evaluate(request, runtime)
@@ -146,11 +151,12 @@ class SafetyDecisionEngine:
 
         # 5. Consent：先 emit approval_required，再按结果 emit
         approval_required_preview = ApprovalDecision(
-            outcome="approved",  # 占位；emit 后立刻被真实 decision 替换
+            outcome="pending",  # trace 占位：实际结果由 ConsentResolver 决定
             reason="awaiting user consent",
             metadata={
                 ApprovalMetadataKeys.DECISION_CLASS: "explicit_consent",
                 ApprovalMetadataKeys.BOUNDARY_KIND: "host",
+                "placeholder": True,
             },
         )
         self._emit("tool.approval_required", approval_required_preview, request)

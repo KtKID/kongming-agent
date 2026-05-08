@@ -303,8 +303,8 @@ class TestMaybeWriteSessionGrantCommandPrefix:
         assert grant.key.matcher == "*"  # 非 shell 保持通配
 
     @pytest.mark.asyncio
-    async def test_empty_command_falls_back_to_wildcard(self) -> None:
-        """空命令 → extract_command_base 返回 ""，fallback 到 "*"。"""
+    async def test_empty_command_skips_grant(self) -> None:
+        """空命令 → 跳过 grant 写入（避免 fallback 到 "*" 过度授权）。"""
         gated, store = self._make_gated_approval()
         req = ApprovalRequest(
             run_id="r1",
@@ -316,5 +316,20 @@ class TestMaybeWriteSessionGrantCommandPrefix:
         )
         await gated.decide(req)
         bucket = store._session_grants.get("s1", {})
-        grant = next(iter(bucket.values()))
-        assert grant.key.matcher == "*"  # 空命令 fallback
+        assert len(bucket) == 0  # 空命令不写 grant
+
+    @pytest.mark.asyncio
+    async def test_whitespace_only_command_skips_grant(self) -> None:
+        """纯空白命令 → 同样跳过 grant 写入。"""
+        gated, store = self._make_gated_approval()
+        req = ApprovalRequest(
+            run_id="r1",
+            session_id="s1",
+            turn=1,
+            call_id="c-ws",
+            tool_name="run_shell",
+            arguments={"command": "   "},
+        )
+        await gated.decide(req)
+        bucket = store._session_grants.get("s1", {})
+        assert len(bucket) == 0  # 纯空白命令不写 grant

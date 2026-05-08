@@ -175,6 +175,9 @@ class SafetyGatedApproval:
         if request.tool_name == "run_shell":
             cmd = (request.arguments or {}).get("command")
             if isinstance(cmd, str):
+                if not cmd.strip():
+                    # 空/纯空白命令不写 grant（避免 fallback 到 "*" 过度授权）
+                    return
                 cmd_base = extract_command_base(cmd)
                 if cmd_base:
                     matcher = cmd_base
