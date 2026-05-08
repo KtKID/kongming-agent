@@ -28,11 +28,12 @@ URL 里出现的资源是新 thread（``imported=true`` 时），与 thread CRUD
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -664,8 +665,16 @@ async def get_workspace_file(
     _validate_thread_id(thread_id)
     try:
         meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
-        root = require_workspace_root(meta)
-        payload = await asyncio.to_thread(read_workspace_text_file, root, path)
+        try:
+            root = require_workspace_root(meta)
+        except WorkspaceError:
+            root = cast(Path, request.app.state.workspace_root)
+        resolved_path = path.strip()
+        if resolved_path.startswith("/"):
+            abs_p = Path(resolved_path).resolve()
+            with contextlib.suppress(ValueError):
+                resolved_path = str(abs_p.relative_to(root.resolve()))
+        payload = await asyncio.to_thread(read_workspace_text_file, root, resolved_path)
     except ThreadNotFoundError:
         raise
     except FileNotFoundError as exc:
