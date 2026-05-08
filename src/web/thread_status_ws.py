@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 from typing import Any, Literal, cast
 
 from fastapi import FastAPI, WebSocket
@@ -27,6 +29,12 @@ from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 logger = logging.getLogger(__name__)
 
 WS_CLOSE_POLICY_VIOLATION = 1008
+
+
+def _now_ms() -> int:
+    """当前时间戳（毫秒）。"""
+    return int(time.time() * 1000)
+
 
 Phase = Literal[
     "idle",
@@ -246,10 +254,21 @@ async def _thread_status_ws_handler(websocket: WebSocket) -> None:
     broadcaster = get_broadcaster()
     await broadcaster.attach(websocket)
 
-    # 3. 入帧循环：客户端不需要给本端发数据，仅 await 直到断连
+    # 3. 入帧循环：解析 ping 帧并回 pong，其余静默丢弃
     try:
         while True:
-            await websocket.receive_text()
+            raw = await websocket.receive_text()
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict) and data.get("kind") == "ping":
+                    pong = {
+                        "kind": "pong",
+                        "timestamp_ms": _now_ms(),
+                        "ts": data.get("ts"),
+                    }
+                    await websocket.send_json(pong)
+            except (json.JSONDecodeError, TypeError):
+                pass  # 非 JSON 帧静默忽略
     except Exception:
         logger.debug("/ws/thread-status client disconnected or errored")
     finally:

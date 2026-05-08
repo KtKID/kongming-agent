@@ -60,6 +60,7 @@ class PingFrame(_C2SFrameBase):
     """浏览器侧 keep-alive 心跳；后端以 ``pong`` 回应。"""
 
     kind: Literal["ping"] = "ping"
+    ts: int | None = None  # 客户端发送时的 epoch ms，用于 RTT 计算
 
 
 class UserInputFrame(_C2SFrameBase):
@@ -142,9 +143,10 @@ class ErrorFrame(_S2CFrameBase):
 
 
 class PongFrame(_S2CFrameBase):
-    """对 ``ping`` 的应答；仅含 ``timestamp_ms``。"""
+    """对 ``ping`` 的应答；含服务端 ``timestamp_ms`` + 客户端原始 ``ts``。"""
 
     kind: Literal["pong"] = "pong"
+    ts: int | None = None  # 原样回传客户端的 ts
 
 
 class SystemNoticeFrame(_S2CFrameBase):

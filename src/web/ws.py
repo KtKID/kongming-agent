@@ -202,7 +202,7 @@ async def _dispatch_frame(
             logger.exception("resolve_approval raised; ignored")
     elif kind == "ping":
         try:
-            pong = PongFrame(timestamp_ms=_now_ms())
+            pong = PongFrame(timestamp_ms=_now_ms(), ts=getattr(frame, "ts", None))
             await websocket.send_json(pong.model_dump())
         except Exception:
             # 推 pong 失败说明 ws 断了；让下次 receive 抛 WebSocketDisconnect

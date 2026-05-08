@@ -882,6 +882,11 @@ class WebConfig(BaseModel):
             evict（默认 30 分钟）。下限 60s 防误配。
         idle_check_interval_seconds: 后台扫盘周期（默认 60s）。下限 10s。
         pending_approval_timeout_seconds: 单次审批等待上限（默认 60s）。下限 10s。
+        ws_heartbeat_interval_ms: 前端发 ping 的间隔（毫秒）。默认 30s。
+            下限 5s 防过频。
+        ws_heartbeat_timeout_ms: 单次 pong 等待超时（毫秒）。默认 10s。
+            下限 3s。
+        ws_heartbeat_max_missed: 连续丢失几次 pong 判定连接死亡。默认 3 次。
         llm_presets: 可用的 LLM preset 列表；浏览器创建 thread 时下拉选其一。
             v0.1.5 schema 留空，由 web-app-shell 任务实际填默认 preset。
     """
@@ -896,6 +901,15 @@ class WebConfig(BaseModel):
     idle_timeout_seconds: Annotated[int, Field(ge=60)] = 1800
     idle_check_interval_seconds: Annotated[int, Field(ge=10)] = 60
     pending_approval_timeout_seconds: Annotated[int, Field(ge=10)] = 60
+
+    # 心跳配置（前端读取，不硬编码）
+    ws_heartbeat_interval_ms: Annotated[int, Field(ge=5000)] = 30000
+    """前端发 ping 的间隔（毫秒）。默认 30s。下限 5s 防过频。"""
+    ws_heartbeat_timeout_ms: Annotated[int, Field(ge=3000)] = 10000
+    """单次 pong 等待超时（毫秒）。默认 10s。"""
+    ws_heartbeat_max_missed: Annotated[int, Field(ge=1)] = 3
+    """连续丢失几次 pong 判定连接死亡。默认 3 次。"""
+
     llm_presets: list[LLMPresetConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")
