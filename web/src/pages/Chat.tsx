@@ -124,19 +124,32 @@ export function ChatPage() {
   }, [fetchWorkspaceContext, threadId]);
 
   useEffect(() => {
-    const syncLayout = () => {
-      const mobile = window.innerWidth < 768;
-      const compact = window.innerWidth < 1080;
+    // 首次同步布局：compact 模式关闭侧边栏
+    const initWidth = window.innerWidth;
+    const initMobile = initWidth < 768;
+    const initCompact = initWidth < 1080;
+    setIsMobileLayout(initMobile);
+    setIsCompactLayout(initCompact);
+    if (initCompact) {
+      setIsLeftSidebarOpen(false);
+      setIsWhiteboardOpen(false);
+    }
+    // 后续 resize：只在宽度真正变化时关闭（排除虚拟键盘弹出只改高度的 resize）
+    let lastWidth = initWidth;
+    const onResize = () => {
+      const width = window.innerWidth;
+      const mobile = width < 768;
+      const compact = width < 1080;
       setIsMobileLayout(mobile);
       setIsCompactLayout(compact);
-      if (compact) {
+      if (compact && width !== lastWidth) {
         setIsLeftSidebarOpen(false);
         setIsWhiteboardOpen(false);
       }
+      lastWidth = width;
     };
-    syncLayout();
-    window.addEventListener("resize", syncLayout);
-    return () => window.removeEventListener("resize", syncLayout);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
   }, []);
 
   const toggleLeftSidebar = () => {
