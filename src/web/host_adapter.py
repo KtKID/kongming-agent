@@ -171,6 +171,8 @@ class WebHostAdapter(HostAdapter):
         self._pending_approvals[request.call_id] = future
 
         # 推 ApprovalRequestFrame 给浏览器
+        # 从 request.metadata 透传 policy_hint / confirm_token（ConsentResolver 写入）
+        req_meta = request.metadata or {}
         frame = ApprovalRequestFrame(
             call_id=request.call_id,
             tool_name=request.tool_name,
@@ -178,6 +180,8 @@ class WebHostAdapter(HostAdapter):
             reason=request.reason,
             turn=request.turn,
             timestamp_ms=_now_ms(),
+            policy_hint=req_meta.get("policy_hint"),
+            confirm_token=req_meta.get("confirm_token"),
         )
         await self._safe_send_json(frame.model_dump())
 

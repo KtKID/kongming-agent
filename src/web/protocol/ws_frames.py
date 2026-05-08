@@ -95,7 +95,13 @@ class ApprovalDecisionFrame(_S2CFrameBase):
 
 
 class ApprovalRequestFrame(_S2CFrameBase):
-    """工具执行前向用户请求审批，浏览器需回 ``approval.ack``。"""
+    """工具执行前向用户请求审批，浏览器需回 ``approval.ack``。
+
+    v0.1.6+ elevated 审批：``policy_hint="elevated"`` 时前端应：
+    - 隐藏「本 session 同意」按钮
+    - 显示 ``confirm_token``（8 hex），用户需输入后才能点「同意」
+    - 红色边框 / 警告图标视觉区分
+    """
 
     kind: Literal["approval.request"] = "approval.request"
     call_id: str
@@ -103,6 +109,8 @@ class ApprovalRequestFrame(_S2CFrameBase):
     arguments: dict[str, Any]
     reason: str | None = None
     turn: int
+    policy_hint: str | None = None
+    confirm_token: str | None = None
 
 
 class CellEvictedFrame(_S2CFrameBase):

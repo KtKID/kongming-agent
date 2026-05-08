@@ -20,13 +20,27 @@ function pushApproval() {
   });
 }
 
+function pushElevatedApproval() {
+  useApprovalDialogStore.getState().push({
+    kind: "approval.request",
+    timestamp_ms: 1,
+    call_id: "c-elevated",
+    tool_name: "run_shell",
+    arguments: { command: "rm -rf .kongming/skills/musk-five-steps" },
+    reason: "递归删除：最高优先级，必须审批",
+    turn: 1,
+    policy_hint: "elevated",
+    confirm_token: "a1b2c3d4",
+  });
+}
+
 function makeStubSocket() {
   return {
     send: vi.fn(),
   } as unknown as ThreadSocket;
 }
 
-describe("ApprovalDialog", () => {
+describe("ApprovalDialog — standard 模式", () => {
   it("无 pending 时不渲染", () => {
     const sock = makeStubSocket();
     render(<ApprovalDialog socket={sock} />);
@@ -107,6 +121,146 @@ describe("ApprovalDialog", () => {
     expect(sock.send).toHaveBeenCalledWith({
       kind: "approval.ack",
       call_id: "c1",
+      action: "reject",
+    });
+  });
+
+  it("standard 模式显示「本 session 同意」按钮", async () => {
+    const sock = makeStubSocket();
+    render(<ApprovalDialog socket={sock} />);
+    pushApproval();
+    await waitFor(() =>
+      expect(screen.getByTestId("approval-approve-session")).toBeInTheDocument(),
+    );
+  });
+
+  it("standard 模式无警告图标", async () => {
+    const sock = makeStubSocket();
+    render(<ApprovalDialog socket={sock} />);
+    pushApproval();
+    await waitFor(() =>
+      expect(screen.getByTestId("approval-approve")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("elevated-warning-icon")).not.toBeInTheDocument();
+  });
+});
+
+describe("ApprovalDialog — elevated 模式", () => {
+  it("elevated 模式隐藏「本 session 同意」按钮", async () => {
+    const sock = makeStubSocket();
+    render(<ApprovalDialog socket={sock} />);
+    pushElevatedApproval();
+    await waitFor(() =>
+      expect(screen.getByTestId("approval-approve")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("approval-approve-session")).not.toBeInTheDocument();
+  });
+
+  it("elevated 模式显示警告图标", async () => {
+    const sock = makeStubSocket();
+    render(<ApprovalDialog socket={sock} />);
+    pushElevatedApproval();
+    await waitFor(() =>
+      expect(screen.getByTestId("elevated-warning-icon")).toBeInTheDocument(),
+    );
+  });
+
+  it("elevated 模式标题为「危险操作审批」", async () => {
+    const sock = makeStubSocket();
+    render(<ApprovalDialog socket={sock} />);
+    pushElevatedApproval();
+    await waitFor(() =>
+      expect(screen.getByText(/危险操作审批/)).toBeInTheDocument(),
+    );
+  });
+
+  it("elevated 模式显示确认码输入区域", async () => {
+    const sock = makeStubSocket();
+    render(<ApprovalDialog socket={sock} />);
+    pushElevatedApproval();
+    await waitFor(() =>
+      expect(screen.getByTestId("confirm-token-area")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("confirm-token-input")).toBeInTheDocument();
+  });
+
+  it("elevated 模式未输入确认码时「同意」按钮禁用", async () => {
+    const sock = makeStubSocket();
+    render(<ApprovalDialog socket={sock} />);
+    pushElevatedApproval();
+    await waitFor(() =>
+      expect(screen.getByTestId("approval-approve")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("approval-approve")).toBeDisabled();
+  });
+
+  it("elevated 模式输入正确确认码后「同意」按钮可用", async () => {
+    const sock = makeStubSocket();
+    render(<ApprovalDialog socket={sock} />);
+    pushElevatedApproval();
+    const user = userEvent.setup();
+    await waitFor(() =>
+      expect(screen.getByTestId("confirm-token-input")).toBeInTheDocument(),
+    );
+    await user.type(screen.getByTestId("confirm-token-input"), "a1b2c3d4");
+    expect(screen.getByTestId("approval-approve")).not.toBeDisabled();
+  });
+
+  it("elevated 模式输入错误确认码时「同意」按钮仍禁用", async () => {
+    const sock = makeStubSocket();
+    render(<ApprovalDialog socket={sock} />);
+    pushElevatedApproval();
+    const user = userEvent.setup();
+    await waitFor(() =>
+      expect(screen.getByTestId("confirm-token-input")).toBeInTheDocument(),
+    );
+    await user.type(screen.getByTestId("confirm-token-input"), "wrong123");
+    expect(screen.getByTestId("approval-approve")).toBeDisabled();
+  });
+
+  it("elevated 模式输入确认码后点同意 → 发送 accept_once", async () => {
+    const sock = makeStubSocket();
+    render(<ApprovalDialog socket={sock} />);
+    pushElevatedApproval();
+    const user = userEvent.setup();
+    await waitFor(() =>
+      expect(screen.getByTestId("confirm-token-input")).toBeInTheDocument(),
+    );
+    await user.type(screen.getByTestId("confirm-token-input"), "a1b2c3d4");
+    await user.click(screen.getByTestId("approval-approve"));
+    expect(sock.send).toHaveBeenCalledWith({
+      kind: "approval.ack",
+      call_id: "c-elevated",
+      action: "accept_once",
+    });
+  });
+
+  it("elevated 模式「同意」按钮使用 destructive variant", async () => {
+    const sock = makeStubSocket();
+    render(<ApprovalDialog socket={sock} />);
+    pushElevatedApproval();
+    await waitFor(() =>
+      expect(screen.getByTestId("approval-approve")).toBeInTheDocument(),
+    );
+    // destructive variant 的 class 检查
+    const btn = screen.getByTestId("approval-approve");
+    // shadcn Button destructive variant 会有 bg-destructive 或类似 class
+    // 至少验证它不是 default variant（无 outline）
+    expect(btn.className).not.toContain("bg-primary");
+  });
+
+  it("elevated 拒绝仍可直接点击（不需要确认码）", async () => {
+    const sock = makeStubSocket();
+    render(<ApprovalDialog socket={sock} />);
+    pushElevatedApproval();
+    const user = userEvent.setup();
+    await waitFor(() =>
+      expect(screen.getByTestId("approval-reject")).toBeInTheDocument(),
+    );
+    await user.click(screen.getByTestId("approval-reject"));
+    expect(sock.send).toHaveBeenCalledWith({
+      kind: "approval.ack",
+      call_id: "c-elevated",
       action: "reject",
     });
   });

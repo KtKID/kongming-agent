@@ -694,6 +694,10 @@ export interface ApprovalRequestFrame {
   arguments: Record<string, unknown>;
   reason?: string;
   turn: number;
+  /** elevated 审批时为 "elevated"，标准审批时为 "standard" 或 undefined */
+  policy_hint?: string;
+  /** elevated 审批时的确认令牌（8 hex），用户需输入后才能点同意 */
+  confirm_token?: string;
 }
 
 /**
