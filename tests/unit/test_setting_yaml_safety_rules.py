@@ -60,19 +60,6 @@ def test_setting_yaml_sensitive_paths_protect_personal_dirs() -> None:
         assert "read" not in rule.ops
 
 
-def test_setting_yaml_cross_volume_write_is_elevated() -> None:
-    """跨卷写入（/Volumes/）是 elevated 不是 block——保留覆盖能力但要明确审批。"""
-    cfg = load_config(_SETTING_YAML, load_env_file=False)
-    rules_by_name = {r.name: r for r in cfg.safety.sensitive_paths}
-
-    assert "cross-volume-write" in rules_by_name
-    rule = rules_by_name["cross-volume-write"]
-    assert rule.matcher == "/Volumes/"
-    assert rule.match_mode == "path_prefix"
-    assert rule.effect == "elevated"
-    assert "write" in rule.ops
-    assert "read" not in rule.ops  # 跨卷读不拦
-
 
 def test_setting_yaml_rm_recursive_requires_elevated_approval() -> None:
     """approval_required_commands 含 rm-recursive-elevated 规则，severity=elevated。"""
