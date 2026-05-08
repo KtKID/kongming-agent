@@ -393,6 +393,8 @@ describe("stores/chat", () => {
       cumulativePrompt: 160,
       cumulativeCompletion: 65,
       cumulativeTotal: 225,
+      cumulativeCacheRead: null,
+      cumulativeCacheCreation: null,
     });
   });
 
