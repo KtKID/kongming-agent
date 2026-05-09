@@ -820,6 +820,21 @@ class SchedulerConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Workflow Dashboard
+# ---------------------------------------------------------------------------
+
+
+class WorkflowConfig(BaseModel):
+    """工作流看板配置。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    home: Path | None = None
+    scan_interval: float = Field(default=30.0, ge=5.0)
+
+
+# ---------------------------------------------------------------------------
 # Web 宿主壳（v0.1.5+）
 # ---------------------------------------------------------------------------
 
@@ -955,6 +970,7 @@ class Config(BaseModel):
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     web: WebConfig = Field(default_factory=WebConfig)
+    workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
 
 
 __all__ = [
@@ -984,4 +1000,5 @@ __all__ = [
     "ToolConfig",
     "TraceConfig",
     "WebConfig",
+    "WorkflowConfig",
 ]

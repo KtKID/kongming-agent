@@ -201,9 +201,67 @@ def create_app(
                 ticker_stop = None
                 ticker_runtime = None
 
+        # workflow dashboard scanner
+        wf_scanner_task: asyncio.Task[None] | None = None
+        wf_scanner_stop: asyncio.Event | None = None
+        if cfg.workflow.enabled:
+            try:
+                from web.workflow.service import WorkflowService
+                from web.workflow.store import WorkflowStore
+
+                wf_home = (
+                    cfg.workflow.home if cfg.workflow.home is not None else (home / "workflows")
+                )
+                wf_store = WorkflowStore(wf_home)
+                wf_service = WorkflowService(Path.cwd(), wf_store)
+                app.state.workflow_service = wf_service
+                app.state.workflow_scan_interval = cfg.workflow.scan_interval
+
+                # 初始扫描
+                wf_service.scan()
+
+                async def _wf_scan_loop(
+                    svc: WorkflowService, stop: asyncio.Event, interval: float
+                ) -> None:
+                    while not stop.is_set():
+                        try:
+                            await asyncio.sleep(interval)
+                            if stop.is_set():
+                                break
+                            svc.scan()
+                        except asyncio.CancelledError:
+                            break
+                        except Exception:
+                            logger.exception("workflow scanner tick failed; will retry")
+
+                wf_scanner_stop = asyncio.Event()
+                wf_scanner_task = asyncio.create_task(
+                    _wf_scan_loop(wf_service, wf_scanner_stop, cfg.workflow.scan_interval)
+                )
+                logger.info(
+                    "workflow scanner started (home=%s, interval=%.0fs)",
+                    wf_home,
+                    cfg.workflow.scan_interval,
+                )
+            except Exception:
+                logger.exception("workflow scanner startup failed; continuing without it")
+                wf_scanner_task = None
+                wf_scanner_stop = None
+
         try:
             yield
         finally:
+            # workflow scanner shutdown
+            if wf_scanner_task is not None and wf_scanner_stop is not None:
+                wf_scanner_stop.set()
+                try:
+                    await asyncio.wait_for(wf_scanner_task, timeout=5.0)
+                except (TimeoutError, asyncio.CancelledError):
+                    wf_scanner_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await wf_scanner_task
+                except Exception:
+                    logger.exception("workflow scanner raised during shutdown; ignoring")
             # 顺序：先停 ticker → 再关 thread_manager。两步都用 try/except
             # 吞，shutdown 任意阶段挂掉都不阻断剩余清理。
             if ticker_task is not None and ticker_stop is not None:
@@ -311,6 +369,12 @@ def create_app(
     app.include_router(workspace_shell_router)
     app.include_router(slash_candidates_router)
     app.include_router(cron_router)
+
+    # workflow dashboard
+    if cfg.workflow.enabled:
+        from web.workflow.router import router as workflow_router
+
+        app.include_router(workflow_router)
 
     # 9. WS endpoint
     from web.cron_ws import register_cron_ws_routes
