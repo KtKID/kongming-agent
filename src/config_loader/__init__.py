@@ -35,6 +35,7 @@ from config_loader.models import (
     SiTianConfig,
     ToolConfig,
     TraceConfig,
+    WorkflowConfig,
 )
 from core.sitian import SiTianSourceConfig, SiTianSourceRuntimeState
 from config_loader.paths import get_kongming_home
@@ -59,6 +60,7 @@ __all__ = [
     "SiTianSourceRuntimeState",
     "ToolConfig",
     "TraceConfig",
+    "WorkflowConfig",
     "get_kongming_home",
     "load_config",
 ]
