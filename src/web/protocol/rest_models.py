@@ -86,9 +86,10 @@ class CreateThreadRequest(_FrameBase):
     ``backend_kind="claude_code"`` / ``"codex"`` 路径不需要 preset，此时 preset_id 留空字符串占位。
     路由层在校验 ``backend_kind="generic_chat"`` 时强制 ``preset_id`` 非空。
     ``cwd`` 是可选 workspace 根目录；传入时要求绝对路径。
+    ``name`` 可选，默认空串；为空时后端用 thread_id 兜底。
     """
 
-    name: Annotated[str, Field(max_length=200)]
+    name: Annotated[str, Field(max_length=200)] = ""
     preset_id: str = ""
     backend_kind: Literal["generic_chat", "claude_code", "codex"] = "generic_chat"
     cwd: str = ""

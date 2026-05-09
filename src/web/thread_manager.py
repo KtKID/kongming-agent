@@ -212,24 +212,23 @@ class ThreadManager:
         浏览器先 ``POST /api/threads`` 创建，再单独建 WS 触发 boot。
 
         Args:
-            name: thread 名（剥前后空白后非空）。
+            name: thread 名（可选；为空时用 thread_id 兜底）。
             preset_id: ``backend_kind="generic_chat"`` 时必须非空，
                 ``backend_kind="claude_code"`` / ``"codex"`` 时允许空字符串占位。
             backend_kind: 后端类型；决定后续 WS endpoint 走通用 chat、Claude Code
                 或 Codex 通道。
             cwd: 可选 workspace 根目录；为空表示纯聊天 thread。
         """
-        if not name or not name.strip():
-            raise ValueError("thread name must not be empty")
         if backend_kind == "generic_chat" and (not preset_id or not preset_id.strip()):
             raise ValueError("preset_id required for generic_chat backend")
         normalized_cwd = cwd.strip()
 
         thread_id = _generate_thread_id()
+        resolved_name = name.strip() or thread_id
         now = _now()
         meta = ThreadMetadata(
             id=thread_id,
-            name=name.strip(),
+            name=resolved_name,
             preset_id=preset_id,
             backend_kind=backend_kind,
             cwd=normalized_cwd,

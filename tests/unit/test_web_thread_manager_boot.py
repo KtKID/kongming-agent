@@ -164,12 +164,24 @@ async def test_create_thread_writes_metadata(tmp_path: Path) -> None:
     assert loaded == meta
 
 
-async def test_create_thread_rejects_empty_name(tmp_path: Path) -> None:
+async def test_create_thread_empty_name_uses_thread_id(tmp_path: Path) -> None:
+    """空名 → name 回退到 thread_id。"""
     cfg = _make_cfg()
     factory, _ = _make_factory_call_counter()
     mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
-    with pytest.raises(ValueError):
-        await mgr.create_thread("   ", "p1")
+    meta = await mgr.create_thread("   ", "p1")
+    # name 应该是 thread_id（thread-<hex12> 格式）
+    assert meta.name == meta.id
+    assert meta.name.startswith("thread-")
+
+
+async def test_create_thread_empty_string_name_uses_thread_id(tmp_path: Path) -> None:
+    """完全空串 → name 回退到 thread_id。"""
+    cfg = _make_cfg()
+    factory, _ = _make_factory_call_counter()
+    mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
+    meta = await mgr.create_thread("", "p1")
+    assert meta.name == meta.id
 
 
 async def test_create_thread_rejects_empty_preset(tmp_path: Path) -> None:

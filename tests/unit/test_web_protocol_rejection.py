@@ -71,9 +71,7 @@ from web.protocol.ws_frames import (
         (HistoryMessageDTO, {"role": "user"}),
         # ContentDeltaFrame：缺 seq + timestamp_ms
         (ContentDeltaFrame, {"delta": "x", "turn": 1}),
-        # CreateThreadRequest：缺 name（v0.1.6 起 preset_id 已改可选，
-        # name 是 CreateThreadRequest 唯一仍必填的字段）
-        (CreateThreadRequest, {"preset_id": "p"}),
+        # CreateThreadRequest：name + preset_id 都已改为可选，无必填字段可测
         # LoginRequest：完全空
         (LoginRequest, {}),
     ],
@@ -82,7 +80,6 @@ from web.protocol.ws_frames import (
         "approval_ack_missing_approved",
         "history_message_missing_content_turn_timestamp",
         "content_delta_missing_seq_timestamp",
-        "create_thread_missing_name",
         "login_request_empty",
     ],
 )
