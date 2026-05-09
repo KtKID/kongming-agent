@@ -286,6 +286,7 @@ def create_app(
     from web.routers.claude import router as claude_router
     from web.routers.codex import router as codex_rest_router
     from web.routers.config import router as config_router
+    from web.routers.cron import router as cron_router
     from web.routers.diagrams import router as diagrams_router
     from web.routers.manage import router as manage_router
     from web.routers.presets import router as presets_router
@@ -309,6 +310,7 @@ def create_app(
     app.include_router(workspace_git_router)
     app.include_router(workspace_shell_router)
     app.include_router(slash_candidates_router)
+    app.include_router(cron_router)
 
     # 9. WS endpoint
     from web.cron_ws import register_cron_ws_routes

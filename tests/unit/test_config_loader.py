@@ -52,7 +52,10 @@ def test_load_default_yaml_returns_config() -> None:
 
 
 @pytest.mark.unit
-def test_load_setting_yaml_has_empty_api_key() -> None:
+def test_load_setting_yaml_has_empty_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 隔离环境变量，还原"纯 yaml 无 env 覆盖"场景
+    monkeypatch.delenv("KONGMING_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("KONGMING_MODEL_BASE_URL", raising=False)
     cfg = load_config(SETTING_YAML, load_env_file=False)
     assert cfg.model.api_key == ""
     assert cfg.model.is_local is True

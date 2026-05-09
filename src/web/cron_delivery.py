@@ -76,6 +76,9 @@ class WebDeliverySink(DeliverySink):
                 "delivered_at_iso": run.finished_at,
                 "scheduled_for": run.scheduled_for,
                 "delivery_target": delivery_target,
+                # v0.5 web-cron-router：下游前端不必 N+1 refetch
+                "next_run_at": task.next_run_at,
+                "status": run.status.value,
             }
         )
         return DeliveryResult.delivered()

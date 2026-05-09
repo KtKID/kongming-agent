@@ -55,9 +55,7 @@ def _make_task(*, name: str = "测试任务", task_id: str = "t-web") -> Schedul
         enabled=True,
         state=TaskState.SCHEDULED,
         origin=TaskOrigin.TOOL,
-        trigger=ScheduleTrigger(
-            trigger_type=TriggerType.INTERVAL, expr="10", timezone="UTC"
-        ),
+        trigger=ScheduleTrigger(trigger_type=TriggerType.INTERVAL, expr="10", timezone="UTC"),
         policy=TaskExecutionPolicy(
             session_mode=SessionMode.FRESH_SESSION,
             concurrency_policy=ConcurrencyPolicy.FORBID,
@@ -125,6 +123,10 @@ async def test_websink_deliver_calls_broker_broadcast():
     assert payload["final_message"] == "早安"
     assert payload["delivered_at_iso"] == run.finished_at
     assert payload["scheduled_for"] == run.scheduled_for
+    # v0.5 web-cron-router 扩展字段
+    assert "next_run_at" in payload
+    assert payload["next_run_at"] == task.next_run_at
+    assert payload["status"] == run.status.value
 
 
 @pytest.mark.asyncio

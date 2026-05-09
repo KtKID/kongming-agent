@@ -202,8 +202,10 @@ def test_app_state_attached(tmp_path: Path) -> None:
     assert app.state.kongming_home == tmp_path
 
 
-def test_password_not_configured_raises(tmp_path: Path) -> None:
+def test_password_not_configured_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """缺 password.hash + env → WebAuthNotConfiguredError。"""
+    # 隔离环境变量，还原"真的没配密码"场景
+    monkeypatch.delenv("KONGMING_WEB_PASSWORD", raising=False)
     cfg = _make_cfg()
     tm = FakeThreadManager()
     # 不调 _seed_password
