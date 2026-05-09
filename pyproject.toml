@@ -64,6 +64,7 @@ dev = [
 
 [project.scripts]
 kongming = "cli.main:main"
+kongming-sitian = "sitian.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/kongming-agent/kongming-agent"
@@ -87,6 +88,7 @@ packages = [
     "src/memory",
     "src/prompts",
     "src/web",
+    "src/sitian",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -103,6 +105,7 @@ include = [
     "src/memory",
     "src/prompts",
     "src/web",
+    "src/sitian",
     "config",
     "README.md",
     "pyproject.toml",
@@ -172,6 +175,7 @@ known-first-party = [
     "memory",
     "prompts",
     "web",
+    "sitian",
 ]
 
 [tool.ruff.format]
@@ -273,6 +277,7 @@ source = [
     "observability",
     "memory",
     "config_loader",
+    "sitian",
 ]
 omit = [
     "tests/*",

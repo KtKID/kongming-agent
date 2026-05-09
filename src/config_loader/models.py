@@ -21,6 +21,8 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from core.sitian import SiTianConfig
+
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
@@ -971,6 +973,7 @@ class Config(BaseModel):
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
+    sitian: SiTianConfig = Field(default_factory=SiTianConfig)
 
 
 __all__ = [
@@ -996,6 +999,7 @@ __all__ = [
     "SchedulerConfig",
     "SessionConfig",
     "ShellToolConfig",
+    "SiTianConfig",
     "StreamConfig",
     "ToolConfig",
     "TraceConfig",

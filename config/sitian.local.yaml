@@ -1,0 +1,105 @@
+# SiTian local config
+# Workspace default: E:/xgt/proj/agent-proj
+
+model:
+  provider: openai_compatible
+  name: stub-model
+  base_url: http://127.0.0.1:1234/v1
+  api_key: ""
+  timeout: 60
+  max_tokens: 4096
+  temperature: 0.7
+
+runner:
+  max_turns: 90
+
+session:
+  backend: file
+  store_path: .kongming/sessions.jsonl
+  file_store_path: .kongming/sessions
+
+trace:
+  output_path: .kongming/trace.jsonl
+  auto_flush: true
+  raw_llm: false
+
+logging:
+  level: INFO
+
+host:
+  kind: cli
+
+approval:
+  mode: interactive
+
+tool:
+  shell:
+    enabled: true
+    timeout_seconds: 30.0
+    max_stream_bytes: 8000
+    terminate_grace_seconds: 2.0
+  file:
+    enabled: true
+    read_max_bytes: 65536
+
+compactor:
+  enabled: false
+  max_messages: 50
+  keep_recent: 20
+  keep_system: true
+  tool_result_max_chars: 2000
+
+retry:
+  max_retries: 3
+  retry_backoff: 1.0
+
+stream:
+  enabled: true
+  read_timeout: 120.0
+  suppress_content_after_tool_call: true
+  delta_sampling: none
+  periodic_batch_size: 20
+
+scheduler:
+  enabled: false
+
+web:
+  enabled: false
+
+sitian:
+  version: v1
+  default_scan_interval_sec: 60
+  idle_sleep_sec: 3
+  sources:
+    - id: workspace-general
+      kind: generic_channel
+      path: E:/xgt/proj/agent-proj
+      include:
+        - "dev-pipeline/tasks/sitian-v1/*"
+        - "docs/sitian-v1/*"
+        - "kongming-agent/src/sitian/*"
+        - "kongming-agent/tests/unit/test_sitian_*"
+      tags:
+        - workspace
+        - sitian
+        - generic
+    - id: workspace-claude
+      kind: claude_project
+      path: E:/xgt/proj/agent-proj
+      include:
+        - "docs/sitian-v1/*"
+        - "kongming-agent/src/sitian/*"
+      tags:
+        - workspace
+        - sitian
+        - claude
+    - id: workspace-codex
+      kind: codex_project
+      path: E:/xgt/proj/agent-proj
+      include:
+        - "dev-pipeline/tasks/sitian-v1/*"
+        - "kongming-agent/src/sitian/*"
+      tags:
+        - workspace
+        - sitian
+        - codex

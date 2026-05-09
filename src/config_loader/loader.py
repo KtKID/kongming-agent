@@ -117,6 +117,9 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("web", "idle_timeout_seconds"),
     ("web", "idle_check_interval_seconds"),
     ("web", "pending_approval_timeout_seconds"),
+    ("sitian", "version"),
+    ("sitian", "default_scan_interval_sec"),
+    ("sitian", "idle_sleep_sec"),
 )
 
 # per-module YAML 文件名 → 合并到 Config 的顶层 key。
