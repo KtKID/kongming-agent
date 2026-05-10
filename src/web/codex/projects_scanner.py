@@ -1,21 +1,20 @@
-"""扫描 ``~/.codex/sessions/`` 目录，列出 Codex CLI 写入的会话摘要。
+"""按 registry 登记的 cwd 列表过滤 ``~/.codex/sessions/`` 下的 rollout。
 
-公共入口 :func:`list_codex_projects` 返回 :class:`CodexProjectSummary` 列表，
-每个 project 含若干 :class:`CodexSessionSummary`（按 ``last_modified`` 倒序）。
-projects 间按各 project 内最新 session 的 ``last_modified`` 倒序。
+公共入口 :func:`list_codex_projects` **以 registry 登记的 cwd 列表为权威输入**：
 
-数据源策略（双源合并）：
+1. 仍递归扫 ``~/.codex/sessions/<Y>/<M>/<D>/rollout-*.jsonl``——这一步绕不开，
+   因为 codex 的 cwd 真值在 rollout 第一行 ``session_meta.payload.cwd`` 字段里，
+   而不是从目录名编码而来（claude 才是后者）。
+2. 读完 rollout 拿到 cwd 后，**只保留 registry_cwds 列表里登记过的**，未登记
+   的 cwd（哪怕本地实际有 rollout）一律丢弃。
+3. 登记里有但完全没匹配到 rollout 的 cwd，仍返回 ``ProjectSummary``
+   （``sessions=[]``），让用户从空白开始用合法。
 
-1. **快通道**：读 ``~/.codex/session_index.jsonl``（每行含 id / thread_name /
-   updated_at），拿到 title 真值。
-2. **兜底**：递归扫 ``~/.codex/sessions/<Y>/<M>/<D>/rollout-*.jsonl``，每文件读
-   第一行 ``session_meta`` 拿到 cwd / cli_version / originator。
-3. 按 ``session_id`` 去重（索引 + 扫盘 Union），索引的 ``thread_name`` 优先
-   作为 title。
-4. cwd 只能从 rollout 第一行 ``session_meta.payload.cwd`` 获取（索引不含 cwd）。
+设计要点（与 v0.1 web-projects-registry D1 决议对齐）：
 
-设计要点：
-
+- **registry-driven**：worktree A / worktree B 互不污染；不在 registry 里的
+  项目即使本地有 rollout 也不展示。
+- ``set(registry_cwds)`` 加速 ``in`` 判断
 - 流式读第一行（``readline``），rollout 可能 16 MB+，绝不全量读
 - ``os.path.realpath()`` 归一 cwd（macOS ``/private/tmp`` ↔ ``/tmp`` symlink）
 - 纯只读，从不写入任何文件
@@ -80,16 +79,16 @@ class CodexProjectSummary:
     """按 cwd 聚合的 Codex 项目摘要。"""
 
     cwd: str
-    """项目工作目录（session_meta.cwd 真值，经 realpath 归一）。"""
+    """项目工作目录（registry 登记的 cwd 真值，经 realpath 归一）。"""
 
     display_name: str
     """``cwd`` 最后一段 basename。"""
 
     sessions: list[CodexSessionSummary]
-    """按 ``last_modified`` 倒序的 session 摘要列表。"""
+    """按 ``last_modified`` 倒序的 session 摘要列表；无匹配 rollout 时为空列表。"""
 
     last_modified: float
-    """``max(session.last_modified)``。"""
+    """``max(session.last_modified)``；无 session 时为 ``0.0``。"""
 
 
 # ---------------------------------------------------------------------------
@@ -112,63 +111,91 @@ class _IndexEntry:
 
 
 def list_codex_projects(
+    registry_cwds: list[str],
+    *,
     codex_home: Path | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> list[CodexProjectSummary]:
-    """扫描 ``~/.codex/sessions/`` 列出所有 codex 项目 + 会话。
+    """按 registry 登记的 cwd 列表过滤 ``~/.codex/sessions/`` 下的 rollout。
 
     Args:
+        registry_cwds: 来自 ``codex.projects_registry.load_registry()`` 的 cwd
+            列表（绝对路径）。每个 cwd 输出一个 ``CodexProjectSummary`` 节点。
+            重复的 cwd 会去重（保留首次出现位置）。
         codex_home: Codex 数据目录，默认 ``Path.home() / ".codex"``。
             单元测试可注入临时目录。
-        progress_callback: ``(current, total, session_id)`` 进度回调。
+        progress_callback: ``(current, total, session_id)`` 进度回调，仍按
+            **rollout 文件级别** 触发，前端进度条不变。
 
     Returns:
-        CodexProjectSummary 列表，按 ``last_modified`` 倒序。
-        ``codex_home`` 不存在时返回空列表。
+        每个登记 cwd 一个 ``CodexProjectSummary`` 节点：
+
+        - 该 cwd 在 sessions/*.jsonl 内有匹配 rollout → ``sessions`` 填充
+        - 不匹配 / ``codex_home`` 不存在 → ``sessions=[]``，节点仍保留
+
+        登记里没有的 cwd（即使本地有 rollout）**不返回**——D1 决议。
+
+        排序：按各 project 内最新 session 的 ``last_modified`` 倒序；空列表的
+        project 用 ``0.0`` 自然垫底。
     """
     home = codex_home if codex_home is not None else Path.home() / ".codex"
 
-    # --- 1. 快通道：读索引拿 thread_name ---
-    index_map = _load_session_index(home / "session_index.jsonl")
+    # registry_cwds 去重 + 归一（保留首次出现顺序）。
+    # realpath 让 ``/tmp/x`` 与 rollout 内的 ``/private/tmp/x`` 能对齐。
+    seen: set[str] = set()
+    deduped_cwds: list[str] = []
+    for raw in registry_cwds:
+        normalized = os.path.realpath(raw) if raw else raw
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped_cwds.append(normalized)
 
-    # --- 2. 兜底：递归扫 rollout 文件 ---
-    sessions_dir = home / "sessions"
-    if not sessions_dir.is_dir():
-        return []
+    registry_set = set(deduped_cwds)
 
-    rollout_files = _find_rollout_files(sessions_dir)
-    total = len(rollout_files)
-
-    # session_id → CodexSessionSummary
-    session_by_id: dict[str, CodexSessionSummary] = {}
-
-    for idx, rollout_path in enumerate(rollout_files, start=1):
-        summary = _build_session_from_rollout(rollout_path, index_map)
-        if summary is not None:
-            # 去重：同一 session_id 保留 mtime 更晚的
-            existing = session_by_id.get(summary.session_id)
-            if existing is None or summary.last_modified > existing.last_modified:
-                session_by_id[summary.session_id] = summary
-        if progress_callback is not None:
-            sid = summary.session_id if summary else rollout_path.name
-            progress_callback(idx, total, sid)
-
-    # --- 3. 按 cwd 分组 ---
+    # cwd → 该 cwd 下的 sessions
     groups: dict[str, list[CodexSessionSummary]] = defaultdict(list)
-    for session in session_by_id.values():
-        groups[session.cwd].append(session)
 
-    # --- 4. 组装 ProjectSummary ---
+    sessions_dir = home / "sessions"
+    if sessions_dir.is_dir():
+        # --- 1. 快通道：读索引拿 thread_name ---
+        index_map = _load_session_index(home / "session_index.jsonl")
+
+        # --- 2. 递归扫 rollout 文件 ---
+        rollout_files = _find_rollout_files(sessions_dir)
+        total = len(rollout_files)
+
+        # session_id → CodexSessionSummary（去重）
+        session_by_id: dict[str, CodexSessionSummary] = {}
+
+        for idx, rollout_path in enumerate(rollout_files, start=1):
+            summary = _build_session_from_rollout(rollout_path, index_map)
+            if summary is not None and summary.cwd in registry_set:
+                # 去重：同一 session_id 保留 mtime 更晚的
+                existing = session_by_id.get(summary.session_id)
+                if existing is None or summary.last_modified > existing.last_modified:
+                    session_by_id[summary.session_id] = summary
+            if progress_callback is not None:
+                sid = summary.session_id if summary else rollout_path.name
+                progress_callback(idx, total, sid)
+
+        # --- 3. 按 cwd 分组（仅 registry 内的） ---
+        for session in session_by_id.values():
+            groups[session.cwd].append(session)
+
+    # --- 4. 组装：每个 registry cwd 一个节点 ---
     projects: list[CodexProjectSummary] = []
-    for cwd, sessions in groups.items():
+    for cwd in deduped_cwds:
+        sessions = groups.get(cwd, [])
         sessions.sort(key=lambda s: s.last_modified, reverse=True)
         display_name = os.path.basename(cwd) or cwd
+        last_modified = sessions[0].last_modified if sessions else 0.0
         projects.append(
             CodexProjectSummary(
                 cwd=cwd,
                 display_name=display_name,
                 sessions=sessions,
-                last_modified=sessions[0].last_modified,
+                last_modified=last_modified,
             )
         )
 

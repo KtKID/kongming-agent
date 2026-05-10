@@ -378,6 +378,45 @@ class EvolutionDecisionResponse(_FrameBase):
     review: EvolutionReviewDTO
 
 
+class ProjectRegistryEntryDTO(_FrameBase):
+    """项目登记条目（``GET /api/{claude,codex}/projects`` 中嵌入用，可选）。
+
+    主 list 接口仍返回 ``ProjectSummary`` 形态——本 DTO 是给将来纯 registry list
+    端点预留 + 服务端内部 typing 用。
+
+    - ``cwd``：项目工作目录绝对路径。
+    - ``alias``：用户给项目起的别名，空串表示未设置。
+    - ``added_at``：登记时间戳（Unix 秒，可含小数）。
+    """
+
+    cwd: Annotated[str, Field(min_length=1)]
+    alias: str = ""
+    added_at: float
+
+
+class AddProjectRequest(_FrameBase):
+    """``POST /api/{claude,codex}/projects`` 请求体。
+
+    ``cwd`` 必须以 ``/`` 开头（绝对路径）；后端再做 ``is_dir`` 校验，不存在
+    则返 400。``alias`` 可选，缺省空串表示无别名。
+    """
+
+    cwd: Annotated[str, Field(min_length=1, pattern=r"^/")]
+    alias: str = ""
+
+
+class ServerInfoResponse(_FrameBase):
+    """``GET /api/server/info`` 响应体。
+
+    - ``repo_root``：web server 进程的项目根绝对路径，前端用于 "📍 一键填
+      当前 worktree" 按钮。
+    - ``schema_version``：响应 schema 版本号，当前 1。
+    """
+
+    repo_root: str
+    schema_version: int = 1
+
+
 class ImportClaudeSessionRequest(_FrameBase):
     """``POST /api/threads/import-claude-session`` 请求体（v0.2.0 dev #8）。
 
@@ -498,6 +537,7 @@ class UpdateWhiteboardLayoutRequest(_FrameBase):
 
 
 __all__: list[str] = [
+    "AddProjectRequest",
     "CellSummaryDTO",
     "CreateThreadRequest",
     "CreateWhiteboardCardRequest",
@@ -507,7 +547,9 @@ __all__: list[str] = [
     "ImportClaudeSessionResponse",
     "LLMPresetDTO",
     "LoginRequest",
+    "ProjectRegistryEntryDTO",
     "RenameThreadRequest",
+    "ServerInfoResponse",
     "ThreadMetadataDTO",
     "UpdateWhiteboardCardRequest",
     "UpdateWhiteboardLayoutRequest",

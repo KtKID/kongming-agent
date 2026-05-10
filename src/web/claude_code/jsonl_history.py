@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     # 仅用于类型注释——返回 dict 与 NormalizedMessage TypedDict 形态对齐。
     from web.llm_protocol import NormalizedMessage  # noqa: F401
 
-__all__ = ["jsonl_path_for", "parse_jsonl_history"]
+__all__ = ["encode_cwd", "jsonl_path_for", "parse_jsonl_history"]
 
 _logger = logging.getLogger(__name__)
 
@@ -75,11 +75,11 @@ def jsonl_path_for(
         **不校验文件存在**，只做路径拼接。
     """
     home = claude_home if claude_home is not None else Path.home() / ".claude"
-    encoded = _encode_cwd(cwd)
+    encoded = encode_cwd(cwd)
     return home / "projects" / encoded / f"{claude_thread_id}.jsonl"
 
 
-def _encode_cwd(cwd: str) -> str:
+def encode_cwd(cwd: str) -> str:
     """SDK 编码 cwd 为 ``~/.claude/projects/`` 下的目录名。
 
     实测 SDK 规则（从已落盘目录名反推）：``/`` / ``_`` / ``.`` 都换成 ``-``，

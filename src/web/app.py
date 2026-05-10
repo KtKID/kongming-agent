@@ -48,7 +48,7 @@ from web.errors import KongmingWebError, kongming_error_handler
 from web.startup_progress import StartupProgress
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from config_loader.models import Config
@@ -60,6 +60,65 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_LIFESPAN_SHUTDOWN_TIMEOUT = 5.0
 """shutdown 时调 ``thread_manager.aclose_all()`` 的超时（秒）。"""
+
+
+# src/web/app.py → parents[2] 指向项目根 (kongming-agent/)，
+# 与 ``web.ctl._REPO_ROOT`` (parents[2]) 同源。这里独立计算以避免引入
+# ``ctl.py`` 的 ``load_dotenv`` 启动副作用（同 server_info 模式）。
+_REPO_ROOT: Path = Path(__file__).resolve().parents[2]
+
+
+def _bootstrap_projects_registry(home: Path, repo_root: str) -> None:
+    """Web server 启动时调用，登记当前 worktree + 迁移既有 thread metadata。
+
+    幂等：每次启动都跑一遍，但 ``bootstrap_register_self`` /
+    ``add_project`` 内部对已存在 cwd 不重复写盘。
+
+    每个 registry 的 bootstrap 与 migrate 步骤互相独立 try/except，
+    任一失败仅 log warning 不阻塞 web server 启动；下一次启动会重试。
+
+    Args:
+        home: ``.kongming/`` 根目录（由 :func:`config_loader.paths.get_kongming_home`
+            或 ``create_app(home_dir=...)`` 注入）。
+        repo_root: 当前 web server 进程对应的项目根绝对路径。
+    """
+    from web.claude_code.projects_registry import (
+        bootstrap_register_self as bootstrap_claude,
+    )
+    from web.claude_code.projects_registry import (
+        migrate_from_thread_metadata as migrate_claude,
+    )
+    from web.codex.projects_registry import (
+        bootstrap_register_self as bootstrap_codex,
+    )
+    from web.codex.projects_registry import (
+        migrate_from_thread_metadata as migrate_codex,
+    )
+
+    registries: tuple[tuple[str, Callable[[Path, str], None], Callable[[Path], int]], ...] = (
+        ("claude_code", bootstrap_claude, migrate_claude),
+        ("codex", bootstrap_codex, migrate_codex),
+    )
+    migrated_counts: dict[str, int] = {}
+    for kind, bootstrap_fn, migrate_fn in registries:
+        try:
+            bootstrap_fn(home, repo_root)
+        except Exception:
+            logger.warning("bootstrap %s registry failed", kind, exc_info=True)
+        try:
+            migrated_counts[kind] = migrate_fn(home)
+        except Exception:
+            logger.warning(
+                "migrate %s registry from thread metadata failed",
+                kind,
+                exc_info=True,
+            )
+            migrated_counts[kind] = 0
+    logger.info(
+        "projects registry bootstrap: claude_code migrated=%d, codex migrated=%d",
+        migrated_counts.get("claude_code", 0),
+        migrated_counts.get("codex", 0),
+    )
 
 
 def create_app(
@@ -136,6 +195,19 @@ def create_app(
             except Exception:
                 logger.exception("slash candidates loading failed; continuing with empty list")
                 app.state.slash_candidates = []
+
+            # web-projects-registry-v0.1 #8：把当前 worktree 登记进 claude_code /
+            # codex 两个 registry，并迁移既有 thread metadata。文件 IO 用
+            # ``asyncio.to_thread`` 包一层，避免阻塞 event loop（虽然只是几次
+            # JSON 读写，但 lifespan 期间整个 web server 都在等）。
+            try:
+                await asyncio.to_thread(
+                    _bootstrap_projects_registry,
+                    home,
+                    str(_REPO_ROOT),
+                )
+            except Exception:
+                logger.exception("projects registry bootstrap failed; continuing without it")
         except Exception:
             progress.fail("ThreadManager.start() failed")
             logger.exception("ThreadManager.start() failed; aborting app startup")
@@ -348,6 +420,7 @@ def create_app(
     from web.routers.diagrams import router as diagrams_router
     from web.routers.manage import router as manage_router
     from web.routers.presets import router as presets_router
+    from web.routers.server_info import router as server_info_router
     from web.routers.slash_candidates import router as slash_candidates_router
     from web.routers.threads import router as threads_router
     from web.routers.whiteboard import router as whiteboard_router
@@ -369,6 +442,7 @@ def create_app(
     app.include_router(workspace_shell_router)
     app.include_router(slash_candidates_router)
     app.include_router(cron_router)
+    app.include_router(server_info_router)
 
     # workflow dashboard
     if cfg.workflow.enabled:
