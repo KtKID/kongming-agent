@@ -184,7 +184,23 @@ def _make_runtime_factory(cfg: object) -> object:
         if _instructions_cache[0] is None:
             async with _cache_lock:
                 if _instructions_cache[0] is None:
-                    rendered, origins = await assemble_instructions(kongming_home=home)
+                    # -- sitian prompt root (与 cli/main.py 同逻辑) --
+                    sitian_root = None
+                    try:
+                        from sitian.store import resolve_sitian_root
+
+                        _base = resolve_sitian_root()
+                        if real_cfg.sitian.output_subdir:
+                            sitian_root = _base / real_cfg.sitian.output_subdir
+                        else:
+                            sitian_root = _base
+                    except ImportError:
+                        pass
+
+                    rendered, origins = await assemble_instructions(
+                        kongming_home=home,
+                        sitian_root=sitian_root,
+                    )
                     sink_list = list(sinks) if sinks else []  # type: ignore[call-overload]
                     skill_specs_list = await load_skill_specs(
                         home,
