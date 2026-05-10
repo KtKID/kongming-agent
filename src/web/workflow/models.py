@@ -60,6 +60,7 @@ class TaskSnapshot:
     path: str
     spec_ref: str | None = None
     stages: dict[str, StageStatus] = field(default_factory=dict)
+    pinned: bool = False
 
 
 @dataclass

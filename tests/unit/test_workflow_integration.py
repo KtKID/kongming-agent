@@ -140,3 +140,49 @@ class TestDuplicateRunRejection:
 
         with pytest.raises(ValueError, match="already has an active run"):
             service.create_run(task_id="dup-task", workflow_id="full-pipeline")
+
+
+# ── Test 5: toggle_pin ────────────────────────────────────
+
+
+class TestTogglePin:
+    def test_toggle_pin_creates_and_removes_file(self, tmp_path: Path) -> None:
+        _setup_project(tmp_path)
+        _create_task_dir(tmp_path, "pin-task")
+
+        store = WorkflowStore(tmp_path / ".workflow")
+        service = WorkflowService(project_root=tmp_path, store=store)
+
+        pin_file = tmp_path / "dev-pipeline" / "tasks" / "pin-task" / ".pinned"
+        assert not pin_file.exists()
+
+        result = service.toggle_pin("pin-task")
+        assert result is True
+        assert pin_file.exists()
+
+        result = service.toggle_pin("pin-task")
+        assert result is False
+        assert not pin_file.exists()
+
+    def test_toggle_pin_nonexistent_task_raises(self, tmp_path: Path) -> None:
+        _setup_project(tmp_path)
+
+        store = WorkflowStore(tmp_path / ".workflow")
+        service = WorkflowService(project_root=tmp_path, store=store)
+
+        with pytest.raises(FileNotFoundError):
+            service.toggle_pin("no-such-task")
+
+    def test_scan_reflects_pinned_state(self, tmp_path: Path) -> None:
+        _setup_project(tmp_path)
+        _create_task_dir(tmp_path, "pin-task")
+
+        store = WorkflowStore(tmp_path / ".workflow")
+        service = WorkflowService(project_root=tmp_path, store=store)
+
+        result = service.scan()
+        assert result.tasks[0].pinned is False
+
+        service.toggle_pin("pin-task")
+        result = service.scan()
+        assert result.tasks[0].pinned is True

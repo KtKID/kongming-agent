@@ -125,3 +125,16 @@ async def trigger_scan(request: Request) -> dict[str, Any]:
         "specs_count": len(result.specs),
         "tasks_count": len(result.tasks),
     }
+
+
+# ── pin ─────────────────────────────────────────────────
+
+
+@router.post("/tasks/{task_id}/pin")
+async def toggle_pin(request: Request, task_id: str) -> dict[str, Any]:
+    svc = _svc(request)
+    try:
+        pinned = svc.toggle_pin(task_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, f"Task not found: {task_id}") from e
+    return {"task_id": task_id, "pinned": pinned}

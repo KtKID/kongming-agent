@@ -327,3 +327,27 @@ def test_non_dir_in_docs_ignored(tmp_path: Path) -> None:
 
     result = _make_scanner(tmp_path).scan()
     assert result.specs == []
+
+
+# ── 9. pinned 文件检测 ───────────────────────────────────
+
+
+def test_pinned_true_when_dotpinned_exists(tmp_path: Path) -> None:
+    """task 目录下有 .pinned 文件 → pinned = True。"""
+    task_dir = tmp_path / "dev-pipeline" / "tasks" / "my-task"
+    task_dir.mkdir(parents=True)
+    (task_dir / "README.md").write_text("# T")
+    (task_dir / ".pinned").write_text("")
+
+    result = _make_scanner(tmp_path).scan()
+    assert result.tasks[0].pinned is True
+
+
+def test_pinned_false_when_no_dotpinned(tmp_path: Path) -> None:
+    """task 目录下无 .pinned 文件 → pinned = False。"""
+    task_dir = tmp_path / "dev-pipeline" / "tasks" / "my-task"
+    task_dir.mkdir(parents=True)
+    (task_dir / "README.md").write_text("# T")
+
+    result = _make_scanner(tmp_path).scan()
+    assert result.tasks[0].pinned is False

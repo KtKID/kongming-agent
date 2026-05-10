@@ -73,6 +73,7 @@ class WorkflowScanner:
             name = self._extract_title(child)
             spec_ref = self._extract_spec_ref(child)
             stages = self._detect_stages(child, spec_ref)
+            pinned = (child / ".pinned").exists()
             results.append(
                 TaskSnapshot(
                     task_id=child.name,
@@ -80,6 +81,7 @@ class WorkflowScanner:
                     path=str(child),
                     spec_ref=spec_ref,
                     stages=stages,
+                    pinned=pinned,
                 )
             )
         return results

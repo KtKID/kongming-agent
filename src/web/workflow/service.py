@@ -205,6 +205,21 @@ class WorkflowService:
             )
         return target
 
+    # ── pin ──────────────────────────────────────────────────
+
+    def toggle_pin(self, task_id: str) -> bool:
+        """Toggle .pinned marker file for a task. Returns new pinned state."""
+        task_dir = self._scanner._root / "dev-pipeline" / "tasks" / task_id
+        if not task_dir.is_dir():
+            raise FileNotFoundError(f"Task directory not found: {task_id}")
+        pin_file = task_dir / ".pinned"
+        if pin_file.exists():
+            pin_file.unlink()
+            return False
+        else:
+            pin_file.touch()
+            return True
+
     # ── events ───────────────────────────────────────────────
 
     def list_events(self, run_id: str | None = None) -> list[WorkflowEvent]:
