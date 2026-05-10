@@ -7,7 +7,7 @@ from click.testing import CliRunner
 
 import sitian.cli as sitian_cli
 from config_loader.models import Config, ModelConfig
-from core.sitian import SiTianConfig, SiTianSourceConfig
+from sitian.config import SiTianConfig, SiTianSourceConfig
 
 
 def _build_cfg(project_dir: Path) -> Config:

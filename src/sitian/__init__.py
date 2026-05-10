@@ -1,3 +1,4 @@
+from sitian.config import SiTianConfig, SiTianSourceConfig
 from sitian.models import (
     JsonValue,
     SiTianObservation,
@@ -22,6 +23,7 @@ from sitian.suggestions import SiTianBuildSummaryMarkdown, SiTianMaterializeStat
 __all__ = [
     "JsonValue",
     "SiTianBuildSummaryMarkdown",
+    "SiTianConfig",
     "SiTianMaterializeState",
     "SiTianObservation",
     "SiTianPendingApproval",
@@ -32,6 +34,7 @@ __all__ = [
     "SiTianRunResult",
     "SiTianScanBatch",
     "SiTianScanSource",
+    "SiTianSourceConfig",
     "SiTianSourceRuntimeState",
     "SiTianWorkItem",
     "SiTianWorkspaceBlocker",

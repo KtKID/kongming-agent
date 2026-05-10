@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from config_loader.models import Config, ModelConfig
-from core.sitian import SiTianConfig, SiTianSourceConfig
+from sitian.config import SiTianConfig, SiTianSourceConfig
 from sitian.scanners import SiTianScanSource
 from sitian.service import SiTianReadState, SiTianRunOnce
 from sitian.store import SiTianRecordsStore
@@ -174,3 +175,94 @@ def test_sitian_scan_codex_project_reads_matching_sessions(
     thread_observations = [item for item in batch.observations if item.entity_type == "thread"]
     assert len(thread_observations) == 1
     assert thread_observations[0].payload["title"] == "Codex progress"
+
+
+@pytest.mark.unit
+def test_sitian_scan_claude_workspace_lists_top_projects_by_mtime(
+    tmp_path: Path,
+) -> None:
+    claude_home = tmp_path / ".claude"
+    projects_dir = claude_home / "projects"
+    projects_dir.mkdir(parents=True)
+
+    # 造 5 个 project，jsonl mtime 故意倒着设：proj-1 最旧，proj-5 最新
+    base_ts = 1_704_067_200.0  # 2024-01-01 UTC
+    for i in range(1, 6):
+        project_dir = projects_dir / f"-Volumes-proj-{i}"
+        project_dir.mkdir()
+        session_file = project_dir / f"thread-{i}.jsonl"
+        session_file.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "cwd": f"/Volumes/proj/{i}",
+                    "message": {"role": "user", "content": f"task {i}"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(session_file, (base_ts + i * 100, base_ts + i * 100))
+
+    batch = asyncio.run(
+        SiTianScanSource(
+            SiTianSourceConfig(
+                id="claude-recent",
+                kind="claude_workspace",
+                path=str(claude_home),
+                top_n=3,
+            ),
+            observed_at="2026-05-10T10:00:00Z",
+        )
+    )
+
+    project_obs = [o for o in batch.observations if o.entity_type == "project"]
+    assert len(project_obs) == 3
+    assert [o.payload["rank"] for o in project_obs] == [1, 2, 3]
+    assert [o.payload["displayName"] for o in project_obs] == ["5", "4", "3"]
+
+    status_obs = [o for o in batch.observations if o.entity_type == "status"]
+    assert len(status_obs) == 1
+    assert status_obs[0].payload["projectCount"] == 3
+    assert status_obs[0].payload["topN"] == 3
+
+    thread_obs = [o for o in batch.observations if o.entity_type == "thread"]
+    assert len(thread_obs) == 3
+    assert thread_obs[0].payload["title"] == "task 5"
+
+
+@pytest.mark.unit
+def test_sitian_scan_claude_workspace_accepts_projects_subdir_path(
+    tmp_path: Path,
+) -> None:
+    claude_home = tmp_path / ".claude"
+    projects_dir = claude_home / "projects"
+    projects_dir.mkdir(parents=True)
+    project_dir = projects_dir / "-Volumes-only"
+    project_dir.mkdir()
+    (project_dir / "t.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "cwd": "/Volumes/only",
+                "message": {"role": "user", "content": "hello"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    # path 传 projects 子目录也应识别到 claude_home
+    batch = asyncio.run(
+        SiTianScanSource(
+            SiTianSourceConfig(
+                id="claude-recent",
+                kind="claude_workspace",
+                path=str(projects_dir),
+            ),
+            observed_at="2026-05-10T10:00:00Z",
+        )
+    )
+    project_obs = [o for o in batch.observations if o.entity_type == "project"]
+    assert len(project_obs) == 1
+    assert project_obs[0].payload["cwd"] == "/Volumes/only"

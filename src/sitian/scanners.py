@@ -9,13 +9,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from core.sitian import SiTianSourceConfig
+from sitian.config import SiTianSourceConfig
 from sitian.models import SiTianObservation
+from web.claude_code.projects_scanner import list_projects as list_claude_projects
 from web.codex.projects_scanner import list_codex_projects
 
 _MAX_ARTIFACT_OBSERVATIONS = 20
 _MAX_SESSION_OBSERVATIONS = 20
 _MAX_SCAN_FILES = 2000
+_DEFAULT_CLAUDE_WORKSPACE_TOP_N = 10
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,8 @@ async def SiTianScanSource(
         observations = _SiTianScanClaudeProject(source, observed_at=resolved_observed_at)
     elif source.kind == "codex_project":
         observations = _SiTianScanCodexProject(source, observed_at=resolved_observed_at)
+    elif source.kind == "claude_workspace":
+        observations = _SiTianScanClaudeWorkspace(source, observed_at=resolved_observed_at)
     else:  # pragma: no cover - defensive
         raise ValueError(f"unsupported SiTian source kind: {source.kind}")
     return SiTianScanBatch(
@@ -144,6 +148,102 @@ def _SiTianScanCodexProject(
             )
         break
     return observations
+
+
+def _SiTianScanClaudeWorkspace(
+    source: SiTianSourceConfig,
+    *,
+    observed_at: str,
+) -> list[SiTianObservation]:
+    claude_home = _resolve_claude_home_from_path(source.path)
+    top_n = source.top_n or _DEFAULT_CLAUDE_WORKSPACE_TOP_N
+
+    projects = list_claude_projects(claude_home=claude_home)[:top_n]
+
+    observations: list[SiTianObservation] = []
+    latest_modified_iso = (
+        _timestamp_to_iso(max(s.last_modified for s in projects[0].sessions))
+        if projects and projects[0].sessions
+        else None
+    )
+    observations.append(
+        _observation(
+            source=source,
+            observed_at=observed_at,
+            entity_type="status",
+            entity_key=str(claude_home),
+            payload={
+                "claudeHome": str(claude_home),
+                "channelKind": "claude_workspace",
+                "projectCount": len(projects),
+                "topN": top_n,
+                "latestModifiedAt": latest_modified_iso,
+                "sourceTags": list(source.tags),
+            },
+            evidence_refs=(str(claude_home / "projects"),),
+        )
+    )
+
+    for rank, project in enumerate(projects, start=1):
+        latest_session_mtime = (
+            max(s.last_modified for s in project.sessions) if project.sessions else 0.0
+        )
+        observations.append(
+            _observation(
+                source=source,
+                observed_at=observed_at,
+                entity_type="project",
+                entity_key=project.cwd,
+                payload={
+                    "rank": rank,
+                    "projectDirName": project.name,
+                    "cwd": project.cwd,
+                    "displayName": project.display_name,
+                    "sessionCount": len(project.sessions),
+                    "lastModifiedAt": _timestamp_to_iso(latest_session_mtime),
+                },
+                evidence_refs=(str(claude_home / "projects" / project.name),),
+            )
+        )
+        if project.sessions:
+            latest_session = project.sessions[0]
+            observations.append(
+                _observation(
+                    source=source,
+                    observed_at=observed_at,
+                    entity_type="thread",
+                    entity_key=latest_session.claude_thread_id,
+                    payload={
+                        "threadId": latest_session.claude_thread_id,
+                        "title": latest_session.title,
+                        "cwd": project.cwd,
+                        "displayName": project.display_name,
+                        "messageCount": latest_session.message_count,
+                        "lastModifiedAt": _timestamp_to_iso(latest_session.last_modified),
+                    },
+                    evidence_refs=(
+                        str(
+                            claude_home
+                            / "projects"
+                            / project.name
+                            / f"{latest_session.claude_thread_id}.jsonl"
+                        ),
+                    ),
+                )
+            )
+    return observations
+
+
+def _resolve_claude_home_from_path(raw_path: str) -> Path:
+    """Allow path 既可以填 ``~/.claude`` 也可以填 ``~/.claude/projects``。
+
+    list_projects 期待 claude_home（含 ``projects/`` 子目录），所以末尾若是
+    ``projects`` 自动回退到父目录。
+    """
+    resolved = Path(raw_path).expanduser()
+    if resolved.name == "projects":
+        return resolved.parent
+    return resolved
 
 
 def _build_file_observations(

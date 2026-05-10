@@ -4,10 +4,15 @@ import asyncio
 import contextlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
-from config_loader.models import Config
-from core.sitian import SiTianConfig, SiTianSourceConfig
+from sitian.config import SiTianConfig, SiTianSourceConfig
 from sitian.models import JsonValue, SiTianSourceRuntimeState
+
+if TYPE_CHECKING:
+    # 只做类型注解；运行时不需要 Config 实例（_extract_sitian_config 只对
+    # SiTianConfig 做 isinstance）。延迟 import 切断 sitian↔config_loader 循环。
+    from config_loader.models import Config
 from sitian.scanners import SiTianScanBatch, SiTianScanSource
 from sitian.store import SiTianRecordsStore
 from sitian.suggestions import SiTianMaterializeState
@@ -72,9 +77,7 @@ async def SiTianRunOnce(
         observed_at=observed_at,
     )
     flat_observations = tuple(
-        observation
-        for batch in observations
-        for observation in batch.observations
+        observation for batch in observations for observation in batch.observations
     )
     if flat_observations:
         await records.append_observations(flat_observations)
@@ -248,7 +251,9 @@ def _SiTianAdvanceRuntimeError(
     )
     current_backoff = runtime_state.retry_backoff_sec if runtime_state is not None else 0
     retry_backoff_sec = current_backoff * 2 if current_backoff else _DEFAULT_RETRY_BACKOFF_SEC
-    next_run_at = _to_iso(_parse_iso(observed_at) + timedelta(seconds=max(interval, retry_backoff_sec)))
+    next_run_at = _to_iso(
+        _parse_iso(observed_at) + timedelta(seconds=max(interval, retry_backoff_sec))
+    )
     return SiTianSourceRuntimeState(
         source_id=source.id,
         scan_interval_sec=interval,

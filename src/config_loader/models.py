@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from core.sitian import SiTianConfig
+from sitian.config import SiTianConfig
 
 # ---------------------------------------------------------------------------
 # Model

@@ -4,7 +4,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from core.sitian import SiTianConfig
+from sitian.config import SiTianConfig
 from sitian.models import (
     JsonValue,
     SiTianObservation,
@@ -65,7 +65,11 @@ def SiTianMaterializeState(
                     severity="high" if work_item.status == "blocked" else "medium",
                 )
             )
-        if runtime_state is not None and runtime_state.status == "error" and runtime_state.last_error:
+        if (
+            runtime_state is not None
+            and runtime_state.status == "error"
+            and runtime_state.last_error
+        ):
             risks.append(
                 SiTianWorkspaceRisk(
                     category="scan_error",
@@ -90,7 +94,9 @@ def SiTianMaterializeState(
                 "priority": work_item.priority,
                 "status": work_item.status,
                 "reason": _recommendation_reason(work_item),
-                "nextAction": work_item.next_actions[0] if work_item.next_actions else "同步最新状态",
+                "nextAction": work_item.next_actions[0]
+                if work_item.next_actions
+                else "同步最新状态",
             }
         )
 
@@ -203,7 +209,8 @@ def _materialize_work_item(
     )
     project_paths = (project_path,)
     artifact_paths = tuple(
-        str(item.payload.get("relativePath", item.entity_key)) for item in artifacts[:_MAX_ARTIFACTS]
+        str(item.payload.get("relativePath", item.entity_key))
+        for item in artifacts[:_MAX_ARTIFACTS]
     )
 
     return SiTianWorkItem(
@@ -281,7 +288,7 @@ def _recommendation_reason(work_item: SiTianWorkItem) -> str:
     return "有新的线程或产物可继续推进"
 
 
-def _recommendation_sort_key(item: dict[str, JsonValue]) -> tuple[int, str]:
+def _recommendation_sort_key(item: dict[str, JsonValue]) -> tuple[int, int]:
     priority_order = {"high": 0, "medium": 1, "low": 2}
     status_order = {"blocked": 0, "active": 1, "waiting": 2, "uncertain": 3, "done": 4}
     return (
