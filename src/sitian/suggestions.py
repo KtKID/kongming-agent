@@ -209,14 +209,26 @@ def _expand_workspace_work_items(
     runtime_state: SiTianSourceRuntimeState | None,
     updated_at: str,
 ) -> list[SiTianWorkItem]:
-    """claude_workspace 展开：每个 project obs 对应一个 work_item。"""
+    """claude_workspace 展开：每个 project（按 cwd 去重）对应一个 work_item。
+
+    observations.jsonl 是追加式写入，多次扫描会产生同一 cwd 的多条
+    project observation。这里按 cwd 分组，取最新一条的 payload 作为
+    display_name / projectDirName，threads 也按 cwd 汇聚。
+    """
     project_obs_list = [obs for obs in observations if obs.entity_type == "project"]
     if not project_obs_list:
         return []
 
+    # 按 cwd 分组，保留最新（observed_at 最大）的 project obs 代表该 project
+    projects_by_cwd: dict[str, SiTianObservation] = {}
+    for obs in project_obs_list:
+        cwd = str(obs.payload.get("cwd", ""))
+        existing = projects_by_cwd.get(cwd)
+        if existing is None or obs.observed_at > existing.observed_at:
+            projects_by_cwd[cwd] = obs
+
     items: list[SiTianWorkItem] = []
-    for project_obs in project_obs_list:
-        project_cwd = str(project_obs.payload.get("cwd", ""))
+    for project_cwd, project_obs in projects_by_cwd.items():
         display_name = str(project_obs.payload.get("displayName", ""))
         project_dir_name = str(project_obs.payload.get("projectDirName", ""))
 
@@ -293,8 +305,10 @@ def _materialize_work_item(
         next_actions.append("查看最新线程并决定下一步")
 
     thread_ids = tuple(
-        str(thread.payload.get("threadId", thread.entity_key))
-        for thread in threads[:_MAX_THREAD_IDS]
+        dict.fromkeys(
+            str(thread.payload.get("threadId", thread.entity_key))
+            for thread in threads[:_MAX_THREAD_IDS]
+        )
     )
     project_paths = (project_path,)
     artifact_paths = tuple(
