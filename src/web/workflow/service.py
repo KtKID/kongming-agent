@@ -54,10 +54,33 @@ class WorkflowService:
     def last_scan(self) -> ScanResult | None:
         return self._last_scan
 
+    _DEFAULT_WORKFLOW_ID = "full-pipeline"
+
     def _sync_runs_from_scan(self, scan: ScanResult) -> None:
         runs = self._store.load_runs()
         task_stages = {t.task_id: t.stages for t in scan.tasks}
+        runs_by_task = {r.task_id: r for r in runs if r.status != RunStatus.COMPLETED}
         changed = False
+
+        default_def = self._get_definition(self._DEFAULT_WORKFLOW_ID)
+        if default_def:
+            for task in scan.tasks:
+                if task.task_id not in runs_by_task:
+                    node_states = {
+                        n.id: task.stages.get(n.template_id, StageStatus.NOT_STARTED)
+                        for n in default_def.nodes
+                    }
+                    run = WorkflowRun(
+                        id=new_id(),
+                        workflow_id=self._DEFAULT_WORKFLOW_ID,
+                        task_id=task.task_id,
+                        spec_id=task.spec_ref,
+                        node_states=node_states,
+                        status=RunStatus.ACTIVE,
+                    )
+                    runs.append(run)
+                    runs_by_task[task.task_id] = run
+                    changed = True
 
         for run in runs:
             if run.task_id not in task_stages:
