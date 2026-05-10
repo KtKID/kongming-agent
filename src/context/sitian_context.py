@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-MAX_ITEMS = 15
+MAX_ITEMS_PER_CHANNEL = 15
 
 _STATUS_ZH: dict[str, str] = {
     "active": "活跃",
@@ -19,7 +19,7 @@ _STATUS_ZH: dict[str, str] = {
 def _relative_time(iso_str: str, now: datetime) -> str:
     try:
         dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
         return "未知"
     delta = now - dt
     total_seconds = int(delta.total_seconds())
@@ -40,7 +40,7 @@ def _relative_time(iso_str: str, now: datetime) -> str:
 def _is_stale(iso_str: str, now: datetime) -> bool:
     try:
         dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
         return True
     return (now - dt).total_seconds() > 3600
 
@@ -52,8 +52,43 @@ def _truncate(text: str, max_len: int = 30) -> str:
 
 
 def build_sitian_context_text(sitian_root: Path) -> str | None:
-    state_path = sitian_root / "workspace_state.json"
-    summary_path = sitian_root / "latest_summary.md"
+    """扫描 sitian_root 下所有频道子目录，聚合为 system prompt 文本。
+
+    目录结构：sitian_root/<channel>/workspace_state.json
+    每个子目录是一个频道（如 claude、codex、general）。
+    """
+    if not sitian_root.is_dir():
+        return None
+
+    now = datetime.now(UTC)
+    channel_sections: list[str] = []
+
+    for channel_dir in sorted(sitian_root.iterdir()):
+        if not channel_dir.is_dir():
+            continue
+        section = _build_channel_section(channel_dir, channel_dir.name, now)
+        if section:
+            channel_sections.append(section)
+
+    if not channel_sections:
+        return None
+
+    lines: list[str] = [
+        "## 工作区态势（司天观察）",
+        "",
+        f"频道数：{len(channel_sections)}",
+        "",
+    ]
+    lines.append("\n\n".join(channel_sections))
+    lines.append("")
+    lines.append("以上数据由司天自动扫描产出，可能存在延迟。如需最新状态请询问用户手动触发扫描。")
+
+    return "\n".join(lines)
+
+
+def _build_channel_section(channel_dir: Path, channel_name: str, now: datetime) -> str | None:
+    state_path = channel_dir / "workspace_state.json"
+    summary_path = channel_dir / "latest_summary.md"
 
     try:
         raw = state_path.read_text(encoding="utf-8")
@@ -69,7 +104,6 @@ def build_sitian_context_text(sitian_root: Path) -> str | None:
     if not work_items:
         return None
 
-    now = datetime.now(UTC)
     updated_at: str = state.get("updatedAt", "")
     sources: dict[str, Any] = state.get("sources") or {}
     sources_total = sources.get("total", "?")
@@ -82,7 +116,7 @@ def build_sitian_context_text(sitian_root: Path) -> str | None:
         freshness += "（可能已过期）"
 
     lines: list[str] = []
-    lines.append("## 工作区态势（司天观察）")
+    lines.append(f"### 频道：{channel_name}")
     lines.append("")
     lines.append(
         f"数据采集于 {updated_at}（{freshness}）"
@@ -93,8 +127,8 @@ def build_sitian_context_text(sitian_root: Path) -> str | None:
     lines.append("| # | 项目 | 状态 | 优先级 | 最近活跃 | 下一步 |")
     lines.append("|---|------|------|--------|---------|--------|")
 
-    display_items = work_items[:MAX_ITEMS]
-    overflow = len(work_items) - MAX_ITEMS
+    display_items = work_items[:MAX_ITEMS_PER_CHANNEL]
+    overflow = len(work_items) - MAX_ITEMS_PER_CHANNEL
 
     for i, item in enumerate(display_items, 1):
         title = item.get("title", item.get("id", "?"))
@@ -115,7 +149,7 @@ def build_sitian_context_text(sitian_root: Path) -> str | None:
 
     if blockers:
         lines.append("")
-        lines.append("### 阻塞项")
+        lines.append("#### 阻塞项")
         for b in blockers:
             wid = b.get("workItemId", "?")
             summary = b.get("summary", "无描述")
@@ -123,21 +157,18 @@ def build_sitian_context_text(sitian_root: Path) -> str | None:
 
     if risks:
         lines.append("")
-        lines.append("### 风险项")
+        lines.append("#### 风险项")
         for r in risks:
             category = r.get("category", "?")
             summary = r.get("summary", "无描述")
             lines.append(f"- {category}: {summary}")
-
-    lines.append("")
-    lines.append("以上数据由司天自动扫描产出，可能存在延迟。如需最新状态请询问用户手动触发扫描。")
 
     if summary_path.is_file():
         try:
             summary_text = summary_path.read_text(encoding="utf-8").strip()
             if summary_text:
                 lines.append("")
-                lines.append("### 最近摘要")
+                lines.append("#### 最近摘要")
                 lines.append(summary_text)
         except OSError:
             pass

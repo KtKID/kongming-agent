@@ -184,18 +184,9 @@ def _make_runtime_factory(cfg: object) -> object:
         if _instructions_cache[0] is None:
             async with _cache_lock:
                 if _instructions_cache[0] is None:
-                    # -- sitian prompt root (与 cli/main.py 同逻辑) --
-                    sitian_root = None
-                    try:
-                        from sitian.store import resolve_sitian_root
-
-                        _base = resolve_sitian_root()
-                        if real_cfg.sitian.output_subdir:
-                            sitian_root = _base / real_cfg.sitian.output_subdir
-                        else:
-                            sitian_root = _base
-                    except ImportError:
-                        pass
+                    # -- sitian prompt root: 读 SITIAN_PROMPT_ROOT 环境变量 --
+                    _sitian_raw = os.environ.get("SITIAN_PROMPT_ROOT", "").strip()
+                    sitian_root = Path(_sitian_raw).expanduser().resolve() if _sitian_raw else None
 
                     rendered, origins = await assemble_instructions(
                         kongming_home=home,

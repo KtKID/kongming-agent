@@ -584,21 +584,16 @@ async def _run(
 def _resolve_sitian_prompt_root(cfg: Config) -> Path | None:
     """解析 sitian prompt 注入所需的根目录。
 
-    复用 ``sitian.store.resolve_sitian_root()`` 得到基准路径（默认
-    ``~/.kongming/SiTian``），再按 ``cfg.sitian.output_subdir`` 拼子目录。
-
-    Returns:
-        完整路径；sitian 模块不可用时返回 ``None``。
+    优先读 ``SITIAN_PROMPT_ROOT`` 环境变量；未设置时返回 None（不注入）。
+    返回的是频道父目录（如 ``/Users/kid/.SiTian``），
+    ``build_sitian_context_text`` 会遍历子目录按频道聚合。
     """
-    try:
-        from sitian.store import resolve_sitian_root
-    except ImportError:  # sitian 模块未安装
-        return None
+    import os
 
-    base = resolve_sitian_root()
-    if cfg.sitian.output_subdir:
-        return base / cfg.sitian.output_subdir
-    return base
+    raw = os.environ.get("SITIAN_PROMPT_ROOT", "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser().resolve()
 
 
 def _resolve_memory_dir(raw: str) -> Path:

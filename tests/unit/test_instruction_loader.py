@@ -366,7 +366,8 @@ async def test_assemble_sitian_root_valid_injects_origin(
     monkeypatch.delenv("KONGMING_EXTRA_INSTRUCTIONS", raising=False)
 
     sitian_dir = tmp_path / "sitian"
-    sitian_dir.mkdir()
+    channel_dir = sitian_dir / "claude"
+    channel_dir.mkdir(parents=True)
     state = {
         "updatedAt": "2026-05-10T08:00:00+00:00",
         "sources": {"total": 3, "active": 2},
@@ -381,7 +382,7 @@ async def test_assemble_sitian_root_valid_injects_origin(
             },
         ],
     }
-    (sitian_dir / "workspace_state.json").write_text(
+    (channel_dir / "workspace_state.json").write_text(
         json.dumps(state, ensure_ascii=False),
         encoding="utf-8",
     )
@@ -400,16 +401,18 @@ async def test_assemble_sitian_rendered_prompt_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """快照：验证 sitian 注入后完整 rendered prompt 的结构和内容。
+    """快照：验证多频道 sitian 注入后完整 rendered prompt 的结构和内容。
 
-    构造 3 个项目 + 1 blocker + 1 risk + latest_summary.md，
-    断言 rendered 文本中 # sitian 段包含表格、阻塞项、风险项、摘要。
+    构造 sitian_root/claude/ 频道（3 个项目 + blocker + risk + summary），
+    断言 rendered 文本中 # sitian 段包含频道标题、表格、阻塞项、风险项、摘要。
     """
     _patch_assemble_deps(monkeypatch)
     monkeypatch.delenv("KONGMING_EXTRA_INSTRUCTIONS", raising=False)
 
-    sitian_dir = tmp_path / "sitian"
-    sitian_dir.mkdir()
+    sitian_root = tmp_path / "sitian"
+    sitian_root.mkdir()
+    claude_dir = sitian_root / "claude"
+    claude_dir.mkdir()
     state = {
         "updatedAt": "2026-05-10T08:00:00+00:00",
         "sources": {"total": 3, "active": 2},
@@ -446,24 +449,26 @@ async def test_assemble_sitian_rendered_prompt_snapshot(
             {"category": "stale_activity", "summary": "ralph 5 天无进展"},
         ],
     }
-    (sitian_dir / "workspace_state.json").write_text(
+    (claude_dir / "workspace_state.json").write_text(
         json.dumps(state, ensure_ascii=False),
         encoding="utf-8",
     )
-    (sitian_dir / "latest_summary.md").write_text(
+    (claude_dir / "latest_summary.md").write_text(
         "# SiTian Summary\n\n- Sources: 2/3 active\n",
         encoding="utf-8",
     )
 
     rendered, origins = await assemble_instructions(
         kongming_home=tmp_path,
-        sitian_root=sitian_dir,
+        sitian_root=sitian_root,
     )
     assert "sitian" in origins
 
     sitian_section = rendered.split("# sitian\n", 1)[1]
 
     assert "工作区态势（司天观察）" in sitian_section
+    assert "频道数：1" in sitian_section
+    assert "### 频道：claude" in sitian_section
     assert "数据采集于 2026-05-10T08:00:00+00:00" in sitian_section
     assert "2/3 活跃，3 个项目" in sitian_section
 
@@ -474,13 +479,13 @@ async def test_assemble_sitian_rendered_prompt_snapshot(
     assert "补充进展" in sitian_section
     assert "同步最新状态" in sitian_section
 
-    assert "### 阻塞项" in sitian_section
+    assert "#### 阻塞项" in sitian_section
     assert "proj-c: 扫描路径不存在" in sitian_section
 
-    assert "### 风险项" in sitian_section
+    assert "#### 风险项" in sitian_section
     assert "stale_activity: ralph 5 天无进展" in sitian_section
 
-    assert "### 最近摘要" in sitian_section
+    assert "#### 最近摘要" in sitian_section
     assert "SiTian Summary" in sitian_section
 
     assert "询问用户手动触发扫描" in sitian_section
@@ -491,9 +496,9 @@ async def test_assemble_sitian_real_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """用真实 sitian 产物目录验证注入效果。
+    """用真实 sitian 产物目录验证多频道注入效果。
 
-    通过 SITIAN_TEST_ROOT 环境变量指定目录（如 /Users/kid/.SiTian/claude）。
+    通过 SITIAN_TEST_ROOT 环境变量指定频道父目录（如 /Users/kid/.SiTian）。
     未设置时跳过。只做结构性断言，不写死具体项目名。
     """
     import os
@@ -502,8 +507,13 @@ async def test_assemble_sitian_real_directory(
     if not sitian_dir_str:
         pytest.skip("SITIAN_TEST_ROOT not set")
     sitian_dir = Path(sitian_dir_str)
-    if not (sitian_dir / "workspace_state.json").exists():
-        pytest.skip(f"workspace_state.json not found in {sitian_dir}")
+    if not sitian_dir.is_dir():
+        pytest.skip(f"directory not found: {sitian_dir}")
+    has_channel = any(
+        (d / "workspace_state.json").exists() for d in sitian_dir.iterdir() if d.is_dir()
+    )
+    if not has_channel:
+        pytest.skip(f"no channel with workspace_state.json under {sitian_dir}")
 
     _patch_assemble_deps(monkeypatch)
     monkeypatch.delenv("KONGMING_EXTRA_INSTRUCTIONS", raising=False)
@@ -518,7 +528,8 @@ async def test_assemble_sitian_real_directory(
     sitian_section = rendered.split("# sitian\n", 1)[1]
 
     assert "工作区态势（司天观察）" in sitian_section
-    assert "数据采集于" in sitian_section
+    assert "频道数：" in sitian_section
+    assert "### 频道：" in sitian_section
     assert "| # | 项目 | 状态 | 优先级 | 最近活跃 | 下一步 |" in sitian_section
     assert "| 1 |" in sitian_section
     assert "询问用户手动触发扫描" in sitian_section

@@ -9,9 +9,9 @@
 - freshness 超 1h → "可能已过期"
 - freshness 新鲜 → 无"可能已过期"
 - latest_summary.md 存在 / 不存在
-- blockers 非空 → "### 阻塞项"
-- blockers 为空 → 无"### 阻塞项"
-- risks 非空 → "### 风险项"
+- blockers 非空 → "#### 阻塞项"
+- blockers 为空 → 无"#### 阻塞项"
+- risks 非空 → "#### 风险项"
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from unittest.mock import patch
 
 import pytest
 
-from context.sitian_context import MAX_ITEMS, build_sitian_context_text
+from context.sitian_context import MAX_ITEMS_PER_CHANNEL, build_sitian_context_text
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -66,9 +66,14 @@ def _make_state(
     }
 
 
-def _write_state(root: Path, state: dict[str, Any]) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    p = root / "workspace_state.json"
+def _write_state(root: Path, state: dict[str, Any], channel: str = "claude") -> Path:
+    """写 workspace_state.json 到 root/<channel>/ 下。
+
+    root 是 sitian_root（频道父目录），channel 默认 "claude"。
+    """
+    channel_dir = root / channel
+    channel_dir.mkdir(parents=True, exist_ok=True)
+    p = channel_dir / "workspace_state.json"
     p.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
     return p
 
@@ -132,8 +137,7 @@ def test_missing_directory(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_missing_state_file(tmp_path: Path) -> None:
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    # 目录存在但无 workspace_state.json
+    (tmp_path / "claude").mkdir(parents=True, exist_ok=True)
     result = build_sitian_context_text(tmp_path)
     assert result is None
 
@@ -145,8 +149,9 @@ def test_missing_state_file(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_corrupted_json(tmp_path: Path) -> None:
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    (tmp_path / "workspace_state.json").write_text("{broken json!!", encoding="utf-8")
+    channel = tmp_path / "claude"
+    channel.mkdir(parents=True, exist_ok=True)
+    (channel / "workspace_state.json").write_text("{broken json!!", encoding="utf-8")
     result = build_sitian_context_text(tmp_path)
     assert result is None
 
@@ -181,7 +186,7 @@ def test_null_work_items(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_truncation_over_max_items(tmp_path: Path) -> None:
-    total = MAX_ITEMS + 5  # 20 items
+    total = MAX_ITEMS_PER_CHANNEL + 5  # 20 items
     items = [
         {
             "id": f"item-{i}",
@@ -202,12 +207,12 @@ def test_truncation_over_max_items(tmp_path: Path) -> None:
         result = build_sitian_context_text(tmp_path)
 
     assert result is not None
-    overflow = total - MAX_ITEMS
+    overflow = total - MAX_ITEMS_PER_CHANNEL
     assert f"...及 {overflow} 个更多项目" in result
     # 前 15 项存在
-    assert f"| {MAX_ITEMS} |" in result
+    assert f"| {MAX_ITEMS_PER_CHANNEL} |" in result
     # 第 16 项不作为表格行出现
-    assert f"| {MAX_ITEMS + 1} |" not in result
+    assert f"| {MAX_ITEMS_PER_CHANNEL + 1} |" not in result
 
 
 @pytest.mark.unit
@@ -224,7 +229,7 @@ def test_exact_max_items_no_truncation(tmp_path: Path) -> None:
             "risks": [],
             "updatedAt": "2026-05-10T11:50:00Z",
         }
-        for i in range(MAX_ITEMS)
+        for i in range(MAX_ITEMS_PER_CHANNEL)
     ]
     state = _make_state(work_items=items)
     _write_state(tmp_path, state)
@@ -280,7 +285,7 @@ def test_fresh_data(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 8. latest_summary.md 存在 → "### 最近摘要"
+# 8. latest_summary.md 存在 → "#### 最近摘要"
 # ---------------------------------------------------------------------------
 
 
@@ -288,32 +293,32 @@ def test_fresh_data(tmp_path: Path) -> None:
 def test_summary_present(tmp_path: Path) -> None:
     state = _make_state()
     _write_state(tmp_path, state)
-    (tmp_path / "latest_summary.md").write_text("这是一段摘要文本。", encoding="utf-8")
+    (tmp_path / "claude" / "latest_summary.md").write_text("这是一段摘要文本。", encoding="utf-8")
 
     with _patch_now():
         result = build_sitian_context_text(tmp_path)
 
     assert result is not None
-    assert "### 最近摘要" in result
+    assert "#### 最近摘要" in result
     assert "这是一段摘要文本。" in result
 
 
 @pytest.mark.unit
 def test_summary_empty_file(tmp_path: Path) -> None:
-    """summary 文件存在但内容为空 → 不应出现"### 最近摘要"。"""
+    """summary 文件存在但内容为空 → 不应出现"#### 最近摘要"。"""
     state = _make_state()
     _write_state(tmp_path, state)
-    (tmp_path / "latest_summary.md").write_text("", encoding="utf-8")
+    (tmp_path / "claude" / "latest_summary.md").write_text("", encoding="utf-8")
 
     with _patch_now():
         result = build_sitian_context_text(tmp_path)
 
     assert result is not None
-    assert "### 最近摘要" not in result
+    assert "#### 最近摘要" not in result
 
 
 # ---------------------------------------------------------------------------
-# 9. latest_summary.md 不存在 → 无"### 最近摘要"
+# 9. latest_summary.md 不存在 → 无"#### 最近摘要"
 # ---------------------------------------------------------------------------
 
 
@@ -327,11 +332,11 @@ def test_summary_absent(tmp_path: Path) -> None:
         result = build_sitian_context_text(tmp_path)
 
     assert result is not None
-    assert "### 最近摘要" not in result
+    assert "#### 最近摘要" not in result
 
 
 # ---------------------------------------------------------------------------
-# 10. blockers 非空 → "### 阻塞项"
+# 10. blockers 非空 → "#### 阻塞项"
 # ---------------------------------------------------------------------------
 
 
@@ -349,13 +354,13 @@ def test_blockers_present(tmp_path: Path) -> None:
         result = build_sitian_context_text(tmp_path)
 
     assert result is not None
-    assert "### 阻塞项" in result
+    assert "#### 阻塞项" in result
     assert "item-0: 依赖服务挂了" in result
     assert "item-1: 等待审批" in result
 
 
 # ---------------------------------------------------------------------------
-# 11. blockers 为空 → 无"### 阻塞项"
+# 11. blockers 为空 → 无"#### 阻塞项"
 # ---------------------------------------------------------------------------
 
 
@@ -368,11 +373,11 @@ def test_blockers_empty(tmp_path: Path) -> None:
         result = build_sitian_context_text(tmp_path)
 
     assert result is not None
-    assert "### 阻塞项" not in result
+    assert "#### 阻塞项" not in result
 
 
 # ---------------------------------------------------------------------------
-# 12. risks 非空 → "### 风险项"
+# 12. risks 非空 → "#### 风险项"
 # ---------------------------------------------------------------------------
 
 
@@ -389,7 +394,7 @@ def test_risks_present(tmp_path: Path) -> None:
         result = build_sitian_context_text(tmp_path)
 
     assert result is not None
-    assert "### 风险项" in result
+    assert "#### 风险项" in result
     assert "安全: 密钥即将过期" in result
 
 
@@ -402,7 +407,7 @@ def test_risks_empty(tmp_path: Path) -> None:
         result = build_sitian_context_text(tmp_path)
 
     assert result is not None
-    assert "### 风险项" not in result
+    assert "#### 风险项" not in result
 
 
 # ---------------------------------------------------------------------------
