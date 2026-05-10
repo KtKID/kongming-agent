@@ -57,7 +57,26 @@ class SiTianConfig(BaseModel):
     version: Literal["v1"] = "v1"
     default_scan_interval_sec: int = Field(default=300, gt=0)
     idle_sleep_sec: int = Field(default=30, gt=0)
+    output_subdir: str | None = Field(default=None)
+    """产物落子目录名（相对 SiTianRecords root_dir）。
+
+    例：``output_subdir="claude"`` → 所有产物落到 ``<root>/claude/`` 下。
+    设 ``None`` 时直接落 ``<root>/``（向后兼容）。
+    用于多 kind 共存时隔离产物（``claude/`` / ``codex/`` / ``general/``）。
+    """
     sources: list[SiTianSourceConfig] = Field(default_factory=list)
+
+    @field_validator("output_subdir")
+    @classmethod
+    def _output_subdir_clean(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip().strip("/")
+        if not stripped:
+            raise ValueError("output_subdir must not be empty / only slashes")
+        if ".." in stripped.split("/"):
+            raise ValueError("output_subdir must not contain '..'")
+        return stripped
 
     @model_validator(mode="after")
     def _check_unique_source_ids(self) -> SiTianConfig:

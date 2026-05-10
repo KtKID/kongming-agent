@@ -76,6 +76,10 @@ sitian:
   version: v1                          # 配置版本号，目前固定 v1
   default_scan_interval_sec: 60        # 全局默认扫描间隔（秒）。各 source 可覆盖
   idle_sleep_sec: 3                    # 循环模式空闲等待秒数（loop 命令两轮之间最长睡多久）
+  output_subdir: claude                # 产物落子目录名（相对 root_dir）。
+                                       # 设置后所有产物落到 <root>/<subdir>/。
+                                       # 用于多 kind 共存时隔离（claude / codex / general）。
+                                       # 不设/留空 → 直接落 <root>/（向后兼容）。
 
   sources:
     # ---------------------------------------------------------------------
