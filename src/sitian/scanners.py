@@ -10,9 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from sitian.config import SiTianSourceConfig
+from sitian.global_scanner import list_claude_projects_global, list_codex_projects_global
 from sitian.models import SiTianObservation
-from web.claude_code.projects_scanner import list_projects as list_claude_projects
-from web.codex.projects_scanner import list_codex_projects
 
 _MAX_ARTIFACT_OBSERVATIONS = 20
 _MAX_SESSION_OBSERVATIONS = 20
@@ -123,7 +122,7 @@ def _SiTianScanCodexProject(
     )
 
     codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
-    for project in list_codex_projects(codex_home=codex_home):
+    for project in list_codex_projects_global(codex_home=codex_home):
         if os.path.realpath(project.cwd) != os.path.realpath(str(project_path)):
             continue
         for session in project.sessions[:_MAX_SESSION_OBSERVATIONS]:
@@ -158,7 +157,7 @@ def _SiTianScanClaudeWorkspace(
     claude_home = _resolve_claude_home_from_path(source.path)
     top_n = source.top_n or _DEFAULT_CLAUDE_WORKSPACE_TOP_N
 
-    projects = list_claude_projects(claude_home=claude_home)[:top_n]
+    projects = list_claude_projects_global(claude_home=claude_home)[:top_n]
 
     observations: list[SiTianObservation] = []
     latest_modified_iso = (
@@ -212,9 +211,9 @@ def _SiTianScanClaudeWorkspace(
                     source=source,
                     observed_at=observed_at,
                     entity_type="thread",
-                    entity_key=latest_session.claude_thread_id,
+                    entity_key=latest_session.thread_id,
                     payload={
-                        "threadId": latest_session.claude_thread_id,
+                        "threadId": latest_session.thread_id,
                         "title": latest_session.title,
                         "cwd": project.cwd,
                         "displayName": project.display_name,
@@ -226,7 +225,7 @@ def _SiTianScanClaudeWorkspace(
                             claude_home
                             / "projects"
                             / project.name
-                            / f"{latest_session.claude_thread_id}.jsonl"
+                            / f"{latest_session.thread_id}.jsonl"
                         ),
                     ),
                 )
