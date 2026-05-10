@@ -109,8 +109,10 @@ async def workspace_shell_ws(
         if meta.backend_kind == "claude_code"
         else build_system_shell_command()
     )
+
     def emit_output(text: str) -> Awaitable[None]:
         return send_frame({"type": "shell-output", "data": text})
+
     claude_home = getattr(websocket.app.state, "claude_home", None)
     bind_task: asyncio.Task[None] | None = None
     process: WorkspaceShellProcess | None = None

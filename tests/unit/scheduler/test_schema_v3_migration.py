@@ -32,9 +32,7 @@ from scheduler.domain import (
 from scheduler.store import Store
 
 
-def _make_task_with_delivery(
-    *, task_id: str, channel: DeliveryChannel | None
-) -> ScheduledTask:
+def _make_task_with_delivery(*, task_id: str, channel: DeliveryChannel | None) -> ScheduledTask:
     delivery = ScheduleDelivery(channel=channel) if channel is not None else None
     return ScheduledTask(
         task_id=task_id,
@@ -42,9 +40,7 @@ def _make_task_with_delivery(
         enabled=True,
         state=TaskState.SCHEDULED,
         origin=TaskOrigin.TOOL,
-        trigger=ScheduleTrigger(
-            trigger_type=TriggerType.INTERVAL, expr="30", timezone="UTC"
-        ),
+        trigger=ScheduleTrigger(trigger_type=TriggerType.INTERVAL, expr="30", timezone="UTC"),
         policy=TaskExecutionPolicy(
             session_mode=SessionMode.FRESH_SESSION,
             concurrency_policy=__import__(
@@ -195,9 +191,7 @@ def test_v2_data_with_tasks_backed_up_intact(tmp_path: Path) -> None:
             }
         ],
     }
-    (tmp_path / "scheduled_tasks.json").write_text(
-        json.dumps(v2_data), encoding="utf-8"
-    )
+    (tmp_path / "scheduled_tasks.json").write_text(json.dumps(v2_data), encoding="utf-8")
 
     Store(tmp_path)
 
@@ -219,9 +213,7 @@ def test_v2_to_v3_post_migration_can_create_with_delivery(tmp_path: Path) -> Non
     store = Store(tmp_path)
 
     # 现在 schema_version 已经是 3
-    current = json.loads(
-        (tmp_path / "scheduled_tasks.json").read_text(encoding="utf-8")
-    )
+    current = json.loads((tmp_path / "scheduled_tasks.json").read_text(encoding="utf-8"))
     assert current["schema_version"] == SCHEMA_VERSION
 
     # 能创建带 delivery 的新任务

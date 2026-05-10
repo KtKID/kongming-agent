@@ -60,7 +60,6 @@ def test_setting_yaml_sensitive_paths_protect_personal_dirs() -> None:
         assert "read" not in rule.ops
 
 
-
 def test_setting_yaml_rm_recursive_requires_elevated_approval() -> None:
     """approval_required_commands 含 rm-recursive-elevated 规则，severity=elevated。"""
     cfg = load_config(_SETTING_YAML, load_env_file=False)
