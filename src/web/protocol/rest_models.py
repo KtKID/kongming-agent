@@ -136,9 +136,13 @@ class ResetPasswordRequest(_FrameBase):
 
 
 class RenameThreadRequest(_FrameBase):
-    """重命名 thread 请求体（``PATCH /api/threads/{id}``）。"""
+    """更新 thread 属性请求体（``PATCH /api/threads/{id}``）。
 
-    name: Annotated[str, Field(max_length=200)]
+    支持重命名（name）和/或切换置顶状态（is_pinned），至少传一个。
+    """
+
+    name: Annotated[str, Field(max_length=200)] | None = None
+    is_pinned: bool | None = None
 
 
 class ThreadMetadataDTO(_FrameBase):
@@ -151,6 +155,7 @@ class ThreadMetadataDTO(_FrameBase):
     ``schema_version`` 升至 ``5``。
     v0.2.3 将旧 ``sdk_session_id`` 改名为 ``claude_thread_id``，
     ``schema_version`` 升至 ``6``。
+    v0.2.4 加 ``is_pinned`` 置顶字段，``schema_version`` 升至 ``7``。
     （同时接受老 v1/v2 文件，懒升级在 :func:`web.thread_metadata.read_thread_metadata`
     里完成；DTO 这里只负责出/入参形态对齐 ThreadMetadata 模型）。
     ``id`` 严格匹配 ``^thread-[a-f0-9]{12}$``，防止用户在 URL 里手写 thread id
@@ -172,7 +177,8 @@ class ThreadMetadataDTO(_FrameBase):
     cumulative_total_tokens: Annotated[int, Field(ge=0)] = 0
     cumulative_cache_read_tokens: int | None = None
     cumulative_cache_creation_tokens: int | None = None
-    schema_version: Literal[1, 2, 3, 4, 5, 6] = 6
+    is_pinned: bool = False
+    schema_version: Literal[1, 2, 3, 4, 5, 6, 7] = 7
 
 
 class WorkspaceContextDTO(_FrameBase):

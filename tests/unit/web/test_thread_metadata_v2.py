@@ -31,9 +31,9 @@ from web.thread_metadata import (
 )
 
 
-def test_schema_version_constant_is_6() -> None:
-    """v0.2.3 起常量为 6（v0.2.2 是 5）。"""
-    assert THREAD_METADATA_SCHEMA_VERSION == 6
+def test_schema_version_constant_is_7() -> None:
+    """v0.2.4 起常量为 7（v0.2.3 是 6）。"""
+    assert THREAD_METADATA_SCHEMA_VERSION == 7
 
 
 def test_default_construction_uses_v6_and_generic_chat() -> None:
@@ -44,7 +44,7 @@ def test_default_construction_uses_v6_and_generic_chat() -> None:
         created_at=1.0,
         updated_at=1.0,
     )
-    assert meta.schema_version == 6
+    assert meta.schema_version == 7
     assert meta.backend_kind == "generic_chat"
     assert meta.preset_id == "p1"
     # v0.2/v0.2.1 新字段默认空 / 0
@@ -81,7 +81,7 @@ def test_read_v1_file_auto_upgrades_to_v4(tmp_path: Path) -> None:
     loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
     assert loaded is not None
     assert loaded.backend_kind == "generic_chat"
-    assert loaded.schema_version == 6
+    assert loaded.schema_version == 7
     assert loaded.claude_thread_id == ""
     assert loaded.cwd == ""
     assert loaded.cumulative_prompt_tokens == 0

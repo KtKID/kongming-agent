@@ -36,11 +36,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 logger = logging.getLogger(__name__)
 
 
-# v0.2.3 schema 版本：bump 到 6 以支持 provider thread id 命名统一。
+# v0.2.4 schema 版本：bump 到 7 以支持 thread 置顶功能（is_pinned 字段）。
 # ``claude_thread_id`` / ``codex_thread_id`` 都表示 provider 底层可恢复 thread id。
 # 一个 Kongming thread 绑定一个 provider session/thread；老 v5 文件读入时把
 # ``sdk_session_id`` 迁移为 ``claude_thread_id``。
-THREAD_METADATA_SCHEMA_VERSION = 6
+THREAD_METADATA_SCHEMA_VERSION = 7
 
 
 class ThreadMetadata(BaseModel):
@@ -72,8 +72,9 @@ class ThreadMetadata(BaseModel):
             加上本次 ``Result.metadata.usage.prompt_tokens``。
         cumulative_completion_tokens: thread 级累计输出 token 总量。
         cumulative_total_tokens: thread 级累计总 token。
-        schema_version: 当前 ``6``；``Literal[1, 2, 3, 4, 5, 6]`` 同时接受老文件，
-            写盘时永远写 ``6``。
+        is_pinned: 置顶标记；``True`` 时 UI 列表优先排列。v0.2.4 新增。
+        schema_version: 当前 ``7``；``Literal[1, 2, 3, 4, 5, 6, 7]`` 同时接受老文件，
+            写盘时永远写 ``7``。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -93,7 +94,8 @@ class ThreadMetadata(BaseModel):
     cumulative_total_tokens: Annotated[int, Field(ge=0)] = 0
     cumulative_cache_read_tokens: Annotated[int, Field(ge=0)] = 0
     cumulative_cache_creation_tokens: Annotated[int, Field(ge=0)] = 0
-    schema_version: Literal[1, 2, 3, 4, 5, 6] = 6
+    is_pinned: bool = False
+    schema_version: Literal[1, 2, 3, 4, 5, 6, 7] = 7
 
 
 def thread_metadata_path(home: Path, thread_id: str) -> Path:
@@ -144,7 +146,7 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
 
     - 文件不存在 / 不是普通文件
     - JSON 解析失败（损坏 / 编码异常）
-    - schema_version 不在 ``{1, 2, 3, 4, 5, 6}``（更高版本 = 该进程不认识，拒绝）
+    - schema_version 不在 ``{1, 2, 3, 4, 5, 6, 7}``（更高版本 = 该进程不认识，拒绝）
     - 字段校验失败（缺字段 / 类型不对 / 正则不匹配）
 
     **v1 → v2 懒升级**：``schema_version=1`` 且缺 ``backend_kind`` 时，
@@ -162,8 +164,10 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
     **v5 → v6 懒升级**：把旧 ``sdk_session_id`` 迁移到 ``claude_thread_id``，
     并删除旧字段，避免 ``extra="forbid"`` 校验失败。
 
-    返回的 :class:`ThreadMetadata` 实例已是最新 v6 形态。下次
-    :func:`write_thread_metadata` 会以 v6 写盘（默认 ``schema_version=6``，
+    **v6 → v7 懒升级**：补 ``is_pinned`` 字段（v0.2.4 置顶功能新增）。
+
+    返回的 :class:`ThreadMetadata` 实例已是最新 v7 形态。下次
+    :func:`write_thread_metadata` 会以 v7 写盘（默认 ``schema_version=7``，
     无需调用方关心）。本函数**不**自己回写——避免读盘函数有副作用。
 
     所有 ``None`` 路径都会记 warning 日志，便于排查。
@@ -210,6 +214,10 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
         data["claude_thread_id"] = str(data.pop("sdk_session_id", data.get("claude_thread_id", "")))
         data.setdefault("codex_thread_id", "")
         data["schema_version"] = 6
+    # v6 → v7 懒升级：补 is_pinned 字段（v0.2.4 置顶功能新增）
+    if data.get("schema_version") == 6:
+        data.setdefault("is_pinned", False)
+        data["schema_version"] = 7
     # 兜底：任何 version 下如果 sdk_session_id 仍残留，强制迁移
     if "sdk_session_id" in data:
         data.setdefault("claude_thread_id", str(data.pop("sdk_session_id")))
@@ -249,7 +257,8 @@ def list_thread_metadata(home: Path) -> list[ThreadMetadata]:
             continue
         # 容错：万一目录名与 metadata.id 不一致，按 metadata 为准（不重命名目录）
         out.append(meta)
-    out.sort(key=lambda m: m.updated_at, reverse=True)
+    # 先按 is_pinned 降序（置顶排前），再按 updated_at 降序
+    out.sort(key=lambda m: (m.is_pinned, m.updated_at), reverse=True)
     return out
 
 

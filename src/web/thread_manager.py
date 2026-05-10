@@ -269,6 +269,39 @@ class ThreadManager:
             cumulative_prompt_tokens=meta.cumulative_prompt_tokens,
             cumulative_completion_tokens=meta.cumulative_completion_tokens,
             cumulative_total_tokens=meta.cumulative_total_tokens,
+            cumulative_cache_read_tokens=meta.cumulative_cache_read_tokens,
+            cumulative_cache_creation_tokens=meta.cumulative_cache_creation_tokens,
+            is_pinned=meta.is_pinned,
+        )
+        await asyncio.to_thread(write_thread_metadata, self._home, updated)
+        async with self._lock:
+            cell = self._cells.get(thread_id)
+            if cell is not None:
+                cell.metadata = updated
+        return updated
+
+    async def pin_thread(self, thread_id: str, is_pinned: bool) -> ThreadMetadata:
+        """置顶/取消置顶 thread。"""
+        meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
+        if meta is None:
+            raise KeyError(f"thread not found: {thread_id}")
+        updated = ThreadMetadata(
+            id=meta.id,
+            name=meta.name,
+            preset_id=meta.preset_id,
+            backend_kind=meta.backend_kind,
+            claude_thread_id=meta.claude_thread_id,
+            codex_thread_id=meta.codex_thread_id,
+            cwd=meta.cwd,
+            created_at=meta.created_at,
+            updated_at=meta.updated_at,  # pin 不改 updated_at
+            message_count=meta.message_count,
+            cumulative_prompt_tokens=meta.cumulative_prompt_tokens,
+            cumulative_completion_tokens=meta.cumulative_completion_tokens,
+            cumulative_total_tokens=meta.cumulative_total_tokens,
+            cumulative_cache_read_tokens=meta.cumulative_cache_read_tokens,
+            cumulative_cache_creation_tokens=meta.cumulative_cache_creation_tokens,
+            is_pinned=is_pinned,
         )
         await asyncio.to_thread(write_thread_metadata, self._home, updated)
         async with self._lock:
@@ -307,7 +340,7 @@ class ThreadManager:
             "cumulative_prompt_tokens": meta.cumulative_prompt_tokens + prompt,
             "cumulative_completion_tokens": meta.cumulative_completion_tokens + completion,
             "cumulative_total_tokens": meta.cumulative_total_tokens + total,
-            "schema_version": 6,
+            "schema_version": 7,
         }
         if cache_read_tokens is not None:
             update["cumulative_cache_read_tokens"] = (
@@ -587,7 +620,8 @@ class ThreadManager:
         merged: dict[str, ThreadMetadata] = {m.id: m for m in disk_metas}
         merged.update(in_memory)
         out = list(merged.values())
-        out.sort(key=lambda m: m.updated_at, reverse=True)
+        # 先按 is_pinned 降序（置顶排前），再按 updated_at 降序
+        out.sort(key=lambda m: (m.is_pinned, m.updated_at), reverse=True)
         return out
 
     def list_cells(self) -> list[CellSummaryDTO]:
@@ -693,7 +727,7 @@ class ThreadManager:
             update={
                 "claude_thread_id": claude_thread_id,
                 "cwd": cwd,
-                "schema_version": 6,
+                "schema_version": 7,
                 "updated_at": _now(),
             }
         )
@@ -738,7 +772,7 @@ class ThreadManager:
             update={
                 "codex_thread_id": codex_thread_id,
                 "cwd": cwd,
-                "schema_version": 6,
+                "schema_version": 7,
                 "updated_at": _now(),
             }
         )

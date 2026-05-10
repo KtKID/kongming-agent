@@ -13,7 +13,7 @@ import logging
 from dataclasses import asdict
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from web.codex.jsonl_history import parse_codex_rollout, read_session_meta
@@ -25,10 +25,34 @@ router = APIRouter(prefix="/api/codex", tags=["codex"])
 
 
 @router.get("/projects")
-async def get_projects() -> JSONResponse:
+async def get_projects(request: Request) -> JSONResponse:
     """列出所有 Codex 项目（按 cwd 分组）。"""
     projects = await asyncio.to_thread(list_codex_projects)
-    return JSONResponse([asdict(p) for p in projects])
+
+    # 构建 pinned session id 集合
+    tm = request.app.state.thread_manager
+    pinned_ids: set[str] = set()
+    all_threads = await asyncio.to_thread(tm.list_threads)
+    for meta in all_threads:
+        if meta.is_pinned and meta.codex_thread_id:
+            pinned_ids.add(meta.codex_thread_id)
+
+    result = []
+    for p in projects:
+        sessions = sorted(
+            [{**asdict(s), "is_pinned": s.session_id in pinned_ids} for s in p.sessions],
+            key=lambda s: (s["is_pinned"], s["last_modified"]),
+            reverse=True,
+        )
+        result.append(
+            {
+                "cwd": p.cwd,
+                "display_name": p.display_name,
+                "sessions": sessions,
+                "last_modified": p.last_modified,
+            }
+        )
+    return JSONResponse(result)
 
 
 @router.get("/sessions/{session_id}/history")

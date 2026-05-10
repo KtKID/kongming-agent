@@ -89,6 +89,22 @@ class FakeTM:
         self._threads[thread_id] = new_meta
         return new_meta
 
+    async def pin_thread(self, thread_id: str, is_pinned: bool) -> ThreadMetadata:
+        if thread_id not in self._threads:
+            raise KeyError(thread_id)
+        old = self._threads[thread_id]
+        new_meta = ThreadMetadata(
+            id=old.id,
+            name=old.name,
+            preset_id=old.preset_id,
+            created_at=old.created_at,
+            updated_at=old.updated_at,
+            message_count=old.message_count,
+            is_pinned=is_pinned,
+        )
+        self._threads[thread_id] = new_meta
+        return new_meta
+
     async def delete_thread(self, thread_id: str, *, keep_history: bool = False) -> None:
         del keep_history
         self.delete_calls.append(thread_id)
@@ -274,6 +290,43 @@ def test_invalid_thread_id_returns_422(tmp_path: Path) -> None:
             headers=CSRF_HEADERS,
         )
         assert resp.status_code == 422
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_pin_thread(tmp_path: Path) -> None:
+    tm = FakeTM()
+    client = _login_client(tmp_path, tm)
+    try:
+        cresp = client.post(
+            "/api/threads",
+            json={"name": "t", "preset_id": "p1"},
+            headers=CSRF_HEADERS,
+        )
+        thread_id = cresp.json()["id"]
+        assert cresp.json()["is_pinned"] is False
+
+        resp = client.patch(
+            f"/api/threads/{thread_id}",
+            json={"is_pinned": True},
+            headers=CSRF_HEADERS,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["is_pinned"] is True
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_pin_nonexistent_returns_404(tmp_path: Path) -> None:
+    tm = FakeTM()
+    client = _login_client(tmp_path, tm)
+    try:
+        resp = client.patch(
+            "/api/threads/thread-aaaaaaaaaaaa",
+            json={"is_pinned": True},
+            headers=CSRF_HEADERS,
+        )
+        assert resp.status_code == 404
     finally:
         client.__exit__(None, None, None)
 

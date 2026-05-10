@@ -128,6 +128,7 @@ def _to_dto(meta: ThreadMetadata) -> ThreadMetadataDTO:
         cumulative_total_tokens=total,
         cumulative_cache_read_tokens=cache_read,
         cumulative_cache_creation_tokens=cache_creation,
+        is_pinned=meta.is_pinned,
         schema_version=meta.schema_version,
     )
 
@@ -387,13 +388,35 @@ async def rename_thread(
     body: RenameThreadRequest,
     request: Request,
 ) -> ThreadMetadataDTO:
-    """重命名 thread。"""
+    """更新 thread 属性（重命名 / 置顶）。"""
     _validate_thread_id(thread_id)
     tm: ThreadManagerProtocol = request.app.state.thread_manager
-    try:
-        meta = await tm.rename_thread(thread_id, body.name)
-    except KeyError as exc:
-        raise ThreadNotFoundError(f"thread not found: {thread_id}") from exc
+
+    meta: ThreadMetadata | None = None
+
+    if body.name is not None:
+        try:
+            meta = await tm.rename_thread(thread_id, body.name)
+        except KeyError as exc:
+            raise ThreadNotFoundError(f"thread not found: {thread_id}") from exc
+
+    if body.is_pinned is not None:
+        try:
+            meta = await tm.pin_thread(thread_id, body.is_pinned)
+        except KeyError as exc:
+            raise ThreadNotFoundError(f"thread not found: {thread_id}") from exc
+
+    if meta is None:
+        # 什么都没改，读取当前状态返回
+        from web.thread_metadata import read_thread_metadata
+
+        meta_read = await asyncio.to_thread(
+            read_thread_metadata, request.app.state.kongming_home, thread_id
+        )
+        if meta_read is None:
+            raise ThreadNotFoundError(f"thread not found: {thread_id}")
+        return _to_dto(meta_read)
+
     return _to_dto(meta)
 
 

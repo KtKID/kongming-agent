@@ -49,7 +49,7 @@ class TestSchemaV4ToV6Upgrade:
         _write_v4_metadata(tmp_path)
         meta = read_thread_metadata(tmp_path, _THREAD_ID)
         assert meta is not None
-        assert meta.schema_version == 6
+        assert meta.schema_version == 7
         assert meta.codex_thread_id == ""
 
     def test_v4_fields_preserved(self, tmp_path: Path) -> None:
@@ -98,5 +98,5 @@ class TestCodexBackendKind:
 
 
 class TestSchemaVersion:
-    def test_current_version_is_6(self) -> None:
-        assert THREAD_METADATA_SCHEMA_VERSION == 6
+    def test_current_version_is_7(self) -> None:
+        assert THREAD_METADATA_SCHEMA_VERSION == 7

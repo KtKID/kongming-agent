@@ -32,7 +32,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -44,42 +44,55 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/claude", tags=["claude"])
 
 
-def _serialize_projects(projects: list[ProjectSummary]) -> list[dict[str, Any]]:
+def _serialize_projects(
+    projects: list[ProjectSummary],
+    pinned_ids: set[str],
+) -> list[dict[str, Any]]:
     return [
         {
             "name": p.name,
             "cwd": p.cwd,
             "display_name": p.display_name,
-            "sessions": [
-                {
-                    "claude_thread_id": s.claude_thread_id,
-                    "title": s.title,
-                    "last_modified": s.last_modified,
-                    "message_count": s.message_count,
-                }
-                for s in p.sessions
-            ],
+            "sessions": sorted(
+                [
+                    {
+                        "claude_thread_id": s.claude_thread_id,
+                        "title": s.title,
+                        "last_modified": s.last_modified,
+                        "message_count": s.message_count,
+                        "is_pinned": s.claude_thread_id in pinned_ids,
+                    }
+                    for s in p.sessions
+                ],
+                key=lambda s: (s["is_pinned"], s["last_modified"]),
+                reverse=True,
+            ),
         }
         for p in projects
     ]
 
 
 @router.get("/projects")
-async def get_claude_projects() -> dict[str, Any]:
+async def get_claude_projects(request: Request) -> dict[str, Any]:
     """列出 ``~/.claude/projects/`` 下的所有 project 与 session 摘要。
 
     Returns:
         dict: ``{"projects": [...]}``，每个 project 含 ``name`` / ``cwd``
         / ``display_name`` / ``sessions``；session 含 ``claude_thread_id``
-        / ``title`` / ``last_modified`` / ``message_count``。
+        / ``title`` / ``last_modified`` / ``message_count`` / ``is_pinned``。
         ``~/.claude/projects/`` 不存在时 ``projects`` 为空列表。
     """
     projects = await asyncio.to_thread(list_projects)
-    return {"projects": _serialize_projects(projects)}
+    tm = request.app.state.thread_manager
+    threads = await asyncio.to_thread(tm.list_threads)
+    pinned_ids: set[str] = {
+        meta.claude_thread_id for meta in threads if meta.is_pinned and meta.claude_thread_id
+    }
+    return {"projects": _serialize_projects(projects, pinned_ids)}
 
 
 @router.get("/projects/refresh")
-async def refresh_claude_projects() -> StreamingResponse:
+async def refresh_claude_projects(request: Request) -> StreamingResponse:
     """流式刷新 Claude projects，并持续返回扫描进度。
 
     NDJSON 事件：
@@ -87,6 +100,11 @@ async def refresh_claude_projects() -> StreamingResponse:
     - ``{"kind":"done","projects":[...]}``
     - ``{"kind":"error","detail":"..."}``
     """
+    tm = request.app.state.thread_manager
+    threads = await asyncio.to_thread(tm.list_threads)
+    pinned_ids: set[str] = {
+        meta.claude_thread_id for meta in threads if meta.is_pinned and meta.claude_thread_id
+    }
 
     async def stream() -> AsyncIterator[str]:
         loop = asyncio.get_running_loop()
@@ -114,7 +132,7 @@ async def refresh_claude_projects() -> StreamingResponse:
                     queue.put_nowait,
                     {
                         "kind": "done",
-                        "projects": _serialize_projects(projects),
+                        "projects": _serialize_projects(projects, pinned_ids),
                     },
                 )
             except Exception as exc:  # pragma: no cover - 防御性兜底

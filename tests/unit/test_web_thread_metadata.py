@@ -91,9 +91,7 @@ def test_thread_metadata_name_max_200() -> None:
 
 def test_thread_metadata_default_schema_version() -> None:
     meta = _make_meta()
-    # v0.2.3 bump 到 6（sdk_session_id -> claude_thread_id）；老文件由
-    # read_thread_metadata 懒升级
-    assert meta.schema_version == THREAD_METADATA_SCHEMA_VERSION == 6
+    assert meta.schema_version == THREAD_METADATA_SCHEMA_VERSION == 7
 
 
 def test_thread_metadata_message_count_non_negative() -> None:
@@ -204,10 +202,11 @@ def test_read_v3_lazy_upgrades_usage_totals_to_v4(tmp_path: Path) -> None:
     )
     loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
     assert loaded is not None
-    assert loaded.schema_version == 6
+    assert loaded.schema_version == 7
     assert loaded.cumulative_prompt_tokens == 0
     assert loaded.cumulative_completion_tokens == 0
     assert loaded.cumulative_total_tokens == 0
+    assert loaded.is_pinned is False
 
 
 def test_read_directory_instead_of_file_returns_none(tmp_path: Path) -> None:
@@ -239,6 +238,20 @@ def test_list_sorted_by_updated_at_desc(tmp_path: Path) -> None:
         "thread-bbbbbbbbbbbb",  # updated_at=300
         "thread-cccccccccccc",  # 200
         "thread-aaaaaaaaaaaa",  # 100
+    ]
+
+
+def test_list_pinned_threads_sorted_first(tmp_path: Path) -> None:
+    a = _make_meta("thread-aaaaaaaaaaaa", updated_at=100.0, is_pinned=False)
+    b = _make_meta("thread-bbbbbbbbbbbb", updated_at=300.0, is_pinned=False)
+    c = _make_meta("thread-cccccccccccc", updated_at=50.0, is_pinned=True)
+    for m in (a, b, c):
+        write_thread_metadata(tmp_path, m)
+    out = list_thread_metadata(tmp_path)
+    assert [m.id for m in out] == [
+        "thread-cccccccccccc",  # pinned, updated_at=50
+        "thread-bbbbbbbbbbbb",  # not pinned, updated_at=300
+        "thread-aaaaaaaaaaaa",  # not pinned, updated_at=100
     ]
 
 
@@ -292,3 +305,40 @@ def test_delete_removes_extra_files_in_thread_dir(tmp_path: Path) -> None:
     extra.write_text("blob", encoding="utf-8")
     delete_thread_metadata_dir(tmp_path, meta.id)
     assert not target_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# is_pinned 相关
+# ---------------------------------------------------------------------------
+
+
+def test_is_pinned_default_false() -> None:
+    meta = _make_meta()
+    assert meta.is_pinned is False
+
+
+def test_is_pinned_round_trip(tmp_path: Path) -> None:
+    meta = _make_meta(is_pinned=True)
+    write_thread_metadata(tmp_path, meta)
+    loaded = read_thread_metadata(tmp_path, meta.id)
+    assert loaded is not None
+    assert loaded.is_pinned is True
+
+
+def test_read_v6_lazy_upgrades_to_v7_with_is_pinned(tmp_path: Path) -> None:
+    """v6 文件缺 is_pinned → 懒升级到 v7，补 is_pinned=False。"""
+    path = thread_metadata_path(tmp_path, "thread-aaaaaaaaaaaa")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '{"id":"thread-aaaaaaaaaaaa","name":"x","preset_id":"p",'
+        '"backend_kind":"generic_chat","claude_thread_id":"","codex_thread_id":"","cwd":"",'
+        '"created_at":1.0,"updated_at":2.0,"message_count":3,'
+        '"cumulative_prompt_tokens":0,"cumulative_completion_tokens":0,'
+        '"cumulative_total_tokens":0,"cumulative_cache_read_tokens":0,'
+        '"cumulative_cache_creation_tokens":0,"schema_version":6}',
+        encoding="utf-8",
+    )
+    loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
+    assert loaded is not None
+    assert loaded.schema_version == 7
+    assert loaded.is_pinned is False
