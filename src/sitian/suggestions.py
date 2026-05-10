@@ -47,7 +47,8 @@ def SiTianMaterializeState(
         if runtime_state is not None and runtime_state.status != "error":
             active_sources += 1
 
-        work_item = _materialize_work_item(
+        # claude_workspace 展开为 per-project work_items；其他 kind 保持 1:1
+        source_work_items = _expand_source_work_items(
             source_id=source.id,
             source_kind=source.kind,
             project_path=source.path,
@@ -55,59 +56,61 @@ def SiTianMaterializeState(
             runtime_state=runtime_state,
             updated_at=updated_at,
         )
-        work_items.append(work_item)
 
-        for blocker_summary in work_item.blockers:
-            blockers.append(
-                SiTianWorkspaceBlocker(
-                    work_item_id=work_item.id,
-                    summary=blocker_summary,
-                    severity="high" if work_item.status == "blocked" else "medium",
-                )
-            )
-        if (
-            runtime_state is not None
-            and runtime_state.status == "error"
-            and runtime_state.last_error
-        ):
-            risks.append(
-                SiTianWorkspaceRisk(
-                    category="scan_error",
-                    summary=f"{source.id}: {runtime_state.last_error}",
-                    evidence_refs=(source.path,),
-                )
-            )
+        for work_item in source_work_items:
+            work_items.append(work_item)
 
-        if work_item.status == "waiting":
-            for thread_id in work_item.thread_ids or (work_item.id,):
-                approvals.append(
-                    SiTianPendingApproval(
-                        thread_id=thread_id,
-                        summary=f"{work_item.title} 等待人工确认或下一步决策",
+            for blocker_summary in work_item.blockers:
+                blockers.append(
+                    SiTianWorkspaceBlocker(
+                        work_item_id=work_item.id,
+                        summary=blocker_summary,
+                        severity="high" if work_item.status == "blocked" else "medium",
+                    )
+                )
+            if (
+                runtime_state is not None
+                and runtime_state.status == "error"
+                and runtime_state.last_error
+            ):
+                risks.append(
+                    SiTianWorkspaceRisk(
+                        category="scan_error",
+                        summary=f"{source.id}: {runtime_state.last_error}",
+                        evidence_refs=(source.path,),
                     )
                 )
 
-        recommendation_items.append(
-            {
-                "workItemId": work_item.id,
-                "title": work_item.title,
-                "priority": work_item.priority,
-                "status": work_item.status,
-                "reason": _recommendation_reason(work_item),
-                "nextAction": work_item.next_actions[0]
-                if work_item.next_actions
-                else "同步最新状态",
-            }
-        )
+            if work_item.status == "waiting":
+                for thread_id in work_item.thread_ids or (work_item.id,):
+                    approvals.append(
+                        SiTianPendingApproval(
+                            thread_id=thread_id,
+                            summary=f"{work_item.title} 等待人工确认或下一步决策",
+                        )
+                    )
 
-        if _is_stale(work_item.updated_at):
-            risks.append(
-                SiTianWorkspaceRisk(
-                    category="stale_activity",
-                    summary=f"{work_item.title} 最近缺少新活动",
-                    evidence_refs=tuple(work_item.project_paths or (source.path,)),
-                )
+            recommendation_items.append(
+                {
+                    "workItemId": work_item.id,
+                    "title": work_item.title,
+                    "priority": work_item.priority,
+                    "status": work_item.status,
+                    "reason": _recommendation_reason(work_item),
+                    "nextAction": work_item.next_actions[0]
+                    if work_item.next_actions
+                    else "同步最新状态",
+                }
             )
+
+            if _is_stale(work_item.updated_at):
+                risks.append(
+                    SiTianWorkspaceRisk(
+                        category="stale_activity",
+                        summary=f"{work_item.title} 最近缺少新活动",
+                        evidence_refs=tuple(work_item.project_paths or (source.path,)),
+                    )
+                )
 
     recommendation_items.sort(key=_recommendation_sort_key)
     workspace_state = SiTianWorkspaceState(
@@ -164,6 +167,81 @@ def SiTianBuildSummaryMarkdown(
     return "\n".join(lines) + "\n"
 
 
+def _expand_source_work_items(
+    *,
+    source_id: str,
+    source_kind: str,
+    project_path: str,
+    observations: list[SiTianObservation],
+    runtime_state: SiTianSourceRuntimeState | None,
+    updated_at: str,
+) -> list[SiTianWorkItem]:
+    """按 source kind 展开 work_items。
+
+    claude_workspace → per-project（每个 entity_type=project 独立成一条 work_item）。
+    其他 kind → 1 source = 1 work_item（保持原行为）。
+    """
+    if source_kind == "claude_workspace":
+        return _expand_workspace_work_items(
+            source_id=source_id,
+            source_kind=source_kind,
+            observations=observations,
+            runtime_state=runtime_state,
+            updated_at=updated_at,
+        )
+    return [
+        _materialize_work_item(
+            source_id=source_id,
+            source_kind=source_kind,
+            project_path=project_path,
+            observations=observations,
+            runtime_state=runtime_state,
+            updated_at=updated_at,
+        )
+    ]
+
+
+def _expand_workspace_work_items(
+    *,
+    source_id: str,
+    source_kind: str,
+    observations: list[SiTianObservation],
+    runtime_state: SiTianSourceRuntimeState | None,
+    updated_at: str,
+) -> list[SiTianWorkItem]:
+    """claude_workspace 展开：每个 project obs 对应一个 work_item。"""
+    project_obs_list = [obs for obs in observations if obs.entity_type == "project"]
+    if not project_obs_list:
+        return []
+
+    items: list[SiTianWorkItem] = []
+    for project_obs in project_obs_list:
+        project_cwd = str(project_obs.payload.get("cwd", ""))
+        display_name = str(project_obs.payload.get("displayName", ""))
+        project_dir_name = str(project_obs.payload.get("projectDirName", ""))
+
+        # 关联该 project 的 threads（按 cwd 匹配）
+        project_threads = [
+            obs
+            for obs in observations
+            if obs.entity_type == "thread" and obs.payload.get("cwd") == project_cwd
+        ]
+        project_observations: list[SiTianObservation] = [project_obs, *project_threads]
+
+        work_item = _materialize_work_item(
+            source_id=source_id,
+            source_kind=source_kind,
+            project_path=project_cwd,
+            observations=project_observations,
+            runtime_state=runtime_state,
+            updated_at=updated_at,
+            work_item_id=f"{source_id}:{project_dir_name or display_name}",
+            display_name=display_name,
+        )
+        items.append(work_item)
+    return items
+
+
 def _materialize_work_item(
     *,
     source_id: str,
@@ -172,9 +250,12 @@ def _materialize_work_item(
     observations: list[SiTianObservation],
     runtime_state: SiTianSourceRuntimeState | None,
     updated_at: str,
+    work_item_id: str | None = None,
+    display_name: str | None = None,
 ) -> SiTianWorkItem:
     threads = [obs for obs in observations if obs.entity_type == "thread"]
     artifacts = [obs for obs in observations if obs.entity_type == "artifact"]
+    projects = [obs for obs in observations if obs.entity_type == "project"]
     latest_status = next((obs for obs in observations if obs.entity_type == "status"), None)
 
     blockers: list[str] = []
@@ -189,15 +270,23 @@ def _materialize_work_item(
         risks.append("缺少线程级进展")
         next_actions.append("补充最近进展或同步黑板摘要")
 
-    if not artifacts:
+    # project obs 也算"有产物"（claude_workspace 不产 artifact，产 project）
+    if not artifacts and not projects:
         risks.append("缺少最近产物")
         next_actions.append("检查项目目录是否有新的交付物")
 
-    if latest_status is not None and int(latest_status.payload.get("fileCount", 0)) == 0:
+    # fileCount=0 只对 generic_channel 判（claude_workspace 没有 fileCount 概念）
+    if (
+        source_kind not in ("claude_workspace",)
+        and latest_status is not None
+        and int(latest_status.payload.get("fileCount", 0)) == 0
+    ):
         blockers.append("目录中没有可观察文件")
         next_actions.append("确认观察路径是否正确")
 
-    title = _work_item_title(source_id, project_path, latest_status, threads)
+    title = _work_item_title(
+        source_id, project_path, latest_status, threads, display_name=display_name
+    )
     status = _work_item_status(blockers=blockers, threads=threads, runtime_state=runtime_state)
     priority = _work_item_priority(status=status, threads=threads, blockers=blockers)
     if not next_actions:
@@ -214,7 +303,7 @@ def _materialize_work_item(
     )
 
     return SiTianWorkItem(
-        id=source_id,
+        id=work_item_id or source_id,
         title=title,
         status=status,
         priority=priority,
@@ -238,7 +327,12 @@ def _work_item_title(
     project_path: str,
     latest_status: SiTianObservation | None,
     threads: list[SiTianObservation],
+    *,
+    display_name: str | None = None,
 ) -> str:
+    # claude_workspace per-project 优先用 displayName（如 "kongming-agent"）
+    if display_name and display_name.strip():
+        return display_name.strip()
     if threads:
         title = threads[0].payload.get("title")
         if isinstance(title, str) and title.strip():

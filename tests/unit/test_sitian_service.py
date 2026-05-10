@@ -266,3 +266,82 @@ def test_sitian_scan_claude_workspace_accepts_projects_subdir_path(
     project_obs = [o for o in batch.observations if o.entity_type == "project"]
     assert len(project_obs) == 1
     assert project_obs[0].payload["cwd"] == "/Volumes/only"
+
+
+@pytest.mark.unit
+def test_sitian_suggestions_claude_workspace_produces_per_project_work_items(
+    tmp_path: Path,
+) -> None:
+    """claude_workspace 扫到 3 个项目 → suggestions 产出 3 个独立 work_items。"""
+
+    claude_home = tmp_path / ".claude"
+    projects_dir = claude_home / "projects"
+    projects_dir.mkdir(parents=True)
+
+    base_ts = 1_704_067_200.0
+    for i in range(1, 4):
+        project_dir = projects_dir / f"-Volumes-proj-{i}"
+        project_dir.mkdir()
+        session_file = project_dir / f"thread-{i}.jsonl"
+        session_file.write_text(
+            json.dumps(
+                {
+                    "type": "user",
+                    "cwd": f"/Volumes/proj/{i}",
+                    "message": {"role": "user", "content": f"task {i}"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(session_file, (base_ts + i * 100, base_ts + i * 100))
+
+    cfg = Config(
+        model=ModelConfig(
+            provider="openai_compatible",
+            name="stub-model",
+            base_url="http://127.0.0.1:1234",
+            api_key="",
+        ),
+        sitian=SiTianConfig(
+            default_scan_interval_sec=60,
+            idle_sleep_sec=2,
+            sources=[
+                SiTianSourceConfig(
+                    id="claude-recent",
+                    kind="claude_workspace",
+                    path=str(claude_home),
+                    top_n=3,
+                ),
+            ],
+        ),
+    )
+    store = SiTianRecordsStore(tmp_path / "records")
+    result = asyncio.run(
+        SiTianRunOnce(cfg, store=store, now=datetime(2026, 5, 10, 10, 0, 0, tzinfo=UTC))
+    )
+    assert result.observation_count == 7  # 1 status + 3 project + 3 thread
+
+    state_payload = asyncio.run(SiTianReadState(store=store))
+    ws = state_payload["workspaceState"]
+    assert ws is not None
+
+    work_items = ws["workItems"]
+    # 关键断言：3 个项目 → 3 个 work_items（不是 1 个）
+    assert len(work_items) == 3
+
+    # title 是 displayName（项目目录名的最后一段），不是 thread 消息
+    titles = [item["title"] for item in work_items]
+    assert "3" in titles
+    assert "2" in titles
+    assert "1" in titles
+
+    # 每个 work_item 都不是 blocked（不再误判"目录中没有可观察文件"）
+    for item in work_items:
+        assert item["status"] != "blocked", f"{item['title']} should not be blocked"
+        blockers = item.get("blockers", [])
+        assert "目录中没有可观察文件" not in blockers
+
+    # summary 应列出 3 个 work items
+    summary = state_payload["latestSummary"]
+    assert "Work items: 3" in summary
