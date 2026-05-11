@@ -163,7 +163,6 @@ def create_app(
         raise WebAuthNotConfiguredError(str(exc)) from exc
 
     serializer = make_serializer(secret)
-
     # 2. rate limiter
     if rate_limiter is None:
         from web.rate_limit import LoginRateLimiter
@@ -428,7 +427,11 @@ def create_app(
     from web.routers.threads import router as threads_router
     from web.routers.whiteboard import router as whiteboard_router
     from web.routers.workspace_git import router as workspace_git_router
-    from web.routers.workspace_shell import router as workspace_shell_router
+    # workspace_shell 依赖 fcntl/termios（Unix 专属），Windows 上跳过
+    import sys
+
+    if sys.platform != "win32":
+        from web.routers.workspace_shell import router as workspace_shell_router
 
     app.include_router(auth_router)
     app.include_router(threads_router)
@@ -442,7 +445,8 @@ def create_app(
     app.include_router(codex_rest_router)
     app.include_router(claude_router)
     app.include_router(workspace_git_router)
-    app.include_router(workspace_shell_router)
+    if sys.platform != "win32":
+        app.include_router(workspace_shell_router)
     app.include_router(slash_candidates_router)
     app.include_router(cron_router)
     app.include_router(server_info_router)
