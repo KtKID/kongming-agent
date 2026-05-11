@@ -152,7 +152,10 @@ def create_app(
     # 1. secret + password
     secret = load_or_init_session_secret(home)
     try:
-        password_hash = load_or_init_password_hash(home)
+        password_hash = load_or_init_password_hash(
+            home,
+            initial_password=cfg.web.initial_password,
+        )
     except _SecretsAuthNotConfigured as exc:
         # 翻译成 web.errors 同名异常（让上层 except 统一）
         from web.errors import WebAuthNotConfiguredError

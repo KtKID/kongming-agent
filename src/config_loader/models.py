@@ -894,6 +894,8 @@ class WebConfig(BaseModel):
             ``"127.0.0.1"`` 更安全。
         port: HTTP / WS 端口。
         dev_mode: 跳过登录鉴权（仅本地开发）；上线必须 False。
+        initial_password: 首次部署启动时使用的明文初始密码。仅在
+            ``password.hash`` 缺失时生效；落盘后长期以文件为准。
         cors_origins: 允许的浏览器 Origin；空列表 = 拒绝所有跨域。
         idle_timeout_seconds: cell 空闲多久后被 ``_idle_eviction_loop`` 自动
             evict（默认 30 分钟）。下限 60s 防误配。
@@ -914,6 +916,7 @@ class WebConfig(BaseModel):
     host: str = "0.0.0.0"
     port: Annotated[int, Field(ge=1, le=65535)] = 8080
     dev_mode: bool = False
+    initial_password: str | None = None
     cors_origins: list[str] = Field(default_factory=list)
     idle_timeout_seconds: Annotated[int, Field(ge=60)] = 1800
     idle_check_interval_seconds: Annotated[int, Field(ge=10)] = 60
