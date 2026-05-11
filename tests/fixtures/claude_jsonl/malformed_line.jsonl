@@ -1,0 +1,6 @@
+{"type":"system","subtype":"init","sessionId":"test-claude-session-001","uuid":"fixture-uuid-001","timestamp":"2026-05-12T08:00:00Z","message":{"role":"system"}}
+{"type":"user","sessionId":"test-claude-session-001","uuid":"fixture-uuid-002","timestamp":"2026-05-12T08:01:00Z","message":{"role":"user","content":"你好"}}
+{not valid json
+{"type":"assistant","sessionId":"test-claude-session-001","uuid":"fixture-uuid-003","timestamp":"2026-05-12T08:02:00Z","message":{"role":"assistant","content":[{"type":"text","text":"你好！有什么可以帮你的吗"}]}}
+{"type":"user","sessionId":"test-claude-session-001","uuid":"fixture-uuid-004","timestamp":"2026-05-12T08:03:00Z","message":{"role":"user","content":"没有了再见"}}
+{"type":"assistant","sessionId":"test-claude-session-001","uuid":"fixture-uuid-005","timestamp":"2026-05-12T08:04:00Z","message":{"role":"assistant","content":[{"type":"text","text":"再见！"}]}}

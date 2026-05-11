@@ -1,0 +1,3 @@
+{"type":"user","sessionId":"test-claude-session-001","uuid":"fixture-uuid-001","timestamp":"2026-05-12T08:00:00Z","message":{"role":"user","content":"匹配的消息"}}
+{"type":"user","sessionId":"wrong-session-999","uuid":"fixture-uuid-002","timestamp":"2026-05-12T08:01:00Z","message":{"role":"user","content":"不匹配的消息一"}}
+{"type":"assistant","sessionId":"wrong-session-999","uuid":"fixture-uuid-003","timestamp":"2026-05-12T08:02:00Z","message":{"role":"assistant","content":[{"type":"text","text":"不匹配的回复"}]}}

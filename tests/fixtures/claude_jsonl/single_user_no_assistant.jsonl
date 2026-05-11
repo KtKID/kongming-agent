@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","sessionId":"test-claude-session-001","uuid":"fixture-uuid-001","timestamp":"2026-05-12T08:00:00Z","message":{"role":"system"}}
+{"type":"user","sessionId":"test-claude-session-001","uuid":"fixture-uuid-002","timestamp":"2026-05-12T08:01:00Z","message":{"role":"user","content":"这是一个没有回复的问题"}}

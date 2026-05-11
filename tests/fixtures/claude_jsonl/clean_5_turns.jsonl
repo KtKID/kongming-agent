@@ -1,0 +1,11 @@
+{"type":"system","subtype":"init","sessionId":"test-claude-session-001","uuid":"fixture-uuid-001","timestamp":"2026-05-12T08:00:00Z","message":{"role":"system"}}
+{"type":"user","sessionId":"test-claude-session-001","uuid":"fixture-uuid-002","timestamp":"2026-05-12T08:01:00Z","message":{"role":"user","content":"第一个问题"}}
+{"type":"assistant","sessionId":"test-claude-session-001","uuid":"fixture-uuid-003","timestamp":"2026-05-12T08:02:00Z","message":{"role":"assistant","content":[{"type":"text","text":"第一个回答"}]}}
+{"type":"user","sessionId":"test-claude-session-001","uuid":"fixture-uuid-004","timestamp":"2026-05-12T08:03:00Z","message":{"role":"user","content":"第二个问题"}}
+{"type":"assistant","sessionId":"test-claude-session-001","uuid":"fixture-uuid-005","timestamp":"2026-05-12T08:04:00Z","message":{"role":"assistant","content":[{"type":"text","text":"第二个回答"}]}}
+{"type":"user","sessionId":"test-claude-session-001","uuid":"fixture-uuid-006","timestamp":"2026-05-12T08:05:00Z","message":{"role":"user","content":"第三个问题"}}
+{"type":"assistant","sessionId":"test-claude-session-001","uuid":"fixture-uuid-007","timestamp":"2026-05-12T08:06:00Z","message":{"role":"assistant","content":[{"type":"text","text":"第三个回答"}]}}
+{"type":"user","sessionId":"test-claude-session-001","uuid":"fixture-uuid-008","timestamp":"2026-05-12T08:07:00Z","message":{"role":"user","content":"第四个问题"}}
+{"type":"assistant","sessionId":"test-claude-session-001","uuid":"fixture-uuid-009","timestamp":"2026-05-12T08:08:00Z","message":{"role":"assistant","content":[{"type":"text","text":"第四个回答"}]}}
+{"type":"user","sessionId":"test-claude-session-001","uuid":"fixture-uuid-010","timestamp":"2026-05-12T08:09:00Z","message":{"role":"user","content":"第五个问题"}}
+{"type":"assistant","sessionId":"test-claude-session-001","uuid":"fixture-uuid-011","timestamp":"2026-05-12T08:10:00Z","message":{"role":"assistant","content":[{"type":"text","text":"第五个回答"}]}}
