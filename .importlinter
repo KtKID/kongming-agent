@@ -203,6 +203,7 @@ ignore_imports =
     web.ws -> evolution.store
     web.claude_code.route -> web.ws_event_sink
     web.claude_code.route -> evolution.claude_transcript_provider
+    web.claude_code.route -> core.contracts
 
 ; ---------------------------------------------------------------------------
 ; Contract 7: scheduler 不允许 import web 模块

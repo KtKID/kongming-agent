@@ -36,7 +36,7 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 
 from web._shared.session_manager import SessionManager
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
@@ -58,6 +58,74 @@ WS_CLOSE_POLICY_VIOLATION = 1008
 _THREAD_ID_RE: re.Pattern[str] = re.compile(r"^thread-[a-f0-9]{12}$")
 
 router = APIRouter()
+
+
+@router.get("/api/claude-code/test-evolution-event")
+async def test_evolution_event(
+    request: Request,
+    thread_id: str = Query(...),
+    status: str = Query(default="completed"),
+) -> dict[str, Any]:
+    """临时测试端点：往 EvolutionManager 的 EventBus 注入模拟 evolution 帧。"""
+    from core.contracts import Event
+
+    manager = getattr(request.app.state, "evolution_manager", None)
+    if manager is None:
+        return {"error": "evolution_manager not available"}
+
+    import time
+
+    run_id = f"run-claude-{thread_id}-test-{int(time.time())}"
+    review_id = f"evo-review:{run_id}"
+
+    if status == "started":
+        event = Event(
+            kind="evolution.review.started",
+            run_id=run_id,
+            payload={
+                "review_id": review_id,
+                "session_id": thread_id,
+                "timeout_seconds": 120,
+            },
+        )
+    elif status == "completed":
+        event = Event(
+            kind="evolution.review.completed",
+            run_id=run_id,
+            payload={
+                "review_id": review_id,
+                "session_id": thread_id,
+                "nutrients_written": 3,
+                "duration_ms": 45000,
+                "timeout_hit": False,
+            },
+        )
+    else:
+        event = Event(
+            kind="evolution.review.failed",
+            run_id=run_id,
+            payload={
+                "review_id": review_id,
+                "session_id": thread_id,
+                "error": "test failure",
+            },
+        )
+
+    # 诊断：bus 路由表
+    routes = {k: type(v).__name__ for k, v in manager._event_bus._routes.items()}
+    sink = manager._event_bus._routes.get(thread_id)
+    sink_closed = getattr(sink, "_closed", "N/A") if sink else "no sink"
+
+    await manager._event_bus.emit(event)
+    return {
+        "ok": True,
+        "kind": event.kind,
+        "run_id": run_id,
+        "thread_id": thread_id,
+        "bus_routes": routes,
+        "sink_type": type(sink).__name__ if sink else None,
+        "sink_closed": sink_closed,
+    }
 
 
 @router.websocket("/ws/claude-code")
