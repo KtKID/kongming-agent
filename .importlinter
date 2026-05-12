@@ -194,12 +194,15 @@ ignore_imports =
     web.app -> scheduler.ticker
     web.app -> scheduler.delivery
     web.app -> evolution.apply_executor
+    web.app -> evolution.evolution_manager
     web.routers.threads -> evolution.apply_executor
     web.routers.threads -> evolution.models
     web.routers.threads -> evolution.state_store
     web.routers.threads -> evolution.store
     web.ws -> evolution.state_store
     web.ws -> evolution.store
+    web.claude_code.route -> web.ws_event_sink
+    web.claude_code.route -> evolution.claude_transcript_provider
 
 ; ---------------------------------------------------------------------------
 ; Contract 7: scheduler 不允许 import web 模块

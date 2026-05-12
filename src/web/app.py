@@ -185,6 +185,18 @@ def create_app(
                     logger.info("Recovered %d evolution apply jobs", len(recovered_jobs))
             except Exception:
                 logger.exception("evolution apply job recovery failed; continuing startup")
+
+            # EvolutionManager 单例（频道无关）
+            try:
+                from evolution.evolution_manager import EvolutionManager
+
+                _evolution_manager = EvolutionManager(config=cfg, kongming_home=home)
+                app.state.evolution_manager = _evolution_manager
+            except Exception:
+                logger.exception("EvolutionManager init failed; continuing without evolution")
+                _evolution_manager = None
+                app.state.evolution_manager = None
+
             progress.done()
             progress.cleanup()
             logger.info("ThreadManager started")
@@ -356,6 +368,13 @@ def create_app(
                         except Exception:
                             logger.exception("scheduler ticker runtime aclose failed; ignoring")
 
+            # evolution manager shutdown
+            if _evolution_manager is not None:
+                try:
+                    await _evolution_manager.aclose()
+                except Exception:
+                    logger.exception("EvolutionManager.aclose failed; ignoring during shutdown")
+
             # shutdown：5s 内强制 aclose_all
             try:
                 await asyncio.wait_for(
@@ -412,6 +431,9 @@ def create_app(
     app.add_exception_handler(KongmingWebError, kongming_error_handler)
 
     # 8. routers
+    # workspace_shell 依赖 fcntl/termios（Unix 专属），Windows 上跳过
+    import sys
+
     from web.claude_code import router as claude_code_router
     from web.codex import router as codex_router
     from web.routers.auth import router as auth_router
@@ -427,8 +449,6 @@ def create_app(
     from web.routers.threads import router as threads_router
     from web.routers.whiteboard import router as whiteboard_router
     from web.routers.workspace_git import router as workspace_git_router
-    # workspace_shell 依赖 fcntl/termios（Unix 专属），Windows 上跳过
-    import sys
 
     if sys.platform != "win32":
         from web.routers.workspace_shell import router as workspace_shell_router

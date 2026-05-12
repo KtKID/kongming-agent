@@ -134,6 +134,12 @@ async def claude_code_ws(
             return
         bound_thread_id = thread_id
 
+    # evolution manager（频道无关 evolution 子系统门面，可能为 None — 未配置时）
+    evolution_manager = getattr(websocket.app.state, "evolution_manager", None)
+    # 缓存 thread metadata 字段供 evolution hook 用
+    bound_cwd: str = getattr(meta, "cwd", "") if meta is not None else ""
+    bound_claude_tid: str = getattr(meta, "claude_thread_id", "") if meta is not None else ""
+
     normalizer = ClaudeNormalizer()
     approval = ApprovalBridge(normalizer, sessions)
     # v0.2 透传 thread_manager（可能为 None — 老路径 / 未配置时仍能运行）
@@ -154,6 +160,13 @@ async def claude_code_ws(
 
     await websocket.accept()
 
+    # 2.7 evolution hook: register event route
+    if evolution_manager is not None and evolution_manager.enabled and bound_thread_id:
+        from web.ws_event_sink import WSEventSink
+
+        evo_sink = WSEventSink(ws=websocket)
+        evolution_manager.register_event_route(bound_thread_id, evo_sink)
+
     # 3. 主循环
     try:
         while True:
@@ -166,9 +179,11 @@ async def claude_code_ws(
                 sessions,
                 bg_tasks,
                 bound_thread_id=bound_thread_id,
+                evolution_manager=evolution_manager,
+                bound_cwd=bound_cwd,
+                bound_claude_tid=bound_claude_tid,
             )
     except WebSocketDisconnect:
-        # 客户端断连：保留 active sessions 以便重连
         logger.debug("claude-code ws disconnected")
     except Exception as exc:
         logger.exception("claude-code ws unhandled error")
@@ -182,6 +197,10 @@ async def claude_code_ws(
             )
         with contextlib.suppress(Exception):
             await websocket.close()
+    finally:
+        # evolution hook: unregister event route on any exit path
+        if evolution_manager is not None and evolution_manager.enabled and bound_thread_id:
+            evolution_manager.unregister_event_route(bound_thread_id)
 
 
 async def _dispatch(
@@ -193,6 +212,9 @@ async def _dispatch(
     bg_tasks: set[asyncio.Task[Any]],
     *,
     bound_thread_id: str | None = None,
+    evolution_manager: Any = None,
+    bound_cwd: str = "",
+    bound_claude_tid: str = "",
 ) -> None:
     """单条入站帧分发。"""
     msg_type = data.get("type") if isinstance(data, dict) else None
@@ -217,6 +239,30 @@ async def _dispatch(
         )
         bg_tasks.add(task)
         task.add_done_callback(bg_tasks.discard)
+
+        # evolution hook: fire-and-forget notify_user_message
+        if (
+            evolution_manager is not None
+            and evolution_manager.enabled
+            and bound_thread_id
+            and bound_claude_tid
+        ):
+            from evolution.claude_transcript_provider import ClaudeTranscriptProvider
+
+            evo_task = asyncio.create_task(
+                evolution_manager.notify_user_message(
+                    thread_id=bound_thread_id,
+                    provider=ClaudeTranscriptProvider(
+                        thread_id=bound_thread_id,
+                        claude_thread_id=bound_claude_tid,
+                        cwd=bound_cwd,
+                    ),
+                    cwd=bound_cwd,
+                ),
+            )
+            bg_tasks.add(evo_task)
+            evo_task.add_done_callback(bg_tasks.discard)
+
         return
 
     if msg_type == "claude-permission-response":
