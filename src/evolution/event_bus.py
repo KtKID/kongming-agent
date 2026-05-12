@@ -65,6 +65,14 @@ class EvolutionEventBus:
             logger.debug("event_bus: no route for thread_id=%s, drop", thread_id)
             return
         try:
+            logger.info(
+                "event_bus: routing event kind=%s run_id=%s → thread_id=%s sink=%s",
+                event.kind,
+                run_id,
+                thread_id,
+                type(sink).__name__,
+            )
             await sink.emit(event)
+            logger.info("event_bus: sink.emit OK for thread_id=%s kind=%s", thread_id, event.kind)
         except Exception as exc:
             logger.warning("event_bus: sink for %s raised: %r", thread_id, exc)
