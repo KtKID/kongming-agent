@@ -21,6 +21,7 @@ root_packages =
     config_loader
     memory
     prompts
+    evolution
     scheduler
     web
 source_paths = src
@@ -89,6 +90,8 @@ ignore_imports =
     tools.schedule_tool -> scheduler.schedule_parser
     tools.schedule_tool -> scheduler.timing
     scheduler.runtime_factory -> context.session_bootstrap
+    evolution.claude_evidence_selector -> web.claude_code.jsonl_history
+    executors.agent_runtime.native_runtime -> evolution
 
 ; ---------------------------------------------------------------------------
 ; Contract 4: tools 不允许直接 import safety 内部 policy / guards / decision_engine
@@ -190,6 +193,13 @@ ignore_imports =
     web.app -> scheduler.store
     web.app -> scheduler.ticker
     web.app -> scheduler.delivery
+    web.app -> evolution.apply_executor
+    web.routers.threads -> evolution.apply_executor
+    web.routers.threads -> evolution.models
+    web.routers.threads -> evolution.state_store
+    web.routers.threads -> evolution.store
+    web.ws -> evolution.state_store
+    web.ws -> evolution.store
 
 ; ---------------------------------------------------------------------------
 ; Contract 7: scheduler 不允许 import web 模块
@@ -204,3 +214,20 @@ source_modules =
     scheduler
 forbidden_modules =
     web
+
+; ---------------------------------------------------------------------------
+; Contract 8: evolution 不允许 import web 模块
+;             evolution 通过 TranscriptProvider Protocol 与频道层解耦；
+;             唯一例外：claude_evidence_selector -> web.claude_code.jsonl_history
+;             （单点白名单，借 jsonl 解析能力）。
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:evolution-no-web]
+name = evolution must not import web
+type = forbidden
+source_modules =
+    evolution
+forbidden_modules =
+    web
+ignore_imports =
+    evolution.claude_evidence_selector -> web.claude_code.jsonl_history
