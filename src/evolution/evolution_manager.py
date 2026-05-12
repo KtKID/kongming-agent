@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -243,6 +244,23 @@ class EvolutionManager:
             self._learning.review_timeout_seconds,
         )
 
+        # --- emit: evolution.review.started ---
+
+        from core.contracts import Event
+
+        review_id = f"evo-review:{run_id}"
+        await self._event_bus.emit(
+            Event(
+                kind="evolution.review.started",
+                run_id=run_id,
+                payload={
+                    "review_id": review_id,
+                    "session_id": thread_id,
+                    "timeout_seconds": self._learning.review_timeout_seconds,
+                },
+            )
+        )
+
         stub = self._build_stub_parent_runtime()
         try:
             outcome = await run_child_review(
@@ -298,6 +316,44 @@ class EvolutionManager:
                     outcome.write_ok,
                 )
 
+            # --- emit: evolution.review.completed / failed ---
+            if outcome.write_ok:
+                await self._event_bus.emit(
+                    Event(
+                        kind="evolution.review.completed",
+                        run_id=run_id,
+                        payload={
+                            "review_id": review_id,
+                            "session_id": thread_id,
+                            "write_status": outcome.write_status,
+                            "duration_ms": outcome.duration_ms,
+                            "timeout_hit": outcome.timed_out,
+                            "timeout_seconds": outcome.timeout_seconds,
+                            "nutrients_written": outcome.write_data.get("nutrients_written")
+                            if isinstance(outcome.write_data, dict)
+                            else None,
+                            "written_nutrient_ids": outcome.write_data.get("written_nutrient_ids")
+                            if isinstance(outcome.write_data, dict)
+                            else None,
+                        },
+                    )
+                )
+            else:
+                await self._event_bus.emit(
+                    Event(
+                        kind="evolution.review.failed",
+                        run_id=run_id,
+                        payload={
+                            "review_id": review_id,
+                            "session_id": thread_id,
+                            "write_status": outcome.write_status,
+                            "duration_ms": outcome.duration_ms,
+                            "timeout_hit": outcome.timed_out,
+                            "error": outcome.write_error or "",
+                        },
+                    )
+                )
+
         except Exception as exc:
             logger.error(
                 "evolution reviewer EXCEPTION: run_id=%s error_type=%s error=%s",
@@ -306,6 +362,20 @@ class EvolutionManager:
                 exc or "(empty — likely TimeoutError)",
                 exc_info=True,
             )
+            # emit failed on exception path
+            with contextlib.suppress(Exception):
+                await self._event_bus.emit(
+                    Event(
+                        kind="evolution.review.failed",
+                        run_id=run_id,
+                        payload={
+                            "review_id": review_id,
+                            "session_id": thread_id,
+                            "error_kind": type(exc).__name__,
+                            "error": str(exc) or "(empty)",
+                        },
+                    )
+                )
         finally:
             await stub.aclose()
 
