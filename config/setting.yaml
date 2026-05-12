@@ -208,25 +208,52 @@ evolution:
     # memory tool view 动作返回的最大字符数。
     view_max_chars: 3000
   learning:
-    # v0.1.9 自我进化副链。主任务完成后创建 child reviewer，
-    # 直接把进化养料写入 .kongming/evolution/。
+    # ---------- 总开关 ----------
+    # 是否启用自我进化。关闭后 EvolutionManager 所有 API 都是 no-op。
     enabled: true
+    # 进化模式，当前仅支持 child_agent（派子 agent 复盘）。
     mode: child_agent
+    # reviewer 是否在后台异步执行（不阻塞主对话）。
     background: true
-    # reviewer 可指向独立的模型服务（跟 web.llm_presets 同模式）。
+
+    # ---------- reviewer 独立模型配置 ----------
     # 全部留空时继承主 agent 的 model / base_url / api_key / provider。
-    model_name:                        # reviewer 模型名（如 claude-sonnet-4-20250514）
-    base_url:                          # reviewer 独立 API 地址（如 https://api.anthropic.com）
-    api_key_env: EVOLUTION_REVIEWER_API_KEY  # 从环境变量读 API key
-    provider:                          # openai_compatible / anthropic（留空自动检测）
+    # 跟 web.llm_presets 同模式：可以让 reviewer 用跟主模型完全不同的服务。
+    # reviewer 模型名（如 claude-sonnet-4-20250514 / MiniMax-M2.7）。
+    model_name:
+    # reviewer 独立 API 地址（如 https://api.anthropic.com / https://api.minimaxi.com/anthropic）。
+    base_url:
+    # API key 从哪个环境变量读。值填环境变量名，不填 key 本身。
+    api_key_env: EVOLUTION_REVIEWER_API_KEY
+    # provider 类型：openai_compatible / anthropic。留空时按 URL 自动检测。
+    provider:
+    # reviewer 推理深度：high / medium / low。留空时继承主 agent。
     reasoning_effort:
+
+    # ---------- 触发节律 ----------
+    # 每 N 轮用户消息触发一次 reviewer。所有频道（claude/codex/native）共用。
     every_n_runs: 5
+    # 累计不足 N 轮时不触发（冷启动保护，避免前几条消息就跑 reviewer）。
     min_user_turns: 3
+
+    # ---------- reviewer 证据窗口 ----------
+    # reviewer 看到的最近消息条数。越大 token 消耗越高，但上下文越完整。
     max_history_messages: 20
+
+    # ---------- 养料提炼 ----------
+    # 单次 review 最多提炼几条养料（nutrient）。
     max_nutrients: 5
+    # 低于此置信度的养料直接丢弃，不进候选队列。
     nutrient_confidence_threshold: 0.75
+
+    # ---------- 超时与生命周期 ----------
+    # reviewer 单次执行超时（秒）。超时后如果 evolution_write 已调用则保留结果。
     review_timeout_seconds: 10.0
+    # app 关闭时等待后台 reviewer 完成的最大时间（秒）。超时则取消。
     drain_on_close_seconds: 3.0
+
+    # ---------- 存储 ----------
+    # evolution 产物根目录。包含 reviews/ / evolution-nutrients.jsonl / evolution.state.json。
     root_path: .kongming/evolution
 
 # ---------------------------------------------------------------------------
