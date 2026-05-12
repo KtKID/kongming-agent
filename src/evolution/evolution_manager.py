@@ -109,10 +109,12 @@ class EvolutionManager:
         try:
             await self._do_notify(thread_id=thread_id, provider=provider, cwd=cwd)
         except Exception as exc:
-            logger.warning(
-                "evolution_manager.notify_user_message failed for %s: %s",
+            logger.error(
+                "evolution notify FAILED: thread=%s error_type=%s error=%s",
                 thread_id,
-                exc,
+                type(exc).__name__,
+                exc or "(empty)",
+                exc_info=True,
             )
 
     def register_event_route(self, thread_id: str, sink: EventSink) -> None:
@@ -239,10 +241,12 @@ class EvolutionManager:
             )
             logger.info("evolution reviewer completed: run_id=%s", run_id)
         except Exception as exc:
-            logger.warning(
-                "evolution_manager._run_review failed for %s: %s",
+            logger.error(
+                "evolution reviewer FAILED: run_id=%s error_type=%s error=%s",
                 run_id,
-                exc,
+                type(exc).__name__,
+                exc or "(empty — likely TimeoutError)",
+                exc_info=True,
             )
         finally:
             await stub.aclose()
