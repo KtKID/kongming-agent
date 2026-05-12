@@ -17,8 +17,10 @@ __all__ = ["EvolutionEventBus"]
 
 logger = logging.getLogger(__name__)
 
-# v0.1 hardcode claude 前缀；M1.5 codex 接入时扩成多正则或 channel_id 参数化
-_RUN_ID_RE = re.compile(r"^run-(?:claude|codex|native)-(thread-[a-f0-9]{12})-\d+$")
+# 从 run_id 里提取 thread-{hex12} 子串。不限前缀——reviewer 事件的 run_id
+# 格式是 evo-review-{session_id}-run-{channel}-{thread_id}-{count}，
+# 主链事件是 run-{channel}-{thread_id}-{count}，两种都能匹配。
+_THREAD_ID_RE = re.compile(r"(thread-[a-f0-9]{12})")
 
 
 class EvolutionEventBus:
@@ -53,7 +55,7 @@ class EvolutionEventBus:
         Sink 抛异常 → 吞 + log warning（不影响其它事件）。
         """
         run_id = event.run_id or ""
-        match = _RUN_ID_RE.match(run_id)
+        match = _THREAD_ID_RE.search(run_id)
         if not match:
             logger.debug("event_bus: cannot parse thread_id from run_id=%r, drop", run_id)
             return

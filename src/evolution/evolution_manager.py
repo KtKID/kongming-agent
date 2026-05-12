@@ -228,10 +228,24 @@ class EvolutionManager:
         """后台执行 child reviewer。"""
         from evolution.reviewer_runtime import run_child_review
 
-        logger.info("evolution reviewer starting: run_id=%s", run_id)
+        # --- 日志：子 agent 输入 ---
+        first_msg = window.messages[0].content[:80] if window.messages else ""
+        last_msg = window.messages[-1].content[:80] if window.messages else ""
+        logger.info(
+            "evolution reviewer INPUT: run_id=%s thread=%s messages=%d turns=%s "
+            "first_msg=%r last_msg=%r timeout=%.1fs",
+            run_id,
+            thread_id,
+            len(window.messages),
+            window.included_turns,
+            first_msg,
+            last_msg,
+            self._learning.review_timeout_seconds,
+        )
+
         stub = self._build_stub_parent_runtime()
         try:
-            await run_child_review(
+            outcome = await run_child_review(
                 parent_runtime=stub,
                 window=window,
                 trigger_reason="cadence_evolution_manager",
@@ -239,10 +253,54 @@ class EvolutionManager:
                 max_nutrients=self._learning.max_nutrients,
                 min_confidence=self._learning.nutrient_confidence_threshold,
             )
-            logger.info("evolution reviewer completed: run_id=%s", run_id)
+
+            # --- 日志：子 agent 输出（解析 ChildReviewOutcome）---
+            logger.info(
+                "evolution reviewer OUTPUT: run_id=%s write_ok=%s write_status=%s "
+                "timed_out=%s duration_ms=%d",
+                run_id,
+                outcome.write_ok,
+                outcome.write_status,
+                outcome.timed_out,
+                outcome.duration_ms,
+            )
+
+            # 落盘结果
+            if outcome.write_ok and outcome.write_data:
+                nutrient_ids = outcome.write_data.get("written_nutrient_ids", [])
+                review_path = outcome.write_data.get("review_path", "")
+                logger.info(
+                    "evolution reviewer STORED: run_id=%s review_path=%s nutrients=%d ids=%s",
+                    run_id,
+                    review_path,
+                    len(nutrient_ids) if isinstance(nutrient_ids, (list, tuple)) else 0,
+                    nutrient_ids,
+                )
+            elif outcome.write_ok:
+                logger.info(
+                    "evolution reviewer STORED: run_id=%s (write_ok but no write_data)", run_id
+                )
+            else:
+                logger.error(
+                    "evolution reviewer WRITE FAILED: run_id=%s write_status=%s write_error=%s",
+                    run_id,
+                    outcome.write_status,
+                    outcome.write_error,
+                )
+
+            if outcome.timed_out:
+                logger.warning(
+                    "evolution reviewer TIMEOUT: run_id=%s duration_ms=%d timeout=%.1fs "
+                    "write_ok_before_timeout=%s",
+                    run_id,
+                    outcome.duration_ms,
+                    outcome.timeout_seconds or 0,
+                    outcome.write_ok,
+                )
+
         except Exception as exc:
             logger.error(
-                "evolution reviewer FAILED: run_id=%s error_type=%s error=%s",
+                "evolution reviewer EXCEPTION: run_id=%s error_type=%s error=%s",
                 run_id,
                 type(exc).__name__,
                 exc or "(empty — likely TimeoutError)",
