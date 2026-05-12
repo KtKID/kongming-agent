@@ -41,9 +41,16 @@ class EvolutionManager:
         config: Config,
         kongming_home: Path,
     ) -> None:
+        from evolution.logging_setup import setup_evolution_logging
+
         self._config = config
         self._learning = config.evolution.learning
         self._kongming_home = kongming_home
+
+        # 独立日志：全量 DEBUG 写 .kongming/logs/evolution.log
+        self._log_path = setup_evolution_logging(kongming_home)
+        logger.info("EvolutionManager init: home=%s log=%s", kongming_home, self._log_path)
+
         self._event_bus = EvolutionEventBus()
         self._bg_tasks: set[asyncio.Task[Any]] = set()
 
