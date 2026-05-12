@@ -98,6 +98,7 @@ class EvolutionManager:
         """
         if not self.enabled:
             return
+        logger.debug("evolution notify_user_message called: thread=%s", thread_id)
         try:
             await self._do_notify(thread_id=thread_id, provider=provider, cwd=cwd)
         except Exception as exc:
@@ -147,14 +148,34 @@ class EvolutionManager:
             user_turn_count=0,  # claude 频道 user_turn_count ≈ run_count
         )
 
+        logger.info(
+            "evolution cadence: thread=%s run_count=%d every_n=%d min=%d",
+            thread_id,
+            current.run_count,
+            learning.every_n_runs,
+            learning.min_user_turns,
+        )
+
         if current.run_count < learning.min_user_turns:
+            logger.info(
+                "evolution skip: run_count=%d < min_user_turns=%d",
+                current.run_count,
+                learning.min_user_turns,
+            )
             return
         if current.run_count % learning.every_n_runs != 0:
+            logger.info(
+                "evolution skip: run_count=%d %% every_n=%d != 0 (next at %d)",
+                current.run_count,
+                learning.every_n_runs,
+                current.run_count
+                + (learning.every_n_runs - current.run_count % learning.every_n_runs),
+            )
             return
 
         # 2. run_id
-        # v0.1 hardcode channel_id；M1.5 改成 provider.channel_id 拼接
         run_id = f"run-{provider.channel_id}-{thread_id}-{current.run_count}"
+        logger.info("evolution triggered: run_id=%s", run_id)
 
         # 3. transcript
         window = await provider.build_window(
@@ -163,12 +184,19 @@ class EvolutionManager:
         )
 
         if not window.messages:
+            logger.info("evolution skip: empty transcript window for %s", run_id)
             await self._state_store.mark_review_result(
                 session_id=thread_id,
                 run_id=run_id,
                 status="skipped_empty_window",
             )
             return
+
+        logger.info(
+            "evolution spawning reviewer: run_id=%s messages=%d",
+            run_id,
+            len(window.messages),
+        )
 
         # 4. spawn reviewer (后台 task)
         task = asyncio.create_task(
@@ -191,6 +219,7 @@ class EvolutionManager:
         """后台执行 child reviewer。"""
         from evolution.reviewer_runtime import run_child_review
 
+        logger.info("evolution reviewer starting: run_id=%s", run_id)
         stub = self._build_stub_parent_runtime()
         try:
             await run_child_review(
@@ -201,6 +230,7 @@ class EvolutionManager:
                 max_nutrients=self._learning.max_nutrients,
                 min_confidence=self._learning.nutrient_confidence_threshold,
             )
+            logger.info("evolution reviewer completed: run_id=%s", run_id)
         except Exception as exc:
             logger.warning(
                 "evolution_manager._run_review failed for %s: %s",
