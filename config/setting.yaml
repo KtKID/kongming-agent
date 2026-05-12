@@ -197,7 +197,7 @@ evolution:
   memory:
     # 是否启用 memory 模块（跨会话长期记忆）。False 时：不加载 memory 目录、
     # 不注册 memory tool、不 emit snapshot 事件。
-    enabled: false
+    enabled: true
     # memory 根目录。相对路径视为 cwd 子目录；绝对路径直接使用。
     root_path: .kongming/memory
     # 是否将 memory snapshot 注入 system prompt。
@@ -210,17 +210,20 @@ evolution:
   learning:
     # v0.1.9 自我进化副链。主任务完成后创建 child reviewer，
     # 直接把进化养料写入 .kongming/evolution/。
-    enabled: false
+    enabled: true
     mode: child_agent
     background: true
-    # reviewer 复用同一 provider，可单独指定模型名和推理深度。
-    # 留空时继承主 agent。
-    model_name:
+    # reviewer 可指向独立的模型服务（跟 web.llm_presets 同模式）。
+    # 全部留空时继承主 agent 的 model / base_url / api_key / provider。
+    model_name:                        # reviewer 模型名（如 claude-sonnet-4-20250514）
+    base_url:                          # reviewer 独立 API 地址（如 https://api.anthropic.com）
+    api_key_env: EVOLUTION_REVIEWER_API_KEY  # 从环境变量读 API key
+    provider:                          # openai_compatible / anthropic（留空自动检测）
     reasoning_effort:
     every_n_runs: 5
     min_user_turns: 3
     max_history_messages: 20
-    max_nutrients: 2
+    max_nutrients: 5
     nutrient_confidence_threshold: 0.75
     review_timeout_seconds: 10.0
     drain_on_close_seconds: 3.0
