@@ -572,26 +572,43 @@ class EvolutionMemoryConfig(BaseModel):
 
 
 class EvolutionLearningConfig(BaseModel):
-    """Self evolution learning 配置。"""
+    """自我进化 learning 配置——控制 reviewer 子 agent 的触发、模型、窗口和产物。"""
 
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = False
-    mode: Literal["child_agent"] = "child_agent"
-    background: bool = True
-    model_name: str | None = None
-    base_url: str | None = None
-    api_key_env: str | None = None
-    provider: str | None = None
-    reasoning_effort: str | None = None
-    every_n_runs: int = Field(default=5, ge=1)
-    min_user_turns: int = Field(default=3, ge=1)
-    max_history_messages: int = Field(default=20, ge=1)
-    max_nutrients: int = Field(default=2, ge=1)
-    nutrient_confidence_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
-    review_timeout_seconds: float = Field(default=10.0, gt=0)
-    drain_on_close_seconds: float = Field(default=3.0, gt=0)
-    root_path: str = ".kongming/evolution"
+    # --- 总开关 ---
+    enabled: bool = False  # 是否启用自我进化。False 时所有 API no-op
+    mode: Literal["child_agent"] = "child_agent"  # 进化模式，当前仅支持 child_agent
+    background: bool = True  # reviewer 是否在后台异步执行（不阻塞主对话）
+
+    # --- reviewer 独立模型配置（全部留空则继承主 agent）---
+    model_name: str | None = None  # reviewer 模型名（如 claude-sonnet-4-20250514）
+    base_url: str | None = None  # reviewer 独立 API 地址（如 https://api.anthropic.com）
+    api_key_env: str | None = None  # API key 环境变量名（如 EVOLUTION_REVIEWER_API_KEY）
+    provider: str | None = None  # provider 类型：openai_compatible / anthropic，留空自动检测
+    reasoning_effort: str | None = None  # reviewer 推理深度（如 high / medium / low）
+
+    # --- 触发节律 ---
+    every_n_runs: int = Field(default=5, ge=1)  # 每 N 轮用户消息触发一次 reviewer
+    min_user_turns: int = Field(default=3, ge=1)  # 累计不足 N 轮时不触发（冷启动保护）
+
+    # --- reviewer 证据窗口 ---
+    max_history_messages: int = Field(default=20, ge=1)  # reviewer 看到的最近消息条数
+
+    # --- 养料提炼 ---
+    max_nutrients: int = Field(default=2, ge=1)  # 单次 review 最多提炼几条养料
+    nutrient_confidence_threshold: float = Field(
+        default=0.75, ge=0.0, le=1.0
+    )  # 低于此置信度的养料丢弃
+
+    # --- 超时与生命周期 ---
+    review_timeout_seconds: float = Field(default=10.0, gt=0)  # reviewer 单次执行超时（秒）
+    drain_on_close_seconds: float = Field(
+        default=3.0, gt=0
+    )  # app 关闭时等待后台 reviewer 的最大时间
+
+    # --- 存储 ---
+    root_path: str = ".kongming/evolution"  # evolution 产物根目录（reviews / nutrients / state）
 
 
 class EvolutionConfig(BaseModel):
