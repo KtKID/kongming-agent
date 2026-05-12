@@ -580,6 +580,9 @@ class EvolutionLearningConfig(BaseModel):
     mode: Literal["child_agent"] = "child_agent"
     background: bool = True
     model_name: str | None = None
+    base_url: str | None = None
+    api_key_env: str | None = None
+    provider: str | None = None
     reasoning_effort: str | None = None
     every_n_runs: int = Field(default=5, ge=1)
     min_user_turns: int = Field(default=3, ge=1)

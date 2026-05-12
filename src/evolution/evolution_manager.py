@@ -212,6 +212,8 @@ class EvolutionManager:
 
     def _build_stub_parent_runtime(self) -> Any:
         """构造 ad-hoc NativeRuntime 当 reviewer 的 parent 容器。"""
+        import os
+
         from core.agent_spec import AgentSpec
         from core.session import InMemorySession
         from evolution.reviewer_runtime import REVIEWER_TOOL_NAME
@@ -225,6 +227,19 @@ class EvolutionManager:
         if not model:
             raise ValueError("evolution learning has no model resolvable")
 
+        # reviewer 独立模型配置覆盖（跟 web preset 同模式）
+        model_overrides: dict[str, Any] = {"name": model}
+        if learning.base_url:
+            model_overrides["base_url"] = learning.base_url
+        if learning.api_key_env:
+            model_overrides["api_key"] = os.environ.get(learning.api_key_env, "")
+        if learning.provider:
+            model_overrides["provider"] = learning.provider
+        if learning.reasoning_effort:
+            model_overrides["reasoning_effort"] = learning.reasoning_effort
+        preset_model = self._config.model.model_copy(update=model_overrides)
+        preset_cfg = self._config.model_copy(update={"model": preset_model})
+
         stub_spec = AgentSpec(
             name="evolution-stub-parent",
             instructions="",
@@ -235,7 +250,7 @@ class EvolutionManager:
             reasoning_effort=learning.reasoning_effort,
         )
         return NativeRuntime.build(
-            self._config,
+            preset_cfg,
             event_sinks=[self._event_bus],
             approval=AutoAllowApproval(),
             tools=self._mini_registry,
