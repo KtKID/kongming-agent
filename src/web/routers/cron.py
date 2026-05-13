@@ -283,26 +283,29 @@ async def create_cron_task(request: Request, body: CreateCronTaskRequest) -> Cro
     now_iso = to_iso(utc_now())
     task_id = uuid.uuid4().hex[:16]
 
-    task = ScheduledTask(
-        task_id=task_id,
-        name=body.name,
-        enabled=True,
-        state=TaskState.SCHEDULED,
-        origin=TaskOrigin.WEB,
-        trigger=trigger,
-        policy=TaskExecutionPolicy(concurrency_policy=concurrency),
-        target=TaskTarget(
-            agent_name=body.agent_name,
-            input_text=body.input_text,
-        ),
-        next_run_at=next_run_at,
-        last_run_at=None,
-        created_by="web",
-        created_at=now_iso,
-        updated_at=now_iso,
-        delivery=ScheduleDelivery(channel=DeliveryChannel.WEB),
-        preset_id=body.preset_id or "",
-    )
+    try:
+        task = ScheduledTask(
+            task_id=task_id,
+            name=body.name,
+            enabled=True,
+            state=TaskState.SCHEDULED,
+            origin=TaskOrigin.WEB,
+            trigger=trigger,
+            policy=TaskExecutionPolicy(concurrency_policy=concurrency),
+            target=TaskTarget(
+                agent_name=body.agent_name,
+                input_text=body.input_text,
+            ),
+            next_run_at=next_run_at,
+            last_run_at=None,
+            created_by="web",
+            created_at=now_iso,
+            updated_at=now_iso,
+            delivery=ScheduleDelivery(channel=DeliveryChannel.WEB),
+            preset_id=body.preset_id or "",
+        )
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     try:
         created = store.create_task(task)
