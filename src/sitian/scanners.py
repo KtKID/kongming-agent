@@ -3,20 +3,26 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import json
+import logging
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sitian.config import SiTianSourceConfig
+from sitian.config import SiTianScannerConfig, SiTianSourceConfig
 from sitian.global_scanner import list_claude_projects_global, list_codex_projects_global
 from sitian.models import SiTianObservation
+from sitian.session_reader import read_claude_session_tail
+
+_log = logging.getLogger("sitian.scanners")
 
 _MAX_ARTIFACT_OBSERVATIONS = 20
 _MAX_SESSION_OBSERVATIONS = 20
 _MAX_SCAN_FILES = 2000
 _DEFAULT_CLAUDE_WORKSPACE_TOP_N = 10
+# 单个 project 在 project obs.recentSessions 中最多展开多少条 session
+_MAX_RECENT_SESSIONS_PER_PROJECT = 20
 
 
 @dataclass(frozen=True)
@@ -31,16 +37,34 @@ async def SiTianScanSource(
     source: SiTianSourceConfig,
     *,
     observed_at: str | None = None,
+    scanner_config: SiTianScannerConfig | None = None,
 ) -> SiTianScanBatch:
     resolved_observed_at = observed_at or _utc_now_iso()
+    effective_scanner_config = scanner_config or SiTianScannerConfig()
     if source.kind == "generic_channel":
-        observations = _SiTianScanGenericChannel(source, observed_at=resolved_observed_at)
+        observations = _SiTianScanGenericChannel(
+            source,
+            observed_at=resolved_observed_at,
+            scanner_config=effective_scanner_config,
+        )
     elif source.kind == "claude_project":
-        observations = _SiTianScanClaudeProject(source, observed_at=resolved_observed_at)
+        observations = _SiTianScanClaudeProject(
+            source,
+            observed_at=resolved_observed_at,
+            scanner_config=effective_scanner_config,
+        )
     elif source.kind == "codex_project":
-        observations = _SiTianScanCodexProject(source, observed_at=resolved_observed_at)
+        observations = _SiTianScanCodexProject(
+            source,
+            observed_at=resolved_observed_at,
+            scanner_config=effective_scanner_config,
+        )
     elif source.kind == "claude_workspace":
-        observations = _SiTianScanClaudeWorkspace(source, observed_at=resolved_observed_at)
+        observations = _SiTianScanClaudeWorkspace(
+            source,
+            observed_at=resolved_observed_at,
+            scanner_config=effective_scanner_config,
+        )
     else:  # pragma: no cover - defensive
         raise ValueError(f"unsupported SiTian source kind: {source.kind}")
     return SiTianScanBatch(
@@ -55,7 +79,9 @@ def _SiTianScanGenericChannel(
     source: SiTianSourceConfig,
     *,
     observed_at: str,
+    scanner_config: SiTianScannerConfig,
 ) -> list[SiTianObservation]:
+    _ = scanner_config  # Wave 2 will consume this; placeholder for current wave
     root_path = Path(source.path).expanduser().resolve()
     recent_files = _collect_recent_files(
         root_path,
@@ -75,6 +101,7 @@ def _SiTianScanClaudeProject(
     source: SiTianSourceConfig,
     *,
     observed_at: str,
+    scanner_config: SiTianScannerConfig,
 ) -> list[SiTianObservation]:
     project_path = Path(source.path).expanduser().resolve()
     observations = _build_file_observations(
@@ -89,14 +116,30 @@ def _SiTianScanClaudeProject(
         project_payload={"path": str(project_path), "projectKind": "claude_project"},
     )
 
-    for thread in _load_claude_threads_for_project(project_path)[:_MAX_SESSION_OBSERVATIONS]:
+    threads = _load_claude_threads_for_project(project_path)
+    cutoff_iso = _compute_window_cutoff_iso(observed_at, scanner_config.recent_session_window_days)
+    if cutoff_iso is not None:
+        threads = [t for t in threads if t["lastModified"] >= cutoff_iso]
+
+    for thread in threads[:_MAX_SESSION_OBSERVATIONS]:
+        tail = read_claude_session_tail(
+            Path(thread["file"]),
+            user_count=scanner_config.session_recent_user_messages,
+            assistant_count=scanner_config.session_recent_assistant_messages,
+            max_chars=scanner_config.session_message_max_chars,
+        )
+        enriched_payload = {
+            **thread,
+            "recentUserMessages": tail["users"],
+            "recentAssistantMessages": tail["assistants"],
+        }
         observations.append(
             _observation(
                 source=source,
                 observed_at=observed_at,
                 entity_type="thread",
                 entity_key=thread["thread_id"],
-                payload=thread,
+                payload=enriched_payload,
                 evidence_refs=(thread["file"],),
             )
         )
@@ -107,7 +150,9 @@ def _SiTianScanCodexProject(
     source: SiTianSourceConfig,
     *,
     observed_at: str,
+    scanner_config: SiTianScannerConfig,
 ) -> list[SiTianObservation]:
+    _ = scanner_config  # Wave 2 will consume this; placeholder for current wave
     project_path = Path(source.path).expanduser().resolve()
     observations = _build_file_observations(
         source=source,
@@ -153,11 +198,13 @@ def _SiTianScanClaudeWorkspace(
     source: SiTianSourceConfig,
     *,
     observed_at: str,
+    scanner_config: SiTianScannerConfig,
 ) -> list[SiTianObservation]:
     claude_home = _resolve_claude_home_from_path(source.path)
     top_n = source.top_n or _DEFAULT_CLAUDE_WORKSPACE_TOP_N
 
     projects = list_claude_projects_global(claude_home=claude_home)[:top_n]
+    cutoff_ts = _compute_window_cutoff_ts(observed_at, scanner_config.recent_session_window_days)
 
     observations: list[SiTianObservation] = []
     latest_modified_iso = (
@@ -187,6 +234,29 @@ def _SiTianScanClaudeWorkspace(
         latest_session_mtime = (
             max(s.last_modified for s in project.sessions) if project.sessions else 0.0
         )
+        windowed_sessions = (
+            project.sessions
+            if cutoff_ts is None
+            else [s for s in project.sessions if s.last_modified >= cutoff_ts]
+        )
+        recent_sessions_payload: list[dict[str, Any]] = []
+        for session in windowed_sessions[:_MAX_RECENT_SESSIONS_PER_PROJECT]:
+            jsonl_path = claude_home / "projects" / project.name / f"{session.thread_id}.jsonl"
+            tail = read_claude_session_tail(
+                jsonl_path,
+                user_count=scanner_config.session_recent_user_messages,
+                assistant_count=scanner_config.session_recent_assistant_messages,
+                max_chars=scanner_config.session_message_max_chars,
+            )
+            recent_sessions_payload.append(
+                {
+                    "threadId": session.thread_id,
+                    "lastModified": _timestamp_to_iso(session.last_modified),
+                    "recentUserMessages": tail["users"],
+                    "recentAssistantMessages": tail["assistants"],
+                }
+            )
+
         observations.append(
             _observation(
                 source=source,
@@ -200,12 +270,22 @@ def _SiTianScanClaudeWorkspace(
                     "displayName": project.display_name,
                     "sessionCount": len(project.sessions),
                     "lastModifiedAt": _timestamp_to_iso(latest_session_mtime),
+                    "recentSessions": recent_sessions_payload,
                 },
                 evidence_refs=(str(claude_home / "projects" / project.name),),
             )
         )
         if project.sessions:
             latest_session = project.sessions[0]
+            latest_jsonl = (
+                claude_home / "projects" / project.name / f"{latest_session.thread_id}.jsonl"
+            )
+            tail = read_claude_session_tail(
+                latest_jsonl,
+                user_count=scanner_config.session_recent_user_messages,
+                assistant_count=scanner_config.session_recent_assistant_messages,
+                max_chars=scanner_config.session_message_max_chars,
+            )
             observations.append(
                 _observation(
                     source=source,
@@ -219,15 +299,10 @@ def _SiTianScanClaudeWorkspace(
                         "displayName": project.display_name,
                         "messageCount": latest_session.message_count,
                         "lastModifiedAt": _timestamp_to_iso(latest_session.last_modified),
+                        "recentUserMessages": tail["users"],
+                        "recentAssistantMessages": tail["assistants"],
                     },
-                    evidence_refs=(
-                        str(
-                            claude_home
-                            / "projects"
-                            / project.name
-                            / f"{latest_session.thread_id}.jsonl"
-                        ),
-                    ),
+                    evidence_refs=(str(latest_jsonl),),
                 )
             )
     return observations
@@ -464,6 +539,37 @@ def _timestamp_to_iso(timestamp: float) -> str:
 
 def _utc_now_iso() -> str:
     return datetime.now(tz=UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _parse_iso_to_dt(value: str) -> datetime:
+    """ISO 8601（含尾部 ``Z``）解析回 ``datetime``，带 UTC tz。"""
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _compute_window_cutoff_ts(observed_at: str, window_days: int) -> float | None:
+    """返回 ``observed_at - window_days`` 的 Unix timestamp；``window_days<=0`` 时返回 None（不过滤）。"""
+    if window_days <= 0:
+        return None
+    try:
+        now_dt = _parse_iso_to_dt(observed_at)
+    except ValueError:
+        _log.warning(
+            "_compute_window_cutoff_ts: invalid observed_at=%r, skipping window filter",
+            observed_at,
+        )
+        return None
+    return now_dt.timestamp() - window_days * 86400.0
+
+
+def _compute_window_cutoff_iso(observed_at: str, window_days: int) -> str | None:
+    """同上但返回 ISO 字符串，用于跟 payload 中已是 ISO 形态的 ``lastModified`` 字典序比较。
+
+    ISO 8601 UTC（``Z`` 后缀）字符串字典序与时间序一致。
+    """
+    cutoff_ts = _compute_window_cutoff_ts(observed_at, window_days)
+    if cutoff_ts is None:
+        return None
+    return _timestamp_to_iso(cutoff_ts)
 
 
 __all__ = ["SiTianScanBatch", "SiTianScanSource"]

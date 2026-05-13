@@ -49,6 +49,24 @@ class SiTianSourceConfig(BaseModel):
         return self.scan_interval_sec or default_scan_interval_sec
 
 
+class SiTianScannerConfig(BaseModel):
+    """Scanner 行为旋钮。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recent_session_window_days: int = Field(default=3, ge=0)
+    """最近活动窗口（天）。0 = 不过滤窗口、读所有 session。"""
+
+    session_recent_user_messages: int = Field(default=1, ge=0)
+    """每个 session 取最后 N 条 user 消息。0 = 不取。"""
+
+    session_recent_assistant_messages: int = Field(default=1, ge=0)
+    """每个 session 取最后 N 条 assistant 消息。0 = 不取。"""
+
+    session_message_max_chars: int = Field(default=500, ge=0)
+    """每条消息最大字符数；超出末尾加 "…"。0 = 不截断。"""
+
+
 class SiTianConfig(BaseModel):
     """顶层 SiTian 配置 section。"""
 
@@ -64,6 +82,7 @@ class SiTianConfig(BaseModel):
     设 ``None`` 时直接落 ``<root>/``（向后兼容）。
     用于多 kind 共存时隔离产物（``claude/`` / ``codex/`` / ``general/``）。
     """
+    scanner: SiTianScannerConfig = Field(default_factory=SiTianScannerConfig)
     sources: list[SiTianSourceConfig] = Field(default_factory=list)
 
     @field_validator("output_subdir")
@@ -92,5 +111,6 @@ class SiTianConfig(BaseModel):
 
 __all__ = [
     "SiTianConfig",
+    "SiTianScannerConfig",
     "SiTianSourceConfig",
 ]

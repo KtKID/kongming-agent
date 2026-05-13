@@ -51,7 +51,11 @@ async def SiTianRunOnce(
 
     for source in ready_sources:
         try:
-            batch = await SiTianScanSource(source, observed_at=observed_at)
+            batch = await SiTianScanSource(
+                source,
+                observed_at=observed_at,
+                scanner_config=sitian_cfg.scanner,
+            )
         except Exception as exc:
             failed_sources[source.id] = str(exc)
             runtime_by_source[source.id] = _SiTianAdvanceRuntimeError(
