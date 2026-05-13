@@ -250,8 +250,7 @@ class SiTianWorkspaceState:
                 SiTianWorkItem.from_dict(dict(item)) for item in raw.get("workItems", [])
             ),
             blockers=tuple(
-                SiTianWorkspaceBlocker.from_dict(dict(item))
-                for item in raw.get("blockers", [])
+                SiTianWorkspaceBlocker.from_dict(dict(item)) for item in raw.get("blockers", [])
             ),
             pending_approvals=tuple(
                 SiTianPendingApproval.from_dict(dict(item))

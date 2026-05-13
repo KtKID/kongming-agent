@@ -59,12 +59,16 @@ class SiTianRecordsStore:
     async def save_config_snapshot(self, config_snapshot: dict[str, JsonValue]) -> Path:
         async with self._lock:
             await asyncio.to_thread(self._ensure_layout_sync)
-            await asyncio.to_thread(self._atomic_write_json_sync, self._config_snapshot_path, config_snapshot)
+            await asyncio.to_thread(
+                self._atomic_write_json_sync, self._config_snapshot_path, config_snapshot
+            )
             return self._config_snapshot_path
 
     async def load_config_snapshot(self) -> dict[str, JsonValue] | None:
         async with self._lock:
-            return await asyncio.to_thread(self._read_json_optional_sync, self._config_snapshot_path)
+            return await asyncio.to_thread(
+                self._read_json_optional_sync, self._config_snapshot_path
+            )
 
     async def append_observations(
         self,
@@ -160,7 +164,9 @@ class SiTianRecordsStore:
 
     async def load_latest_suggestions(self) -> JsonValue | None:
         async with self._lock:
-            return await asyncio.to_thread(self._read_json_optional_sync, self._latest_suggestions_path)
+            return await asyncio.to_thread(
+                self._read_json_optional_sync, self._latest_suggestions_path
+            )
 
     async def save_latest_summary(self, summary_markdown: str) -> Path:
         async with self._lock:
@@ -196,7 +202,9 @@ class SiTianRecordsStore:
                 self._scan_snapshot_path(scan_id),
             )
 
-    async def list_scan_snapshots(self, *, limit: int | None = None) -> tuple[dict[str, JsonValue], ...]:
+    async def list_scan_snapshots(
+        self, *, limit: int | None = None
+    ) -> tuple[dict[str, JsonValue], ...]:
         async with self._lock:
             await asyncio.to_thread(self._ensure_layout_sync)
             paths = await asyncio.to_thread(self._list_json_files_sync, self._scans_dir)
@@ -219,7 +227,9 @@ class SiTianRecordsStore:
         self,
         observations: list[SiTianObservation] | tuple[SiTianObservation, ...],
     ) -> None:
-        lines = [json.dumps(item.to_dict(), ensure_ascii=False, sort_keys=True) for item in observations]
+        lines = [
+            json.dumps(item.to_dict(), ensure_ascii=False, sort_keys=True) for item in observations
+        ]
         with self._observations_path.open("a", encoding="utf-8") as handle:
             for line in lines:
                 handle.write(line)

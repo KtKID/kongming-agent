@@ -41,7 +41,13 @@ from scheduler.domain import (
 )
 from scheduler.schedule_parser import parse_schedule
 from scheduler.store import Store, TaskNotFoundError
-from scheduler.timing import compute_first_run_at, is_within_oneshot_grace, parse_iso, to_iso, utc_now
+from scheduler.timing import (
+    compute_first_run_at,
+    is_within_oneshot_grace,
+    parse_iso,
+    to_iso,
+    utc_now,
+)
 from tools.base import BaseBuiltinTool
 
 _THREAD_ID_RE = re.compile(r"^thread-[a-f0-9]{12}$")

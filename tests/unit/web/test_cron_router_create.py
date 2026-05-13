@@ -28,25 +28,19 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from scheduler.domain import TaskState, TriggerType
-from scheduler.store import Store
 from scheduler.timing import to_iso
+from tests.unit.test_web_app_lifespan import _seed_password
 from tests.unit.web.test_cron_router import (
     CSRF_HEADERS,
     _FakeTM,
     _install_cron_router_before_catch_all,
     _login_client_with_store,
     _make_cfg,
-    _t,
 )
 from web.app import create_app
-from web.auth import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
-from web.routers.cron import router as cron_router
-
-from fastapi.testclient import TestClient
-
-from tests.unit.test_web_app_lifespan import _seed_password
-
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -95,7 +89,10 @@ def test_create_once_task_happy(tmp_path: Path) -> None:
         assert task is not None
         assert task.state is TaskState.SCHEDULED
         assert task.trigger.trigger_type is TriggerType.ONCE
-        assert task.target.input_text == "在当前目录创建一个名为 scheduler-test-once.txt 的文件，内容写入当前时间戳"
+        assert (
+            task.target.input_text
+            == "在当前目录创建一个名为 scheduler-test-once.txt 的文件，内容写入当前时间戳"
+        )
 
         # audit
         audits = store.list_audits(task_id=body["task_id"])
