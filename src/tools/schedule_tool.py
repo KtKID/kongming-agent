@@ -37,10 +37,11 @@ from scheduler.domain import (
     TaskOrigin,
     TaskState,
     TaskTarget,
+    TriggerType,
 )
 from scheduler.schedule_parser import parse_schedule
 from scheduler.store import Store, TaskNotFoundError
-from scheduler.timing import compute_first_run_at, to_iso, utc_now
+from scheduler.timing import compute_first_run_at, is_within_oneshot_grace, parse_iso, to_iso, utc_now
 from tools.base import BaseBuiltinTool
 
 _THREAD_ID_RE = re.compile(r"^thread-[a-f0-9]{12}$")
@@ -246,6 +247,16 @@ class ScheduleTool(BaseBuiltinTool):
                 content=f"无法计算第一次触发时刻：{exc}",
                 error_message=str(exc),
             )
+
+        if trigger.trigger_type is TriggerType.ONCE:
+            now_dt = utc_now()
+            scheduled_for = parse_iso(next_run_at)
+            if not is_within_oneshot_grace(scheduled_for, now_dt):
+                return ToolResult(
+                    ok=False,
+                    content=f"schedule is in the past: {next_run_at} < {to_iso(now_dt)}",
+                    error_message="schedule_in_past",
+                )
 
         task_id = f"task-{uuid.uuid4().hex[:12]}"
         # v0.3：默认填 delivery（dispatcher 看到 None 会 SKIPPED 整条投递链路）
