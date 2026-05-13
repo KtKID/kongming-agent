@@ -471,6 +471,8 @@ async def test_emit_evolution_review_completed_notice() -> None:
                 "timeout_seconds": 30.0,
                 "nutrients_written": 2,
                 "written_nutrient_ids": ["n-1", "n-2"],
+                "review_summary": "Git 提交规范和测试隔离经验",
+                "nutrient_summaries": ["commit 前验证测试", "路径参数需 resolve"],
             },
         )
     )
@@ -478,7 +480,9 @@ async def test_emit_evolution_review_completed_notice() -> None:
     assert sent["kind"] == "system.notice"
     assert sent["status"] == "completed"
     assert sent["title"] == "进化复盘"
-    assert sent["message"] == "发现 2 条进化养料"
+    assert (
+        sent["message"] == "Git 提交规范和测试隔离经验\n• commit 前验证测试\n• 路径参数需 resolve"
+    )
     assert sent["icon"] == "success"
     assert sent["details"] == {
         "review_id": "evo-review:run-parent-2",
@@ -490,6 +494,8 @@ async def test_emit_evolution_review_completed_notice() -> None:
         "timeout_seconds": 30.0,
         "nutrients_written": 2,
         "written_nutrient_ids": ["n-1", "n-2"],
+        "review_summary": "Git 提交规范和测试隔离经验",
+        "nutrient_summaries": ["commit 前验证测试", "路径参数需 resolve"],
     }
 
 

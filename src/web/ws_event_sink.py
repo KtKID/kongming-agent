@@ -351,11 +351,20 @@ def _translate_evolution_notice(
         review_id = _optional_str(payload.get("review_id")) or ""
         review_run_id = _optional_str(payload.get("review_run_id"))
         nutrients_written = _coerce_int(payload.get("nutrients_written"))
-        handled_message = (
-            f"发现 {nutrients_written} 条进化养料"
-            if nutrients_written is not None
-            else "已完成复盘并写入进化养料"
-        )
+        review_summary = _optional_str(payload.get("review_summary"))
+        nutrient_summaries = payload.get("nutrient_summaries") or []
+        if not isinstance(nutrient_summaries, list):
+            nutrient_summaries = []
+
+        if review_summary and nutrient_summaries:
+            titles = "\n".join(f"• {t}" for t in nutrient_summaries[:5])
+            handled_message = f"{review_summary}\n{titles}"
+        elif review_summary:
+            handled_message = review_summary
+        elif nutrients_written is not None:
+            handled_message = f"发现 {nutrients_written} 条进化养料"
+        else:
+            handled_message = "已完成复盘并写入进化养料"
         title = "进化复盘"
         return SystemNoticeFrame(
             notice_key=_EVOLUTION_NOTICE_KEY,
@@ -373,6 +382,8 @@ def _translate_evolution_notice(
                 "timeout_seconds": _coerce_number(payload.get("timeout_seconds")),
                 "nutrients_written": nutrients_written,
                 "written_nutrient_ids": _coerce_str_list(payload.get("written_nutrient_ids")),
+                "review_summary": review_summary,
+                "nutrient_summaries": nutrient_summaries,
             },
             icon="success",
             run_id=run_id,

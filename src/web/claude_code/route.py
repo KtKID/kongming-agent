@@ -98,6 +98,12 @@ async def test_evolution_event(
                 "nutrients_written": 3,
                 "duration_ms": 45000,
                 "timeout_hit": False,
+                "review_summary": "本轮对话涉及 Git 提交规范和测试隔离经验",
+                "nutrient_summaries": [
+                    "commit 前必须验证相关测试通过",
+                    "路径参数需要 resolve 为绝对路径",
+                    "不要用 python -c 做一次性验证",
+                ],
             },
         )
     else:

@@ -335,6 +335,12 @@ class EvolutionManager:
                             "written_nutrient_ids": outcome.write_data.get("written_nutrient_ids")
                             if isinstance(outcome.write_data, dict)
                             else None,
+                            "review_summary": outcome.write_data.get("review_summary")
+                            if isinstance(outcome.write_data, dict)
+                            else None,
+                            "nutrient_summaries": outcome.write_data.get("nutrient_summaries")
+                            if isinstance(outcome.write_data, dict)
+                            else None,
                         },
                     )
                 )
