@@ -37,7 +37,21 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from scheduler.domain import RunStatus, TaskState
+from scheduler.domain import (
+    ConcurrencyPolicy,
+    DeliveryChannel,
+    MisfirePolicy,
+    RunStatus,
+    ScheduleDelivery,
+    ScheduleTrigger,
+    ScheduledTask,
+    TaskExecutionPolicy,
+    TaskOrigin,
+    TaskState,
+    TaskTarget,
+    TriggerType,
+)
+from scheduler.schedule_parser import parse_schedule
 from scheduler.store import TaskNotFoundError
 from scheduler.timing import compute_first_run_at, to_iso, utc_now
 
@@ -122,6 +136,28 @@ class RunNowResponse(BaseModel):
     status: str = Field(default="PENDING")
 
 
+class CreateCronTaskRequest(BaseModel):
+    """``POST /api/cron/tasks`` 创建请求体。
+
+    结构化 DTO：前端不直接耦合 schedule_tool 内部参数形态。
+
+    - ``schedule_type``: once 时需填 ``once_at``；cron 时需填 ``cron_expr``
+    - ``timezone``: IANA 时区字符串
+    - ``concurrency_policy``: 可选，默认 forbid
+    - ``preset_id``: 可选，LLM preset 选择
+    """
+
+    name: str
+    agent_name: str
+    input_text: str
+    schedule_type: str = Field(description="once | cron")
+    once_at: str | None = None
+    cron_expr: str | None = None
+    timezone: str = Field(default="UTC")
+    concurrency_policy: str = Field(default="forbid")
+    preset_id: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Domain → DTO
 # ---------------------------------------------------------------------------
@@ -183,6 +219,116 @@ def _require_task(store: Store, task_id: str) -> ScheduledTask:
     if task is None:
         raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
     return task
+
+
+# ---------------------------------------------------------------------------
+# POST: create task
+# ---------------------------------------------------------------------------
+
+
+@router.post("/tasks", status_code=201)
+async def create_cron_task(request: Request, body: CreateCronTaskRequest) -> CronTaskDTO:
+    """创建定时任务（结构化 REST 入口）。
+
+    流程：
+    1. 校验 schedule_type + 对应字段（once→once_at, cron→cron_expr）
+    2. 用 ``parse_schedule`` 解析触发表达式 → ``ScheduleTrigger``
+    3. 用 ``compute_first_run_at`` 算首次触发时刻
+    4. 构造 ``ScheduledTask`` 并 ``store.create_task``
+    """
+    store = _require_store(request)
+
+    # 校验 schedule_type + 对应字段
+    if body.schedule_type == "once":
+        if not body.once_at:
+            raise HTTPException(
+                status_code=422,
+                detail="once_at is required when schedule_type=once",
+            )
+        schedule_text = body.once_at
+    elif body.schedule_type == "cron":
+        if not body.cron_expr:
+            raise HTTPException(
+                status_code=422,
+                detail="cron_expr is required when schedule_type=cron",
+            )
+        schedule_text = body.cron_expr
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unsupported schedule_type: {body.schedule_type!r}",
+        )
+
+    # 解析触发表达式
+    try:
+        trigger = parse_schedule(schedule_text, default_tz=body.timezone)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # 校验并发策略
+    try:
+        concurrency = ConcurrencyPolicy(body.concurrency_policy)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid concurrency_policy: {body.concurrency_policy!r}",
+        ) from None
+
+    # 计算首次触发时刻
+    try:
+        next_run_at = compute_first_run_at(trigger)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    now_iso = to_iso(utc_now())
+    task_id = uuid.uuid4().hex[:16]
+
+    task = ScheduledTask(
+        task_id=task_id,
+        name=body.name,
+        enabled=True,
+        state=TaskState.SCHEDULED,
+        origin=TaskOrigin.WEB,
+        trigger=trigger,
+        policy=TaskExecutionPolicy(concurrency_policy=concurrency),
+        target=TaskTarget(
+            agent_name=body.agent_name,
+            input_text=body.input_text,
+        ),
+        next_run_at=next_run_at,
+        last_run_at=None,
+        created_by="web",
+        created_at=now_iso,
+        updated_at=now_iso,
+        delivery=ScheduleDelivery(channel=DeliveryChannel.WEB),
+        preset_id=body.preset_id or "",
+    )
+
+    try:
+        created = store.create_task(task)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    store.append_audit(
+        action="create",
+        task_id=created.task_id,
+        actor="web",
+        payload={"source": "cron_router"},
+    )
+    return _task_to_dto(created)
+
+
+# ---------------------------------------------------------------------------
+# GET: single task detail
+# ---------------------------------------------------------------------------
+
+
+@router.get("/tasks/{task_id}")
+async def get_cron_task(request: Request, task_id: str) -> CronTaskDTO:
+    """获取单个 cron 任务详情。"""
+    store = _require_store(request)
+    task = _require_task(store, task_id)
+    return _task_to_dto(task)
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +519,7 @@ async def run_now_cron_task(request: Request, task_id: str) -> RunNowResponse:
 
 
 __all__ = [
+    "CreateCronTaskRequest",
     "CronRunDTO",
     "CronRunsPage",
     "CronTaskDTO",
