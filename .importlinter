@@ -235,3 +235,51 @@ forbidden_modules =
     web
 ignore_imports =
     evolution.claude_evidence_selector -> web.claude_code.jsonl_history
+
+; ---------------------------------------------------------------------------
+; Contract 9: usage-token 封装边界
+;             ``web.usage_token`` 是 Token 用量的唯一对外入口。
+;             外部模块禁止 import 内部子模块（_models / _channel_anthropic /
+;             _channel_openai / _persistence / _migration），只能通过
+;             ``UsageTokenManager`` + 公共 DTO（UsageTokenSnapshot /
+;             ThreadUsageSummary / UsageFrame / ThreadMetadataIO）访问。
+;
+;             5 大硬性约束的机器强制；详见 docs/usage-token/。
+;
+;             白名单：
+;             - ``web.thread_metadata -> web.usage_token._migration``
+;               task#2 阶段 thread_metadata.py 的 lazy upgrade 链需要单点调用
+;               ``upgrade_v7_to_v8`` 纯函数（迁移逻辑沉到 _migration 模块）
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:usage-token-encapsulation]
+name = Only UsageTokenManager and public DTOs exposed; TokenUsage internal models are private
+type = forbidden
+source_modules =
+    core
+    cli
+    host
+    safety
+    observability
+    config_loader
+    executors
+    web.app
+    web.routers
+    web.cron_delivery
+    web.cron_ws
+    web.ws
+    web.ws_event_sink
+    web.thread_manager
+    web.thread_metadata
+    web.claude_code
+    web.codex
+    web.protocol
+forbidden_modules =
+    web.usage_token._models
+    web.usage_token._channel_anthropic
+    web.usage_token._channel_openai
+    web.usage_token._persistence
+; 注：``web.usage_token._migration`` task#1 阶段暂不列入 forbidden——task#2 时
+; ``web.thread_metadata`` 需要单点 import 它做 lazy upgrade；届时把 _migration
+; 加回 forbidden_modules + 配 ``ignore_imports = web.thread_metadata ->
+; web.usage_token._migration`` 白名单。
