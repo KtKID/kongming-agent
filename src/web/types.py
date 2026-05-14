@@ -113,14 +113,19 @@ class ThreadManagerProtocol(Protocol):
         cwd: str,
     ) -> ThreadMetadata: ...
 
-    async def add_thread_usage(
-        self,
-        thread_id: str,
-        *,
-        prompt_tokens: int,
-        completion_tokens: int,
-        total_tokens: int,
-    ) -> ThreadMetadata: ...
+    # task#3.3：移除 add_thread_usage —— UsagePersistSink 改走
+    # ``usage_manager.record_run_usage``；router / WS 处理器通过 ``usage_manager``
+    # 属性拿 ``UsageTokenManager`` 实例。
+
+    @property
+    def usage_manager(self) -> Any:
+        """:class:`web.usage_token.UsageTokenManager` 实例（task#3.3 注入）。
+
+        ``Any`` 而非具体类型——避免 ``web.types`` Protocol 文件 import
+        ``web.usage_token``（保持 types.py 零运行时依赖）。具体类型由
+        ``web.thread_manager.ThreadManager.usage_manager`` 提供。
+        """
+        ...
 
     def resolve_approval(self, thread_id: str, call_id: str, approved: bool) -> None: ...
 

@@ -319,95 +319,10 @@ class ThreadManager:
                 cell.metadata = updated
         return updated
 
-    async def add_thread_usage(
-        self,
-        thread_id: str,
-        *,
-        prompt_tokens: int,
-        completion_tokens: int,
-        total_tokens: int,
-        cache_read_tokens: int | None = None,
-        cache_creation_tokens: int | None = None,
-    ) -> ThreadMetadata:
-        """把一次 run 的累计 usage 回写到 thread metadata。
-
-        ⚠️ **task#2 临时兼容 shim**：直接操作 ``ThreadMetadata.cumulative_usage``
-        透明 dict，本应该由 ``UsageTokenManager.record_run_usage`` 处理；
-        task#3 wiring 时 ``UsagePersistSink`` 直接调 manager，本函数会被
-        绕过，到时候删掉。
-
-        当前实现：按 ``backend_kind`` 决定 channel（claude_code→anthropic /
-        codex→openai / generic_chat→看 prev channel 或 cache_creation 启发式），
-        累加到 ``cumulative_usage`` dict 对应字段。
-
-        Args:
-            prompt_tokens: 本轮 prompt token（Anthropic 视为 input_tokens，
-                OpenAI 视为含 cached_input 子集的 input_tokens）
-            completion_tokens: 本轮输出 token
-            total_tokens: 派生量，**直接丢弃**（v8 schema 不再持久化）
-            cache_read_tokens: Anthropic 系 → cache_read_input_tokens；
-                OpenAI 系 → cached_input_tokens
-            cache_creation_tokens: 仅 Anthropic 系有意义；OpenAI 系丢弃
-        """
-        meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
-        if meta is None:
-            raise KeyError(f"thread not found: {thread_id}")
-
-        prompt = max(0, int(prompt_tokens))
-        completion = max(0, int(completion_tokens))
-        # total_tokens 是派生量，v8 不再持久化（manager 内部按需算）
-        _ = total_tokens
-
-        prev_usage = meta.cumulative_usage or {}
-        prev_channel = prev_usage.get("channel") if isinstance(prev_usage, dict) else None
-
-        # 按 backend_kind 决定 channel
-        if meta.backend_kind == "claude_code":
-            channel = "anthropic"
-        elif meta.backend_kind == "codex":
-            channel = "openai"
-        elif prev_channel in ("anthropic", "openai"):
-            # generic_chat：保留 prev 的 channel 一致性
-            channel = prev_channel
-        else:
-            # generic_chat 首轮启发式：cache_creation > 0 → anthropic（独有概念）
-            channel = "anthropic" if (cache_creation_tokens or 0) > 0 else "openai"
-
-        new_usage: dict[str, int | str]
-        if channel == "anthropic":
-            new_usage = {
-                "channel": "anthropic",
-                "input_tokens": int(prev_usage.get("input_tokens", 0)) + prompt,
-                "cache_read_input_tokens": int(prev_usage.get("cache_read_input_tokens", 0))
-                + max(0, int(cache_read_tokens or 0)),
-                "cache_creation_input_tokens": int(prev_usage.get("cache_creation_input_tokens", 0))
-                + max(0, int(cache_creation_tokens or 0)),
-                "output_tokens": int(prev_usage.get("output_tokens", 0)) + completion,
-            }
-        else:  # openai
-            new_usage = {
-                "channel": "openai",
-                "input_tokens": int(prev_usage.get("input_tokens", 0)) + prompt,
-                "cached_input_tokens": int(prev_usage.get("cached_input_tokens", 0))
-                + max(0, int(cache_read_tokens or 0)),
-                "output_tokens": int(prev_usage.get("output_tokens", 0)) + completion,
-                # reasoning_output_tokens 本接口拿不到，保留 prev 值（决策 4N）
-                "reasoning_output_tokens": int(prev_usage.get("reasoning_output_tokens", 0)),
-            }
-
-        updated = meta.model_copy(
-            update={
-                "updated_at": _now(),
-                "cumulative_usage": new_usage,
-                "schema_version": 8,
-            }
-        )
-        await asyncio.to_thread(write_thread_metadata, self._home, updated)
-        async with self._lock:
-            cell = self._cells.get(thread_id)
-            if cell is not None:
-                cell.metadata = updated
-        return updated
+    # task#3.3：``add_thread_usage`` 已删除——UsagePersistSink 改走
+    # ``self._usage_manager.record_run_usage(channel, raw_payload, ...)``；
+    # router / WS handler 通过 ``self.usage_manager`` 属性拿数据。
+    # 历史调用方（包括测试 mock）应同步迁移到 manager API。
 
     async def delete_thread(
         self,

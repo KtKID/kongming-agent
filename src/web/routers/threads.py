@@ -48,7 +48,6 @@ from evolution.models import (
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore, resolve_evolution_root
 from web.claude_code.jsonl_history import jsonl_path_for, parse_jsonl_history
-from web.claude_code.transcript_usage import parse_transcript_usage
 from web.errors import InvalidThreadIdError, ThreadNotFoundError
 from web.protocol import (
     CreateThreadRequest,
@@ -97,45 +96,17 @@ def _validate_thread_id(thread_id: str) -> None:
         )
 
 
-def _to_dto(meta: ThreadMetadata) -> ThreadMetadataDTO:
+async def _to_dto(meta: ThreadMetadata, tm: ThreadManagerProtocol) -> ThreadMetadataDTO:
     """把 ThreadMetadata 转 REST DTO。
 
-    ⚠️ **task#2 兼容 layer**：ThreadMetadata 已删 5 个 ``cumulative_*_tokens`` 字段，
-    改为嵌套 ``cumulative_usage`` dict（v8）。本函数从 dict 派生回旧 5 字段填 DTO，
-    让前端 ``ThreadMetadataDTO`` 继续工作（task#3 真删 DTO 时一起删本函数兼容 layer）。
-
-    派生规则（按 ``cumulative_usage.channel`` 分支）：
-
-    - ``anthropic``：
-        cumulative_prompt_tokens         = input_tokens (不含 cache)
-        cumulative_completion_tokens     = output_tokens
-        cumulative_total_tokens          = input + output (派生)
-        cumulative_cache_read_tokens     = cache_read_input_tokens
-        cumulative_cache_creation_tokens = cache_creation_input_tokens
-
-    - ``openai``：
-        cumulative_prompt_tokens         = input_tokens (含 cache 子集)
-        cumulative_completion_tokens     = output_tokens
-        cumulative_total_tokens          = input + output
-        cumulative_cache_read_tokens     = cached_input_tokens (lossy 别名)
-        cumulative_cache_creation_tokens = None (OpenAI 无此概念)
-
-    claude_code 通道：保留实时算 transcript jsonl 的逻辑（task#3 删，改为通过
-    UsageTokenManager 派生）。
+    **task#3.3**：通过 ``UsageTokenManager.get_thread_summary()`` 拿 thread 级
+    token usage summary（含 channel 区分 + 派生 context_usage_pct），dump 成 dict
+    塞 ``usage_summary`` 字段——前端 ``ThreadMetadataDTO.usage_summary`` 直接消费。
     """
-    # 从 v8 cumulative_usage dict 派生回旧 5 字段
-    prompt, completion, total, cache_read, cache_creation = _derive_legacy_token_fields(
-        meta.cumulative_usage
+    summary = await tm.usage_manager.get_thread_summary(meta.id)
+    usage_summary_dict: dict[str, Any] | None = (
+        summary.model_dump() if summary is not None else None
     )
-
-    # claude_code：实时算 transcript（task#3 删，改 manager）
-    if meta.backend_kind == "claude_code" and meta.claude_thread_id and meta.cwd:
-        usage = parse_transcript_usage(jsonl_path_for(meta.cwd, meta.claude_thread_id))
-        prompt = usage.input_tokens
-        completion = usage.output_tokens
-        total = usage.input_tokens + usage.output_tokens
-        cache_read = usage.cache_read_tokens or None
-        cache_creation = usage.cache_creation_tokens or None
 
     return ThreadMetadataDTO(
         id=meta.id,
@@ -148,53 +119,10 @@ def _to_dto(meta: ThreadMetadata) -> ThreadMetadataDTO:
         created_at=meta.created_at,
         updated_at=meta.updated_at,
         message_count=meta.message_count,
-        cumulative_prompt_tokens=prompt,
-        cumulative_completion_tokens=completion,
-        cumulative_total_tokens=total,
-        cumulative_cache_read_tokens=cache_read,
-        cumulative_cache_creation_tokens=cache_creation,
+        usage_summary=usage_summary_dict,
         is_pinned=meta.is_pinned,
         schema_version=meta.schema_version,
     )
-
-
-def _derive_legacy_token_fields(
-    cumulative_usage: dict[str, Any] | None,
-) -> tuple[int, int, int, int | None, int | None]:
-    """从 v8 cumulative_usage dict 派生旧 5 字段（task#3 删）。
-
-    Returns:
-        ``(prompt, completion, total, cache_read, cache_creation)``——
-        全 0 / None 表示 thread 首轮前或 dict 损坏。
-    """
-    if not cumulative_usage or not isinstance(cumulative_usage, dict):
-        return 0, 0, 0, None, None
-
-    channel = cumulative_usage.get("channel")
-    input_tokens = int(cumulative_usage.get("input_tokens", 0) or 0)
-    output_tokens = int(cumulative_usage.get("output_tokens", 0) or 0)
-
-    if channel == "anthropic":
-        cache_read = int(cumulative_usage.get("cache_read_input_tokens", 0) or 0)
-        cache_creation = int(cumulative_usage.get("cache_creation_input_tokens", 0) or 0)
-        return (
-            input_tokens,
-            output_tokens,
-            input_tokens + output_tokens,
-            cache_read or None,
-            cache_creation or None,
-        )
-    if channel == "openai":
-        cached_input = int(cumulative_usage.get("cached_input_tokens", 0) or 0)
-        return (
-            input_tokens,
-            output_tokens,
-            input_tokens + output_tokens,
-            cached_input or None,
-            None,  # OpenAI 无 cache_creation 概念
-        )
-    # 未知 channel：保守返回 0
-    return 0, 0, 0, None, None
 
 
 def _to_workspace_context(meta: ThreadMetadata) -> WorkspaceContextDTO:
@@ -333,7 +261,7 @@ async def list_threads(request: Request) -> list[ThreadMetadataDTO]:
     """
     tm: ThreadManagerProtocol = request.app.state.thread_manager
     metas = await asyncio.to_thread(tm.list_threads)
-    return [_to_dto(m) for m in metas]
+    return [await _to_dto(m, tm) for m in metas]
 
 
 @router.post("", status_code=201)
@@ -366,7 +294,7 @@ async def create_thread(
         backend_kind=body.backend_kind,
         cwd=normalized_cwd,
     )
-    return _to_dto(meta)
+    return await _to_dto(meta, tm)
 
 
 @router.post("/import-claude-session")
@@ -395,7 +323,7 @@ async def import_claude_session(
     existing = tm.find_thread_by_claude_thread_id(body.claude_thread_id)
     if existing is not None:
         return ImportClaudeSessionResponse(
-            thread=_to_dto(existing),
+            thread=await _to_dto(existing, tm),
             imported=False,
         )
     new_thread = await tm.create_thread(
@@ -409,7 +337,7 @@ async def import_claude_session(
         body.cwd,
     )
     return ImportClaudeSessionResponse(
-        thread=_to_dto(bound),
+        thread=await _to_dto(bound, tm),
         imported=True,
     )
 
@@ -427,7 +355,7 @@ async def import_codex_session(
     existing = tm.find_thread_by_codex_thread_id(body.codex_thread_id)
     if existing is not None:
         return ImportCodexSessionResponse(
-            thread=_to_dto(existing),
+            thread=await _to_dto(existing, tm),
             imported=False,
         )
     new_thread = await tm.create_thread(
@@ -441,7 +369,7 @@ async def import_codex_session(
         body.cwd,
     )
     return ImportCodexSessionResponse(
-        thread=_to_dto(bound),
+        thread=await _to_dto(bound, tm),
         imported=True,
     )
 
@@ -479,9 +407,9 @@ async def rename_thread(
         )
         if meta_read is None:
             raise ThreadNotFoundError(f"thread not found: {thread_id}")
-        return _to_dto(meta_read)
+        return await _to_dto(meta_read, tm)
 
-    return _to_dto(meta)
+    return await _to_dto(meta, tm)
 
 
 @router.delete("/{thread_id}", status_code=204)

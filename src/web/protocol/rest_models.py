@@ -146,22 +146,42 @@ class RenameThreadRequest(_FrameBase):
 
 
 class ThreadMetadataDTO(_FrameBase):
-    """Thread 元数据，落盘形态 + ``GET /api/threads/{id}`` 响应体。
+    """Thread 元数据，``GET /api/threads/{id}`` 响应体。
 
-    v0.1.6 加 ``backend_kind`` 字段并把 ``schema_version`` 升至 ``2``。
-    v0.2 加 ``claude_thread_id`` + ``cwd`` 字段，``schema_version`` 升至 ``3``。
-    v0.2.1 加 thread 级累计 usage 字段，``schema_version`` 升至 ``4``
-    v0.2.2 加 ``codex_thread_id`` 并允许 ``backend_kind="codex"``，
-    ``schema_version`` 升至 ``5``。
-    v0.2.3 将旧 ``sdk_session_id`` 改名为 ``claude_thread_id``，
-    ``schema_version`` 升至 ``6``。
-    v0.2.4 加 ``is_pinned`` 置顶字段，``schema_version`` 升至 ``7``。
-    **v0.2.5 (usage-token-manager-core task#2)** schema 升至 ``8``：
-    ThreadMetadata 后端字段重组（删 5 旧字段 + 加嵌套 ``cumulative_usage`` dict）；
-    本 DTO 暂时保留旧 5 字段供前端兼容，``_to_dto`` 临时派生。**task#3 删本 DTO**，
-    前端改为消费 ``ThreadUsageSummary`` (`web.usage_token.ThreadUsageSummary`)。
-    （同时接受老 v1/v2 文件，懒升级在 :func:`web.thread_metadata.read_thread_metadata`
-    里完成；DTO 这里只负责出/入参形态对齐 ThreadMetadata 模型）。
+    schema 演进史：
+    - v2 (v0.1.6)：加 ``backend_kind``
+    - v3 (v0.2)：加 ``claude_thread_id`` / ``cwd``
+    - v4 (v0.2.1)：加 thread 级累计 usage 字段（已在 v8 删除）
+    - v5 (v0.2.2)：加 ``codex_thread_id`` + ``backend_kind="codex"``
+    - v6 (v0.2.3)：``sdk_session_id`` → ``claude_thread_id``
+    - v7 (v0.2.4)：加 ``is_pinned``
+    - **v8 (usage-token task#3.3)**：删 5 个 ``cumulative_*_tokens`` 平铺字段；
+      改为嵌套 ``usage_summary: dict`` 字段（语义跟 ``ThreadUsageSummary`` 一致）
+
+    ``usage_summary`` 字段说明：
+
+    ``web.protocol`` 不允许 import ``web.usage_token`` 内部类型
+    （Contract 5 / web-protocol-no-deps），所以 DTO 这一层用透明 ``dict`` 透传，
+    前端 ``protocol.ts`` 用 strict ``ThreadUsageSummary`` interface 描述结构。
+    格式示例（Anthropic 系）::
+
+        {
+          "channel": "anthropic",
+          "cumulative_input_tokens": 100000,
+          "cumulative_output_tokens": 3000,
+          "extras": {
+            "cache_read_input_tokens": 80000,
+            "cache_creation_input_tokens": 4000
+          },
+          "last_run_context_usage": 184000,
+          "model_name": "claude-opus-4",
+          "model_context_window": 1000000,
+          "context_usage_pct": 18.4
+        }
+
+    OpenAI 系 ``channel="openai"``，``extras`` 含 ``cached_input_tokens`` /
+    ``reasoning_output_tokens``。``None`` 表示 thread 还没跑过任何 turn。
+
     ``id`` 严格匹配 ``^thread-[a-f0-9]{12}$``，防止用户在 URL 里手写 thread id
     时绕过命名约束。
     """
@@ -176,11 +196,8 @@ class ThreadMetadataDTO(_FrameBase):
     created_at: float
     updated_at: float
     message_count: Annotated[int, Field(ge=0)]
-    cumulative_prompt_tokens: Annotated[int, Field(ge=0)] = 0
-    cumulative_completion_tokens: Annotated[int, Field(ge=0)] = 0
-    cumulative_total_tokens: Annotated[int, Field(ge=0)] = 0
-    cumulative_cache_read_tokens: int | None = None
-    cumulative_cache_creation_tokens: int | None = None
+    usage_summary: dict[str, Any] | None = None
+    """v8 嵌套字典；语义跟 ``web.usage_token.ThreadUsageSummary`` 一致（见类 docstring）。"""
     is_pinned: bool = False
     schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8] = 8
 

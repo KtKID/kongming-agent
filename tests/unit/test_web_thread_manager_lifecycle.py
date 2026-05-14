@@ -135,37 +135,43 @@ async def test_list_threads_merges_disk_and_memory(tmp_path: Path) -> None:
     assert listed[0].name == "memory-only-name"
 
 
-async def test_add_thread_usage_persists_cumulative_totals(tmp_path: Path) -> None:
+async def test_usage_manager_records_cumulative_via_manager_api(tmp_path: Path) -> None:
+    """task#3.3：``add_thread_usage`` 已删；token usage 走 ``ThreadManager.usage_manager.record_run_usage``。"""
     cfg = _make_cfg()
     factory = _make_factory()
     mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
     meta = await mgr.create_thread("usage", "p1")
 
-    updated = await mgr.add_thread_usage(
+    # 通过 usage_manager 写入第一轮
+    await mgr.usage_manager.record_run_usage(
         meta.id,
-        prompt_tokens=120,
-        completion_tokens=30,
-        total_tokens=150,
+        channel="openai",
+        raw_payload={"input_tokens": 120, "output_tokens": 30},
+        turn=1,
+        run_id="run-1",
     )
-    # v8: cumulative_usage 嵌套 dict（generic_chat + 无 cache_creation → openai）
-    assert updated.cumulative_usage is not None
-    assert updated.cumulative_usage["channel"] == "openai"
-    assert updated.cumulative_usage["input_tokens"] == 120
-    assert updated.cumulative_usage["output_tokens"] == 30
+    summary1 = await mgr.usage_manager.get_thread_summary(meta.id)
+    assert summary1.channel == "openai"
+    assert summary1.cumulative_input_tokens == 120
+    assert summary1.cumulative_output_tokens == 30
 
-    updated2 = await mgr.add_thread_usage(
+    # 第二轮累加
+    await mgr.usage_manager.record_run_usage(
         meta.id,
-        prompt_tokens=20,
-        completion_tokens=5,
-        total_tokens=25,
+        channel="openai",
+        raw_payload={"input_tokens": 20, "output_tokens": 5},
+        turn=2,
+        run_id="run-2",
     )
-    assert updated2.cumulative_usage is not None
-    assert updated2.cumulative_usage["input_tokens"] == 140
-    assert updated2.cumulative_usage["output_tokens"] == 35
+    summary2 = await mgr.usage_manager.get_thread_summary(meta.id)
+    assert summary2.cumulative_input_tokens == 140
+    assert summary2.cumulative_output_tokens == 35
 
+    # 落盘验证：read_thread_metadata 拿到 cumulative_usage dict
     loaded = read_thread_metadata(tmp_path, meta.id)
     assert loaded is not None
     assert loaded.cumulative_usage is not None
+    assert loaded.cumulative_usage["channel"] == "openai"
     assert loaded.cumulative_usage["input_tokens"] == 140
     assert loaded.cumulative_usage["output_tokens"] == 35
 

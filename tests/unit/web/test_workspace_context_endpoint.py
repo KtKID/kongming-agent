@@ -85,16 +85,9 @@ class FakeTM:
         del thread_id, claude_thread_id, cwd
         raise NotImplementedError
 
-    async def add_thread_usage(
-        self,
-        thread_id: str,
-        *,
-        prompt_tokens: int,
-        completion_tokens: int,
-        total_tokens: int,
-    ) -> ThreadMetadata:
-        del thread_id, prompt_tokens, completion_tokens, total_tokens
-        raise NotImplementedError
+    # task#3.3：``add_thread_usage`` 已删除；mock 改提供 ``usage_manager`` property。
+    # 本测试不消费 usage_manager，简单 ``None`` 即可（类型注解 Any）。
+    usage_manager = None  # type: ignore[assignment]
 
     def resolve_approval(self, thread_id: str, call_id: str, approved: bool) -> None:
         del thread_id, call_id, approved

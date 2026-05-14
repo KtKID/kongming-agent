@@ -145,10 +145,20 @@ def _make_approval_decision() -> ApprovalDecisionFrame:
 def _make_usage() -> UsageFrame:
     return UsageFrame(
         timestamp_ms=1_700_000_000_009,
-        prompt_tokens=10,
-        completion_tokens=20,
-        total_tokens=30,
         turn=1,
+        run_id="run-xxx",
+        snapshot={
+            "channel": "anthropic",
+            "input_tokens": 120_000,
+            "output_tokens": 3_000,
+            "extras": {
+                "cache_read_input_tokens": 88_000,
+                "cache_creation_input_tokens": 4_000,
+            },
+            "context_usage": 212_000,
+            "turn": 1,
+            "run_id": "run-xxx",
+        },
     )
 
 
@@ -221,9 +231,19 @@ def _make_thread_metadata() -> ThreadMetadataDTO:
         created_at=1_700_000_000.0,
         updated_at=1_700_000_010.5,
         message_count=3,
-        cumulative_prompt_tokens=1200,
-        cumulative_completion_tokens=340,
-        cumulative_total_tokens=1540,
+        usage_summary={
+            "channel": "anthropic",
+            "cumulative_input_tokens": 100_000,
+            "cumulative_output_tokens": 3_000,
+            "extras": {
+                "cache_read_input_tokens": 80_000,
+                "cache_creation_input_tokens": 4_000,
+            },
+            "last_run_context_usage": 184_000,
+            "model_name": "claude-opus-4",
+            "model_context_window": 1_000_000,
+            "context_usage_pct": 18.4,
+        },
         schema_version=8,
     )
 
@@ -458,10 +478,16 @@ S2C_DISPATCH_CASES = [
         {
             "kind": "usage",
             "timestamp_ms": 1,
-            "prompt_tokens": 1,
-            "completion_tokens": 2,
-            "total_tokens": 3,
             "turn": 1,
+            "snapshot": {
+                "channel": "anthropic",
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "extras": {},
+                "context_usage": 1,
+                "turn": 1,
+                "run_id": "",
+            },
         },
         UsageFrame,
         id="usage_dispatch",
@@ -588,10 +614,16 @@ def test_kind_default_approval_decision():
 def test_kind_default_usage():
     frame = UsageFrame(
         timestamp_ms=1,
-        prompt_tokens=0,
-        completion_tokens=0,
-        total_tokens=0,
         turn=1,
+        snapshot={
+            "channel": "anthropic",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "extras": {},
+            "context_usage": 0,
+            "turn": 1,
+            "run_id": "",
+        },
     )
     assert frame.kind == "usage"
 

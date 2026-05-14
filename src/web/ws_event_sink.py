@@ -70,6 +70,68 @@ _EVOLUTION_NOTICE_KEY = "self_evolution.review"
 _EVOLUTION_NOTICE_SOURCE = "self_evolution"
 
 
+def _build_usage_snapshot(
+    payload: dict[str, Any],
+    *,
+    turn: int,
+    run_id: str,
+) -> dict[str, Any]:
+    """从 runtime ``usage`` event payload 构造 UsageTokenSnapshot dict
+    （task#3.3 v8 WS UsageFrame.snapshot 嵌套字段）。
+
+    payload 字段来源：task#3.1 让 LLMProvider 透传 SDK 原生字段 + provider_kind。
+    本函数按 provider_kind 决定 channel + 派生 context_usage：
+
+    - ``anthropic``：``extras = {cache_read_input_tokens, cache_creation_input_tokens}``
+      ``context_usage = input + cache_read + cache_creation``
+    - ``openai``：``extras = {cached_input_tokens, reasoning_output_tokens}``
+      ``context_usage = input_tokens``（已含 cache 子集）
+    """
+    provider_kind = payload.get("provider_kind")
+    if provider_kind == "anthropic":
+        channel = "anthropic"
+        input_tokens = int(payload.get("input_tokens", 0) or 0)
+        output_tokens = int(payload.get("output_tokens", 0) or 0)
+        cache_read = int(payload.get("cache_read_input_tokens", 0) or 0)
+        cache_creation = int(payload.get("cache_creation_input_tokens", 0) or 0)
+        extras: dict[str, int] = {
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_creation,
+        }
+        context_usage = input_tokens + cache_read + cache_creation
+    elif provider_kind == "openai_compatible":
+        channel = "openai"
+        input_tokens = int(payload.get("input_tokens", 0) or 0)
+        output_tokens = int(payload.get("output_tokens", 0) or 0)
+        cached_input = int(payload.get("cached_input_tokens", 0) or 0)
+        reasoning_output = int(payload.get("reasoning_output_tokens", 0) or 0)
+        extras = {
+            "cached_input_tokens": cached_input,
+            "reasoning_output_tokens": reasoning_output,
+        }
+        context_usage = input_tokens  # OpenAI 已含 cache
+    else:
+        # 老 payload 无 provider_kind（兼容老测试 / 非标准 event）：
+        # 退化为 openai 系基础字段（input/output 来自 prompt/completion）。
+        channel = "openai"
+        input_tokens = int(payload.get("prompt_tokens", 0) or payload.get("input_tokens", 0) or 0)
+        output_tokens = int(
+            payload.get("completion_tokens", 0) or payload.get("output_tokens", 0) or 0
+        )
+        extras = {}
+        context_usage = input_tokens
+
+    return {
+        "channel": channel,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "extras": extras,
+        "context_usage": context_usage,
+        "turn": turn,
+        "run_id": run_id,
+    }
+
+
 class UsagePersistSink:
     """每 turn 把 usage 增量写盘的 EventSink。
 
@@ -272,21 +334,16 @@ class WSEventSink:
                 timestamp_ms=ts,
             )
 
-        # ----- 用量 -----
-        # runtime 在 turn.end 的 metadata.usage 里携带 token 用量；某些版本
-        # 也单独 emit ``usage`` event。本 sink 接受 ``usage`` kind，把字段映射到
-        # UsageFrame；其它字段缺失时给 0（不抛）。
+        # ----- 用量（task#3.3 v8 重构）-----
+        # runtime emit ``kind="usage"`` event 时，payload 已含 task#3.1 透传的 SDK
+        # 原生字段 + provider_kind。本 sink 从 payload 派生 UsageTokenSnapshot dict
+        # 嵌入 UsageFrame.snapshot——避免直接调 manager.to_ws_frame(async)。
         if kind == "usage":
-            cr = payload.get("cache_read_tokens")
-            cc = payload.get("cache_creation_tokens")
+            snapshot = _build_usage_snapshot(payload, turn=turn, run_id=run_id)
             return UsageFrame(
-                prompt_tokens=int(payload.get("prompt_tokens", 0) or 0),
-                completion_tokens=int(payload.get("completion_tokens", 0) or 0),
-                total_tokens=int(payload.get("total_tokens", 0) or 0),
-                cache_read_tokens=int(cr) if cr is not None else None,
-                cache_creation_tokens=int(cc) if cc is not None else None,
                 turn=turn,
-                run_id=event.run_id or "",
+                run_id=run_id,
+                snapshot=snapshot,
                 timestamp_ms=ts,
             )
 

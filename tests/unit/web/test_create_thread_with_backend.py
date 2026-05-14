@@ -28,6 +28,16 @@ from web.thread_metadata import ThreadMetadata
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 
 
+class _FakeUsageManager:
+    """task#3.3 minimal stub for ``_to_dto`` ``tm.usage_manager`` 调用。"""
+
+    async def get_thread_summary(self, thread_id: str):  # type: ignore[no-untyped-def]
+        from web.usage_token import ThreadUsageSummary
+
+        del thread_id
+        return ThreadUsageSummary(channel="anthropic")
+
+
 class FakeTM:
     """支持 thread CRUD 的 FakeThreadManager（v0.1.6 加 backend_kind 字段）。"""
 
@@ -35,6 +45,8 @@ class FakeTM:
         self._threads: dict[str, ThreadMetadata] = {}
         self._started = False
         self._closed = False
+        # task#3.3: router ``_to_dto`` 调 ``tm.usage_manager.get_thread_summary``
+        self.usage_manager = _FakeUsageManager()
 
     @property
     def started(self) -> bool:
