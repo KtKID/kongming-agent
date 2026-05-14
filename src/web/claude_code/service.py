@@ -68,6 +68,8 @@ class ClaudeCodeService:
             client_factory if client_factory is not None else ClaudeSDKClient
         )
         self._thread_manager: Any = thread_manager
+        # per-thread run 计数器——每次 query 调用自增，用于构造 run_id
+        self._run_counters: dict[str, int] = {}
 
     # ----- 主入口 -----
 
@@ -141,9 +143,13 @@ class ClaudeCodeService:
             register_id = register_id_override or session_id or f"pending-{id(client)}"
             record = await self._sessions.register(register_id, writer)
 
+            # run_index：per-thread 自增，用于构造 run_id（跟 core.Runner 一致）
+            run_index = self._run_counters.get(register_id, 0) + 1
+            self._run_counters[register_id] = run_index
+
             # 5. 主循环——把 async for 包成 task 以便能被 abort cancel
             query_task = asyncio.create_task(
-                self._consume(client, command, writer, register_id),
+                self._consume(client, command, writer, register_id, run_index=run_index),
             )
             record.query_task = query_task
             await query_task
@@ -212,6 +218,8 @@ class ClaudeCodeService:
         command: str,
         writer: Any,
         register_id: str,
+        *,
+        run_index: int = 0,
     ) -> None:
         """主流式循环——单独包成方法以便能用 task.cancel() 强制中断。
 
@@ -258,6 +266,29 @@ class ClaudeCodeService:
                             # 已绑定 / 冲突等异常不影响主对话流
                             logger.warning(
                                 "claude-code _consume bind_claude_thread failed",
+                                exc_info=True,
+                            )
+                # usage 写盘：检测到 complete 时取原始 SDK msg.usage 调 manager
+                # 条件：thread_manager 存在 + register_id 是有效 thread_id（非 placeholder）
+                if (
+                    n.get("kind") == "complete"
+                    and self._thread_manager is not None
+                    and self._is_thread_id(register_id)
+                ):
+                    raw_usage = getattr(msg, "usage", None)
+                    if isinstance(raw_usage, dict) and raw_usage:
+                        run_id = f"{register_id}-{run_index}"
+                        try:
+                            await self._thread_manager.usage_manager.record_run_usage(
+                                register_id,
+                                channel="anthropic",
+                                raw_payload=raw_usage,
+                                turn=run_index,
+                                run_id=run_id,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "claude-code _consume record_run_usage failed",
                                 exc_info=True,
                             )
                 # 把出站消息的 sessionId 字段同步成真实 id

@@ -69,6 +69,8 @@ class CodexService:
         self.session_manager = session_manager
         self.thread_manager = thread_manager
         self._processes: dict[str, asyncio.subprocess.Process] = {}
+        # per-thread run 计数器——每次 query 调用自增，用于构造 run_id
+        self._run_counters: dict[str, int] = {}
 
     # ------------------------------------------------------------------ query
 
@@ -145,6 +147,11 @@ class CodexService:
                 query_task=current_task,
             )
 
+            # run_index：per-thread 自增，用于构造 run_id（跟 core.Runner 一致）
+            effective_tid = kongming_thread_id or active_sid
+            run_index = self._run_counters.get(effective_tid, 0) + 1
+            self._run_counters[effective_tid] = run_index
+
             # stdout 主循环
             active_sid, complete_already_sent = await self._consume_stdout(
                 proc,
@@ -152,6 +159,7 @@ class CodexService:
                 active_sid,
                 kongming_thread_id=kongming_thread_id,
                 cwd=cwd,
+                run_index=run_index,
             )
 
             # 等 stderr 收尾 + 拿子进程退出码
@@ -321,6 +329,7 @@ class CodexService:
         *,
         kongming_thread_id: str | None,
         cwd: str,
+        run_index: int = 0,
     ) -> tuple[str, bool]:
         """逐行读取 stdout，归一化后送 writer。
 
@@ -388,6 +397,30 @@ class CodexService:
                                 new_sid,
                                 cwd,
                             )
+
+            # usage 写盘：turn.completed 时取原始 event["usage"] 调 manager
+            # 条件：thread_manager 存在 + 有有效 kongming_thread_id
+            if (
+                event.get("type") == "turn.completed"
+                and self.thread_manager is not None
+                and kongming_thread_id is not None
+            ):
+                raw_usage = event.get("usage")
+                if isinstance(raw_usage, dict) and raw_usage:
+                    run_id = f"{kongming_thread_id}-{run_index}"
+                    try:
+                        await self.thread_manager.usage_manager.record_run_usage(
+                            kongming_thread_id,
+                            channel="openai",
+                            raw_payload=raw_usage,
+                            turn=run_index,
+                            run_id=run_id,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "codex _consume_stdout record_run_usage failed",
+                            exc_info=True,
+                        )
 
             # 归一化 + 下发
             for msg in normalize(event, active_sid):
