@@ -224,7 +224,7 @@ def _make_thread_metadata() -> ThreadMetadataDTO:
         cumulative_prompt_tokens=1200,
         cumulative_completion_tokens=340,
         cumulative_total_tokens=1540,
-        schema_version=7,
+        schema_version=8,
     )
 
 
@@ -633,7 +633,7 @@ def test_kind_default_cell_evicted():
 
 
 def test_thread_metadata_schema_version_default():
-    """``ThreadMetadataDTO.schema_version`` 默认 ``7``（v0.2.4 bump，加 is_pinned 字段）。"""
+    """``ThreadMetadataDTO.schema_version`` 默认 ``8``（task#2 bump，cumulative_usage dict）。"""
     dto = ThreadMetadataDTO(
         id="thread-abcdef012345",
         name="x",
@@ -643,4 +643,4 @@ def test_thread_metadata_schema_version_default():
         updated_at=0.0,
         message_count=0,
     )
-    assert dto.schema_version == 7
+    assert dto.schema_version == 8

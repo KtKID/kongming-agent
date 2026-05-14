@@ -147,9 +147,11 @@ async def test_add_thread_usage_persists_cumulative_totals(tmp_path: Path) -> No
         completion_tokens=30,
         total_tokens=150,
     )
-    assert updated.cumulative_prompt_tokens == 120
-    assert updated.cumulative_completion_tokens == 30
-    assert updated.cumulative_total_tokens == 150
+    # v8: cumulative_usage 嵌套 dict（generic_chat + 无 cache_creation → openai）
+    assert updated.cumulative_usage is not None
+    assert updated.cumulative_usage["channel"] == "openai"
+    assert updated.cumulative_usage["input_tokens"] == 120
+    assert updated.cumulative_usage["output_tokens"] == 30
 
     updated2 = await mgr.add_thread_usage(
         meta.id,
@@ -157,15 +159,15 @@ async def test_add_thread_usage_persists_cumulative_totals(tmp_path: Path) -> No
         completion_tokens=5,
         total_tokens=25,
     )
-    assert updated2.cumulative_prompt_tokens == 140
-    assert updated2.cumulative_completion_tokens == 35
-    assert updated2.cumulative_total_tokens == 175
+    assert updated2.cumulative_usage is not None
+    assert updated2.cumulative_usage["input_tokens"] == 140
+    assert updated2.cumulative_usage["output_tokens"] == 35
 
     loaded = read_thread_metadata(tmp_path, meta.id)
     assert loaded is not None
-    assert loaded.cumulative_prompt_tokens == 140
-    assert loaded.cumulative_completion_tokens == 35
-    assert loaded.cumulative_total_tokens == 175
+    assert loaded.cumulative_usage is not None
+    assert loaded.cumulative_usage["input_tokens"] == 140
+    assert loaded.cumulative_usage["output_tokens"] == 35
 
 
 async def test_list_cells_returns_only_active_cells(tmp_path: Path) -> None:

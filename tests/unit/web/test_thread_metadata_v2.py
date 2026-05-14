@@ -31,12 +31,12 @@ from web.thread_metadata import (
 )
 
 
-def test_schema_version_constant_is_7() -> None:
-    """v0.2.4 起常量为 7（v0.2.3 是 6）。"""
-    assert THREAD_METADATA_SCHEMA_VERSION == 7
+def test_schema_version_constant_is_8() -> None:
+    """task#2 起常量为 8（v0.2.4 是 7）。"""
+    assert THREAD_METADATA_SCHEMA_VERSION == 8
 
 
-def test_default_construction_uses_v6_and_generic_chat() -> None:
+def test_default_construction_uses_v8_and_generic_chat() -> None:
     meta = ThreadMetadata(
         id="thread-aaaaaaaaaaaa",
         name="t",
@@ -44,15 +44,14 @@ def test_default_construction_uses_v6_and_generic_chat() -> None:
         created_at=1.0,
         updated_at=1.0,
     )
-    assert meta.schema_version == 7
+    assert meta.schema_version == 8
     assert meta.backend_kind == "generic_chat"
     assert meta.preset_id == "p1"
-    # v0.2/v0.2.1 新字段默认空 / 0
+    # v0.2/v0.2.1 新字段默认空 / None
     assert meta.claude_thread_id == ""
     assert meta.cwd == ""
-    assert meta.cumulative_prompt_tokens == 0
-    assert meta.cumulative_completion_tokens == 0
-    assert meta.cumulative_total_tokens == 0
+    # v8: cumulative_usage 首轮前为 None（旧 cumulative_*_tokens 字段已删）
+    assert meta.cumulative_usage is None
 
 
 def test_claude_code_allows_empty_preset_id() -> None:
@@ -68,8 +67,8 @@ def test_claude_code_allows_empty_preset_id() -> None:
     assert meta.preset_id == ""
 
 
-def test_read_v1_file_auto_upgrades_to_v4(tmp_path: Path) -> None:
-    """v1 文件落盘后用 read_thread_metadata 读 → 连续懒升级 v1→v2→v3→v4。"""
+def test_read_v1_file_auto_upgrades_to_v8(tmp_path: Path) -> None:
+    """v1 文件 → 连续懒升级 v1→v2→...→v7→v8。"""
     path = thread_metadata_path(tmp_path, "thread-aaaaaaaaaaaa")
     path.parent.mkdir(parents=True, exist_ok=True)
     # 模拟旧 v1 文件：缺 backend_kind，schema_version=1
@@ -81,12 +80,15 @@ def test_read_v1_file_auto_upgrades_to_v4(tmp_path: Path) -> None:
     loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
     assert loaded is not None
     assert loaded.backend_kind == "generic_chat"
-    assert loaded.schema_version == 7
+    assert loaded.schema_version == 8
     assert loaded.claude_thread_id == ""
     assert loaded.cwd == ""
-    assert loaded.cumulative_prompt_tokens == 0
-    assert loaded.cumulative_completion_tokens == 0
-    assert loaded.cumulative_total_tokens == 0
+    # v8: 老 v1 文件无 token 字段 → v3→v4 补 0 → v7→v8 映射为 openai 0 dict
+    # （backend_kind=generic_chat + cache_creation=0 → openai 启发式）
+    assert loaded.cumulative_usage is not None
+    assert loaded.cumulative_usage["channel"] == "openai"
+    assert loaded.cumulative_usage["input_tokens"] == 0
+    assert loaded.cumulative_usage["output_tokens"] == 0
     assert loaded.preset_id == "p1"
     assert loaded.name == "old"
     assert loaded.message_count == 3

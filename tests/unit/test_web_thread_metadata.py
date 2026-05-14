@@ -91,7 +91,7 @@ def test_thread_metadata_name_max_200() -> None:
 
 def test_thread_metadata_default_schema_version() -> None:
     meta = _make_meta()
-    assert meta.schema_version == THREAD_METADATA_SCHEMA_VERSION == 7
+    assert meta.schema_version == THREAD_METADATA_SCHEMA_VERSION == 8
 
 
 def test_thread_metadata_message_count_non_negative() -> None:
@@ -202,10 +202,14 @@ def test_read_v3_lazy_upgrades_usage_totals_to_v4(tmp_path: Path) -> None:
     )
     loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
     assert loaded is not None
-    assert loaded.schema_version == 7
-    assert loaded.cumulative_prompt_tokens == 0
-    assert loaded.cumulative_completion_tokens == 0
-    assert loaded.cumulative_total_tokens == 0
+    # v8 升级链：v3 → v4 → ... → v7 → v8（cumulative_usage dict）
+    assert loaded.schema_version == 8
+    # 老 v3 文件无 cumulative_*_tokens 字段 → v3→v4 补 0 → v7→v8 映射 dict
+    # 因为 backend_kind=generic_chat + cache_creation=0 → openai 启发式
+    assert loaded.cumulative_usage is not None
+    assert loaded.cumulative_usage["channel"] == "openai"
+    assert loaded.cumulative_usage["input_tokens"] == 0
+    assert loaded.cumulative_usage["output_tokens"] == 0
     assert loaded.is_pinned is False
 
 
@@ -325,8 +329,8 @@ def test_is_pinned_round_trip(tmp_path: Path) -> None:
     assert loaded.is_pinned is True
 
 
-def test_read_v6_lazy_upgrades_to_v7_with_is_pinned(tmp_path: Path) -> None:
-    """v6 文件缺 is_pinned → 懒升级到 v7，补 is_pinned=False。"""
+def test_read_v6_lazy_upgrades_to_v8_with_is_pinned_and_usage(tmp_path: Path) -> None:
+    """v6 文件 → 懒升级到 v8：补 is_pinned + 字段重组为 cumulative_usage dict。"""
     path = thread_metadata_path(tmp_path, "thread-aaaaaaaaaaaa")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -340,5 +344,8 @@ def test_read_v6_lazy_upgrades_to_v7_with_is_pinned(tmp_path: Path) -> None:
     )
     loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
     assert loaded is not None
-    assert loaded.schema_version == 7
+    assert loaded.schema_version == 8
     assert loaded.is_pinned is False
+    # v8 字段重组：generic_chat + cache_creation=0 → openai 启发式
+    assert loaded.cumulative_usage is not None
+    assert loaded.cumulative_usage["channel"] == "openai"

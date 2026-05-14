@@ -40,16 +40,13 @@ from pydantic import BaseModel, Field
 from scheduler.domain import (
     ConcurrencyPolicy,
     DeliveryChannel,
-    MisfirePolicy,
     RunStatus,
     ScheduleDelivery,
-    ScheduleTrigger,
     ScheduledTask,
     TaskExecutionPolicy,
     TaskOrigin,
     TaskState,
     TaskTarget,
-    TriggerType,
 )
 from scheduler.schedule_parser import parse_schedule
 from scheduler.store import TaskNotFoundError

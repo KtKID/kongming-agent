@@ -156,6 +156,10 @@ class ThreadMetadataDTO(_FrameBase):
     v0.2.3 将旧 ``sdk_session_id`` 改名为 ``claude_thread_id``，
     ``schema_version`` 升至 ``6``。
     v0.2.4 加 ``is_pinned`` 置顶字段，``schema_version`` 升至 ``7``。
+    **v0.2.5 (usage-token-manager-core task#2)** schema 升至 ``8``：
+    ThreadMetadata 后端字段重组（删 5 旧字段 + 加嵌套 ``cumulative_usage`` dict）；
+    本 DTO 暂时保留旧 5 字段供前端兼容，``_to_dto`` 临时派生。**task#3 删本 DTO**，
+    前端改为消费 ``ThreadUsageSummary`` (`web.usage_token.ThreadUsageSummary`)。
     （同时接受老 v1/v2 文件，懒升级在 :func:`web.thread_metadata.read_thread_metadata`
     里完成；DTO 这里只负责出/入参形态对齐 ThreadMetadata 模型）。
     ``id`` 严格匹配 ``^thread-[a-f0-9]{12}$``，防止用户在 URL 里手写 thread id
@@ -178,7 +182,7 @@ class ThreadMetadataDTO(_FrameBase):
     cumulative_cache_read_tokens: int | None = None
     cumulative_cache_creation_tokens: int | None = None
     is_pinned: bool = False
-    schema_version: Literal[1, 2, 3, 4, 5, 6, 7] = 7
+    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8] = 8
 
 
 class WorkspaceContextDTO(_FrameBase):

@@ -33,7 +33,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -98,12 +98,37 @@ def _validate_thread_id(thread_id: str) -> None:
 
 
 def _to_dto(meta: ThreadMetadata) -> ThreadMetadataDTO:
-    prompt = meta.cumulative_prompt_tokens
-    completion = meta.cumulative_completion_tokens
-    total = meta.cumulative_total_tokens
-    cache_read: int | None = meta.cumulative_cache_read_tokens or None
-    cache_creation: int | None = meta.cumulative_cache_creation_tokens or None
+    """把 ThreadMetadata 转 REST DTO。
 
+    ⚠️ **task#2 兼容 layer**：ThreadMetadata 已删 5 个 ``cumulative_*_tokens`` 字段，
+    改为嵌套 ``cumulative_usage`` dict（v8）。本函数从 dict 派生回旧 5 字段填 DTO，
+    让前端 ``ThreadMetadataDTO`` 继续工作（task#3 真删 DTO 时一起删本函数兼容 layer）。
+
+    派生规则（按 ``cumulative_usage.channel`` 分支）：
+
+    - ``anthropic``：
+        cumulative_prompt_tokens         = input_tokens (不含 cache)
+        cumulative_completion_tokens     = output_tokens
+        cumulative_total_tokens          = input + output (派生)
+        cumulative_cache_read_tokens     = cache_read_input_tokens
+        cumulative_cache_creation_tokens = cache_creation_input_tokens
+
+    - ``openai``：
+        cumulative_prompt_tokens         = input_tokens (含 cache 子集)
+        cumulative_completion_tokens     = output_tokens
+        cumulative_total_tokens          = input + output
+        cumulative_cache_read_tokens     = cached_input_tokens (lossy 别名)
+        cumulative_cache_creation_tokens = None (OpenAI 无此概念)
+
+    claude_code 通道：保留实时算 transcript jsonl 的逻辑（task#3 删，改为通过
+    UsageTokenManager 派生）。
+    """
+    # 从 v8 cumulative_usage dict 派生回旧 5 字段
+    prompt, completion, total, cache_read, cache_creation = _derive_legacy_token_fields(
+        meta.cumulative_usage
+    )
+
+    # claude_code：实时算 transcript（task#3 删，改 manager）
     if meta.backend_kind == "claude_code" and meta.claude_thread_id and meta.cwd:
         usage = parse_transcript_usage(jsonl_path_for(meta.cwd, meta.claude_thread_id))
         prompt = usage.input_tokens
@@ -131,6 +156,45 @@ def _to_dto(meta: ThreadMetadata) -> ThreadMetadataDTO:
         is_pinned=meta.is_pinned,
         schema_version=meta.schema_version,
     )
+
+
+def _derive_legacy_token_fields(
+    cumulative_usage: dict[str, Any] | None,
+) -> tuple[int, int, int, int | None, int | None]:
+    """从 v8 cumulative_usage dict 派生旧 5 字段（task#3 删）。
+
+    Returns:
+        ``(prompt, completion, total, cache_read, cache_creation)``——
+        全 0 / None 表示 thread 首轮前或 dict 损坏。
+    """
+    if not cumulative_usage or not isinstance(cumulative_usage, dict):
+        return 0, 0, 0, None, None
+
+    channel = cumulative_usage.get("channel")
+    input_tokens = int(cumulative_usage.get("input_tokens", 0) or 0)
+    output_tokens = int(cumulative_usage.get("output_tokens", 0) or 0)
+
+    if channel == "anthropic":
+        cache_read = int(cumulative_usage.get("cache_read_input_tokens", 0) or 0)
+        cache_creation = int(cumulative_usage.get("cache_creation_input_tokens", 0) or 0)
+        return (
+            input_tokens,
+            output_tokens,
+            input_tokens + output_tokens,
+            cache_read or None,
+            cache_creation or None,
+        )
+    if channel == "openai":
+        cached_input = int(cumulative_usage.get("cached_input_tokens", 0) or 0)
+        return (
+            input_tokens,
+            output_tokens,
+            input_tokens + output_tokens,
+            cached_input or None,
+            None,  # OpenAI 无 cache_creation 概念
+        )
+    # 未知 channel：保守返回 0
+    return 0, 0, 0, None, None
 
 
 def _to_workspace_context(meta: ThreadMetadata) -> WorkspaceContextDTO:

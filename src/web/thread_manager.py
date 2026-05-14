@@ -235,9 +235,7 @@ class ThreadManager:
             created_at=now,
             updated_at=now,
             message_count=0,
-            cumulative_prompt_tokens=0,
-            cumulative_completion_tokens=0,
-            cumulative_total_tokens=0,
+            cumulative_usage=None,  # v8: 首轮前为 None；首轮 record_run_usage 时初始化
         )
         # 写盘可能阻塞，放 to_thread
         await asyncio.to_thread(write_thread_metadata, self._home, meta)
@@ -266,11 +264,7 @@ class ThreadManager:
             created_at=meta.created_at,
             updated_at=_now(),
             message_count=meta.message_count,
-            cumulative_prompt_tokens=meta.cumulative_prompt_tokens,
-            cumulative_completion_tokens=meta.cumulative_completion_tokens,
-            cumulative_total_tokens=meta.cumulative_total_tokens,
-            cumulative_cache_read_tokens=meta.cumulative_cache_read_tokens,
-            cumulative_cache_creation_tokens=meta.cumulative_cache_creation_tokens,
+            cumulative_usage=meta.cumulative_usage,  # v8: 透传嵌套 dict
             is_pinned=meta.is_pinned,
         )
         await asyncio.to_thread(write_thread_metadata, self._home, updated)
@@ -296,11 +290,7 @@ class ThreadManager:
             created_at=meta.created_at,
             updated_at=meta.updated_at,  # pin 不改 updated_at
             message_count=meta.message_count,
-            cumulative_prompt_tokens=meta.cumulative_prompt_tokens,
-            cumulative_completion_tokens=meta.cumulative_completion_tokens,
-            cumulative_total_tokens=meta.cumulative_total_tokens,
-            cumulative_cache_read_tokens=meta.cumulative_cache_read_tokens,
-            cumulative_cache_creation_tokens=meta.cumulative_cache_creation_tokens,
+            cumulative_usage=meta.cumulative_usage,  # v8: 透传嵌套 dict
             is_pinned=is_pinned,
         )
         await asyncio.to_thread(write_thread_metadata, self._home, updated)
@@ -322,11 +312,23 @@ class ThreadManager:
     ) -> ThreadMetadata:
         """把一次 run 的累计 usage 回写到 thread metadata。
 
-        用于 generic chat 路径在 ``bridge.run_once`` 结束后落盘 thread 级累计
-        ``prompt / completion / total``。负数一律按 0 处理，避免上游异常值污染累计量。
+        ⚠️ **task#2 临时兼容 shim**：直接操作 ``ThreadMetadata.cumulative_usage``
+        透明 dict，本应该由 ``UsageTokenManager.record_run_usage`` 处理；
+        task#3 wiring 时 ``UsagePersistSink`` 直接调 manager，本函数会被
+        绕过，到时候删掉。
 
-        ``cache_read_tokens`` / ``cache_creation_tokens`` 为 optional；generic_chat
-        的 usage event 可能不包含它们。非 None 时累加到 metadata 对应字段。
+        当前实现：按 ``backend_kind`` 决定 channel（claude_code→anthropic /
+        codex→openai / generic_chat→看 prev channel 或 cache_creation 启发式），
+        累加到 ``cumulative_usage`` dict 对应字段。
+
+        Args:
+            prompt_tokens: 本轮 prompt token（Anthropic 视为 input_tokens，
+                OpenAI 视为含 cached_input 子集的 input_tokens）
+            completion_tokens: 本轮输出 token
+            total_tokens: 派生量，**直接丢弃**（v8 schema 不再持久化）
+            cache_read_tokens: Anthropic 系 → cache_read_input_tokens；
+                OpenAI 系 → cached_input_tokens
+            cache_creation_tokens: 仅 Anthropic 系有意义；OpenAI 系丢弃
         """
         meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
         if meta is None:
@@ -334,23 +336,53 @@ class ThreadManager:
 
         prompt = max(0, int(prompt_tokens))
         completion = max(0, int(completion_tokens))
-        total = max(0, int(total_tokens))
-        update: dict[str, object] = {
-            "updated_at": _now(),
-            "cumulative_prompt_tokens": meta.cumulative_prompt_tokens + prompt,
-            "cumulative_completion_tokens": meta.cumulative_completion_tokens + completion,
-            "cumulative_total_tokens": meta.cumulative_total_tokens + total,
-            "schema_version": 7,
-        }
-        if cache_read_tokens is not None:
-            update["cumulative_cache_read_tokens"] = (
-                meta.cumulative_cache_read_tokens + cache_read_tokens
-            )
-        if cache_creation_tokens is not None:
-            update["cumulative_cache_creation_tokens"] = (
-                meta.cumulative_cache_creation_tokens + cache_creation_tokens
-            )
-        updated = meta.model_copy(update=update)
+        # total_tokens 是派生量，v8 不再持久化（manager 内部按需算）
+        _ = total_tokens
+
+        prev_usage = meta.cumulative_usage or {}
+        prev_channel = prev_usage.get("channel") if isinstance(prev_usage, dict) else None
+
+        # 按 backend_kind 决定 channel
+        if meta.backend_kind == "claude_code":
+            channel = "anthropic"
+        elif meta.backend_kind == "codex":
+            channel = "openai"
+        elif prev_channel in ("anthropic", "openai"):
+            # generic_chat：保留 prev 的 channel 一致性
+            channel = prev_channel
+        else:
+            # generic_chat 首轮启发式：cache_creation > 0 → anthropic（独有概念）
+            channel = "anthropic" if (cache_creation_tokens or 0) > 0 else "openai"
+
+        new_usage: dict[str, int | str]
+        if channel == "anthropic":
+            new_usage = {
+                "channel": "anthropic",
+                "input_tokens": int(prev_usage.get("input_tokens", 0)) + prompt,
+                "cache_read_input_tokens": int(prev_usage.get("cache_read_input_tokens", 0))
+                + max(0, int(cache_read_tokens or 0)),
+                "cache_creation_input_tokens": int(prev_usage.get("cache_creation_input_tokens", 0))
+                + max(0, int(cache_creation_tokens or 0)),
+                "output_tokens": int(prev_usage.get("output_tokens", 0)) + completion,
+            }
+        else:  # openai
+            new_usage = {
+                "channel": "openai",
+                "input_tokens": int(prev_usage.get("input_tokens", 0)) + prompt,
+                "cached_input_tokens": int(prev_usage.get("cached_input_tokens", 0))
+                + max(0, int(cache_read_tokens or 0)),
+                "output_tokens": int(prev_usage.get("output_tokens", 0)) + completion,
+                # reasoning_output_tokens 本接口拿不到，保留 prev 值（决策 4N）
+                "reasoning_output_tokens": int(prev_usage.get("reasoning_output_tokens", 0)),
+            }
+
+        updated = meta.model_copy(
+            update={
+                "updated_at": _now(),
+                "cumulative_usage": new_usage,
+                "schema_version": 8,
+            }
+        )
         await asyncio.to_thread(write_thread_metadata, self._home, updated)
         async with self._lock:
             cell = self._cells.get(thread_id)

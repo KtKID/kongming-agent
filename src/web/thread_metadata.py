@@ -3,7 +3,7 @@
 每个 thread 在 ``.kongming/web/threads/<thread_id>/metadata.json`` 落一份
 :class:`ThreadMetadata` 文件。本文件提供：
 
-- :class:`ThreadMetadata` Pydantic 模型（当前 schema_version=6，v0.2.3 起）
+- :class:`ThreadMetadata` Pydantic 模型（当前 schema_version=8，task#2 起）
 - :func:`thread_metadata_path` —— 路径常量
 - :func:`write_thread_metadata` —— 原子写入（``tmp.replace(path)``）
 - :func:`read_thread_metadata` —— 读 + 校验；schema_version 不匹配 / JSON
@@ -29,18 +29,26 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from web.usage_token._migration import upgrade_v7_to_v8
 
 logger = logging.getLogger(__name__)
 
 
-# v0.2.4 schema 版本：bump 到 7 以支持 thread 置顶功能（is_pinned 字段）。
+# schema 版本演进：
+# - v7（v0.2.4）：bump 到 7 以支持 thread 置顶功能（is_pinned 字段）。
+# - **v8（usage-token-manager-core task#2）**：删 5 个 ``cumulative_*_tokens`` 字段
+#   （prompt / completion / total / cache_read / cache_creation），改为嵌套
+#   ``cumulative_usage: dict[str, Any] | None``——透明 dict 落盘，**仅
+#   ``UsageTokenManager`` 能解释**。
+#
 # ``claude_thread_id`` / ``codex_thread_id`` 都表示 provider 底层可恢复 thread id。
 # 一个 Kongming thread 绑定一个 provider session/thread；老 v5 文件读入时把
 # ``sdk_session_id`` 迁移为 ``claude_thread_id``。
-THREAD_METADATA_SCHEMA_VERSION = 7
+THREAD_METADATA_SCHEMA_VERSION = 8
 
 
 class ThreadMetadata(BaseModel):
@@ -68,34 +76,78 @@ class ThreadMetadata(BaseModel):
         created_at: Unix 时间戳（秒）。
         updated_at: Unix 时间戳（秒）；rename / 一轮对话结束时更新。
         message_count: 历史消息总数；用于 UI 上的"X 条消息"展示。
-        cumulative_prompt_tokens: thread 级累计输入 token 总量；每次 run 结束后
-            加上本次 ``Result.metadata.usage.prompt_tokens``。
-        cumulative_completion_tokens: thread 级累计输出 token 总量。
-        cumulative_total_tokens: thread 级累计总 token。
+        cumulative_usage: token 用量累计（v8 新增，**透明 dict 落盘**）。
+
+            ⚠️ **架构约束**：本字段是透明 dict，**仅 ``UsageTokenManager`` 能解释**。
+            外部模块禁止直接读字段；通过 ``manager.get_thread_summary(thread_id)``
+            拿派生 summary。
+
+            落盘格式（Anthropic 系，``backend_kind=claude_code`` 或 generic_chat-anthropic）::
+
+                {
+                  "channel": "anthropic",
+                  "input_tokens": N,                  # 不含 cache 的纯新输入累计
+                  "cache_read_input_tokens": N,       # 命中 cache 输入累计（独立计数）
+                  "cache_creation_input_tokens": N,   # 写 cache 输入累计（独立计数）
+                  "output_tokens": N                  # 输出累计
+                }
+
+            落盘格式（OpenAI 系，``backend_kind=codex`` 或 generic_chat-openai）::
+
+                {
+                  "channel": "openai",
+                  "input_tokens": N,                  # 总输入（含 cached_input 子集）
+                  "cached_input_tokens": N,           # 命中 cache 子集（是 input 子集）
+                  "output_tokens": N,                 # 总输出（含 reasoning 子集）
+                  "reasoning_output_tokens": N        # 推理思考用量（是 output 子集）
+                }
+
+            ``None`` 表示该 thread 还没跑过任何 turn。
         is_pinned: 置顶标记；``True`` 时 UI 列表优先排列。v0.2.4 新增。
-        schema_version: 当前 ``7``；``Literal[1, 2, 3, 4, 5, 6, 7]`` 同时接受老文件，
-            写盘时永远写 ``7``。
+        schema_version: 当前 ``8``；``Literal[1, ..., 8]`` 同时接受老文件，
+            写盘时永远写 ``8``。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     id: Annotated[str, Field(pattern=r"^thread-[a-f0-9]{12}$")]
+    """thread 唯一标识，格式 ``thread-<hex12>``；与 runner session_id 同值。"""
+
     name: Annotated[str, Field(min_length=1, max_length=200)]
+    """thread 显示名（用户输入，最长 200 字符；UI 列表展示用）。"""
+
     preset_id: str = ""
+    """创建时选的 LLM preset ID（claude_code 允许空字符串占位）。"""
+
     backend_kind: Literal["generic_chat", "claude_code", "codex"] = "generic_chat"
+    """后端通道类型（transport 维度，与 token 语义 ``channel`` 解耦）。"""
+
     claude_thread_id: str = ""
+    """Claude SDK 底层 session id（仅 claude_code 通道有效）。"""
+
     codex_thread_id: str = ""
+    """Codex CLI 底层 session id（仅 codex 通道有效）。"""
+
     cwd: str = ""
+    """claude_code 通道工作目录绝对路径（定位 transcript jsonl）。"""
+
     created_at: float
+    """thread 创建时间（Unix 时间戳，秒）。"""
+
     updated_at: float
+    """最近活跃时间（Unix 时间戳，秒）。"""
+
     message_count: Annotated[int, Field(ge=0)] = 0
-    cumulative_prompt_tokens: Annotated[int, Field(ge=0)] = 0
-    cumulative_completion_tokens: Annotated[int, Field(ge=0)] = 0
-    cumulative_total_tokens: Annotated[int, Field(ge=0)] = 0
-    cumulative_cache_read_tokens: Annotated[int, Field(ge=0)] = 0
-    cumulative_cache_creation_tokens: Annotated[int, Field(ge=0)] = 0
+    """历史消息总数（UI 列表展示 "X 条消息"）。"""
+
+    cumulative_usage: dict[str, Any] | None = None
+    """Token 用量累计（v8 透明 dict 落盘，仅 UsageTokenManager 解释；详见类 docstring）。"""
+
     is_pinned: bool = False
-    schema_version: Literal[1, 2, 3, 4, 5, 6, 7] = 7
+    """是否置顶（v0.2.4 新增）。"""
+
+    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8] = 8
+    """schema 版本号（当前 v8）。"""
 
 
 def thread_metadata_path(home: Path, thread_id: str) -> Path:
@@ -146,7 +198,7 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
 
     - 文件不存在 / 不是普通文件
     - JSON 解析失败（损坏 / 编码异常）
-    - schema_version 不在 ``{1, 2, 3, 4, 5, 6, 7}``（更高版本 = 该进程不认识，拒绝）
+    - schema_version 不在 ``{1, ..., 8}``（更高版本 = 该进程不认识，拒绝）
     - 字段校验失败（缺字段 / 类型不对 / 正则不匹配）
 
     **v1 → v2 懒升级**：``schema_version=1`` 且缺 ``backend_kind`` 时，
@@ -166,8 +218,13 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
 
     **v6 → v7 懒升级**：补 ``is_pinned`` 字段（v0.2.4 置顶功能新增）。
 
-    返回的 :class:`ThreadMetadata` 实例已是最新 v7 形态。下次
-    :func:`write_thread_metadata` 会以 v7 写盘（默认 ``schema_version=7``，
+    **v7 → v8 懒升级**（usage-token-manager-core task#2）：
+    删旧 5 个 ``cumulative_*_tokens`` 字段，按 ``backend_kind`` 映射到嵌套
+    ``cumulative_usage: dict``（``upgrade_v7_to_v8`` 实现）。
+    旧 ``cumulative_total_tokens`` 是派生量，直接丢弃。
+
+    返回的 :class:`ThreadMetadata` 实例已是最新 v8 形态。下次
+    :func:`write_thread_metadata` 会以 v8 写盘（默认 ``schema_version=8``，
     无需调用方关心）。本函数**不**自己回写——避免读盘函数有副作用。
 
     所有 ``None`` 路径都会记 warning 日志，便于排查。
@@ -218,6 +275,12 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
     if data.get("schema_version") == 6:
         data.setdefault("is_pinned", False)
         data["schema_version"] = 7
+    # v7 → v8 懒升级（usage-token-manager-core task#2）：删 5 个 cumulative_*_tokens
+    # 字段，按 backend_kind 映射到嵌套 cumulative_usage dict。
+    # ⚠️ 单点白名单：from web.usage_token._migration（.importlinter Contract 9
+    # ignore_imports 已配 `web.thread_metadata -> web.usage_token._migration`）
+    if data.get("schema_version") == 7:
+        data = upgrade_v7_to_v8(data)
     # 兜底：任何 version 下如果 sdk_session_id 仍残留，强制迁移
     if "sdk_session_id" in data:
         data.setdefault("claude_thread_id", str(data.pop("sdk_session_id")))
