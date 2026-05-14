@@ -255,6 +255,9 @@ ignore_imports =
 [importlinter:contract:usage-token-encapsulation]
 name = Only UsageTokenManager and public DTOs exposed; TokenUsage internal models are private
 type = forbidden
+; allow_indirect_imports=True：只禁直接 import；透过公共入口 web.usage_token →
+; manager.py 间接接触内部模型是合法的（manager 内部消费自家私有 helper）。
+allow_indirect_imports = True
 source_modules =
     core
     cli
