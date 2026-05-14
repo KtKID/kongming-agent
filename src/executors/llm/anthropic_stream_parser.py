@@ -422,10 +422,23 @@ class AnthropicStreamParser:
         )
 
     def _build_usage(self) -> dict[str, Any]:
+        # task#3.1：透传 SDK 原生字段 + provider_kind，让 web.usage_token 按 channel 解析
+        cache_read = self._state.cache_read_input_tokens or 0
+        cache_creation = self._state.cache_creation_input_tokens or 0
+        # 派生 prompt_tokens = input + cache_read + cache_creation（**修 lossy bug**：
+        # 不含 cache 两项的旧实现会让 web 显示的输入 token 比真实小 N 万）
+        prompt_tokens = self._state.input_tokens + cache_read + cache_creation
         out: dict[str, Any] = {
-            "prompt_tokens": self._state.input_tokens,
+            "provider_kind": "anthropic",
+            # Anthropic 原生字段
+            "input_tokens": self._state.input_tokens,
+            "output_tokens": self._state.output_tokens,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_creation,
+            # 兼容老消费者
+            "prompt_tokens": prompt_tokens,
             "completion_tokens": self._state.output_tokens,
-            "total_tokens": self._state.input_tokens + self._state.output_tokens,
+            "total_tokens": prompt_tokens + self._state.output_tokens,
         }
         return out
 

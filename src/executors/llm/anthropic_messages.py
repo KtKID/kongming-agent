@@ -406,13 +406,33 @@ class AnthropicMessagesProvider(BaseLLMProvider):
         )
 
         usage_raw = data.get("usage") or {}
-        normalized_usage: dict[str, Any] = {}
-        # Anthropic: input_tokens / output_tokens → 映射成通用键
-        if "input_tokens" in usage_raw:
-            normalized_usage["prompt_tokens"] = usage_raw["input_tokens"]
-        if "output_tokens" in usage_raw:
-            normalized_usage["completion_tokens"] = usage_raw["output_tokens"]
-        if "prompt_tokens" in normalized_usage and "completion_tokens" in normalized_usage:
+        # task#3.1：Anthropic usage 字段透传 SDK 原生字段 + provider_kind 标识，
+        # 用于 web.usage_token.UsageTokenManager 按 channel 解析。
+        # ⚠️ 修复历史 lossy bug（commit 4a00907 前）：
+        # 旧代码 `prompt_tokens=input_tokens` 漏算 cache_read/cache_creation，
+        # 导致 web 显示的 prompt_tokens 比真实 prompt 小 N 万 token。
+        normalized_usage: dict[str, Any] = {
+            "provider_kind": "anthropic",
+        }
+        # 原生字段直透（缺失不写；下游 _channel_anthropic.parse_raw_to_usage 兜底 0）
+        for native_key in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ):
+            if native_key in usage_raw:
+                normalized_usage[native_key] = usage_raw[native_key]
+        # 派生 prompt_tokens / completion_tokens / total_tokens 兼容老消费者
+        # （旧 thread_manager.add_thread_usage shim + 旧 runner accumulated_usage 等）
+        # 派生公式：prompt = input + cache_read + cache_creation（task#3 真值，含 cache）
+        input_t = int(usage_raw.get("input_tokens", 0) or 0)
+        output_t = int(usage_raw.get("output_tokens", 0) or 0)
+        cache_read = int(usage_raw.get("cache_read_input_tokens", 0) or 0)
+        cache_creation = int(usage_raw.get("cache_creation_input_tokens", 0) or 0)
+        if "input_tokens" in usage_raw or "output_tokens" in usage_raw:
+            normalized_usage["prompt_tokens"] = input_t + cache_read + cache_creation
+            normalized_usage["completion_tokens"] = output_t
             normalized_usage["total_tokens"] = (
                 normalized_usage["prompt_tokens"] + normalized_usage["completion_tokens"]
             )
@@ -420,7 +440,7 @@ class AnthropicMessagesProvider(BaseLLMProvider):
         # 厂商扩展字段：保留原始 Anthropic 字段名。
         provider_metadata: dict[str, Any] = {}
 
-        # cache token 细分（Anthropic 的 prompt caching）
+        # cache token 细分也保留到 provider_metadata（向后兼容 observability 旧消费者）
         for cache_key in ("cache_creation_input_tokens", "cache_read_input_tokens"):
             if cache_key in usage_raw:
                 provider_metadata[cache_key] = usage_raw[cache_key]

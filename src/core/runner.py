@@ -438,17 +438,16 @@ class Runner:
             )
 
             # 独立 usage event，供 WS EventSink 推送到前端 StatusLine
+            # task#3.1：payload 透传 LLMResponse.usage 全字段（含 provider_kind +
+            # SDK 原生字段），让 web.usage_token.UsagePersistSink 按 channel 解析；
+            # 同时保留 prompt/completion/total 兼容老消费者。
             u = response.usage
             await self._emit(
                 Event(
                     kind="usage",
                     run_id=state.run_id,
                     turn=state.turn,
-                    payload={
-                        "prompt_tokens": u.get("prompt_tokens", 0),
-                        "completion_tokens": u.get("completion_tokens", 0),
-                        "total_tokens": u.get("total_tokens", 0),
-                    },
+                    payload=dict(u),
                 )
             )
 
