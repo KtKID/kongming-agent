@@ -234,8 +234,55 @@ class ClaudeCodeService:
         # 当前用于出站消息 sessionId 字段的真值——首次见到 session_created 后切换
         active_sid = register_id
         broadcaster = get_broadcaster()
+        # 从 AssistantMessage.model 捕获模型名，供 record_run_usage 注入 context_window 查找
+        _last_model: str | None = None
 
         async for msg in client.receive_response():
+            # 捕获 AssistantMessage.model（SDK dataclass 有此字段）
+            msg_model = getattr(msg, "model", None)
+            if isinstance(msg_model, str) and msg_model:
+                _last_model = msg_model
+
+            # AssistantMessage.usage → set_last_assistant_usage（上下文占用真源）
+            # 每次 API call 完成后立即更新 last_snapshot + emit WS 帧，让前端实时刷新
+            if (
+                self._thread_manager is not None
+                and self._is_thread_id(register_id)
+                and hasattr(msg, "usage")
+                and hasattr(msg, "content")  # AssistantMessage 特征：有 content 字段
+            ):
+                raw_assistant_usage = getattr(msg, "usage", None)
+                if isinstance(raw_assistant_usage, dict) and raw_assistant_usage:
+                    try:
+                        self._thread_manager.usage_manager.set_last_assistant_usage(
+                            register_id,
+                            channel="anthropic",
+                            raw_payload=raw_assistant_usage,
+                            model=_last_model,
+                        )
+                        logger.debug(
+                            "claude-code set_last_assistant_usage ok thread=%s model=%s",
+                            register_id,
+                            _last_model,
+                        )
+                        # emit WS usage_summary 让前端实时刷新上下文占用
+                        with contextlib.suppress(Exception):
+                            summary = await self._thread_manager.usage_manager.get_thread_summary(
+                                register_id
+                            )
+                            await broadcaster.broadcast(
+                                {
+                                    "type": "usage_summary_updated",
+                                    "threadId": register_id,
+                                    "usage_summary": summary.model_dump(),
+                                }
+                            )
+                    except Exception:
+                        logger.warning(
+                            "claude-code _consume set_last_assistant_usage failed",
+                            exc_info=True,
+                        )
+
             normalized = self._normalizer.normalize(msg, active_sid)
             for n in normalized:
                 # 第一次见到 session_created → 把 placeholder 改名成真实 SDK id
@@ -268,29 +315,26 @@ class ClaudeCodeService:
                                 "claude-code _consume bind_claude_thread failed",
                                 exc_info=True,
                             )
-                # usage 写盘：检测到 complete 时取原始 SDK msg.usage 调 manager
-                # 条件：thread_manager 存在 + register_id 是有效 thread_id（非 placeholder）
+                # ResultMessage（complete）到达时：从 SDK 真源 jsonl 派生最新 usage
+                # 广播给前端刷新（**不再写盘** —— claude_code 通道完全走派生路径，
+                # usage-token-derive-from-jsonl-v0.1 task 治本改动；
+                # 参见 docs/usage-token-v2/ 设计）。
                 if (
                     n.get("kind") == "complete"
                     and self._thread_manager is not None
                     and self._is_thread_id(register_id)
                 ):
-                    raw_usage = getattr(msg, "usage", None)
-                    if isinstance(raw_usage, dict) and raw_usage:
-                        run_id = f"{register_id}-{run_index}"
-                        try:
-                            await self._thread_manager.usage_manager.record_run_usage(
-                                register_id,
-                                channel="anthropic",
-                                raw_payload=raw_usage,
-                                turn=run_index,
-                                run_id=run_id,
-                            )
-                        except Exception:
-                            logger.warning(
-                                "claude-code _consume record_run_usage failed",
-                                exc_info=True,
-                            )
+                    with contextlib.suppress(Exception):
+                        summary = await self._thread_manager.usage_manager.get_thread_summary(
+                            register_id
+                        )
+                        await broadcaster.broadcast(
+                            {
+                                "type": "usage_summary_updated",
+                                "threadId": register_id,
+                                "usage_summary": summary.model_dump(),
+                            }
+                        )
                 # 把出站消息的 sessionId 字段同步成真实 id
                 if n.get("sessionId") != active_sid:
                     n["sessionId"] = active_sid

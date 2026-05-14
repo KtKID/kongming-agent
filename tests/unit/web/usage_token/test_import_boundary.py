@@ -9,10 +9,11 @@ from __future__ import annotations
 
 class TestPackageInitExportSurface:
     def test_only_public_symbols_exported(self) -> None:
-        """__init__.py 只 export 5 个公共符号。"""
+        """__init__.py 只 export 6 个公共符号（v0.1 加 DeriveProvider）。"""
         from web import usage_token
 
         expected = {
+            "DeriveProvider",
             "UsageTokenManager",
             "UsageTokenSnapshot",
             "ThreadUsageSummary",
@@ -72,6 +73,18 @@ class TestProtocolCompatibility:
                 return None
 
             async def write_cumulative_usage(self, thread_id: str, usage_dict):  # type: ignore[no-untyped-def]
+                pass
+
+            async def read_last_run_snapshot(self, thread_id: str):  # type: ignore[no-untyped-def]
+                return None
+
+            async def write_last_run_snapshot(self, thread_id: str, snapshot_dict):  # type: ignore[no-untyped-def]
+                pass
+
+            async def read_last_model_name(self, thread_id: str):  # type: ignore[no-untyped-def]
+                return ""
+
+            async def write_last_model_name(self, thread_id: str, model_name):  # type: ignore[no-untyped-def]
                 pass
 
         assert isinstance(DummyAdapter(), ThreadMetadataIO)

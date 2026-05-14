@@ -39,6 +39,7 @@ from typing import Any, Literal
 from config_loader.models import Config
 from core.contracts import ApprovalAction
 from core.message import Message
+from web.claude_code.jsonl_history import jsonl_path_for
 from web.host_adapter import WebHostAdapter
 from web.protocol import CellEvictedFrame, CellSummaryDTO, EvictReason
 from web.thread_cell import ThreadCell
@@ -51,7 +52,8 @@ from web.thread_metadata import (
     write_thread_metadata,
 )
 from web.thread_status_ws import ThreadStatusEventSink
-from web.usage_token import UsageTokenManager
+from web.usage_token import DeriveProvider, UsageTokenManager
+from web.usage_token._model_context_table import DEFAULT_MODEL_CONTEXT_WINDOWS
 from web.usage_token_io_adapter import ThreadMetadataIOAdapter
 from web.ws_event_sink import UsagePersistSink, WSEventSink
 from web.ws_fanout import WebSocketFanout
@@ -65,6 +67,37 @@ class ClaudeThreadAlreadyBoundError(ValueError):
 
 class ClaudeThreadConflictError(ValueError):
     """claude_thread_id 已被另一 thread 绑定，禁止重复绑定（v0.2 invariant：1:1 绑定）。"""
+
+
+class _ClaudeCodeJsonlPathProvider:
+    """``DeriveProvider`` 协议的实现 —— 把 thread_id 翻译成 SDK jsonl 路径。
+
+    UsageTokenManager 通过本 provider 拿到 jsonl 路径后，自己在包内调
+    ``_derive_claude_code.derive_from_jsonl`` 算出 cumulative + last_snapshot
+    + model_name，避免 thread_manager 跨越 importlinter Contract 9 边界
+    直接 import ``_derive_claude_code`` 子模块。
+
+    非 ``backend_kind="claude_code"`` 的 thread / 未首次绑定的 thread 返回 ``None``，
+    让 manager 走 metadata 读盘 fallback。
+    """
+
+    def __init__(self, home: Path) -> None:
+        self._home = home
+
+    async def get_claude_jsonl_path(self, thread_id: str) -> Path | None:
+        # 读 metadata 用同步函数 → asyncio.to_thread 隔离
+        meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
+        if meta is None:
+            return None
+        if meta.backend_kind != "claude_code":
+            return None
+        if not meta.cwd or not meta.claude_thread_id:
+            return None
+        return jsonl_path_for(meta.cwd, meta.claude_thread_id)
+
+
+# Protocol 兼容性自检（启动时一次性，运行时零开销）
+assert isinstance(_ClaudeCodeJsonlPathProvider(Path("/tmp")), DeriveProvider)
 
 
 class CodexThreadAlreadyBoundError(ValueError):
@@ -133,9 +166,15 @@ class ThreadManager:
         # task#3.2: UsageTokenManager 注入——usage 写盘统一走 manager
         # ThreadMetadataIOAdapter 包装 read_thread_metadata / write_thread_metadata
         # 让 manager 通过抽象 Protocol 操作 cumulative_usage dict 字段。
+        #
+        # usage-token-derive-from-jsonl-v0.1：注入 DeriveProvider 让 claude_code
+        # 通道的 cumulative + last_snapshot + model_name 从 SDK jsonl 现场派生，
+        # 不再依赖 metadata.json 落盘（消除 fire-and-forget 并发写竞争）。
         self._usage_manager: UsageTokenManager = UsageTokenManager(
             home=kongming_home,
             thread_metadata_io=ThreadMetadataIOAdapter(kongming_home),
+            model_context_windows=DEFAULT_MODEL_CONTEXT_WINDOWS,
+            derive_provider=_ClaudeCodeJsonlPathProvider(kongming_home),
         )
 
     @property

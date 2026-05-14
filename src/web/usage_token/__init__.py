@@ -35,9 +35,10 @@ from web.usage_token._models import (
     UsageTokenSnapshot,
 )
 from web.usage_token._persistence import ThreadMetadataIO
-from web.usage_token.manager import UsageTokenManager
+from web.usage_token.manager import DeriveProvider, UsageTokenManager
 
 __all__ = [
+    "DeriveProvider",
     "UsageTokenManager",
     "UsageTokenSnapshot",
     "ThreadUsageSummary",
