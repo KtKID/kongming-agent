@@ -51,8 +51,6 @@ from web.thread_metadata import (
     write_thread_metadata,
 )
 from web.thread_status_ws import ThreadStatusEventSink
-from web.usage_token import UsageTokenManager
-from web.usage_token_io_adapter import ThreadMetadataIOAdapter
 from web.ws_event_sink import UsagePersistSink, WSEventSink
 from web.ws_fanout import WebSocketFanout
 
@@ -130,23 +128,6 @@ class ThreadManager:
         self._idle_task: asyncio.Task[None] | None = None
         self._started = False
         self._closed = False
-        # task#3.2: UsageTokenManager 注入——usage 写盘统一走 manager
-        # ThreadMetadataIOAdapter 包装 read_thread_metadata / write_thread_metadata
-        # 让 manager 通过抽象 Protocol 操作 cumulative_usage dict 字段。
-        self._usage_manager: UsageTokenManager = UsageTokenManager(
-            home=kongming_home,
-            thread_metadata_io=ThreadMetadataIOAdapter(kongming_home),
-        )
-
-    @property
-    def usage_manager(self) -> UsageTokenManager:
-        """task#3.2: 暴露给 router / ws handler 通过 manager API 读取 token 数据。
-
-        外部消费方应通过本属性调 ``record_run_usage`` / ``get_thread_summary`` /
-        ``to_ws_frame`` 等公共 API；**禁止**绕过 manager 直接读写
-        ``ThreadMetadata.cumulative_usage``。
-        """
-        return self._usage_manager
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -530,9 +511,7 @@ class ThreadManager:
             pending_approval_timeout_seconds=float(self._cfg.web.pending_approval_timeout_seconds),
         )
         ws_sink = WSEventSink(fanout)
-        # task#3.2: UsagePersistSink 持有 UsageTokenManager 引用而非
-        # add_thread_usage 函数；manager 内部按 channel 解析 payload + 写盘
-        usage_sink = UsagePersistSink(meta.id, self._usage_manager)
+        usage_sink = UsagePersistSink(meta.id, self.add_thread_usage)
 
         status_sink = ThreadStatusEventSink(meta.id)
         sinks: list[Any] = [ws_sink, usage_sink, status_sink]

@@ -279,7 +279,7 @@ forbidden_modules =
     web.usage_token._channel_anthropic
     web.usage_token._channel_openai
     web.usage_token._persistence
-; 注：``web.usage_token._migration`` task#1 阶段暂不列入 forbidden——task#2 时
-; ``web.thread_metadata`` 需要单点 import 它做 lazy upgrade；届时把 _migration
-; 加回 forbidden_modules + 配 ``ignore_imports = web.thread_metadata ->
-; web.usage_token._migration`` 白名单。
+    web.usage_token._migration
+ignore_imports =
+; task#2 接入 v7→v8 lazy upgrade：``web.thread_metadata`` 单点 import _migration
+    web.thread_metadata -> web.usage_token._migration
