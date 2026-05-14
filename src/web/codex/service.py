@@ -160,6 +160,7 @@ class CodexService:
                 kongming_thread_id=kongming_thread_id,
                 cwd=cwd,
                 run_index=run_index,
+                model=model,
             )
 
             # 等 stderr 收尾 + 拿子进程退出码
@@ -330,6 +331,7 @@ class CodexService:
         kongming_thread_id: str | None,
         cwd: str,
         run_index: int = 0,
+        model: str | None = None,
     ) -> tuple[str, bool]:
         """逐行读取 stdout，归一化后送 writer。
 
@@ -398,28 +400,24 @@ class CodexService:
                                 cwd,
                             )
 
-            # usage 写盘：turn.completed 时取原始 event["usage"] 调 manager
-            # 条件：thread_manager 存在 + 有有效 kongming_thread_id
+            # usage 派生：turn.completed 时从 codex rollout 真源派生最新 usage 推前端。
+            # **v2**：manager 无状态门面，service 不再写盘。
             if (
                 event.get("type") == "turn.completed"
                 and self.thread_manager is not None
                 and kongming_thread_id is not None
             ):
-                raw_usage = event.get("usage")
-                if isinstance(raw_usage, dict) and raw_usage:
-                    run_id = f"{kongming_thread_id}-{run_index}"
-                    try:
-                        await self.thread_manager.usage_manager.record_run_usage(
-                            kongming_thread_id,
-                            channel="openai",
-                            raw_payload=raw_usage,
-                            turn=run_index,
-                            run_id=run_id,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "codex _consume_stdout record_run_usage failed",
-                            exc_info=True,
+                with contextlib.suppress(Exception):
+                    usage_dto = await self.thread_manager.usage_manager.get_thread_usage(
+                        kongming_thread_id
+                    )
+                    if usage_dto is not None:
+                        await broadcaster.broadcast(
+                            {
+                                "type": "usage_summary_updated",
+                                "threadId": kongming_thread_id,
+                                "usage": usage_dto.model_dump(),
+                            }
                         )
 
             # 归一化 + 下发

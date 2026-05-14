@@ -135,45 +135,41 @@ async def test_list_threads_merges_disk_and_memory(tmp_path: Path) -> None:
     assert listed[0].name == "memory-only-name"
 
 
-async def test_usage_manager_records_cumulative_via_manager_api(tmp_path: Path) -> None:
-    """task#3.3：``add_thread_usage`` 已删；token usage 走 ``ThreadManager.usage_manager.record_run_usage``。"""
+async def test_usage_manager_v2_exposed_with_get_thread_usage_only(tmp_path: Path) -> None:
+    """**usage-token-v2-bigbang**：ThreadManager.usage_manager 暴露 v2 无状态门面。
+
+    v2 manager 公共方法**只有** ``get_thread_usage(thread_id)``——v1 时代的
+    ``record_run_usage`` / ``set_last_assistant_usage`` / ``get_thread_summary``
+    等方法全部删除（防回归）。
+    """
     cfg = _make_cfg()
     factory = _make_factory()
     mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
     meta = await mgr.create_thread("usage", "p1")
 
-    # 通过 usage_manager 写入第一轮
-    await mgr.usage_manager.record_run_usage(
-        meta.id,
-        channel="openai",
-        raw_payload={"input_tokens": 120, "output_tokens": 30},
-        turn=1,
-        run_id="run-1",
-    )
-    summary1 = await mgr.usage_manager.get_thread_summary(meta.id)
-    assert summary1.channel == "openai"
-    assert summary1.cumulative_input_tokens == 120
-    assert summary1.cumulative_output_tokens == 30
+    # v2 manager 只有 get_thread_usage 公共方法
+    assert hasattr(mgr.usage_manager, "get_thread_usage")
 
-    # 第二轮累加
-    await mgr.usage_manager.record_run_usage(
-        meta.id,
-        channel="openai",
-        raw_payload={"input_tokens": 20, "output_tokens": 5},
-        turn=2,
-        run_id="run-2",
-    )
-    summary2 = await mgr.usage_manager.get_thread_summary(meta.id)
-    assert summary2.cumulative_input_tokens == 140
-    assert summary2.cumulative_output_tokens == 35
+    # v1 方法全部删除（防回归）
+    assert not hasattr(mgr.usage_manager, "record_run_usage")
+    assert not hasattr(mgr.usage_manager, "set_last_assistant_usage")
+    assert not hasattr(mgr.usage_manager, "get_thread_summary")
+    assert not hasattr(mgr.usage_manager, "to_ws_frame")
+    assert not hasattr(mgr.usage_manager, "context_window")
+    assert not hasattr(mgr.usage_manager, "context_usage_pct")
+    assert not hasattr(mgr.usage_manager, "set_thread_model")
 
-    # 落盘验证：read_thread_metadata 拿到 cumulative_usage dict
+    # 新建 thread 没绑 SDK 真源 → get_thread_usage 返回 None（不抛）
+    result = await mgr.usage_manager.get_thread_usage(meta.id)
+    assert result is None
+
+    # metadata.json 不含任何 token 字段（schema v9 物理删 3 字段）
     loaded = read_thread_metadata(tmp_path, meta.id)
     assert loaded is not None
-    assert loaded.cumulative_usage is not None
-    assert loaded.cumulative_usage["channel"] == "openai"
-    assert loaded.cumulative_usage["input_tokens"] == 140
-    assert loaded.cumulative_usage["output_tokens"] == 35
+    assert not hasattr(loaded, "cumulative_usage")
+    assert not hasattr(loaded, "last_run_snapshot")
+    assert not hasattr(loaded, "last_model_name")
+    assert loaded.schema_version == 9
 
 
 async def test_list_cells_returns_only_active_cells(tmp_path: Path) -> None:

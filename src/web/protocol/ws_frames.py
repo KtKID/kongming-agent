@@ -233,38 +233,41 @@ class TurnStartFrame(_S2CFrameBase):
 class UsageFrame(_S2CFrameBase):
     """一轮 token 用量回报。
 
-    **task#3.3 v8 重构**：字段从 5 字段平铺改为嵌套 ``snapshot`` dict——语义跟
-    ``web.usage_token.UsageTokenSnapshot`` 一致（参考 ``web.usage_token._models``）。
+    **usage-token-v2-bigbang**：``usage`` 字段是分通道 DTO dict
+    （``ClaudeUsage`` / ``CodexUsage`` / ``GenericChatAnthropicUsage``
+    / ``GenericChatOpenAIUsage`` 之一的 ``model_dump()`` 输出），自带
+    ``provider`` discriminator 字段。前端按 ``usage.provider`` narrowing。
 
-    ``web.protocol`` 不允许 import ``web.usage_token`` 内部类型
-    （Contract 5 / web-protocol-no-deps），所以 frame 这一层用透明 ``dict`` 透传
-    snapshot 结构，前端 ``protocol.ts`` 用 strict ``UsageTokenSnapshot`` interface
-    描述。
+    ``web.protocol`` 不允许 import ``web.usage_token_v2`` 内部类型
+    （Contract 5 / web-protocol-no-deps），所以这一层用透明 ``dict`` 透传，
+    前端 ``protocol.ts`` 用 strict union interface 描述。
 
-    snapshot dict 形态（Anthropic 系，``channel="anthropic"``）::
+    usage dict 形态（Claude 系，``provider="claude"``）::
 
         {
-          "channel": "anthropic",
-          "input_tokens": 120000,
-          "output_tokens": 3000,
-          "extras": {
-            "cache_read_input_tokens": 88000,
-            "cache_creation_input_tokens": 4000
+          "provider": "claude",
+          "input_tokens": 6,
+          "output_tokens": 881,
+          "cache_read_input_tokens": 341086,
+          "cache_creation_input_tokens": 431,
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 431,
+            "ephemeral_5m_input_tokens": 0
           },
-          "context_usage": 212000,       # 派生：input+cache_read+cache_creation
-          "turn": 1,
-          "run_id": "run-xxx"
+          "context_usage": 341523,
+          "model": "claude-opus-4",
+          "context_window": 1000000
         }
 
-    OpenAI 系 ``channel="openai"``，``extras`` 含 ``cached_input_tokens`` /
-    ``reasoning_output_tokens``；``context_usage == input_tokens`` （已含 cache）。
+    Codex 系 ``provider="openai"``，含 ``total`` / ``last`` / ``model_context_window``
+    / ``rate_limits``；详见 ``docs/usage-token-v2/04-data-and-state.md``。
     """
 
     kind: Literal["usage"] = "usage"
     turn: int
     run_id: str = ""
-    snapshot: dict[str, Any]
-    """嵌套 ``UsageTokenSnapshot`` dict（task#3.3 v8 新结构）。"""
+    usage: dict[str, Any]
+    """嵌套 channel-specific DTO dict（含 ``provider`` discriminator）。"""
 
 
 # ---------------------------------------------------------------------------

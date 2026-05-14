@@ -219,10 +219,10 @@ async def test_emit_tool_call_end_non_dict_data_falls_to_none() -> None:
 
 
 async def test_emit_usage_includes_run_id() -> None:
-    """task#3.3 v8：UsageFrame 由 5 字段平铺改为 ``snapshot`` 嵌套 dict。
+    """v2：UsageFrame.usage 是 channel-specific DTO dict（含 provider discriminator）。
 
     无 ``provider_kind`` 时走 fallback openai 分支：``prompt_tokens`` → ``input_tokens``、
-    ``completion_tokens`` → ``output_tokens``，``context_usage = input_tokens``。
+    ``completion_tokens`` → ``output_tokens``。
     """
     ws = _make_ws()
     sink = WSEventSink(ws)
@@ -242,13 +242,10 @@ async def test_emit_usage_includes_run_id() -> None:
     assert sent["kind"] == "usage"
     assert sent["run_id"] == "run-42"
     assert sent["turn"] == 3
-    snapshot = sent["snapshot"]
-    assert snapshot["channel"] == "openai"
-    assert snapshot["input_tokens"] == 100
-    assert snapshot["output_tokens"] == 25
-    assert snapshot["context_usage"] == 100
-    assert snapshot["run_id"] == "run-42"
-    assert snapshot["turn"] == 3
+    usage = sent["usage"]
+    assert usage["provider"] == "openai"
+    assert usage["last"]["input_tokens"] == 100
+    assert usage["last"]["output_tokens"] == 25
 
 
 # ---------------------------------------------------------------------------
@@ -323,11 +320,7 @@ async def test_emit_approval_decision_unknown_outcome_falls_back_to_cancelled() 
 
 
 async def test_emit_usage() -> None:
-    """task#3.3 v8：UsageFrame 由 5 字段平铺改为 ``snapshot`` 嵌套 dict。
-
-    无 ``provider_kind`` 时走 fallback openai 分支（``prompt_tokens`` → ``input_tokens``、
-    ``completion_tokens`` → ``output_tokens``）。
-    """
+    """v2：UsageFrame.usage 是 channel-specific DTO dict（含 provider）。"""
     ws = _make_ws()
     sink = WSEventSink(ws)
     await sink.emit(
@@ -344,11 +337,10 @@ async def test_emit_usage() -> None:
     )
     sent = ws.send_json.await_args.args[0]
     assert sent["kind"] == "usage"
-    snapshot = sent["snapshot"]
-    assert snapshot["channel"] == "openai"
-    assert snapshot["input_tokens"] == 100
-    assert snapshot["output_tokens"] == 50
-    assert snapshot["context_usage"] == 100
+    usage = sent["usage"]
+    assert usage["provider"] == "openai"
+    assert usage["last"]["input_tokens"] == 100
+    assert usage["last"]["output_tokens"] == 50
 
 
 # ---------------------------------------------------------------------------
@@ -704,17 +696,16 @@ async def test_emit_tool_call_start_with_no_arguments() -> None:
 
 
 async def test_emit_usage_with_missing_fields_defaults_to_zero() -> None:
-    """task#3.3 v8：空 payload → snapshot 全 0；channel 走 fallback openai。"""
+    """v2：空 payload → usage DTO 全 0；走 fallback openai provider 分支。"""
     ws = _make_ws()
     sink = WSEventSink(ws)
     await sink.emit(Event(kind="usage", run_id="r", turn=1, payload={}))
     sent = ws.send_json.await_args.args[0]
-    snapshot = sent["snapshot"]
-    assert snapshot["channel"] == "openai"
-    assert snapshot["input_tokens"] == 0
-    assert snapshot["output_tokens"] == 0
-    assert snapshot["context_usage"] == 0
-    assert snapshot["extras"] == {}
+    usage = sent["usage"]
+    assert usage["provider"] == "openai"
+    assert usage["last"]["input_tokens"] == 0
+    assert usage["last"]["output_tokens"] == 0
+    assert usage["last"]["total_tokens"] == 0
 
 
 # ---------------------------------------------------------------------------

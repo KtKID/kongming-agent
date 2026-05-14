@@ -147,17 +147,19 @@ def _make_usage() -> UsageFrame:
         timestamp_ms=1_700_000_000_009,
         turn=1,
         run_id="run-xxx",
-        snapshot={
-            "channel": "anthropic",
-            "input_tokens": 120_000,
-            "output_tokens": 3_000,
-            "extras": {
-                "cache_read_input_tokens": 88_000,
-                "cache_creation_input_tokens": 4_000,
+        usage={
+            "provider": "claude",
+            "input_tokens": 6,
+            "output_tokens": 881,
+            "cache_read_input_tokens": 341086,
+            "cache_creation_input_tokens": 431,
+            "cache_creation": {
+                "ephemeral_1h_input_tokens": 431,
+                "ephemeral_5m_input_tokens": 0,
             },
-            "context_usage": 212_000,
-            "turn": 1,
-            "run_id": "run-xxx",
+            "context_usage": 341523,
+            "model": "claude-opus-4",
+            "context_window": 1_000_000,
         },
     )
 
@@ -231,20 +233,9 @@ def _make_thread_metadata() -> ThreadMetadataDTO:
         created_at=1_700_000_000.0,
         updated_at=1_700_000_010.5,
         message_count=3,
-        usage_summary={
-            "channel": "anthropic",
-            "cumulative_input_tokens": 100_000,
-            "cumulative_output_tokens": 3_000,
-            "extras": {
-                "cache_read_input_tokens": 80_000,
-                "cache_creation_input_tokens": 4_000,
-            },
-            "last_run_context_usage": 184_000,
-            "model_name": "claude-opus-4",
-            "model_context_window": 1_000_000,
-            "context_usage_pct": 18.4,
-        },
-        schema_version=8,
+        # v9 (usage-token-v2-bigbang): 删 usage_summary 字段；token 数据由独立
+        # 端点 GET /threads/<tid>/usage 提供
+        schema_version=9,
     )
 
 
@@ -479,14 +470,17 @@ S2C_DISPATCH_CASES = [
             "kind": "usage",
             "timestamp_ms": 1,
             "turn": 1,
-            "snapshot": {
-                "channel": "anthropic",
-                "input_tokens": 1,
-                "output_tokens": 2,
-                "extras": {},
-                "context_usage": 1,
-                "turn": 1,
-                "run_id": "",
+            "usage": {
+                "provider": "openai",
+                "last": {
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "cached_input_tokens": 0,
+                    "reasoning_output_tokens": 0,
+                    "total_tokens": 3,
+                },
+                "model": "",
+                "context_window": 0,
             },
         },
         UsageFrame,
@@ -615,14 +609,17 @@ def test_kind_default_usage():
     frame = UsageFrame(
         timestamp_ms=1,
         turn=1,
-        snapshot={
-            "channel": "anthropic",
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "extras": {},
-            "context_usage": 0,
-            "turn": 1,
-            "run_id": "",
+        usage={
+            "provider": "openai",
+            "last": {
+                "input_tokens": 0,
+                "cached_input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_output_tokens": 0,
+                "total_tokens": 0,
+            },
+            "model": "",
+            "context_window": 0,
         },
     )
     assert frame.kind == "usage"
@@ -665,7 +662,7 @@ def test_kind_default_cell_evicted():
 
 
 def test_thread_metadata_schema_version_default():
-    """``ThreadMetadataDTO.schema_version`` 默认 ``8``（task#2 bump，cumulative_usage dict）。"""
+    """``ThreadMetadataDTO.schema_version`` 默认 ``9``（usage-token-v2-bigbang，删 3 token 字段）。"""
     dto = ThreadMetadataDTO(
         id="thread-abcdef012345",
         name="x",
@@ -675,4 +672,4 @@ def test_thread_metadata_schema_version_default():
         updated_at=0.0,
         message_count=0,
     )
-    assert dto.schema_version == 8
+    assert dto.schema_version == 9

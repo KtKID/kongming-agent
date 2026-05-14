@@ -196,10 +196,11 @@ class ThreadMetadataDTO(_FrameBase):
     created_at: float
     updated_at: float
     message_count: Annotated[int, Field(ge=0)]
-    usage_summary: dict[str, Any] | None = None
-    """v8 嵌套字典；语义跟 ``web.usage_token.ThreadUsageSummary`` 一致（见类 docstring）。"""
+    # v9 (usage-token-v2-bigbang)：删 ``usage_summary`` 字段。
+    # token 数据通过独立端点 ``GET /threads/<tid>/usage`` 拿 v2 manager
+    # ``get_thread_usage`` 派生结果。
     is_pinned: bool = False
-    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8] = 8
+    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9] = 9
 
 
 class WorkspaceContextDTO(_FrameBase):

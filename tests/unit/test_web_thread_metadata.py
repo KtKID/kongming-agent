@@ -91,7 +91,7 @@ def test_thread_metadata_name_max_200() -> None:
 
 def test_thread_metadata_default_schema_version() -> None:
     meta = _make_meta()
-    assert meta.schema_version == THREAD_METADATA_SCHEMA_VERSION == 8
+    assert meta.schema_version == THREAD_METADATA_SCHEMA_VERSION == 9
 
 
 def test_thread_metadata_message_count_non_negative() -> None:
@@ -191,7 +191,8 @@ def test_read_wrong_schema_version_returns_none(tmp_path: Path) -> None:
     assert read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa") is None
 
 
-def test_read_v3_lazy_upgrades_usage_totals_to_v4(tmp_path: Path) -> None:
+def test_read_v3_lazy_upgrades_through_v9(tmp_path: Path) -> None:
+    """v3 → v4 → ... → v8 → v9 全链路懒升级；v9 drop 3 个 token 字段。"""
     path = thread_metadata_path(tmp_path, "thread-aaaaaaaaaaaa")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -202,14 +203,11 @@ def test_read_v3_lazy_upgrades_usage_totals_to_v4(tmp_path: Path) -> None:
     )
     loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
     assert loaded is not None
-    # v8 升级链：v3 → v4 → ... → v7 → v8（cumulative_usage dict）
-    assert loaded.schema_version == 8
-    # 老 v3 文件无 cumulative_*_tokens 字段 → v3→v4 补 0 → v7→v8 映射 dict
-    # 因为 backend_kind=generic_chat + cache_creation=0 → openai 启发式
-    assert loaded.cumulative_usage is not None
-    assert loaded.cumulative_usage["channel"] == "openai"
-    assert loaded.cumulative_usage["input_tokens"] == 0
-    assert loaded.cumulative_usage["output_tokens"] == 0
+    # v9 schema：3 个 token 字段已物理删除
+    assert loaded.schema_version == 9
+    assert not hasattr(loaded, "cumulative_usage")
+    assert not hasattr(loaded, "last_run_snapshot")
+    assert not hasattr(loaded, "last_model_name")
     assert loaded.is_pinned is False
 
 
@@ -329,8 +327,8 @@ def test_is_pinned_round_trip(tmp_path: Path) -> None:
     assert loaded.is_pinned is True
 
 
-def test_read_v6_lazy_upgrades_to_v8_with_is_pinned_and_usage(tmp_path: Path) -> None:
-    """v6 文件 → 懒升级到 v8：补 is_pinned + 字段重组为 cumulative_usage dict。"""
+def test_read_v6_lazy_upgrades_through_v9(tmp_path: Path) -> None:
+    """v6 文件 → 懒升级到 v9：穿透多版本链，最终 drop token 字段。"""
     path = thread_metadata_path(tmp_path, "thread-aaaaaaaaaaaa")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -344,8 +342,93 @@ def test_read_v6_lazy_upgrades_to_v8_with_is_pinned_and_usage(tmp_path: Path) ->
     )
     loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
     assert loaded is not None
-    assert loaded.schema_version == 8
+    assert loaded.schema_version == 9
     assert loaded.is_pinned is False
-    # v8 字段重组：generic_chat + cache_creation=0 → openai 启发式
-    assert loaded.cumulative_usage is not None
-    assert loaded.cumulative_usage["channel"] == "openai"
+    # v9：token 字段已物理删除
+    assert not hasattr(loaded, "cumulative_usage")
+
+
+# ---------------------------------------------------------------------------
+# v9 专属测试（usage-token-v2-bigbang）
+# ---------------------------------------------------------------------------
+
+
+def test_v8_to_v9_drops_token_fields(tmp_path: Path) -> None:
+    """v8 文件含 3 个 token 字段 → 读出后被 drop，schema 升到 v9。"""
+    path = thread_metadata_path(tmp_path, "thread-aaaaaaaaaaaa")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '{"id":"thread-aaaaaaaaaaaa","name":"x","preset_id":"p",'
+        '"backend_kind":"claude_code","claude_thread_id":"sid-1","codex_thread_id":"",'
+        '"cwd":"/tmp","created_at":1.0,"updated_at":2.0,"message_count":3,'
+        '"cumulative_usage":{"channel":"anthropic","input_tokens":100,'
+        '"cache_read_input_tokens":50000,"cache_creation_input_tokens":200,'
+        '"output_tokens":300},'
+        '"last_run_snapshot":{"channel":"anthropic","input_tokens":5,"output_tokens":10,'
+        '"extras":{},"context_usage":50205,"turn":0,"run_id":""},'
+        '"last_model_name":"claude-opus-4",'
+        '"is_pinned":true,"schema_version":8}',
+        encoding="utf-8",
+    )
+    loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
+    assert loaded is not None
+    assert loaded.schema_version == 9
+    # v9：token 字段已物理删除（ThreadMetadata 类不再含这些字段）
+    assert not hasattr(loaded, "cumulative_usage")
+    assert not hasattr(loaded, "last_run_snapshot")
+    assert not hasattr(loaded, "last_model_name")
+    # 其他字段保留
+    assert loaded.claude_thread_id == "sid-1"
+    assert loaded.cwd == "/tmp"
+    assert loaded.is_pinned is True
+
+
+def test_v9_idempotent_no_change(tmp_path: Path) -> None:
+    """v9 文件读入再 lazy upgrade 应该无变化（idempotent）。"""
+    meta = _make_meta()
+    write_thread_metadata(tmp_path, meta)
+    loaded1 = read_thread_metadata(tmp_path, meta.id)
+    # 再读一次（模拟 idempotent 检查）
+    loaded2 = read_thread_metadata(tmp_path, meta.id)
+    assert loaded1 == loaded2 == meta
+    assert loaded1 is not None and loaded1.schema_version == 9
+
+
+def test_v10_unknown_schema_returns_none(tmp_path: Path) -> None:
+    """v10 是未来版本，本进程不认识 → 返回 None（Literal[1..9] 拒绝）。"""
+    path = thread_metadata_path(tmp_path, "thread-aaaaaaaaaaaa")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '{"id":"thread-aaaaaaaaaaaa","name":"x","preset_id":"p",'
+        '"created_at":1.0,"updated_at":1.0,"message_count":0,"schema_version":10}',
+        encoding="utf-8",
+    )
+    assert read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa") is None
+
+
+def test_v9_extra_forbid_rejects_unknown_field(tmp_path: Path) -> None:
+    """v9 schema 仍 ``extra="forbid"``：未知字段拒绝。"""
+    path = thread_metadata_path(tmp_path, "thread-aaaaaaaaaaaa")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '{"id":"thread-aaaaaaaaaaaa","name":"x","preset_id":"p",'
+        '"created_at":1.0,"updated_at":1.0,"message_count":0,'
+        '"unknown_v10_field":"hello","schema_version":9}',
+        encoding="utf-8",
+    )
+    # extra="forbid" 让 model_validate 拒绝；read_thread_metadata 兜底返 None
+    assert read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa") is None
+
+
+def test_v9_write_does_not_include_token_fields(tmp_path: Path) -> None:
+    """v9 schema 写盘 dump 时不含被删的 3 个 token 字段。"""
+    import json as _json
+
+    meta = _make_meta()
+    write_thread_metadata(tmp_path, meta)
+    raw = thread_metadata_path(tmp_path, meta.id).read_text(encoding="utf-8")
+    data = _json.loads(raw)
+    assert "cumulative_usage" not in data
+    assert "last_run_snapshot" not in data
+    assert "last_model_name" not in data
+    assert data["schema_version"] == 9

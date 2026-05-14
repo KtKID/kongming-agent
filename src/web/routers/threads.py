@@ -99,15 +99,11 @@ def _validate_thread_id(thread_id: str) -> None:
 async def _to_dto(meta: ThreadMetadata, tm: ThreadManagerProtocol) -> ThreadMetadataDTO:
     """把 ThreadMetadata 转 REST DTO。
 
-    **task#3.3**：通过 ``UsageTokenManager.get_thread_summary()`` 拿 thread 级
-    token usage summary（含 channel 区分 + 派生 context_usage_pct），dump 成 dict
-    塞 ``usage_summary`` 字段——前端 ``ThreadMetadataDTO.usage_summary`` 直接消费。
+    **usage-token-v2-bigbang**：不再返回 ``usage_summary`` 字段。token 数据
+    通过独立端点 ``GET /threads/<tid>/usage`` 拿 v2 manager.get_thread_usage
+    的派生结果。``tm`` 参数保留作未来扩展，本函数当前未使用。
     """
-    summary = await tm.usage_manager.get_thread_summary(meta.id)
-    usage_summary_dict: dict[str, Any] | None = (
-        summary.model_dump() if summary is not None else None
-    )
-
+    _ = tm  # 暂时未用；保留参数兼容现有调用方
     return ThreadMetadataDTO(
         id=meta.id,
         name=meta.name,
@@ -119,7 +115,6 @@ async def _to_dto(meta: ThreadMetadata, tm: ThreadManagerProtocol) -> ThreadMeta
         created_at=meta.created_at,
         updated_at=meta.updated_at,
         message_count=meta.message_count,
-        usage_summary=usage_summary_dict,
         is_pinned=meta.is_pinned,
         schema_version=meta.schema_version,
     )
@@ -410,6 +405,28 @@ async def rename_thread(
         return await _to_dto(meta_read, tm)
 
     return await _to_dto(meta, tm)
+
+
+@router.get("/{thread_id}/usage")
+async def get_thread_usage(thread_id: str, request: Request) -> dict[str, Any]:
+    """v2 新端点：返回 thread 当前 token 用量 DTO（按通道分支返回不同 DTO）。
+
+    内部走 ``manager.get_thread_usage(thread_id)`` 派生 SDK 真源（jsonl/rollout）。
+    返回 ``{"usage": <ClaudeUsage|CodexUsage|GenericChat*Usage|None>}``——前端按
+    ``usage.provider`` 字段做 narrowing 分支渲染。
+
+    错误：
+
+    - 404 thread 不存在
+    - 200 + ``usage=None`` thread 没绑 SDK 真源 / 派生失败（不是错误，前端 StatusLine 留空）
+    """
+    _validate_thread_id(thread_id)
+    tm: ThreadManagerProtocol = request.app.state.thread_manager
+    metas = await asyncio.to_thread(tm.list_threads)
+    if not any(m.id == thread_id for m in metas):
+        raise ThreadNotFoundError(f"thread not found: {thread_id}")
+    usage = await tm.usage_manager.get_thread_usage(thread_id)
+    return {"usage": usage.model_dump() if usage is not None else None}
 
 
 @router.delete("/{thread_id}", status_code=204)

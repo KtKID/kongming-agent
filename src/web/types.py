@@ -113,16 +113,17 @@ class ThreadManagerProtocol(Protocol):
         cwd: str,
     ) -> ThreadMetadata: ...
 
-    # task#3.3：移除 add_thread_usage —— UsagePersistSink 改走
-    # ``usage_manager.record_run_usage``；router / WS 处理器通过 ``usage_manager``
-    # 属性拿 ``UsageTokenManager`` 实例。
+    # usage-token-v2-bigbang：``usage_manager`` 是 :class:`web.usage_token_v2.
+    # UsageTokenManager` 实例，唯一公共方法 ``get_thread_usage(thread_id)``。
+    # v1 的 record_run_usage / set_last_assistant_usage / get_thread_summary
+    # 等方法全部删除。
 
     @property
     def usage_manager(self) -> Any:
-        """:class:`web.usage_token.UsageTokenManager` 实例（task#3.3 注入）。
+        """:class:`web.usage_token_v2.UsageTokenManager` 实例（v2 无状态门面）。
 
         ``Any`` 而非具体类型——避免 ``web.types`` Protocol 文件 import
-        ``web.usage_token``（保持 types.py 零运行时依赖）。具体类型由
+        ``web.usage_token_v2``（保持 types.py 零运行时依赖）。具体类型由
         ``web.thread_manager.ThreadManager.usage_manager`` 提供。
         """
         ...

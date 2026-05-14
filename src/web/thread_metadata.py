@@ -29,11 +29,9 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-
-from web.usage_token._migration import upgrade_v7_to_v8
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +46,7 @@ logger = logging.getLogger(__name__)
 # ``claude_thread_id`` / ``codex_thread_id`` 都表示 provider 底层可恢复 thread id。
 # 一个 Kongming thread 绑定一个 provider session/thread；老 v5 文件读入时把
 # ``sdk_session_id`` 迁移为 ``claude_thread_id``。
-THREAD_METADATA_SCHEMA_VERSION = 8
+THREAD_METADATA_SCHEMA_VERSION = 9
 
 
 class ThreadMetadata(BaseModel):
@@ -140,14 +138,19 @@ class ThreadMetadata(BaseModel):
     message_count: Annotated[int, Field(ge=0)] = 0
     """历史消息总数（UI 列表展示 "X 条消息"）。"""
 
-    cumulative_usage: dict[str, Any] | None = None
-    """Token 用量累计（v8 透明 dict 落盘，仅 UsageTokenManager 解释；详见类 docstring）。"""
+    # ⚠️ v9（usage-token-v2-bigbang）**物理删除** 3 个 token 字段：
+    #   - cumulative_usage / last_run_snapshot / last_model_name
+    # token 真源回归 SDK 写的 jsonl/rollout，由 UsageTokenManager v2 现场派生。
+    # 旧 v8 文件含这 3 字段读入时由 read_thread_metadata 的 v8→v9 lazy upgrade
+    # 自动 drop。``extra="forbid"`` 在 v9 下严格拒绝任何残留写入。
+    # 详见 docs/usage-token-v2/04-data-and-state.md §metadata schema v9。
 
     is_pinned: bool = False
     """是否置顶（v0.2.4 新增）。"""
 
-    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8] = 8
-    """schema 版本号（当前 v8）。"""
+    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9] = 9
+    """schema 版本号（当前 v9，usage-token-v2 bigbang 引入）。
+    ``Literal[1..9]`` 接受所有历史文件，写盘永远写 9。"""
 
 
 def thread_metadata_path(home: Path, thread_id: str) -> Path:
@@ -198,7 +201,7 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
 
     - 文件不存在 / 不是普通文件
     - JSON 解析失败（损坏 / 编码异常）
-    - schema_version 不在 ``{1, ..., 8}``（更高版本 = 该进程不认识，拒绝）
+    - schema_version 不在 ``{1, ..., 9}``（更高版本 = 该进程不认识，拒绝）
     - 字段校验失败（缺字段 / 类型不对 / 正则不匹配）
 
     **v1 → v2 懒升级**：``schema_version=1`` 且缺 ``backend_kind`` 时，
@@ -223,8 +226,14 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
     ``cumulative_usage: dict``（``upgrade_v7_to_v8`` 实现）。
     旧 ``cumulative_total_tokens`` 是派生量，直接丢弃。
 
-    返回的 :class:`ThreadMetadata` 实例已是最新 v8 形态。下次
-    :func:`write_thread_metadata` 会以 v8 写盘（默认 ``schema_version=8``，
+    **v8 → v9 懒升级**（usage-token-v2-bigbang）：
+    **drop** 3 个 token 字段：``cumulative_usage`` / ``last_run_snapshot``
+    / ``last_model_name``。token 真源回归 SDK 写的 jsonl/rollout，由
+    ``UsageTokenManager v2`` 现场派生，metadata.json 不再缓存。
+    旧数据**不迁移**（真源在 SDK，旧字段是冗余拷贝）。
+
+    返回的 :class:`ThreadMetadata` 实例已是最新 v9 形态。下次
+    :func:`write_thread_metadata` 会以 v9 写盘（默认 ``schema_version=9``，
     无需调用方关心）。本函数**不**自己回写——避免读盘函数有副作用。
 
     所有 ``None`` 路径都会记 warning 日志，便于排查。
@@ -275,12 +284,26 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
     if data.get("schema_version") == 6:
         data.setdefault("is_pinned", False)
         data["schema_version"] = 7
-    # v7 → v8 懒升级（usage-token-manager-core task#2）：删 5 个 cumulative_*_tokens
-    # 字段，按 backend_kind 映射到嵌套 cumulative_usage dict。
-    # ⚠️ 单点白名单：from web.usage_token._migration（.importlinter Contract 9
-    # ignore_imports 已配 `web.thread_metadata -> web.usage_token._migration`）
+    # v7 → v8 懒升级：drop 旧 5 个 cumulative_*_tokens 字段（v9 不再保留 token
+    # 字段，所以 v7→v8 不再构造 cumulative_usage——直接 drop 后续 v8→v9 也 drop）。
     if data.get("schema_version") == 7:
-        data = upgrade_v7_to_v8(data)
+        for key in (
+            "cumulative_prompt_tokens",
+            "cumulative_completion_tokens",
+            "cumulative_total_tokens",
+            "cumulative_cache_read_tokens",
+            "cumulative_cache_creation_tokens",
+        ):
+            data.pop(key, None)
+        data["schema_version"] = 8
+    # v8 → v9 懒升级（usage-token-v2-bigbang）：drop 3 个 token 字段。
+    # token 真源回归 SDK 写的 jsonl/rollout，由 UsageTokenManager v2 现场派生。
+    # 旧数据不迁移（真源在 SDK，旧字段是冗余拷贝）。
+    if data.get("schema_version") == 8:
+        data.pop("cumulative_usage", None)
+        data.pop("last_run_snapshot", None)
+        data.pop("last_model_name", None)
+        data["schema_version"] = 9
     # 兜底：任何 version 下如果 sdk_session_id 仍残留，强制迁移
     if "sdk_session_id" in data:
         data.setdefault("claude_thread_id", str(data.pop("sdk_session_id")))

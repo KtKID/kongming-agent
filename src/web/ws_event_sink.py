@@ -70,131 +70,71 @@ _EVOLUTION_NOTICE_KEY = "self_evolution.review"
 _EVOLUTION_NOTICE_SOURCE = "self_evolution"
 
 
-def _build_usage_snapshot(
-    payload: dict[str, Any],
-    *,
-    turn: int,
-    run_id: str,
-) -> dict[str, Any]:
-    """从 runtime ``usage`` event payload 构造 UsageTokenSnapshot dict
-    （task#3.3 v8 WS UsageFrame.snapshot 嵌套字段）。
+def _build_usage_dto(payload: dict[str, Any]) -> dict[str, Any]:
+    """从 runtime ``usage`` event payload 构造 v2 channel-specific DTO dict。
 
-    payload 字段来源：task#3.1 让 LLMProvider 透传 SDK 原生字段 + provider_kind。
-    本函数按 provider_kind 决定 channel + 派生 context_usage：
+    payload 字段来源：LLMProvider 透传 SDK 原生字段 + provider_kind。
+    本函数按 provider_kind 决定通道：
 
-    - ``anthropic``：``extras = {cache_read_input_tokens, cache_creation_input_tokens}``
-      ``context_usage = input + cache_read + cache_creation``
-    - ``openai``：``extras = {cached_input_tokens, reasoning_output_tokens}``
-      ``context_usage = input_tokens``（已含 cache 子集）
+    - ``anthropic`` → ``ClaudeUsage`` 形态（含 cache_creation TTL 子结构）
+    - ``openai_compatible`` → ``GenericChatOpenAIUsage`` 形态（只填 last）
+    - 老 payload 无 provider_kind 退化为 openai 系基础字段
+
+    返回 dict 自带 ``provider`` discriminator，前端按 ``provider`` narrowing。
+    详见 docs/usage-token-v2/04-data-and-state.md。
     """
     provider_kind = payload.get("provider_kind")
+
     if provider_kind == "anthropic":
-        channel = "anthropic"
         input_tokens = int(payload.get("input_tokens", 0) or 0)
         output_tokens = int(payload.get("output_tokens", 0) or 0)
         cache_read = int(payload.get("cache_read_input_tokens", 0) or 0)
-        cache_creation = int(payload.get("cache_creation_input_tokens", 0) or 0)
-        extras: dict[str, int] = {
+        cache_creation_total = int(payload.get("cache_creation_input_tokens", 0) or 0)
+        cc_raw = payload.get("cache_creation") or {}
+        if not isinstance(cc_raw, dict):
+            cc_raw = {}
+        model = str(payload.get("model") or "")
+        return {
+            "provider": "claude",
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
             "cache_read_input_tokens": cache_read,
-            "cache_creation_input_tokens": cache_creation,
+            "cache_creation_input_tokens": cache_creation_total,
+            "cache_creation": {
+                "ephemeral_1h_input_tokens": int(cc_raw.get("ephemeral_1h_input_tokens", 0) or 0),
+                "ephemeral_5m_input_tokens": int(cc_raw.get("ephemeral_5m_input_tokens", 0) or 0),
+            },
+            "context_usage": input_tokens + cache_read + cache_creation_total,
+            "model": model,
+            "context_window": 0,  # 不查表（live event 没需要）
         }
-        context_usage = input_tokens + cache_read + cache_creation
-    elif provider_kind == "openai_compatible":
-        channel = "openai"
-        input_tokens = int(payload.get("input_tokens", 0) or 0)
-        output_tokens = int(payload.get("output_tokens", 0) or 0)
-        cached_input = int(payload.get("cached_input_tokens", 0) or 0)
-        reasoning_output = int(payload.get("reasoning_output_tokens", 0) or 0)
-        extras = {
-            "cached_input_tokens": cached_input,
-            "reasoning_output_tokens": reasoning_output,
-        }
-        context_usage = input_tokens  # OpenAI 已含 cache
-    else:
-        # 老 payload 无 provider_kind（兼容老测试 / 非标准 event）：
-        # 退化为 openai 系基础字段（input/output 来自 prompt/completion）。
-        channel = "openai"
-        input_tokens = int(payload.get("prompt_tokens", 0) or payload.get("input_tokens", 0) or 0)
-        output_tokens = int(
-            payload.get("completion_tokens", 0) or payload.get("output_tokens", 0) or 0
-        )
-        extras = {}
-        context_usage = input_tokens
 
+    # openai_compatible 或老 payload 退化
+    input_tokens = int(payload.get("input_tokens", 0) or payload.get("prompt_tokens", 0) or 0)
+    output_tokens = int(payload.get("output_tokens", 0) or payload.get("completion_tokens", 0) or 0)
+    cached_input = int(payload.get("cached_input_tokens", 0) or 0)
+    reasoning_output = int(payload.get("reasoning_output_tokens", 0) or 0)
+    total_tokens = int(payload.get("total_tokens", 0) or 0) or (input_tokens + output_tokens)
+    model = str(payload.get("model") or "")
     return {
-        "channel": channel,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "extras": extras,
-        "context_usage": context_usage,
-        "turn": turn,
-        "run_id": run_id,
+        "provider": "openai",
+        "last": {
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input,
+            "output_tokens": output_tokens,
+            "reasoning_output_tokens": reasoning_output,
+            "total_tokens": total_tokens,
+        },
+        "model": model,
+        "context_window": 0,
     }
 
 
-class UsagePersistSink:
-    """每 turn 把 usage 增量写盘的 EventSink。
-
-    只关心 ``kind="usage"`` 事件；其余静默跳过。
-    由 ThreadManager._build_cell 注册到 sinks 列表。
-
-    **task#3.2 重构**：持有 :class:`web.usage_token.UsageTokenManager` 引用，
-    通过 ``manager.record_run_usage(channel, raw_payload, ...)`` 写盘——
-    channel 从 payload 的 ``provider_kind`` 派生
-    （anthropic→anthropic / openai_compatible→openai）。
-
-    替代 task#3.2 之前的 ``thread_manager.add_thread_usage(...)`` 直接调用——
-    后者是 task#2 兼容 shim，启发式判断 channel 写 cumulative_usage dict；
-    现在改为 manager 内部按 SDK 原生字段精确写。
-    """
-
-    def __init__(
-        self,
-        thread_id: str,
-        usage_manager: Any,  # web.usage_token.UsageTokenManager
-    ) -> None:
-        self._thread_id = thread_id
-        self._usage_manager = usage_manager
-
-    async def emit(self, event: Event) -> None:
-        if event.kind != "usage":
-            return
-        payload = event.payload or {}
-        # task#3.2: provider_kind → channel 映射（task#3.1 已让 LLMProvider
-        # 在 usage 字段塞 provider_kind 标识）
-        provider_kind = payload.get("provider_kind")
-        if provider_kind == "anthropic":
-            channel = "anthropic"
-        elif provider_kind == "openai_compatible":
-            channel = "openai"
-        else:
-            # 老 event payload 没 provider_kind（兼容老消费者 / 测试），按启发式：
-            # 含 cache_creation_input_tokens 字段 → anthropic；否则 openai。
-            channel = (
-                "anthropic"
-                if "cache_creation_input_tokens" in payload or "cache_read_input_tokens" in payload
-                else "openai"
-            )
-        # 跳过 0 usage（仅日志，不写盘）
-        if all(
-            int(payload.get(k, 0) or 0) == 0
-            for k in ("input_tokens", "output_tokens", "prompt_tokens", "completion_tokens")
-        ):
-            return
-        try:
-            await self._usage_manager.record_run_usage(
-                self._thread_id,
-                channel=channel,
-                raw_payload=payload,
-                turn=event.turn or 0,
-                run_id=event.run_id or "",
-            )
-        except Exception:
-            logger.warning(
-                "UsagePersistSink: failed to persist usage for thread %s",
-                self._thread_id,
-                exc_info=True,
-            )
+# ⚠️ UsagePersistSink 已在 usage-token-v2-bigbang 删除。
+# v2 manager 是无状态门面，不接受外部 push token；所有 token 数据现场从 SDK
+# 真源（jsonl/rollout）派生。Event(kind="usage") 不再需要持久化 sink；前端 token
+# 显示通过 GET /threads/<tid>/usage 端点拿 v2 manager.get_thread_usage 的派生
+# 结果。详见 docs/usage-token-v2/03-core-workflows.md。
 
 
 class WSEventSink:
@@ -334,16 +274,16 @@ class WSEventSink:
                 timestamp_ms=ts,
             )
 
-        # ----- 用量（task#3.3 v8 重构）-----
-        # runtime emit ``kind="usage"`` event 时，payload 已含 task#3.1 透传的 SDK
-        # 原生字段 + provider_kind。本 sink 从 payload 派生 UsageTokenSnapshot dict
-        # 嵌入 UsageFrame.snapshot——避免直接调 manager.to_ws_frame(async)。
+        # ----- 用量（usage-token-v2-bigbang 重构）-----
+        # runtime emit ``kind="usage"`` event 时，payload 已含 LLMProvider 透传的
+        # SDK 原生字段 + provider_kind。本 sink 按 provider 派生 v2 DTO dict
+        # 嵌入 UsageFrame.usage——前端按 ``usage.provider`` discriminator 分支。
         if kind == "usage":
-            snapshot = _build_usage_snapshot(payload, turn=turn, run_id=run_id)
+            usage_dto = _build_usage_dto(payload)
             return UsageFrame(
                 turn=turn,
                 run_id=run_id,
-                snapshot=snapshot,
+                usage=usage_dto,
                 timestamp_ms=ts,
             )
 

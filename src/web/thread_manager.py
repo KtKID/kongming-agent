@@ -36,10 +36,11 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal
 
-from config_loader.models import Config
+from config_loader.models import Config, LLMPresetConfig
 from core.contracts import ApprovalAction
 from core.message import Message
 from web.claude_code.jsonl_history import jsonl_path_for
+from web.codex.projects_scanner import list_codex_projects
 from web.host_adapter import WebHostAdapter
 from web.protocol import CellEvictedFrame, CellSummaryDTO, EvictReason
 from web.thread_cell import ThreadCell
@@ -52,10 +53,14 @@ from web.thread_metadata import (
     write_thread_metadata,
 )
 from web.thread_status_ws import ThreadStatusEventSink
-from web.usage_token import DeriveProvider, UsageTokenManager
-from web.usage_token._model_context_table import DEFAULT_MODEL_CONTEXT_WINDOWS
-from web.usage_token_io_adapter import ThreadMetadataIOAdapter
-from web.ws_event_sink import UsagePersistSink, WSEventSink
+from web.usage_token_v2 import (
+    ClaudeJsonlLocator,
+    CodexRolloutLocator,
+    ProviderKind,
+    ThreadMetadataReader,
+    UsageTokenManager,
+)
+from web.ws_event_sink import WSEventSink
 from web.ws_fanout import WebSocketFanout
 
 logger = logging.getLogger(__name__)
@@ -69,35 +74,133 @@ class ClaudeThreadConflictError(ValueError):
     """claude_thread_id 已被另一 thread 绑定，禁止重复绑定（v0.2 invariant：1:1 绑定）。"""
 
 
-class _ClaudeCodeJsonlPathProvider:
-    """``DeriveProvider`` 协议的实现 —— 把 thread_id 翻译成 SDK jsonl 路径。
-
-    UsageTokenManager 通过本 provider 拿到 jsonl 路径后，自己在包内调
-    ``_derive_claude_code.derive_from_jsonl`` 算出 cumulative + last_snapshot
-    + model_name，避免 thread_manager 跨越 importlinter Contract 9 边界
-    直接 import ``_derive_claude_code`` 子模块。
-
-    非 ``backend_kind="claude_code"`` 的 thread / 未首次绑定的 thread 返回 ``None``，
-    让 manager 走 metadata 读盘 fallback。
+class _ThreadMetadataReaderImpl:
+    """``ThreadMetadataReader`` v2 Protocol 实现 —— 从 thread metadata.json 读
+    轻量字段（backend_kind / cwd / claude_thread_id / codex_thread_id / preset_id）
+    给 UsageTokenManager v2 派发派生器用。
     """
 
     def __init__(self, home: Path) -> None:
         self._home = home
 
-    async def get_claude_jsonl_path(self, thread_id: str) -> Path | None:
-        # 读 metadata 用同步函数 → asyncio.to_thread 隔离
+    async def read(self, thread_id: str) -> dict[str, Any] | None:
         meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
         if meta is None:
             return None
-        if meta.backend_kind != "claude_code":
+        return {
+            "backend_kind": meta.backend_kind,
+            "cwd": meta.cwd,
+            "claude_thread_id": meta.claude_thread_id,
+            "codex_thread_id": meta.codex_thread_id,
+            "preset_id": meta.preset_id,
+        }
+
+
+class _ClaudeJsonlLocatorImpl:
+    """``ClaudeJsonlLocator`` v2 Protocol 实现 —— 拼 Claude SDK jsonl 路径。
+
+    非 ``backend_kind="claude_code"`` 或缺 ``cwd`` / ``claude_thread_id`` → None。
+    """
+
+    def __init__(self, home: Path) -> None:
+        self._home = home
+
+    async def locate(self, thread_id: str) -> Path | None:
+        meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
+        if meta is None or meta.backend_kind != "claude_code":
             return None
         if not meta.cwd or not meta.claude_thread_id:
             return None
         return jsonl_path_for(meta.cwd, meta.claude_thread_id)
 
 
+class _CodexRolloutLocatorImpl:
+    """``CodexRolloutLocator`` v2 Protocol 实现 —— 扫 ~/.codex/sessions/ 找 rollout 路径。
+
+    非 ``backend_kind="codex"`` 或缺 ``codex_thread_id`` → None。
+    复用 ``web/codex/projects_scanner.py::list_codex_projects`` 的扫描结果，
+    按 codex_thread_id 匹配 rollout uuid。
+    """
+
+    def __init__(self, home: Path) -> None:
+        self._home = home
+
+    async def locate(self, thread_id: str) -> Path | None:
+        meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
+        if meta is None or meta.backend_kind != "codex":
+            return None
+        codex_tid = meta.codex_thread_id
+        if not codex_tid:
+            return None
+        # 扫 codex sessions 找匹配 uuid 的 rollout 文件
+        try:
+            projects = await asyncio.to_thread(list_codex_projects, registry_cwds=[])
+        except Exception:
+            logger.warning(
+                "_CodexRolloutLocatorImpl.locate failed for %s", thread_id, exc_info=True
+            )
+            return None
+        for proj in projects:
+            for session in getattr(proj, "sessions", []):
+                if getattr(session, "session_id", "") == codex_tid:
+                    rollout_path = getattr(session, "rollout_path", None)
+                    if isinstance(rollout_path, (str, Path)):
+                        return Path(rollout_path)
+        return None
+
+
+class _GenericChatSessionLocatorImpl:
+    """``GenericChatSessionLocator`` v2 Protocol 实现 —— 拼 FileSession messages.jsonl
+    路径 + 按 preset_id 决定 provider 厂商。
+
+    返回 None：
+    - 非 ``backend_kind="generic_chat"``
+    - session backend 不是 FileSession（memory / sqlite 不支持派生）
+    - 找不到 preset_id 对应的 provider
+    - thread 未跑过（messages.jsonl 未 materialize）
+    """
+
+    def __init__(self, home: Path, cfg: Config) -> None:
+        self._home = home
+        self._cfg = cfg
+        # 建索引：preset_id → LLMPresetConfig（启动时一次，运行时只读）
+        presets: dict[str, LLMPresetConfig] = {}
+        web_cfg = getattr(cfg, "web", None)
+        if web_cfg is not None:
+            for preset in getattr(web_cfg, "llm_presets", []) or []:
+                presets[preset.id] = preset
+        self._presets = presets
+
+    async def locate(self, thread_id: str) -> tuple[Path, ProviderKind] | None:
+        meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
+        if meta is None or meta.backend_kind != "generic_chat":
+            return None
+        # 检查 session backend 是否 file（D-1 决策：只支持 FileSession）
+        session_cfg = getattr(self._cfg, "session", None)
+        backend_kind = getattr(session_cfg, "backend", "file") if session_cfg else "file"
+        if backend_kind != "file":
+            # memory / sqlite backend → 不支持派生
+            return None
+        # 拼 FileSession messages.jsonl 路径
+        jsonl_path = self._home / "sessions" / thread_id / "messages.jsonl"
+        if not jsonl_path.is_file():
+            return None
+        # 查 preset_id → provider 厂商
+        preset = self._presets.get(meta.preset_id)
+        if preset is None:
+            return None
+        provider = preset.provider
+        if provider not in ("anthropic", "openai_compatible"):
+            return None
+        return (jsonl_path, provider)
+
+
 # Protocol 兼容性自检（启动时一次性，运行时零开销）
-assert isinstance(_ClaudeCodeJsonlPathProvider(Path("/tmp")), DeriveProvider)
+assert isinstance(_ThreadMetadataReaderImpl(Path("/tmp")), ThreadMetadataReader)
+assert isinstance(_ClaudeJsonlLocatorImpl(Path("/tmp")), ClaudeJsonlLocator)
+assert isinstance(_CodexRolloutLocatorImpl(Path("/tmp")), CodexRolloutLocator)
+# _GenericChatSessionLocatorImpl 需要 Config，无法静态实例化校验；
+# 运行时 ThreadManager.__init__ 装配时隐式校验
 
 
 class CodexThreadAlreadyBoundError(ValueError):
@@ -163,27 +266,23 @@ class ThreadManager:
         self._idle_task: asyncio.Task[None] | None = None
         self._started = False
         self._closed = False
-        # task#3.2: UsageTokenManager 注入——usage 写盘统一走 manager
-        # ThreadMetadataIOAdapter 包装 read_thread_metadata / write_thread_metadata
-        # 让 manager 通过抽象 Protocol 操作 cumulative_usage dict 字段。
-        #
-        # usage-token-derive-from-jsonl-v0.1：注入 DeriveProvider 让 claude_code
-        # 通道的 cumulative + last_snapshot + model_name 从 SDK jsonl 现场派生，
-        # 不再依赖 metadata.json 落盘（消除 fire-and-forget 并发写竞争）。
+        # usage-token-v2-bigbang: UsageTokenManager v2 注入——无状态门面。
+        # token 真源来自 SDK 写的 jsonl/rollout，由 manager 内部派生器现场算。
+        # metadata.json 不再缓存 token（schema v9 已物理删 3 个 token 字段）。
         self._usage_manager: UsageTokenManager = UsageTokenManager(
-            home=kongming_home,
-            thread_metadata_io=ThreadMetadataIOAdapter(kongming_home),
-            model_context_windows=DEFAULT_MODEL_CONTEXT_WINDOWS,
-            derive_provider=_ClaudeCodeJsonlPathProvider(kongming_home),
+            meta_reader=_ThreadMetadataReaderImpl(kongming_home),
+            claude_locator=_ClaudeJsonlLocatorImpl(kongming_home),
+            codex_locator=_CodexRolloutLocatorImpl(kongming_home),
+            generic_locator=_GenericChatSessionLocatorImpl(kongming_home, cfg),
         )
 
     @property
     def usage_manager(self) -> UsageTokenManager:
-        """task#3.2: 暴露给 router / ws handler 通过 manager API 读取 token 数据。
+        """v2 manager: 暴露给 router / ws handler / service 调
+        ``get_thread_usage(thread_id)`` 唯一公共方法。
 
-        外部消费方应通过本属性调 ``record_run_usage`` / ``get_thread_summary`` /
-        ``to_ws_frame`` 等公共 API；**禁止**绕过 manager 直接读写
-        ``ThreadMetadata.cumulative_usage``。
+        外部消费方**只能**调这一个方法；v1 时代的 record_run_usage /
+        set_last_assistant_usage / get_thread_summary 等方法 v2 全部删除。
         """
         return self._usage_manager
 
@@ -293,7 +392,8 @@ class ThreadManager:
             created_at=now,
             updated_at=now,
             message_count=0,
-            cumulative_usage=None,  # v8: 首轮前为 None；首轮 record_run_usage 时初始化
+            # v9 (usage-token-v2-bigbang)：删 cumulative_usage 字段；token 真源
+            # 在 SDK jsonl/rollout，由 UsageTokenManager v2 派生器现场算。
         )
         # 写盘可能阻塞，放 to_thread
         await asyncio.to_thread(write_thread_metadata, self._home, meta)
@@ -322,7 +422,6 @@ class ThreadManager:
             created_at=meta.created_at,
             updated_at=_now(),
             message_count=meta.message_count,
-            cumulative_usage=meta.cumulative_usage,  # v8: 透传嵌套 dict
             is_pinned=meta.is_pinned,
         )
         await asyncio.to_thread(write_thread_metadata, self._home, updated)
@@ -348,7 +447,6 @@ class ThreadManager:
             created_at=meta.created_at,
             updated_at=meta.updated_at,  # pin 不改 updated_at
             message_count=meta.message_count,
-            cumulative_usage=meta.cumulative_usage,  # v8: 透传嵌套 dict
             is_pinned=is_pinned,
         )
         await asyncio.to_thread(write_thread_metadata, self._home, updated)
@@ -484,12 +582,12 @@ class ThreadManager:
             pending_approval_timeout_seconds=float(self._cfg.web.pending_approval_timeout_seconds),
         )
         ws_sink = WSEventSink(fanout)
-        # task#3.2: UsagePersistSink 持有 UsageTokenManager 引用而非
-        # add_thread_usage 函数；manager 内部按 channel 解析 payload + 写盘
-        usage_sink = UsagePersistSink(meta.id, self._usage_manager)
+        # usage-token-v2-bigbang: UsagePersistSink 已删除——v2 manager 是无状态门面，
+        # 不接受外部 push token。usage 事件无需持久化 sink；前端通过
+        # GET /threads/<tid>/usage 端点拉取派生结果。
 
         status_sink = ThreadStatusEventSink(meta.id)
-        sinks: list[Any] = [ws_sink, usage_sink, status_sink]
+        sinks: list[Any] = [ws_sink, status_sink]
         runtime, bridge = await self._runtime_factory(
             meta.id,
             meta.preset_id,
