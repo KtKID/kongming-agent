@@ -28,7 +28,6 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from core.contracts import Event
@@ -75,38 +74,58 @@ class UsagePersistSink:
     """每 turn 把 usage 增量写盘的 EventSink。
 
     只关心 ``kind="usage"`` 事件；其余静默跳过。
-    由 ThreadManager._build_cell 注册到 sinks 列表，替代
-    _run_once_safely 中的 run 结束一次性持久化，保证刷新页面
-    后 hydrateUsageFromThreads 能拿到最新累计值。
+    由 ThreadManager._build_cell 注册到 sinks 列表。
+
+    **task#3.2 重构**：持有 :class:`web.usage_token.UsageTokenManager` 引用，
+    通过 ``manager.record_run_usage(channel, raw_payload, ...)`` 写盘——
+    channel 从 payload 的 ``provider_kind`` 派生
+    （anthropic→anthropic / openai_compatible→openai）。
+
+    替代 task#3.2 之前的 ``thread_manager.add_thread_usage(...)`` 直接调用——
+    后者是 task#2 兼容 shim，启发式判断 channel 写 cumulative_usage dict；
+    现在改为 manager 内部按 SDK 原生字段精确写。
     """
 
     def __init__(
         self,
         thread_id: str,
-        persist_fn: Callable[..., Awaitable[Any]],
+        usage_manager: Any,  # web.usage_token.UsageTokenManager
     ) -> None:
         self._thread_id = thread_id
-        self._persist_fn = persist_fn
+        self._usage_manager = usage_manager
 
     async def emit(self, event: Event) -> None:
         if event.kind != "usage":
             return
         payload = event.payload or {}
-        prompt = int(payload.get("prompt_tokens", 0) or 0)
-        completion = int(payload.get("completion_tokens", 0) or 0)
-        total = int(payload.get("total_tokens", 0) or 0)
-        if prompt == 0 and completion == 0 and total == 0:
+        # task#3.2: provider_kind → channel 映射（task#3.1 已让 LLMProvider
+        # 在 usage 字段塞 provider_kind 标识）
+        provider_kind = payload.get("provider_kind")
+        if provider_kind == "anthropic":
+            channel = "anthropic"
+        elif provider_kind == "openai_compatible":
+            channel = "openai"
+        else:
+            # 老 event payload 没 provider_kind（兼容老消费者 / 测试），按启发式：
+            # 含 cache_creation_input_tokens 字段 → anthropic；否则 openai。
+            channel = (
+                "anthropic"
+                if "cache_creation_input_tokens" in payload or "cache_read_input_tokens" in payload
+                else "openai"
+            )
+        # 跳过 0 usage（仅日志，不写盘）
+        if all(
+            int(payload.get(k, 0) or 0) == 0
+            for k in ("input_tokens", "output_tokens", "prompt_tokens", "completion_tokens")
+        ):
             return
-        cr_raw = payload.get("cache_read_tokens")
-        cc_raw = payload.get("cache_creation_tokens")
         try:
-            await self._persist_fn(
+            await self._usage_manager.record_run_usage(
                 self._thread_id,
-                prompt_tokens=prompt,
-                completion_tokens=completion,
-                total_tokens=total,
-                cache_read_tokens=int(cr_raw) if cr_raw is not None else None,
-                cache_creation_tokens=int(cc_raw) if cc_raw is not None else None,
+                channel=channel,
+                raw_payload=payload,
+                turn=event.turn or 0,
+                run_id=event.run_id or "",
             )
         except Exception:
             logger.warning(
