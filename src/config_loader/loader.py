@@ -90,6 +90,9 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("evolution", "learning", "mode"),
     ("evolution", "learning", "background"),
     ("evolution", "learning", "model_name"),
+    ("evolution", "learning", "base_url"),
+    ("evolution", "learning", "api_key_env"),
+    ("evolution", "learning", "provider"),
     ("evolution", "learning", "reasoning_effort"),
     ("evolution", "learning", "every_n_runs"),
     ("evolution", "learning", "min_user_turns"),
@@ -114,16 +117,14 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("web", "host"),
     ("web", "port"),
     ("web", "dev_mode"),
+    ("web", "initial_password"),
     ("web", "idle_timeout_seconds"),
     ("web", "idle_check_interval_seconds"),
     ("web", "pending_approval_timeout_seconds"),
+    ("scheduler", "approval", "allow_write_file_create_in_cwd"),
     ("sitian", "version"),
     ("sitian", "default_scan_interval_sec"),
     ("sitian", "idle_sleep_sec"),
-    ("sitian", "scanner", "recent_session_window_days"),
-    ("sitian", "scanner", "session_recent_user_messages"),
-    ("sitian", "scanner", "session_recent_assistant_messages"),
-    ("sitian", "scanner", "session_message_max_chars"),
 )
 
 # per-module YAML 文件名 → 合并到 Config 的顶层 key。

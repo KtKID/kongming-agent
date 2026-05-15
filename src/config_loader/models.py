@@ -805,6 +805,14 @@ class SafetyConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class SchedulerApprovalConfig(BaseModel):
+    """Scheduler-triggered approval policy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    allow_write_file_create_in_cwd: bool = True
+
+
 class SchedulerConfig(BaseModel):
     """cron 模块运行配置（v0.2 引入）。
 
@@ -839,6 +847,7 @@ class SchedulerConfig(BaseModel):
     max_task_age_seconds: int | None = None
     default_timezone: str = "UTC"
     default_delivery_channel: Literal["web", "cli"] = "web"
+    approval: SchedulerApprovalConfig = Field(default_factory=SchedulerApprovalConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -1019,6 +1028,7 @@ __all__ = [
     "SafetyHardDenyConfig",
     "SafetySensitivePathConfig",
     "SafetySkillCallConfig",
+    "SchedulerApprovalConfig",
     "SchedulerConfig",
     "SessionConfig",
     "ShellToolConfig",

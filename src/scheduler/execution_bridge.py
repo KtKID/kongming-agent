@@ -34,6 +34,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from config_loader.models import SchedulerApprovalConfig
 from core.agent_spec import AgentSpec
 from core.contracts import (
     ApprovalProvider,
@@ -424,7 +425,13 @@ class ExecutionBridge:
 
         # 2) approval wrap
         wrapped_approval = ScheduleApprovalProvider(
-            inner=self._inner_approval, task_id=task.task_id
+            inner=self._inner_approval,
+            task_id=task.task_id,
+            policy=(
+                self._base_config.scheduler.approval
+                if self._base_config is not None
+                else SchedulerApprovalConfig()
+            ),
         )
 
         # 3) watchdog

@@ -139,6 +139,12 @@ approval:
   # interactive | auto_allow | auto_deny
   mode: interactive
 
+scheduler:
+  enabled: true
+  default_timezone: Asia/Shanghai
+  approval:
+    allow_write_file_create_in_cwd: true
+
 tool:
   shell:
     enabled: true
@@ -508,11 +514,11 @@ safety:
 # 文档：docs/web-multi-thread-frontend-v0.1.5/
 web:
   # 是否启用 web 宿主壳（默认 false；启用前先 review 整段配置）
-  enabled: false
+  enabled: true
 
   # uvicorn bind IP：仅本机用 127.0.0.1；需外网访问改 0.0.0.0 + 防火墙
   host: "0.0.0.0"
-  port: 8080
+  port: 60000
 
   # 跳过登录鉴权（仅本地开发！）；上线必须 false 并设强密码
   dev_mode: false

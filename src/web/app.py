@@ -50,10 +50,14 @@ from web.startup_progress import StartupProgress
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from pathlib import Path
+    from typing import Any
 
     from config_loader.models import Config
+    from scheduler.store import Store
     from web.rate_limit import LoginRateLimiter
     from web.types import ThreadManagerProtocol
+
+    SchedulerRuntimeFactory = Callable[[Store], tuple[Any, Any]]
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +131,7 @@ def create_app(
     *,
     home_dir: Path | None = None,
     rate_limiter: LoginRateLimiter | None = None,
+    scheduler_runtime_factory: SchedulerRuntimeFactory | None = None,
     lifespan_shutdown_timeout: float = DEFAULT_LIFESPAN_SHUTDOWN_TIMEOUT,
 ) -> FastAPI:
     """装配 FastAPI app。
@@ -260,14 +265,20 @@ def create_app(
                     target_sink=ThreadTargetSink(thread_manager),
                 )
                 preset_map = {p.id: p for p in cfg.web.llm_presets}
-                ticker_runtime, ticker_bridge = build_cron_execution_bridge(
-                    cfg,
-                    scheduler_store,
-                    event_sinks=[],
-                    dispatcher=lifespan_cron_dispatcher,
-                    preset_map=preset_map,
-                    trace_dir=cron_home / "traces",
-                )
+                if scheduler_runtime_factory is None:
+                    ticker_runtime, ticker_bridge = build_cron_execution_bridge(
+                        cfg,
+                        scheduler_store,
+                        event_sinks=[],
+                        dispatcher=lifespan_cron_dispatcher,
+                        preset_map=preset_map,
+                        trace_dir=cron_home / "traces",
+                    )
+                else:
+                    ticker_runtime, ticker_bridge = scheduler_runtime_factory(scheduler_store)
+                    ticker_bridge._dispatcher = lifespan_cron_dispatcher
+                    ticker_bridge._preset_map = dict(preset_map)
+                    ticker_bridge._trace_dir = cron_home / "traces"
                 ticker_stop = asyncio.Event()
                 ticker_task = asyncio.create_task(
                     run_ticker_loop(
