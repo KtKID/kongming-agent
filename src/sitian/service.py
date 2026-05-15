@@ -2,20 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from sitian.config import SiTianConfig, SiTianSourceConfig
-from sitian.models import JsonValue, SiTianSourceRuntimeState
+from sitian.models import JsonValue, SiTianObservation, SiTianSourceRuntimeState
 
 if TYPE_CHECKING:
-    # 只做类型注解；运行时不需要 Config 实例（_extract_sitian_config 只对
-    # SiTianConfig 做 isinstance）。延迟 import 切断 sitian↔config_loader 循环。
     from config_loader.models import Config
+    from core.contracts import LLMProvider
 from sitian.scanners import SiTianScanBatch, SiTianScanSource
 from sitian.store import SiTianRecordsStore
 from sitian.suggestions import SiTianMaterializeState
+
+_log = logging.getLogger("sitian.service")
 
 _DEFAULT_RETRY_BACKOFF_SEC = 60
 
@@ -34,6 +36,7 @@ async def SiTianRunOnce(
     *,
     store: SiTianRecordsStore | None = None,
     now: datetime | None = None,
+    llm_provider: LLMProvider | None = None,
 ) -> SiTianRunResult:
     sitian_cfg = _extract_sitian_config(cfg)
     records = store or SiTianRecordsStore()
@@ -98,6 +101,16 @@ async def SiTianRunOnce(
     await records.save_work_items(work_items)
     await records.save_latest_suggestions(suggestions)
     await records.save_latest_summary(summary)
+
+    if llm_provider is not None and sitian_cfg.analyzer.enabled:
+        await _run_llm_analysis(
+            records=records,
+            provider=llm_provider,
+            sitian_cfg=sitian_cfg,
+            observations=all_observations,
+            observed_at=observed_at,
+        )
+
     await records.write_scan_snapshot(
         {
             "scanId": observed_at,
@@ -117,18 +130,63 @@ async def SiTianRunOnce(
     )
 
 
+async def _run_llm_analysis(
+    *,
+    records: SiTianRecordsStore,
+    provider: LLMProvider,
+    sitian_cfg: SiTianConfig,
+    observations: tuple[SiTianObservation, ...],
+    observed_at: str,
+) -> None:
+    from sitian.analyzer import compute_observations_hash, report_to_markdown, sitian_analyze
+
+    if sitian_cfg.analyzer.skip_if_unchanged:
+        current_hash = compute_observations_hash(observations)
+        previous_hash = await records.load_observations_hash()
+        if current_hash == previous_hash:
+            _log.info("observations unchanged (hash=%s), skip LLM analysis", current_hash[:12])
+            return
+    else:
+        current_hash = None
+
+    report = await sitian_analyze(
+        observations,
+        provider=provider,
+        analyzer_config=sitian_cfg.analyzer,
+        interests_config=sitian_cfg.interests,
+        observed_at=observed_at,
+        sitian_root=records.root_dir,
+    )
+    await records.save_sitian_report(report.to_dict())
+    await records.save_latest_summary(report_to_markdown(report))
+
+    if current_hash is not None:
+        await records.save_observations_hash(current_hash)
+
+    if report.errors:
+        for err in report.errors:
+            _log.warning("sitian analysis error: %s", err)
+    else:
+        _log.info(
+            "sitian analysis complete: %d items, report_id=%s",
+            len(report.items),
+            report.report_id,
+        )
+
+
 async def SiTianRunLoop(
     cfg: Config | SiTianConfig,
     *,
     store: SiTianRecordsStore | None = None,
     stop_event: asyncio.Event | None = None,
+    llm_provider: LLMProvider | None = None,
 ) -> None:
     sitian_cfg = _extract_sitian_config(cfg)
     records = store or SiTianRecordsStore()
     stop_signal = stop_event or asyncio.Event()
 
     while not stop_signal.is_set():
-        await SiTianRunOnce(sitian_cfg, store=records)
+        await SiTianRunOnce(sitian_cfg, store=records, llm_provider=llm_provider)
         runtime_states = await _SiTianLoadRuntimeStates(records, sitian_cfg, observed_at=_to_iso())
         sleep_seconds = _SiTianSleepSeconds(
             sitian_cfg=sitian_cfg,

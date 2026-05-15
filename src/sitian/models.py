@@ -270,10 +270,81 @@ def _as_optional_str(value: Any) -> str | None:
     return str(value)
 
 
+@dataclass(frozen=True)
+class SiTianReportItem:
+    """单个项目的 LLM 分析结果。"""
+
+    project_id: str
+    project_name: str
+    status: str  # active / idle / blocked
+    severity: str  # high / medium / low
+    narrative: str
+    recent_activity: str
+    next_actions: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "projectId": self.project_id,
+            "projectName": self.project_name,
+            "status": self.status,
+            "severity": self.severity,
+            "narrative": self.narrative,
+            "recentActivity": self.recent_activity,
+            "nextActions": list(self.next_actions),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> SiTianReportItem:
+        return cls(
+            project_id=str(raw["projectId"]),
+            project_name=str(raw["projectName"]),
+            status=str(raw["status"]),
+            severity=str(raw["severity"]),
+            narrative=str(raw["narrative"]),
+            recent_activity=str(raw["recentActivity"]),
+            next_actions=_tuple_of_str(raw.get("nextActions", [])),
+        )
+
+
+@dataclass(frozen=True)
+class SiTianReport:
+    """一次 LLM 分析的完整报告。"""
+
+    report_id: str
+    generated_at: str
+    summary: str
+    items: tuple[SiTianReportItem, ...]
+    model_name: str
+    errors: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "reportId": self.report_id,
+            "generatedAt": self.generated_at,
+            "summary": self.summary,
+            "items": [item.to_dict() for item in self.items],
+            "modelName": self.model_name,
+            "errors": list(self.errors),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> SiTianReport:
+        return cls(
+            report_id=str(raw["reportId"]),
+            generated_at=str(raw["generatedAt"]),
+            summary=str(raw["summary"]),
+            items=tuple(SiTianReportItem.from_dict(item) for item in raw.get("items", [])),
+            model_name=str(raw["modelName"]),
+            errors=_tuple_of_str(raw.get("errors", [])),
+        )
+
+
 __all__ = [
     "JsonValue",
     "SiTianObservation",
     "SiTianPendingApproval",
+    "SiTianReport",
+    "SiTianReportItem",
     "SiTianSourceRuntimeState",
     "SiTianWorkItem",
     "SiTianWorkspaceBlocker",

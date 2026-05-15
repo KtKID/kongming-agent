@@ -67,6 +67,33 @@ class SiTianScannerConfig(BaseModel):
     """每条消息最大字符数；超出末尾加 "…"。0 = 不截断。"""
 
 
+class SiTianAnalyzerConfig(BaseModel):
+    """LLM 分析层配置。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(default=False)
+    model_name: str = Field(default="")
+    base_url: str = Field(default="")
+    api_key_env: str = Field(default="")
+    max_tokens: int = Field(default=2048, gt=0)
+    temperature: float = Field(default=0.3, ge=0.0, le=2.0)
+    timeout: int = Field(default=30, gt=0)
+    max_context_chars: int = Field(default=50000, gt=0)
+    skip_if_unchanged: bool = Field(default=True)
+    full_log_enabled: bool = Field(default=False)
+    """记录完整 LLM 提示词 + 回复到 $SITIAN_ROOT/full-log/（审计日志）。"""
+
+
+class SiTianInterestsConfig(BaseModel):
+    """用户兴趣配置，注入 LLM system prompt。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    projects: list[str] = Field(default_factory=list)
+    focus: str = Field(default="")
+
+
 class SiTianConfig(BaseModel):
     """顶层 SiTian 配置 section。"""
 
@@ -83,6 +110,8 @@ class SiTianConfig(BaseModel):
     用于多 kind 共存时隔离产物（``claude/`` / ``codex/`` / ``general/``）。
     """
     scanner: SiTianScannerConfig = Field(default_factory=SiTianScannerConfig)
+    analyzer: SiTianAnalyzerConfig = Field(default_factory=SiTianAnalyzerConfig)
+    interests: SiTianInterestsConfig = Field(default_factory=SiTianInterestsConfig)
     sources: list[SiTianSourceConfig] = Field(default_factory=list)
 
     @field_validator("output_subdir")
@@ -110,7 +139,9 @@ class SiTianConfig(BaseModel):
 
 
 __all__ = [
+    "SiTianAnalyzerConfig",
     "SiTianConfig",
+    "SiTianInterestsConfig",
     "SiTianScannerConfig",
     "SiTianSourceConfig",
 ]

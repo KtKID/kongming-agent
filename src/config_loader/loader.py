@@ -125,6 +125,23 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("sitian", "version"),
     ("sitian", "default_scan_interval_sec"),
     ("sitian", "idle_sleep_sec"),
+    ("sitian", "scanner", "recent_session_window_days"),
+    ("sitian", "scanner", "session_recent_user_messages"),
+    ("sitian", "scanner", "session_recent_assistant_messages"),
+    ("sitian", "scanner", "session_message_max_chars"),
+    # sitian.analyzer
+    ("sitian", "analyzer", "enabled"),
+    ("sitian", "analyzer", "model_name"),
+    ("sitian", "analyzer", "base_url"),
+    ("sitian", "analyzer", "api_key_env"),
+    ("sitian", "analyzer", "max_tokens"),
+    ("sitian", "analyzer", "temperature"),
+    ("sitian", "analyzer", "timeout"),
+    ("sitian", "analyzer", "max_context_chars"),
+    ("sitian", "analyzer", "skip_if_unchanged"),
+    ("sitian", "analyzer", "full_log_enabled"),
+    # sitian.interests
+    ("sitian", "interests", "focus"),
 )
 
 # per-module YAML 文件名 → 合并到 Config 的顶层 key。

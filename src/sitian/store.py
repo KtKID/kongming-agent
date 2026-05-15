@@ -26,11 +26,15 @@ _LATEST_SUGGESTIONS_FILENAME = "latest_suggestions.json"
 _LATEST_SUMMARY_FILENAME = "latest_summary.md"
 _WORK_ITEMS_DIRNAME = "work_items"
 _SCANS_DIRNAME = "scans"
+_SITIAN_REPORT_FILENAME = "sitian_report.json"
+_OBSERVATIONS_HASH_FILENAME = "last_observations_hash"
 
 
 def resolve_sitian_root(root_dir: str | Path | None = None) -> Path:
     if root_dir is None:
-        return (Path.home() / ".kongming" / "SiTian").expanduser().resolve()
+        from config_loader.paths import get_kongming_home
+
+        return get_kongming_home() / "sitian"
     return Path(root_dir).expanduser().resolve()
 
 
@@ -181,6 +185,25 @@ class SiTianRecordsStore:
     async def load_latest_summary(self) -> str | None:
         async with self._lock:
             return await asyncio.to_thread(self._read_text_optional_sync, self._latest_summary_path)
+
+    async def save_sitian_report(self, report_dict: dict[str, JsonValue]) -> Path:
+        async with self._lock:
+            await asyncio.to_thread(self._ensure_layout_sync)
+            path = self._root_dir / _SITIAN_REPORT_FILENAME
+            await asyncio.to_thread(self._atomic_write_json_sync, path, report_dict)
+            return path
+
+    async def save_observations_hash(self, hash_str: str) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._ensure_layout_sync)
+            path = self._root_dir / _OBSERVATIONS_HASH_FILENAME
+            await asyncio.to_thread(self._atomic_write_text_sync, path, hash_str)
+
+    async def load_observations_hash(self) -> str | None:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._read_text_optional_sync, self._root_dir / _OBSERVATIONS_HASH_FILENAME
+            )
 
     async def write_scan_snapshot(
         self,

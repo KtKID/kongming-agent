@@ -3,11 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 
 from config_loader import load_config
 from config_loader.models import Config
+
+if TYPE_CHECKING:
+    from core.contracts import LLMProvider
 from sitian.service import SiTianReadState, SiTianRunLoop, SiTianRunOnce
 from sitian.store import SiTianRecordsStore, resolve_sitian_root
 
@@ -87,7 +91,8 @@ def _resolve_records_root(root_dir: Path | None, cfg: Config | None) -> Path:
 async def _run_once(*, config_path: Path | None, root_dir: Path | None) -> None:
     cfg = load_config(config_path)
     store = SiTianRecordsStore(_resolve_records_root(root_dir, cfg))
-    result = await SiTianRunOnce(cfg, store=store)
+    provider = _build_analyzer_provider(cfg)
+    result = await SiTianRunOnce(cfg, store=store, llm_provider=provider)
     click.echo(
         json.dumps(
             {
@@ -106,7 +111,8 @@ async def _run_once(*, config_path: Path | None, root_dir: Path | None) -> None:
 async def _run_loop(*, config_path: Path | None, root_dir: Path | None) -> None:
     cfg = load_config(config_path)
     store = SiTianRecordsStore(_resolve_records_root(root_dir, cfg))
-    await SiTianRunLoop(cfg, store=store)
+    provider = _build_analyzer_provider(cfg)
+    await SiTianRunLoop(cfg, store=store, llm_provider=provider)
 
 
 async def _print_state(*, config_path: Path | None, root_dir: Path | None) -> None:
@@ -120,6 +126,37 @@ async def _print_state(*, config_path: Path | None, root_dir: Path | None) -> No
     store = SiTianRecordsStore(_resolve_records_root(root_dir, cfg))
     payload = await SiTianReadState(store=store)
     click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _build_analyzer_provider(cfg: Config) -> LLMProvider | None:
+    """如果 analyzer.enabled 且有有效模型配置，构造 LLM provider；否则返回 None。"""
+    analyzer_cfg = cfg.sitian.analyzer
+    if not analyzer_cfg.enabled:
+        return None
+    if not analyzer_cfg.model_name and not analyzer_cfg.base_url:
+        return None
+
+    import os
+
+    from config_loader.models import ModelConfig
+
+    api_key = ""
+    if analyzer_cfg.api_key_env:
+        api_key = os.environ.get(analyzer_cfg.api_key_env, "")
+
+    sitian_model = ModelConfig(
+        name=analyzer_cfg.model_name or cfg.model.name,
+        base_url=analyzer_cfg.base_url or cfg.model.base_url,
+        api_key=api_key or cfg.model.api_key,
+        timeout=analyzer_cfg.timeout,
+        max_tokens=analyzer_cfg.max_tokens,
+        temperature=analyzer_cfg.temperature,
+    )
+    provider_cfg = cfg.model_copy(update={"model": sitian_model})
+
+    from executors.llm.provider_factory import build_provider
+
+    return build_provider(provider_cfg)
 
 
 __all__ = ["main"]
