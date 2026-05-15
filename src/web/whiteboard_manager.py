@@ -3,8 +3,9 @@
 `WhiteboardManager` 统一管理两个独立的 whiteboard workspace：
 
 - **global workspace**：``<whiteboard_root>/global/``，跨项目共享，所有 cwd 都能看到。
-- **project workspace**：``<whiteboard_root>/projects/<encode_cwd(cwd)>/``，每个 cwd
-  一份独立白板。``encode_cwd`` 复用 Claude SDK 的规则（``/ _ . → -``）。
+- **project workspace**：``<whiteboard_root>/projects/<encode_project_dir(cwd)>/``，
+  每个 cwd 一份独立白板。目录名格式为 ``<basename-slug>-<sha256[:8]>``——
+  basename 保留可读性，hash 后缀保证唯一（同 basename 不同路径不会撞）。
 
 设计要点：
 
@@ -18,13 +19,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from web.claude_code.jsonl_history import encode_cwd
 from web.whiteboard_store import (
     DEFAULT_CARD_HEIGHT,
     DEFAULT_CARD_TITLE,
@@ -42,6 +44,30 @@ from web.whiteboard_store import (
 )
 
 CardScope = Literal["project", "global"]
+
+_SLUG_RE = re.compile(r"[^a-z0-9-]+")
+_PROJECT_DIR_HASH_LEN = 8
+
+
+def encode_project_dir(cwd: str) -> str:
+    """生成 project 子目录名：可读 + 唯一 + 和路径有关。
+
+    格式 ``<basename-slug>-<sha256[:8]>``：
+
+    - **basename-slug**：取 ``Path(cwd).name`` 小写后保留 ``[a-z0-9-]``，其他字符
+      压成 ``-``；为空 / 全非 ASCII 时退化为 ``project``。
+    - **hash**：SHA-256 完整 ``cwd`` 字符串前 8 字符——hash 空间 2^32，本地工具够用，
+      且保证同 basename 不同路径（如 ``/a/proj`` vs ``/b/proj``）不撞。
+
+    示例：
+
+    - ``/Users/kid/proj/kongming-agent`` → ``kongming-agent-<8hex>``
+    - ``/Users/kid/项目/喵🐱`` → ``project-<8hex>``（非 ASCII basename 退化）
+    """
+    basename = Path(cwd).name.lower()
+    slug = _SLUG_RE.sub("-", basename).strip("-") or "project"
+    digest = hashlib.sha256(cwd.encode("utf-8")).hexdigest()[:_PROJECT_DIR_HASH_LEN]
+    return f"{slug}-{digest}"
 
 
 class ScopedCardRecord(BaseModel):
@@ -81,7 +107,7 @@ class WhiteboardManager:
         return self._root / "global"
 
     def _project_workspace(self, cwd: str) -> Path:
-        return self._root / "projects" / encode_cwd(cwd)
+        return self._root / "projects" / encode_project_dir(cwd)
 
     def _write_project_meta(self, cwd: str) -> None:
         """首次落 project workspace 时，把原始 cwd 记到 ``meta.json``。
@@ -274,4 +300,5 @@ __all__ = [
     "WhiteboardLayoutUpdate",
     "WhiteboardManager",
     "WhiteboardScopeError",
+    "encode_project_dir",
 ]

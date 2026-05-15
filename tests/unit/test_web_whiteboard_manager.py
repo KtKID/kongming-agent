@@ -9,12 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from web.claude_code.jsonl_history import encode_cwd
 from web.whiteboard_manager import (
     ScopedCardRecord,
     ScopedWhiteboardSnapshot,
     WhiteboardManager,
     WhiteboardScopeError,
+    encode_project_dir,
 )
 from web.whiteboard_store import (
     WhiteboardContentConflictError,
@@ -81,7 +81,7 @@ def test_m2_create_project_card_writes_meta_and_layout(
 
     assert record.scope == "project"
 
-    encoded = encode_cwd(cwd)
+    encoded = encode_project_dir(cwd)
     project_ws = tmp_path / "projects" / encoded
 
     # meta.json 写入
@@ -330,7 +330,7 @@ def test_m13_update_layout_global_does_not_touch_project(
     g_card = manager.create_card(cwd=None, scope="global", title="G", content="g1", x=10, y=10)
     p_card = manager.create_card(cwd=cwd, scope="project", title="P", content="p1", x=20, y=20)
 
-    project_board = tmp_path / "projects" / encode_cwd(cwd) / "whiteboard" / "board.json"
+    project_board = tmp_path / "projects" / encode_project_dir(cwd) / "whiteboard" / "board.json"
     project_board_before = project_board.read_text(encoding="utf-8")
 
     manager.update_layout(
@@ -449,7 +449,7 @@ def test_m16_update_layout_project_first_write_creates_meta_json(
     import json
 
     cwd = "/Users/kid/proj/layout-first"
-    encoded = encode_cwd(cwd)
+    encoded = encode_project_dir(cwd)
     project_root = tmp_path / "projects" / encoded
     meta_path = project_root / "meta.json"
 
@@ -471,7 +471,7 @@ def test_m16_update_layout_project_first_write_creates_meta_json(
 
 
 # ---------------------------------------------------------------------------
-# E1：encode_cwd 确定性 — 同一 cwd 两次 create 落同一 project workspace
+# E1：encode_project_dir 确定性 — 同一 cwd 两次 create 落同一 project workspace
 # ---------------------------------------------------------------------------
 
 
@@ -482,15 +482,15 @@ def test_e1_same_cwd_two_creates_share_workspace(
     manager.create_card(cwd=cwd, scope="project", title="C1", content="c1")
     manager.create_card(cwd=cwd, scope="project", title="C2", content="c2")
 
-    encoded = encode_cwd(cwd)
+    encoded = encode_project_dir(cwd)
     project_ws = tmp_path / "projects" / encoded
     cards_dir = project_ws / "whiteboard" / "cards"
 
     md_files = list(cards_dir.glob("*.md"))
     assert len(md_files) == 2
 
-    # encode_cwd 自身确定性
-    assert encode_cwd(cwd) == encoded
+    # encode_project_dir 自身确定性
+    assert encode_project_dir(cwd) == encoded
 
     # 只有一个 projects 子目录被创建
     project_subdirs = [p for p in (tmp_path / "projects").iterdir() if p.is_dir()]
@@ -509,8 +509,8 @@ def test_e2_different_cwds_isolated(manager: WhiteboardManager, tmp_path: Path) 
     card_a = manager.create_card(cwd=cwd_a, scope="project", title="A1", content="a")
     card_b = manager.create_card(cwd=cwd_b, scope="project", title="B1", content="b")
 
-    encoded_a = encode_cwd(cwd_a)
-    encoded_b = encode_cwd(cwd_b)
+    encoded_a = encode_project_dir(cwd_a)
+    encoded_b = encode_project_dir(cwd_b)
     assert encoded_a != encoded_b
 
     ws_a = tmp_path / "projects" / encoded_a
@@ -529,3 +529,43 @@ def test_e2_different_cwds_isolated(manager: WhiteboardManager, tmp_path: Path) 
     b_ids = [c.record.id for c in snap_b.cards if c.scope == "project"]
     assert b_ids == [card_b.record.id]
     assert card_a.record.id not in b_ids
+
+
+# ---------------------------------------------------------------------------
+# E3：encode_project_dir 格式契约 — 可读 basename + sha256[:8]
+# ---------------------------------------------------------------------------
+
+
+def test_e3_encode_project_dir_format() -> None:
+    """目录名格式：``<basename-slug>-<sha256[:8]>``。
+
+    覆盖：
+    - 普通 ASCII 路径 → basename 保留
+    - 非 ASCII basename → 退化为 ``project``
+    - 同 basename 不同路径 → hash 区分（不撞）
+    - 确定性：同一 cwd 永远算出同一目录名
+    """
+    import hashlib
+
+    # 1. 普通路径：basename 保留
+    cwd_a = "/Users/kid/proj/kongming-agent"
+    expected_hash_a = hashlib.sha256(cwd_a.encode("utf-8")).hexdigest()[:8]
+    assert encode_project_dir(cwd_a) == f"kongming-agent-{expected_hash_a}"
+
+    # 2. 同 basename 不同路径 → hash 区分
+    cwd_b = "/Users/kid/work/kongming-agent"
+    expected_hash_b = hashlib.sha256(cwd_b.encode("utf-8")).hexdigest()[:8]
+    encoded_a = encode_project_dir(cwd_a)
+    encoded_b = encode_project_dir(cwd_b)
+    assert encoded_a != encoded_b
+    assert encoded_b == f"kongming-agent-{expected_hash_b}"
+
+    # 3. 非 ASCII basename → 退化为 "project"
+    cwd_unicode = "/Users/kid/项目/喵🐱"
+    encoded_unicode = encode_project_dir(cwd_unicode)
+    assert encoded_unicode.startswith("project-")
+    expected_hash_unicode = hashlib.sha256(cwd_unicode.encode("utf-8")).hexdigest()[:8]
+    assert encoded_unicode == f"project-{expected_hash_unicode}"
+
+    # 4. 确定性：多次调用同一 cwd 算出同一目录名
+    assert encode_project_dir(cwd_a) == encode_project_dir(cwd_a)

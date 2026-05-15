@@ -37,8 +37,8 @@ from config_loader.models import Config
 from tests.unit.test_web_app_lifespan import _seed_password
 from web.app import create_app
 from web.auth import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
-from web.claude_code.jsonl_history import encode_cwd
 from web.thread_metadata import ThreadMetadata
+from web.whiteboard_manager import encode_project_dir
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 
@@ -357,7 +357,7 @@ def test_post_project_card_with_cwd_writes_to_project_workspace(tmp_path: Path) 
         )
         assert resp.status_code == 201
         assert resp.json()["scope"] == "project"
-        encoded = encode_cwd(project_cwd)
+        encoded = encode_project_dir(project_cwd)
         proj_root = home / "whiteboard" / "projects" / encoded
         # store.whiteboard_dir 在 workspace/whiteboard/ 下；project workspace 是
         # ``<root>/projects/<encoded>/``，所以 board.json 路径是
@@ -459,7 +459,7 @@ def test_put_card_content_conflict_returns_409(tmp_path: Path) -> None:
 
         # 通过外部直接改文件触发冲突（mtime 变化让 expected_updated_at 失配）
         time.sleep(0.02)
-        encoded = encode_cwd(project_cwd)
+        encoded = encode_project_dir(project_cwd)
         proj_root = home / "whiteboard" / "projects" / encoded
         card_path = proj_root / "whiteboard" / "cards" / created["filename"]
         card_path.write_text("edited outside api", encoding="utf-8")
