@@ -417,6 +417,7 @@ def create_app(
     # 5. app.state 注入
     from web._shared.session_manager import SessionManager as _SharedSessionManager
     from web.codex import CodexService
+    from web.whiteboard_manager import WhiteboardManager
 
     app.state.config = cfg
     app.state.serializer = serializer
@@ -426,6 +427,7 @@ def create_app(
     app.state.kongming_home = home
     app.state.claude_home = Path.home() / ".claude"
     app.state.workspace_root = Path.cwd()
+    app.state.whiteboard_manager = WhiteboardManager(whiteboard_root=home / "whiteboard")
     app.state.claude_session_manager = _SharedSessionManager()
     # codex 通道（与 claude_code 平级，独立 SessionManager 单例）
     app.state.codex_session_manager = _SharedSessionManager()

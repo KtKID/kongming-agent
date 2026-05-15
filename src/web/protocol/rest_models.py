@@ -493,9 +493,16 @@ class ImportCodexSessionResponse(_FrameBase):
 
 
 class WhiteboardCardDTO(_FrameBase):
-    """白板卡片完整 DTO。"""
+    """白板卡片完整 DTO。
+
+    ``scope`` 区分卡片所属作用域：
+
+    - ``"project"``：项目级，落在当前 cwd 下的 ``.kongming/whiteboard/``。
+    - ``"global"``：全局级，落在 ``KONGMING_HOME/whiteboard/``。
+    """
 
     id: Annotated[str, Field(pattern=r"^card-[a-f0-9]{12}$")]
+    scope: Literal["project", "global"]
     title: Annotated[str, Field(min_length=1, max_length=200)]
     category: Annotated[str, Field(max_length=100)] = ""
     x: Annotated[int, Field(ge=0)]
@@ -512,16 +519,30 @@ class WhiteboardCardDTO(_FrameBase):
 
 
 class WhiteboardDTO(_FrameBase):
-    """Workspace 级白板聚合快照。"""
+    """Workspace 级白板聚合快照（双 scope 合并视图）。
 
-    title: Annotated[str, Field(min_length=1, max_length=200)]
+    用 ``global_title`` + ``project_title`` 取代单一 ``title``：
+
+    - ``global_title``：全局白板标题，恒非空。
+    - ``project_title``：项目白板标题。``None`` 表示 cwd 空 / 项目目录不存在，
+      此时白板只展示全局卡片。
+
+    ``cards`` 列表混合包含两个 scope 的卡片，前端按 ``scope`` 字段分别渲染。
+    """
+
+    global_title: Annotated[str, Field(min_length=1, max_length=200)]
+    project_title: Annotated[str, Field(min_length=1, max_length=200)] | None = None
     cards: list[WhiteboardCardDTO] = Field(default_factory=list)
     schema_version: Literal[1] = 1
 
 
 class CreateWhiteboardCardRequest(_FrameBase):
-    """创建白板卡片请求体。"""
+    """创建白板卡片请求体。
 
+    ``scope`` 必填，由前端显式指定目标作用域。
+    """
+
+    scope: Literal["project", "global"]
     title: Annotated[str, Field(min_length=1, max_length=200)] = "Untitled"
     category: Annotated[str, Field(max_length=100)] = ""
     content: str = ""
@@ -552,8 +573,15 @@ class WhiteboardCardLayoutDTO(_FrameBase):
 
 
 class UpdateWhiteboardLayoutRequest(_FrameBase):
-    """更新白板布局请求体。"""
+    """更新白板布局请求体。
 
+    ``scope`` 必填，指定本次布局更新作用在哪个作用域的白板：
+
+    - ``"project"``：更新项目白板的 title / cards 布局。
+    - ``"global"``：更新全局白板的 title / cards 布局。
+    """
+
+    scope: Literal["project", "global"]
     title: Annotated[str, Field(min_length=1, max_length=200)] | None = None
     cards: list[WhiteboardCardLayoutDTO] = Field(default_factory=list)
 

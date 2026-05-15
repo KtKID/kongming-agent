@@ -284,3 +284,19 @@ forbidden_modules =
     web.usage_token_v2._model_context_table
 ; web.thread_manager 是装配层，允许构造 v2 manager + 注入 locator；
 ; 但仍禁止直接 import 派生器（manager 内部消费）。
+
+; ---------------------------------------------------------------------------
+; Contract 10: whiteboard router 不允许绕过 manager 直接 import store
+;              router 必须只通过 WhiteboardManager 操作白板数据，
+;              store 是内部实现细节，不能成为 router 的直接依赖。
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:whiteboard-isolation]
+name = Whiteboard router must go through manager
+type = forbidden
+source_modules =
+    web.routers.whiteboard
+forbidden_modules =
+    web.whiteboard_store
+; router → manager → store 是合法链路，只禁直接 import
+allow_indirect_imports = True
