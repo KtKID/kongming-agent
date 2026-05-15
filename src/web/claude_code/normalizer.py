@@ -337,6 +337,9 @@ class ClaudeNormalizer:
                 tool_name = block.get("name")
                 if isinstance(tool_name, str) and tool_name:
                     out["toolName"] = tool_name
+                tool_id = block.get("id")
+                if isinstance(tool_id, str) and tool_id:
+                    out["toolId"] = tool_id
             return [out]
 
         if event_type == "content_block_delta":
