@@ -31,12 +31,12 @@ from web.thread_metadata import (
 )
 
 
-def test_schema_version_constant_is_8() -> None:
-    """task#2 起常量为 8（v0.2.4 是 7）。"""
-    assert THREAD_METADATA_SCHEMA_VERSION == 8
+def test_schema_version_constant_is_9() -> None:
+    """usage-token-v2-bigbang 起常量为 9（删 3 个 token 字段）。"""
+    assert THREAD_METADATA_SCHEMA_VERSION == 9
 
 
-def test_default_construction_uses_v8_and_generic_chat() -> None:
+def test_default_construction_uses_v9_and_generic_chat() -> None:
     meta = ThreadMetadata(
         id="thread-aaaaaaaaaaaa",
         name="t",
@@ -44,14 +44,13 @@ def test_default_construction_uses_v8_and_generic_chat() -> None:
         created_at=1.0,
         updated_at=1.0,
     )
-    assert meta.schema_version == 8
+    assert meta.schema_version == 9
     assert meta.backend_kind == "generic_chat"
     assert meta.preset_id == "p1"
-    # v0.2/v0.2.1 新字段默认空 / None
     assert meta.claude_thread_id == ""
     assert meta.cwd == ""
-    # v8: cumulative_usage 首轮前为 None（旧 cumulative_*_tokens 字段已删）
-    assert meta.cumulative_usage is None
+    # v9 (usage-token-v2-bigbang): 3 个 token 字段物理删除
+    assert not hasattr(meta, "cumulative_usage")
 
 
 def test_claude_code_allows_empty_preset_id() -> None:
@@ -67,8 +66,8 @@ def test_claude_code_allows_empty_preset_id() -> None:
     assert meta.preset_id == ""
 
 
-def test_read_v1_file_auto_upgrades_to_v8(tmp_path: Path) -> None:
-    """v1 文件 → 连续懒升级 v1→v2→...→v7→v8。"""
+def test_read_v1_file_auto_upgrades_to_v9(tmp_path: Path) -> None:
+    """v1 文件 → 连续懒升级 v1→v2→...→v8→v9（v9 drop 所有 token 字段）。"""
     path = thread_metadata_path(tmp_path, "thread-aaaaaaaaaaaa")
     path.parent.mkdir(parents=True, exist_ok=True)
     # 模拟旧 v1 文件：缺 backend_kind，schema_version=1
@@ -80,15 +79,11 @@ def test_read_v1_file_auto_upgrades_to_v8(tmp_path: Path) -> None:
     loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
     assert loaded is not None
     assert loaded.backend_kind == "generic_chat"
-    assert loaded.schema_version == 8
+    assert loaded.schema_version == 9
     assert loaded.claude_thread_id == ""
     assert loaded.cwd == ""
-    # v8: 老 v1 文件无 token 字段 → v3→v4 补 0 → v7→v8 映射为 openai 0 dict
-    # （backend_kind=generic_chat + cache_creation=0 → openai 启发式）
-    assert loaded.cumulative_usage is not None
-    assert loaded.cumulative_usage["channel"] == "openai"
-    assert loaded.cumulative_usage["input_tokens"] == 0
-    assert loaded.cumulative_usage["output_tokens"] == 0
+    # v9 (usage-token-v2-bigbang): token 字段已物理删除
+    assert not hasattr(loaded, "cumulative_usage")
     assert loaded.preset_id == "p1"
     assert loaded.name == "old"
     assert loaded.message_count == 3
