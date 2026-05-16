@@ -238,9 +238,9 @@ evolution:
 
     # ---------- 触发节律 ----------
     # 每 N 轮用户消息触发一次 reviewer。所有频道（claude/codex/native）共用。
-    every_n_runs: 5
+    every_n_runs: 10
     # 累计不足 N 轮时不触发（冷启动保护，避免前几条消息就跑 reviewer）。
-    min_user_turns: 3
+    min_user_turns: 5
 
     # ---------- reviewer 证据窗口 ----------
     # reviewer 看到的最近消息条数。越大 token 消耗越高，但上下文越完整。
@@ -254,9 +254,9 @@ evolution:
 
     # ---------- 超时与生命周期 ----------
     # reviewer 单次执行超时（秒）。超时后如果 evolution_write 已调用则保留结果。
-    review_timeout_seconds: 10.0
+    review_timeout_seconds: 120.0
     # app 关闭时等待后台 reviewer 完成的最大时间（秒）。超时则取消。
-    drain_on_close_seconds: 3.0
+    drain_on_close_seconds: 120.0
 
     # ---------- 存储 ----------
     # evolution 产物根目录。包含 reviews/ / evolution-nutrients.jsonl / evolution.state.json。
