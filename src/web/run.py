@@ -165,6 +165,7 @@ def _make_runtime_factory(cfg: object) -> object:
                     event_sinks=sink_list,
                     tools=registry,
                     enabled_tool_names=enabled_tool_names,
+                    instructions=_instructions_cache[0],
                     dispatcher=cron_dispatcher,
                     preset_map=preset_map,
                 )

@@ -317,6 +317,7 @@ class TestSchedulerRuntimeFactory:
         _, kwargs = mock_bridge.call_args
         assert kwargs["tools"] is mock_deps["registry"]
         assert kwargs["enabled_tool_names"] == ["read_file", "shell"]
+        assert kwargs["instructions"] == "test instructions"
 
 
 class TestEventSinks:
