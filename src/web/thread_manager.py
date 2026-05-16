@@ -593,6 +593,81 @@ class ThreadManager:
             self._boot_locks_storage: dict[str, asyncio.Lock] = {}
         return self._boot_locks_storage
 
+    # claude_bind_locks 字典：claude_thread_id → asyncio.Lock
+    # 只在 create_and_bind_claude_thread 路径用，串行化"反查→不存在则 create+bind"
+    # 的临界区，避免两个 import_claude_session 请求同时进入"不存在"分支产生重复
+    # thread metadata（"幽灵 thread"——曾在用户机器上发现 3 组 ctid 各挂 2-3 条
+    # thread metadata，根因是该临界区非原子）。
+    @property
+    def _claude_bind_locks(self) -> dict[str, asyncio.Lock]:
+        if not hasattr(self, "_claude_bind_locks_storage"):
+            self._claude_bind_locks_storage: dict[str, asyncio.Lock] = {}
+        return self._claude_bind_locks_storage
+
+    async def create_and_bind_claude_thread(
+        self,
+        *,
+        claude_thread_id: str,
+        cwd: str,
+        name: str,
+        preset_id: str = "",
+    ) -> tuple[ThreadMetadata, bool]:
+        """原子地完成"反查 ctid → 不存在则 create_thread + bind_claude_thread"。
+
+        替代老的两步非原子调用（import_claude_session router 旧实现），消除
+        race window（参见 ``docs/fixes/claude-session-rename-archive-
+        metadata-source.md`` 的根因调查）。
+
+        实现：per-claude_thread_id :class:`asyncio.Lock` 串行化临界区。
+
+        Returns:
+            元组 ``(meta, imported)``：
+
+            - ``imported=False``：``claude_thread_id`` 已绑过另一个 thread，
+              返回 existing thread metadata。
+            - ``imported=True``：新建了 thread + 完成 bind。
+
+        Raises:
+            ValueError: ``claude_thread_id`` 为空。
+            ClaudeThreadConflictError: 极端 race（如 worktree 共享 .kongming
+                并行写盘）下仍可能抛出；create_thread 阶段写入的 metadata 会被
+                回滚（``delete_thread``），不留幽灵。
+        """
+        if not claude_thread_id:
+            raise ValueError("claude_thread_id must not be empty")
+
+        # 拿/创建 per-ctid lock；用 self._lock 保护字典 setdefault 防止并发
+        # 创建两把不同 Lock 实例（那样就完全失去串行化效果了）
+        async with self._lock:
+            ctid_lock = self._claude_bind_locks.setdefault(claude_thread_id, asyncio.Lock())
+
+        async with ctid_lock:
+            # 临界区开始：double-check 反查（等锁期间可能有人已经绑好）
+            existing = self.find_thread_by_claude_thread_id(claude_thread_id)
+            if existing is not None:
+                return existing, False
+
+            # 未绑定 → create_thread + bind_claude_thread 原子完成
+            new_thread = await self.create_thread(
+                name,
+                preset_id,
+                backend_kind="claude_code",
+                cwd=cwd,
+            )
+            try:
+                bound = await self.bind_claude_thread(
+                    new_thread.id,
+                    claude_thread_id,
+                    cwd,
+                )
+            except Exception:
+                # bind 失败（如 ClaudeThreadConflictError）→ 回滚 create_thread
+                # 避免留下未绑定的孤儿 thread metadata（"幽灵 thread"）
+                with suppress(Exception):
+                    await self.delete_thread(new_thread.id, keep_history=False)
+                raise
+            return bound, True
+
     async def _build_cell(self, meta: ThreadMetadata) -> ThreadCell:
         """装配单个 cell。
 

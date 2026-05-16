@@ -162,6 +162,36 @@ class FakeTM:
     ) -> Any:
         raise NotImplementedError  # 默认；测试 mock 时按需 override
 
+    async def create_and_bind_claude_thread(
+        self,
+        *,
+        claude_thread_id: str,
+        cwd: str,
+        name: str,
+        preset_id: str = "",
+    ) -> Any:
+        """默认实现：复用 find / create / bind 三个旧方法，让历史测试 mock 仍然生效。
+
+        历史 test_import_claude_session_endpoint 测试通过 mock
+        ``find_thread_by_claude_thread_id`` / ``create_thread`` / ``bind_claude_thread``
+        来验证防重复语义；router 改用 ``create_and_bind_claude_thread`` 后需要
+        FakeTM 兜底翻译，否则那些测试全部 AttributeError。
+
+        生产 ThreadManager 的实现含 per-ctid asyncio.Lock 串行化；FakeTM 不需要
+        并发保护（测试用例顺序调用，不会真并发命中 race）。
+        """
+        existing = self.find_thread_by_claude_thread_id(claude_thread_id)
+        if existing is not None:
+            return existing, False
+        new_thread = await self.create_thread(
+            name,
+            preset_id,
+            backend_kind="claude_code",
+            cwd=cwd,
+        )
+        bound = await self.bind_claude_thread(new_thread.id, claude_thread_id, cwd)
+        return bound, True
+
     def resolve_approval(self, thread_id: str, call_id: str, approved: bool) -> None:
         del thread_id, call_id, approved
         return None

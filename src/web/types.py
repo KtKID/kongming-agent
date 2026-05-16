@@ -108,6 +108,15 @@ class ThreadManagerProtocol(Protocol):
         cwd: str,
     ) -> ThreadMetadata: ...
 
+    async def create_and_bind_claude_thread(
+        self,
+        *,
+        claude_thread_id: str,
+        cwd: str,
+        name: str,
+        preset_id: str = "",
+    ) -> tuple[ThreadMetadata, bool]: ...
+
     async def bind_codex_thread(
         self,
         thread_id: str,

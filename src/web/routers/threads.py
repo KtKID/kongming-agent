@@ -302,39 +302,27 @@ async def import_claude_session(
 
     防重复语义：
 
-    1. ``find_thread_by_claude_thread_id(claude_thread_id)`` 命中 → 返回该 thread
-       + ``imported=False``（用户重复点同一 session，不再多创建 thread）。
-    2. 未命中 → ``create_thread(name, "", backend_kind="claude_code")`` 后
-       ``bind_claude_thread(thread_id, claude_thread_id, cwd)`` → ``imported=True``。
+    1. ``claude_thread_id`` 已绑过 → 返回该 thread + ``imported=False``。
+    2. 未绑定 → 新建 thread + 绑定 → ``imported=True``。
 
-    bind_claude_thread 内部已守 invariant（已绑 / 1:1 冲突会抛），这里不再
-    重复检查；竞态下两个 import 同时打到同 ``claude_thread_id`` 时，第二个会被
-    bind 阶段的全局反查拦下抛 ``ClaudeThreadConflictError``，走 500（v0.2 接受
-    极小概率失败 —— 单用户场景下不构成问题）。
+    走 :meth:`ThreadManager.create_and_bind_claude_thread`：用 per-ctid
+    :class:`asyncio.Lock` 串行化"反查→不存在则 create+bind"临界区，根治原
+    "两步非原子写入"的 race window（曾让同 ctid 并发请求产出多条 thread
+    metadata，即"幽灵 thread"——参见 ``docs/fixes/claude-session-rename-
+    archive-metadata-source.md``）。
 
     校验：DTO 已强制 ``cwd`` 必须以 ``/`` 开头、``name`` / ``claude_thread_id``
     长度上限。鉴权由全局 :class:`web.auth.AuthMiddleware` 兜底。
     """
     tm: ThreadManagerProtocol = request.app.state.thread_manager
-    existing = tm.find_thread_by_claude_thread_id(body.claude_thread_id)
-    if existing is not None:
-        return ImportClaudeSessionResponse(
-            thread=await _to_dto(existing, tm),
-            imported=False,
-        )
-    new_thread = await tm.create_thread(
-        body.name,
-        "",
-        backend_kind="claude_code",
-    )
-    bound = await tm.bind_claude_thread(
-        new_thread.id,
-        body.claude_thread_id,
-        body.cwd,
+    meta, imported = await tm.create_and_bind_claude_thread(
+        claude_thread_id=body.claude_thread_id,
+        cwd=body.cwd,
+        name=body.name,
     )
     return ImportClaudeSessionResponse(
-        thread=await _to_dto(bound, tm),
-        imported=True,
+        thread=await _to_dto(meta, tm),
+        imported=imported,
     )
 
 
