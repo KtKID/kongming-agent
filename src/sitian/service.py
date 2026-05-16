@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -41,6 +42,13 @@ async def SiTianRunOnce(
     sitian_cfg = _extract_sitian_config(cfg)
     records = store or SiTianRecordsStore()
     observed_at = _to_iso(now)
+    # 计时：startedAt 用墙钟时间戳（与 observed_at 一致），耗时用 perf_counter（单调）
+    start_perf = time.perf_counter()
+    _log.info(
+        "sitian run started: observed_at=%s sources=%d",
+        observed_at,
+        len(sitian_cfg.sources),
+    )
 
     await records.ensure_layout()
     await records.save_config_snapshot(sitian_cfg.model_dump(mode="json"))
@@ -102,8 +110,9 @@ async def SiTianRunOnce(
     await records.save_latest_suggestions(suggestions)
     await records.save_latest_summary(summary)
 
+    analyzer_duration_ms: int | None = None
     if llm_provider is not None and sitian_cfg.analyzer.enabled:
-        await _run_llm_analysis(
+        analyzer_duration_ms = await _run_llm_analysis(
             records=records,
             provider=llm_provider,
             sitian_cfg=sitian_cfg,
@@ -111,10 +120,24 @@ async def SiTianRunOnce(
             observed_at=observed_at,
         )
 
+    finished_at = _to_iso(None)
+    duration_ms = int((time.perf_counter() - start_perf) * 1000)
+    _log.info(
+        "sitian run finished in %dms (analyzer=%s ms), observations=%d failures=%d",
+        duration_ms,
+        analyzer_duration_ms if analyzer_duration_ms is not None else "skipped",
+        len(flat_observations),
+        len(failed_sources),
+    )
+
     await records.write_scan_snapshot(
         {
             "scanId": observed_at,
             "observedAt": observed_at,
+            "startedAt": observed_at,
+            "finishedAt": finished_at,
+            "durationMs": duration_ms,
+            "analyzerDurationMs": analyzer_duration_ms,
             "readySourceIds": [source.id for source in ready_sources],
             "scannedSourceIds": [batch.source_id for batch in observations],
             "failedSources": failed_sources,
@@ -137,7 +160,12 @@ async def _run_llm_analysis(
     sitian_cfg: SiTianConfig,
     observations: tuple[SiTianObservation, ...],
     observed_at: str,
-) -> None:
+) -> int | None:
+    """跑 LLM 分析，返回耗时（ms）。
+
+    返回 None 表示：observations 未变化（skip_if_unchanged 命中）→ 没真的调 LLM。
+    返回 >= 0 的 int 表示：LLM 调用确实跑过（无论成功失败，耗时都计入）。
+    """
     from sitian.analyzer import compute_observations_hash, report_to_markdown, sitian_analyze
 
     if sitian_cfg.analyzer.skip_if_unchanged:
@@ -145,10 +173,11 @@ async def _run_llm_analysis(
         previous_hash = await records.load_observations_hash()
         if current_hash == previous_hash:
             _log.info("observations unchanged (hash=%s), skip LLM analysis", current_hash[:12])
-            return
+            return None
     else:
         current_hash = None
 
+    analyzer_start = time.perf_counter()
     report = await sitian_analyze(
         observations,
         provider=provider,
@@ -157,6 +186,8 @@ async def _run_llm_analysis(
         observed_at=observed_at,
         sitian_root=records.root_dir,
     )
+    analyzer_duration_ms = int((time.perf_counter() - analyzer_start) * 1000)
+
     await records.save_sitian_report(report.to_dict())
     await records.save_latest_summary(report_to_markdown(report))
 
@@ -168,11 +199,13 @@ async def _run_llm_analysis(
             _log.warning("sitian analysis error: %s", err)
     else:
         _log.info(
-            "sitian analysis complete: %d alerts, %d projects, report_id=%s",
+            "sitian analysis complete in %dms: %d alerts, %d projects, report_id=%s",
+            analyzer_duration_ms,
             len(report.top_alerts),
             len(report.projects),
             report.report_id,
         )
+    return analyzer_duration_ms
 
 
 async def SiTianRunLoop(

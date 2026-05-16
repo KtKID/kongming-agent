@@ -1,147 +1,82 @@
 # =============================================================================
 # 司天本地配置（Mac 版）
-# 入口：./sitian.sh           # 推荐：封装好的脚本
-# 或：uv run kongming-sitian run-once --config config/sitian.local.yaml
-#                                     --root-dir /tmp/sitian-records
-# 默认 root-dir：~/.kongming/SiTian/
+#
+# 入口：./sitian.sh                                  # 推荐：封装好的脚本
+#   或：uv run kongming-sitian run-once \
+#         --config config/sitian.local.yaml \
+#         --root-dir /tmp/sitian-records
+#
+# 默认产物根：~/.kongming/SiTian/（可用 --root-dir 或 SITIAN_ROOT env 覆盖）
+#
+# 本文件只承担"司天 CLI 的配置"。其他模块（web / 主 agent CLI / scheduler）走
+# 各自的 config，不复用此文件。
 # =============================================================================
 
-# ---- LLM 模型（司天本身不调模型，但 Config schema 强制要求 model 段，填占位即可）----
+# ---- 顶级 model 段（schema 强制必填） ------------------------------------
+# 司天本身不消费这里的 endpoint/key/timeout/max_tokens/temperature 等字段，
+# 真正调 LLM 的配置在下面 `sitian.analyzer.*` 段。
+# 这里只填 schema 必填的两个字段（name / base_url）做占位，让 Config 验证过。
+# ⚠️ 如果 sitian.analyzer.model_name / base_url 留空，sitian 会 fallback 到这里。
 model:
-  provider: openai_compatible      # 模型协议：openai_compatible / anthropic
-  name: stub-model                 # 模型名（司天不用）
-  base_url: http://127.0.0.1:1234/v1   # 本地兼容 OpenAI 服务地址
-  api_key: ""                      # 本地服务可空；命中 127/localhost 自动跳 key 校验
-  timeout: 60                      # HTTP 超时秒数
-  max_tokens: 4096                 # 单次最多生成 token
-  temperature: 0.7                 # 采样温度
-
-# ---- runner / session / trace（占位，司天不消费但 Config 必填）----
-runner:
-  max_turns: 90                    # agent 单轮最多推进几个 turn
-
-session:
-  backend: file                    # 会话后端：memory / sqlite / file
-  store_path: .kongming/sessions.jsonl
-  file_store_path: .kongming/sessions
-
-trace:
-  output_path: .kongming/trace.jsonl   # trace 落盘路径
-  auto_flush: true
-  raw_llm: false
-
-logging:
-  level: INFO
-
-host:
-  kind: cli                        # 宿主类型，司天不消费
-
-approval:
-  mode: interactive                # 审批模式，司天不消费
-
-tool:
-  shell:
-    enabled: true
-    timeout_seconds: 30.0
-    max_stream_bytes: 8000
-    terminate_grace_seconds: 2.0
-  file:
-    enabled: true
-    read_max_bytes: 65536
-
-compactor:
-  enabled: false                   # 历史压缩开关，司天不消费
-
-retry:
-  max_retries: 3
-  retry_backoff: 1.0
-
-stream:
-  enabled: true
-  read_timeout: 120.0
-  suppress_content_after_tool_call: true
-  delta_sampling: none
-  periodic_batch_size: 20
-
-scheduler:
-  enabled: false                   # cron 调度器，跟司天无关
-
-web:
-  enabled: false                   # web server，跟司天无关
+  name: stub-model                          # schema 必填占位，无实际作用
+  base_url: http://127.0.0.1:1234/v1        # schema 必填占位，无实际作用
 
 # =============================================================================
 # 司天本体配置
 # =============================================================================
 sitian:
-  version: v1                          # 配置版本号，目前固定 v1
-  default_scan_interval_sec: 60        # 全局默认扫描间隔（秒）。各 source 可覆盖
-  idle_sleep_sec: 3                    # 循环模式空闲等待秒数（loop 命令两轮之间最长睡多久）
-  output_subdir: claude                # 产物落子目录名（相对 root_dir）。
-                                       # 设置后所有产物落到 <root>/<subdir>/。
-                                       # 用于多 kind 共存时隔离（claude / codex / general）。
-                                       # 不设/留空 → 直接落 <root>/（向后兼容）。
+  version: v1                               # 配置版本号，schema 固定 "v1"
+  default_scan_interval_sec: 60             # 全局默认扫描间隔（秒）；各 source 可单独覆盖
+  idle_sleep_sec: 3                         # loop 模式两轮之间的最长睡眠（秒）；越短响应越快但 CPU 更忙
+  output_subdir: claude                     # 产物落子目录名（相对 root_dir）
+                                            # 设置后所有产物落到 <root>/<subdir>/，用于多 kind 隔离
+                                            # 不设/留空 → 直接落 <root>/（向后兼容）
+                                            # ⚠️ web 端 GET /api/sitian/report 默认走 "claude" channel；
+                                            #    这里改了名字 web 弹窗就读不到了
 
-  # 司天 scanner 行为旋钮（v1+）
+  # ---- Scanner 行为旋钮 -------------------------------------------------
+  # 控制扫描器从 jsonl 里取多少上下文喂给后面的 LLM
   scanner:
-    # 最近活动窗口（天）。
-    # 0 = 不过滤窗口、读取所有 session；默认 3 表示只看最近 3 天内修改过的 jsonl。
-    recent_session_window_days: 3
-    # 每个 session 取最后 N 条 user 消息。0 = 不取（payload 字段为空数组）。
-    session_recent_user_messages: 1
-    # 每个 session 取最后 N 条 assistant 消息。0 = 不取。
-    session_recent_assistant_messages: 1
-    # 每条消息最大字符数；超出末尾加 "…"。0 = 不截断（注意 jsonl 可能超长）。
-    session_message_max_chars: 500
+    recent_session_window_days: 3           # 只看最近 N 天内修改过的 session jsonl；0 = 全读（慢且 prompt 大）
+    session_recent_user_messages: 1         # 每个 session 取最后 N 条 user 消息；0 = 不取
+    session_recent_assistant_messages: 1    # 每个 session 取最后 N 条 assistant 消息；0 = 不取
+    session_message_max_chars: 500          # 每条消息截断到 N 字符（末尾加 "…"）；0 = 不截断（注意 jsonl 可能超长）
 
-  # 司天 LLM 分析层（v1）
+  # ---- LLM 分析层（真正调模型的地方） ----------------------------------
   analyzer:
-    # 是否启用 LLM 分析。false = 只 scan 不调 LLM，保留现有规则化 suggestions。
-    enabled: true
-    # 分析用的模型名。空 = 复用 model.name（通常是本地 stub，需要改成真实模型）。
-    model_name: "MiniMax-M2.7"
-    # 模型 API 地址。空 = 复用 model.base_url。
-    base_url: "https://api.minimaxi.com/anthropic"
-    # 读哪个环境变量拿 API key。空 = 复用 model.api_key。
-    api_key_env: "MINIMAX_API_KEY"
-    # LLM 输出 max_tokens。
-    max_tokens: 4096
-    # 采样温度（0-2）。0.3 = 低温度稳定输出。
-    temperature: 0.3
-    # LLM 调用超时秒数。
-    timeout: 90
-    # 输入 observations 裁剪上限（字符数）。超出按最新 session 优先裁剪。
-    max_context_chars: 50000
-    # observations 没变化时跳过 LLM 调用（节省 token）。
-    skip_if_unchanged: true
-    # 记录完整 LLM 提示词 + 回复到 $SITIAN_ROOT/full-log/（审计日志）。
-    # 开启后每次 LLM 调用产出一个 analyzer-YYYYMMDD-HHmmss.json。
-    full_log_enabled: true
+    enabled: true                           # false = 只 scan 不调 LLM（回退到规则化 suggestions）
+    model_name: "MiniMax-M2.7"              # 模型名；留空则 fallback 到顶级 model.name（不推荐）
+    base_url: "https://api.minimaxi.com/anthropic"   # 模型 endpoint；留空则 fallback 到顶级 model.base_url
+    api_key_env: "MINIMAX_API_KEY"          # 从这个环境变量读 API key（不要把明文 key 写进配置）
+    max_tokens: 4096                        # LLM 单次响应最大 token 数
+    temperature: 0.3                        # 采样温度（0-2）；0.3 = 低温度稳定输出
+    timeout: 90                             # LLM 调用超时秒数；超时会被分析器拦下并写 errors
+    max_context_chars: 50000                # 输入 observations 裁剪上限（字符数），超出按最新 session 优先裁剪
+    skip_if_unchanged: true                 # observations 没变化时跳过 LLM 调用（用 last_observations_hash 比对，省 token）
+    full_log_enabled: true                  # 写完整 LLM 提示词+回复到 $SITIAN_ROOT/full-log/（审计 + 调试用）
 
-  # 用户兴趣配置（注入 LLM system prompt）
+  # ---- 用户兴趣（注入到 LLM system prompt） ----------------------------
   interests:
-    # 项目路径白名单（空 = 分析全部项目）。
-    projects: []
-    # 自然语言描述，注入 system prompt。如"关注 kongming-agent 的进度"。
-    focus: ""
+    projects: []                            # 项目路径白名单；空数组 = 分析所有项目
+    focus: ""                               # 自然语言补充描述；如 "关注 kongming-agent 的 verify gate 漏洞"
 
+  # ---- 数据源声明 ------------------------------------------------------
+  # 每个 source 是一个独立的扫描任务；id 必须全 yaml 内唯一
   sources:
-    # ---------------------------------------------------------------------
-    # source 1: 扫描 ~/.claude/projects/ 取最近修改的 N 个项目（推荐入口）
-    # ---------------------------------------------------------------------
-    - id: claude-workspace             # source 唯一 id（一次配置内不能重复）
-      kind: claude_workspace           # 类型：扫整个 ~/.claude/projects/ 取 top N
-      path: ~/.claude                  # claude_home 路径；填 ~/.claude 或 ~/.claude/projects 都行
-      top_n: 3                        # 取最近修改的前 N 个项目（按 jsonl mtime 倒序）
-      scan_interval_sec: 120           # 该 source 的扫描间隔（秒），覆盖 default
-      tags:                            # 标签，落进 observation.payload.sourceTags
+    # ----- source 1: 扫描 ~/.claude/projects/ 取最近修改的 top_n 个项目 -----
+    - id: claude-workspace                  # source 唯一 id（不能与其他 source 重名）
+      kind: claude_workspace                # 类型：扫整个 claude 家目录，按 jsonl mtime 倒序取 top N
+      path: ~/.claude                       # claude 家目录；~/.claude 或 ~/.claude/projects 都行
+      top_n: 3                              # 取最近修改的前 N 个项目
+      scan_interval_sec: 120                # 该 source 的扫描间隔（秒），覆盖 default_scan_interval_sec
+      tags:                                 # 落到 observation.payload.sourceTags，方便后续过滤
         - claude
         - workspace
         - recent
 
-    # ---------------------------------------------------------------------
-    # source 2（可选）：扫单个 claude 项目下的会话（按 cwd 过滤）
-    # 用 kind=claude_project，path 填项目实际 cwd
-    # ---------------------------------------------------------------------
+    # ----- 以下 source 模板，按需启用，**注意 id 必须唯一** ----------------
+
+    # source 模板 A：扫单个 claude 项目（按 cwd 过滤会话）
     # - id: claude-kongming-agent
     #   kind: claude_project
     #   path: /Volumes/machub_app/proj/kongming-agent   # 仓库 cwd
@@ -153,9 +88,7 @@ sitian:
     #     - "**/__pycache__/**"
     #   tags: [claude, single-project]
 
-    # ---------------------------------------------------------------------
-    # source 3（可选）：通用频道扫描，纯文件系统、不关联任何 SDK
-    # ---------------------------------------------------------------------
+    # source 模板 B：通用频道扫描（纯文件系统，不绑定任何 SDK）
     # - id: workspace-general
     #   kind: generic_channel
     #   path: /Volumes/machub_app/proj/kongming-agent
@@ -164,22 +97,23 @@ sitian:
     #     - "docs/sitian-v1/*"
     #   tags: [workspace, sitian]
 
-    # ---------------------------------------------------------------------
-    # source 4（可选）：扫单个 codex 项目下的会话（按 cwd 过滤）
-    # ---------------------------------------------------------------------
+    # source 模板 C：单个 codex 项目
     # - id: codex-kongming-agent
     #   kind: codex_project
     #   path: /Volumes/machub_app/proj/kongming-agent
     #   tags: [codex, single-project]
 
 # =============================================================================
-# 产物路径（默认 ~/.kongming/SiTian/，可用 --root-dir 覆盖）
+# 产物文件清单（落在 <root>/<output_subdir>/）
 # =============================================================================
 # config.snapshot.json     ← 最近一次 SiTianConfig 快照
-# observations.jsonl       ← 每次扫描追加的事实（永不删，看历史用）
+# observations.jsonl       ← 每次扫描追加的事实（append-only，看历史用）
+# last_observations_hash   ← 上一次扫描的 hash（skip_if_unchanged 用）
 # runtime_state.json       ← 各 source 的 next_run_at / 失败 backoff 状态
-# workspace_state.json     ← 归并后的全局视图
+# workspace_state.json     ← 归并后的全局视图（feed 给 web 弹窗）
 # work_items/<id>.json     ← 单个 work item
 # latest_suggestions.json  ← 建议引擎产出
-# latest_summary.md        ← 人类可读 Markdown
+# latest_summary.md        ← 人类可读 Markdown 总结
+# sitian_report.json       ← LLM 分析层产出（web GET /api/sitian/report 读取）
 # scans/<observed_at>.json ← 每次扫描的快照
+# full-log/analyzer-*.json ← LLM 调用完整日志（full_log_enabled=true 才写）
