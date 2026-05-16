@@ -21,8 +21,8 @@
   组装 ``{claude_thread_id → ThreadMetadata}`` 索引并传入；scanner 命中即用
   ``meta.name`` / ``meta.is_archived``。未命中（未绑定 thread 的孤儿 jsonl）
   走原 fallback：扫首条 user message。这一改动修掉旧 "尾部 4KB 窗口" bug——
-  Claude jsonl 单行 P90=7KB / P99=285KB，原 ``read_custom_title`` /
-  ``read_archived`` 一旦 rename 后又写了大消息就读不到真值。
+  Claude jsonl 单行 P90=7KB / P99=285KB，旧版按 4KB 反向扫尾部找
+  rename / archive 事件的实现，一旦后续又追加了大消息就读不到真值。
 
 模块严格无副作用：纯函数，仅读 ``claude_home``，从不写入。
 """
