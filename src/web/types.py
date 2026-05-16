@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from web.protocol import CellSummaryDTO
+    from web.protocol import CellSummaryDTO, EvictReason
     from web.thread_metadata import ThreadMetadata
 
 
@@ -84,7 +84,7 @@ class ThreadManagerProtocol(Protocol):
     async def evict_cell(
         self,
         thread_id: str,
-        reason: str,
+        reason: EvictReason,
         message: str | None = None,
         *,
         notify_ws: bool = True,
@@ -130,7 +130,12 @@ class ThreadManagerProtocol(Protocol):
         """
         ...
 
-    def resolve_approval(self, thread_id: str, call_id: str, approved: bool) -> None: ...
+    def resolve_approval(self, thread_id: str, call_id: str, action: Any) -> None: ...
+
+    # ``action`` 实际是 :class:`core.contracts.ApprovalAction` 或同义 string 字面值
+    # （``"accept_once"`` / ``"accept_for_session"`` / ``"reject"``）。
+    # 类型注解保持 ``Any``——避免 ``web.types`` import ``core.contracts``
+    # （Contract: web.* → core.* 禁止；跟 ``usage_manager`` 同款 escape）。
 
 
 __all__ = [

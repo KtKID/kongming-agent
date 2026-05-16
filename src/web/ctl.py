@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import click
 from dotenv import load_dotenv
@@ -155,11 +156,15 @@ def _should_rebuild_dist(*, force: bool) -> bool:
             if "__tests__" in path.parts:
                 continue
             if path.stat().st_mtime > dist_mtime:
-                click.echo(f"Frontend stale (newer source: {path.relative_to(_REPO_ROOT)}), rebuilding...")
+                click.echo(
+                    f"Frontend stale (newer source: {path.relative_to(_REPO_ROOT)}), rebuilding..."
+                )
                 return True
     for cfg in candidate_files:
         if cfg.exists() and cfg.stat().st_mtime > dist_mtime:
-            click.echo(f"Frontend stale (newer config: {cfg.relative_to(_REPO_ROOT)}), rebuilding...")
+            click.echo(
+                f"Frontend stale (newer config: {cfg.relative_to(_REPO_ROOT)}), rebuilding..."
+            )
             return True
     return False
 
@@ -176,7 +181,9 @@ def cli() -> None:
 
 
 @cli.command()
-@click.option("--rebuild", is_flag=True, default=False, help="Force rebuild frontend dist before start.")
+@click.option(
+    "--rebuild", is_flag=True, default=False, help="Force rebuild frontend dist before start."
+)
 def start(rebuild: bool) -> None:
     _ensure_dirs()
     progress = StartupProgress(_REPO_ROOT / ".kongming")
@@ -203,7 +210,7 @@ def start(rebuild: bool) -> None:
 
     click.echo(f"Starting web server on {host}:{port}...")
     with open(_LOG_FILE, "ab") as log_handle:
-        popen_kwargs = {
+        popen_kwargs: dict[str, Any] = {
             "cwd": _REPO_ROOT,
             "stdout": log_handle,
             "stderr": subprocess.STDOUT,
@@ -286,7 +293,9 @@ def _stop_win32(pid: int) -> None:
 
 
 @cli.command()
-@click.option("--rebuild", is_flag=True, default=False, help="Force rebuild frontend dist during restart.")
+@click.option(
+    "--rebuild", is_flag=True, default=False, help="Force rebuild frontend dist during restart."
+)
 @click.pass_context
 def restart(ctx: click.Context, rebuild: bool) -> None:
     ctx.invoke(stop)

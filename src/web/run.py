@@ -55,7 +55,7 @@ def main() -> int:
             tm,
             home_dir=home,
             scheduler_runtime_factory=getattr(runtime_factory, "_scheduler_runtime_factory", None),
-        )  # type: ignore[arg-type]
+        )
     except Exception as exc:
         progress.fail(f"create_app failed: {exc}")
         sys.stderr.write(f"create_app failed: {exc}\n")
@@ -144,9 +144,7 @@ def _make_runtime_factory(cfg: object) -> object:
                 skill_specs=skill_specs or None,
                 skill_event_sinks=sink_list,
             )
-            enabled_tool_names = [
-                name for name in registry.names() if name != "evolution_write"
-            ]
+            enabled_tool_names = [name for name in registry.names() if name != "evolution_write"]
 
             cron_dispatcher = None
             if real_cfg.scheduler.enabled:
@@ -224,7 +222,7 @@ def _make_runtime_factory(cfg: object) -> object:
         preset_cfg = real_cfg.model_copy(update={"model": preset_model})
 
         await _ensure_shared_assets(sinks)
-        setattr(factory, "_scheduler_runtime_factory", _scheduler_runtime_factory_cache[0])
+        factory._scheduler_runtime_factory = _scheduler_runtime_factory_cache[0]  # type: ignore[attr-defined]
         instructions = _instructions_cache[0]
         assert instructions is not None
         origins = _origins_cache[0] or []
@@ -268,7 +266,7 @@ def _make_runtime_factory(cfg: object) -> object:
         asyncio.get_running_loop()
     except RuntimeError:
         asyncio.run(_ensure_shared_assets([]))
-    setattr(factory, "_scheduler_runtime_factory", _scheduler_runtime_factory_cache[0])
+    factory._scheduler_runtime_factory = _scheduler_runtime_factory_cache[0]  # type: ignore[attr-defined]
     return factory
 
 
