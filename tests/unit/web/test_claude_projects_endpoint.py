@@ -54,9 +54,20 @@ def test_returns_projects_dict(tmp_path: Path, monkeypatch) -> None:
             ],
         )
     ]
-    # router 现在用 list_projects(cwds, claude_home=..., thread_metadata_index=...)
-    # mock 用 *args/**kwargs 通吃签名变化
-    monkeypatch.setattr("web.routers.claude.list_projects", lambda *a, **kw: fake_data)
+
+    # router 现在用 list_projects(cwds, *, claude_home, progress_callback, thread_metadata_index)
+    # mock 用显式签名钉死调用契约——router 加新参数时 TypeError 提示更新测试
+    def fake_list_projects(
+        registry_cwds,
+        *,
+        claude_home=None,
+        progress_callback=None,
+        thread_metadata_index=None,
+    ):
+        del registry_cwds, claude_home, progress_callback, thread_metadata_index
+        return fake_data
+
+    monkeypatch.setattr("web.routers.claude.list_projects", fake_list_projects)
     tm = FakeTM()
     client = _login_client(tmp_path, tm)
     try:
@@ -80,7 +91,17 @@ def test_returns_projects_dict(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_empty_returns_empty_projects(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("web.routers.claude.list_projects", lambda *a, **kw: [])
+    def fake_empty_list_projects(
+        registry_cwds,
+        *,
+        claude_home=None,
+        progress_callback=None,
+        thread_metadata_index=None,
+    ):
+        del registry_cwds, claude_home, progress_callback, thread_metadata_index
+        return []
+
+    monkeypatch.setattr("web.routers.claude.list_projects", fake_empty_list_projects)
     tm = FakeTM()
     client = _login_client(tmp_path, tm)
     try:
@@ -108,8 +129,14 @@ def test_refresh_stream_returns_progress_and_done(tmp_path: Path, monkeypatch) -
         )
     ]
 
-    def fake_list_projects(*args, progress_callback=None, **kwargs):
-        del args, kwargs
+    def fake_list_projects(
+        registry_cwds,
+        *,
+        claude_home=None,
+        progress_callback=None,
+        thread_metadata_index=None,
+    ):
+        del registry_cwds, claude_home, thread_metadata_index
         if progress_callback is not None:
             progress_callback(1, 1, "-foo-bar")
         return fake_data
