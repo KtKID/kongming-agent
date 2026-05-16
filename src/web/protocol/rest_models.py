@@ -138,11 +138,13 @@ class ResetPasswordRequest(_FrameBase):
 class RenameThreadRequest(_FrameBase):
     """更新 thread 属性请求体（``PATCH /api/threads/{id}``）。
 
-    支持重命名（name）和/或切换置顶状态（is_pinned），至少传一个。
+    支持重命名（name）和/或切换置顶（is_pinned）和/或归档（is_archived），
+    至少传一个。
     """
 
     name: Annotated[str, Field(max_length=200)] | None = None
     is_pinned: bool | None = None
+    is_archived: bool | None = None
 
 
 class ThreadMetadataDTO(_FrameBase):
@@ -200,7 +202,8 @@ class ThreadMetadataDTO(_FrameBase):
     # token 数据通过独立端点 ``GET /threads/<tid>/usage`` 拿 v2 manager
     # ``get_thread_usage`` 派生结果。
     is_pinned: bool = False
-    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9] = 9
+    is_archived: bool = False
+    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10] = 10
 
 
 class WorkspaceContextDTO(_FrameBase):

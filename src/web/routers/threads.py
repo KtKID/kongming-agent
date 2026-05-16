@@ -116,6 +116,7 @@ async def _to_dto(meta: ThreadMetadata, tm: ThreadManagerProtocol) -> ThreadMeta
         updated_at=meta.updated_at,
         message_count=meta.message_count,
         is_pinned=meta.is_pinned,
+        is_archived=meta.is_archived,
         schema_version=meta.schema_version,
     )
 
@@ -390,6 +391,12 @@ async def rename_thread(
     if body.is_pinned is not None:
         try:
             meta = await tm.pin_thread(thread_id, body.is_pinned)
+        except KeyError as exc:
+            raise ThreadNotFoundError(f"thread not found: {thread_id}") from exc
+
+    if body.is_archived is not None:
+        try:
+            meta = await tm.set_archived(thread_id, body.is_archived)
         except KeyError as exc:
             raise ThreadNotFoundError(f"thread not found: {thread_id}") from exc
 

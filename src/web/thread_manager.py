@@ -423,6 +423,7 @@ class ThreadManager:
             updated_at=_now(),
             message_count=meta.message_count,
             is_pinned=meta.is_pinned,
+            is_archived=meta.is_archived,
         )
         await asyncio.to_thread(write_thread_metadata, self._home, updated)
         async with self._lock:
@@ -448,6 +449,39 @@ class ThreadManager:
             updated_at=meta.updated_at,  # pin 不改 updated_at
             message_count=meta.message_count,
             is_pinned=is_pinned,
+            is_archived=meta.is_archived,
+        )
+        await asyncio.to_thread(write_thread_metadata, self._home, updated)
+        async with self._lock:
+            cell = self._cells.get(thread_id)
+            if cell is not None:
+                cell.metadata = updated
+        return updated
+
+    async def set_archived(self, thread_id: str, is_archived: bool) -> ThreadMetadata:
+        """归档/取消归档 thread（v10 claude-session-rename-archive-metadata-source）。
+
+        与 ``pin_thread`` 同款：read → model_copy → atomic write → 同步 cell.metadata。
+        归档不算"活跃"，所以**不**更新 ``updated_at``（保持与 pin 一致）。
+
+        失败：thread 不存在抛 :class:`KeyError`。
+        """
+        meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
+        if meta is None:
+            raise KeyError(f"thread not found: {thread_id}")
+        updated = ThreadMetadata(
+            id=meta.id,
+            name=meta.name,
+            preset_id=meta.preset_id,
+            backend_kind=meta.backend_kind,
+            claude_thread_id=meta.claude_thread_id,
+            codex_thread_id=meta.codex_thread_id,
+            cwd=meta.cwd,
+            created_at=meta.created_at,
+            updated_at=meta.updated_at,  # archive 不改 updated_at（与 pin 一致）
+            message_count=meta.message_count,
+            is_pinned=meta.is_pinned,
+            is_archived=is_archived,
         )
         await asyncio.to_thread(write_thread_metadata, self._home, updated)
         async with self._lock:

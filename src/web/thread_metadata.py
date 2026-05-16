@@ -3,7 +3,7 @@
 每个 thread 在 ``.kongming/web/threads/<thread_id>/metadata.json`` 落一份
 :class:`ThreadMetadata` 文件。本文件提供：
 
-- :class:`ThreadMetadata` Pydantic 模型（当前 schema_version=8，task#2 起）
+- :class:`ThreadMetadata` Pydantic 模型（当前 schema_version=10）
 - :func:`thread_metadata_path` —— 路径常量
 - :func:`write_thread_metadata` —— 原子写入（``tmp.replace(path)``）
 - :func:`read_thread_metadata` —— 读 + 校验；schema_version 不匹配 / JSON
@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # ``claude_thread_id`` / ``codex_thread_id`` 都表示 provider 底层可恢复 thread id。
 # 一个 Kongming thread 绑定一个 provider session/thread；老 v5 文件读入时把
 # ``sdk_session_id`` 迁移为 ``claude_thread_id``。
-THREAD_METADATA_SCHEMA_VERSION = 9
+THREAD_METADATA_SCHEMA_VERSION = 10
 
 
 class ThreadMetadata(BaseModel):
@@ -102,8 +102,8 @@ class ThreadMetadata(BaseModel):
 
             ``None`` 表示该 thread 还没跑过任何 turn。
         is_pinned: 置顶标记；``True`` 时 UI 列表优先排列。v0.2.4 新增。
-        schema_version: 当前 ``8``；``Literal[1, ..., 8]`` 同时接受老文件，
-            写盘时永远写 ``8``。
+        schema_version: 当前 ``10``；``Literal[1, ..., 10]`` 同时接受老文件，
+            写盘时永远写 ``10``。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -148,9 +148,15 @@ class ThreadMetadata(BaseModel):
     is_pinned: bool = False
     """是否置顶（v0.2.4 新增）。"""
 
-    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9] = 9
-    """schema 版本号（当前 v9，usage-token-v2 bigbang 引入）。
-    ``Literal[1..9]`` 接受所有历史文件，写盘永远写 9。"""
+    is_archived: bool = False
+    """是否归档（v10 新增）。归档的 thread 在列表中隐藏（scanner 过滤），
+    仍保留 metadata 与 jsonl 历史。前端通过 PATCH /api/threads/{tid}
+    ``{is_archived: true}`` 触发；scanner 真源由本字段决定，jsonl 内的
+    历史 ``archived`` 事件不再被读取。"""
+
+    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10] = 10
+    """schema 版本号（当前 v10，claude-session-rename-archive-metadata-source 引入）。
+    ``Literal[1..10]`` 接受所有历史文件，写盘永远写 10。"""
 
 
 def thread_metadata_path(home: Path, thread_id: str) -> Path:
@@ -201,7 +207,7 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
 
     - 文件不存在 / 不是普通文件
     - JSON 解析失败（损坏 / 编码异常）
-    - schema_version 不在 ``{1, ..., 9}``（更高版本 = 该进程不认识，拒绝）
+    - schema_version 不在 ``{1, ..., 10}``（更高版本 = 该进程不认识，拒绝）
     - 字段校验失败（缺字段 / 类型不对 / 正则不匹配）
 
     **v1 → v2 懒升级**：``schema_version=1`` 且缺 ``backend_kind`` 时，
@@ -232,8 +238,13 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
     ``UsageTokenManager v2`` 现场派生，metadata.json 不再缓存。
     旧数据**不迁移**（真源在 SDK，旧字段是冗余拷贝）。
 
-    返回的 :class:`ThreadMetadata` 实例已是最新 v9 形态。下次
-    :func:`write_thread_metadata` 会以 v9 写盘（默认 ``schema_version=9``，
+    **v9 → v10 懒升级**（claude-session-rename-archive-metadata-source）：
+    补 ``is_archived=False`` 字段。归档真源从 jsonl 的 ``archived`` 事件
+    迁到本字段；旧文件读入时默认未归档（如需保留历史归档状态，由
+    ``scripts/migrate_claude_titles_to_metadata.py`` 一次性迁移）。
+
+    返回的 :class:`ThreadMetadata` 实例已是最新 v10 形态。下次
+    :func:`write_thread_metadata` 会以 v10 写盘（默认 ``schema_version=10``，
     无需调用方关心）。本函数**不**自己回写——避免读盘函数有副作用。
 
     所有 ``None`` 路径都会记 warning 日志，便于排查。
@@ -304,6 +315,12 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
         data.pop("last_run_snapshot", None)
         data.pop("last_model_name", None)
         data["schema_version"] = 9
+    # v9 → v10 懒升级（claude-session-rename-archive-metadata-source）：
+    # 补 is_archived=False 字段。归档真源从 jsonl archived 事件迁到本字段；
+    # 旧文件读入默认未归档，历史归档状态由迁移脚本一次性补齐。
+    if data.get("schema_version") == 9:
+        data.setdefault("is_archived", False)
+        data["schema_version"] = 10
     # 兜底：任何 version 下如果 sdk_session_id 仍残留，强制迁移
     if "sdk_session_id" in data:
         data.setdefault("claude_thread_id", str(data.pop("sdk_session_id")))

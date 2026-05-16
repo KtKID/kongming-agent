@@ -36,11 +36,10 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel, Field
 
 from web.claude_code.projects_registry import (
     add_project,
@@ -48,12 +47,32 @@ from web.claude_code.projects_registry import (
     remove_project,
 )
 from web.claude_code.projects_scanner import ProjectSummary, list_projects
-from web.claude_code.session_writer import append_archived, append_custom_title
 from web.protocol.rest_models import AddProjectRequest, ProjectRegistryEntryDTO
+from web.thread_metadata import ThreadMetadata
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/claude", tags=["claude"])
+
+
+def _build_thread_metadata_index(
+    threads: list[ThreadMetadata],
+) -> dict[str, ThreadMetadata]:
+    """按 ``claude_thread_id`` 反查 thread metadata 的索引构造器。
+
+    历史上 ``bind_claude_thread`` 的 1:1 守门可能漏掉过若干路径（导致同一
+    ``claude_thread_id`` 挂多个 thread metadata），所以这里必须容忍冲突。
+
+    冲突时**保留 ``threads`` 列表中首次出现的那条**——调用方传入的列表通常已按
+    ``(is_pinned, updated_at) DESC`` 排序（``ThreadManager.list_threads`` 默认），
+    所以首条就是"最优"（置顶 + 最近活跃）。用 dict 推导会被后者（次优）覆盖，
+    导致 scanner 拿到的 title / archived 退化到次优 thread 的值。
+    """
+    idx: dict[str, ThreadMetadata] = {}
+    for m in threads:
+        if m.claude_thread_id:
+            idx.setdefault(m.claude_thread_id, m)
+    return idx
 
 
 def _serialize_projects(
@@ -104,13 +123,17 @@ async def get_claude_projects(request: Request) -> dict[str, Any]:
     claude_home: Path | None = getattr(request.app.state, "claude_home", None)
     entries = await asyncio.to_thread(load_registry, home)
     cwds = [e.cwd for e in entries]
+    tm = request.app.state.thread_manager
+    # 用 tm.list_threads() 而不是 list_thread_metadata：前者会用内存中已 boot
+    # cell 的 metadata 覆盖扫盘版本，避免刚 rename 的 thread 还没写盘就读到 stale。
+    threads = await asyncio.to_thread(tm.list_threads)
+    thread_metadata_index = _build_thread_metadata_index(threads)
     projects = await asyncio.to_thread(
         list_projects,
         cwds,
         claude_home=claude_home,
+        thread_metadata_index=thread_metadata_index,
     )
-    tm = request.app.state.thread_manager
-    threads = await asyncio.to_thread(tm.list_threads)
     pinned_ids: set[str] = {
         meta.claude_thread_id for meta in threads if meta.is_pinned and meta.claude_thread_id
     }
@@ -185,6 +208,7 @@ async def refresh_claude_projects(request: Request) -> StreamingResponse:
     registry_cwds = [e.cwd for e in entries]
     tm = request.app.state.thread_manager
     threads = await asyncio.to_thread(tm.list_threads)
+    thread_metadata_index = _build_thread_metadata_index(threads)
     pinned_ids: set[str] = {
         meta.claude_thread_id for meta in threads if meta.is_pinned and meta.claude_thread_id
     }
@@ -214,6 +238,7 @@ async def refresh_claude_projects(request: Request) -> StreamingResponse:
                     registry_cwds,
                     claude_home=claude_home,
                     progress_callback=emit_progress,
+                    thread_metadata_index=thread_metadata_index,
                 )
                 loop.call_soon_threadsafe(
                     queue.put_nowait,
@@ -243,94 +268,6 @@ async def refresh_claude_projects(request: Request) -> StreamingResponse:
             await task
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
-
-
-# ---------------------------------------------------------------------------
-# Rename session
-# ---------------------------------------------------------------------------
-
-
-class RenameClaudeSessionRequest(BaseModel):
-    """重命名 Claude session 的请求体。"""
-
-    claude_thread_id: Annotated[str, Field(min_length=1, max_length=100)]
-    cwd: Annotated[str, Field(pattern=r"^/")]
-    title: Annotated[str, Field(min_length=1, max_length=200)]
-
-
-def _resolve_jsonl_path(
-    claude_thread_id: str,
-    cwd: str,
-    claude_home: Path | None = None,
-) -> Path | None:
-    """从 *cwd* 定位 jsonl 路径。
-
-    SDK 编码规则不止替换 ``/``（``_`` ``.`` 也会被替换成 ``-``），
-    无法纯文本逆转。改用遍历 projects 目录，找到含目标 jsonl 的那个。
-    """
-    home = claude_home or Path.home() / ".claude"
-    projects_dir = home / "projects"
-    if not projects_dir.is_dir():
-        return None
-    target = f"{claude_thread_id}.jsonl"
-    for entry in projects_dir.iterdir():
-        if not entry.is_dir():
-            continue
-        candidate = entry / target
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-@router.patch("/sessions/rename")
-async def rename_claude_session(
-    body: RenameClaudeSessionRequest,
-) -> dict[str, bool]:
-    """往 Claude jsonl 文件追加 ``custom-title`` 条目以重命名 session。"""
-    jsonl_path = _resolve_jsonl_path(body.claude_thread_id, body.cwd)
-    if jsonl_path is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"jsonl not found for session {body.claude_thread_id}",
-        )
-    await asyncio.to_thread(
-        append_custom_title,
-        jsonl_path,
-        body.claude_thread_id,
-        body.title,
-    )
-    return {"ok": True}
-
-
-# ---------------------------------------------------------------------------
-# Archive session
-# ---------------------------------------------------------------------------
-
-
-class ArchiveClaudeSessionRequest(BaseModel):
-    """归档 Claude session 的请求体。"""
-
-    claude_thread_id: Annotated[str, Field(min_length=1, max_length=100)]
-    cwd: Annotated[str, Field(pattern=r"^/")]
-
-
-@router.patch("/sessions/archive")
-async def archive_claude_session(
-    body: ArchiveClaudeSessionRequest,
-) -> dict[str, bool]:
-    """往 Claude jsonl 文件追加 ``archived`` 条目以归档 session。"""
-    jsonl_path = _resolve_jsonl_path(body.claude_thread_id, body.cwd)
-    if jsonl_path is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"jsonl not found for session {body.claude_thread_id}",
-        )
-    await asyncio.to_thread(
-        append_archived,
-        jsonl_path,
-        body.claude_thread_id,
-    )
-    return {"ok": True}
 
 
 __all__ = ["router"]

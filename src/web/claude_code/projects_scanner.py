@@ -14,9 +14,15 @@
 - 跳过 ``agent-*.jsonl``（subagent 工具历史，v0.2 不展示）
 - 行数为 0 的空 jsonl 跳过（不输出 SessionSummary）
 - 损坏 / 完全无 user message 的 jsonl 仍然计入：``title`` 取占位文案
-- ``display_name`` 直接取 ``os.path.basename(cwd)``——cwd 由 registry 提供，
+- ``display_name`` 直接取 ``os.path.basename(cwd)``——cwd 由 registry 提供,
   本身就是绝对路径真值，不再需要从 jsonl entry 反推。
 - 不依赖 SDK，只 import 标准库
+- **title / archived 真源 = thread metadata**：调用方按 ``claude_thread_id``
+  组装 ``{claude_thread_id → ThreadMetadata}`` 索引并传入；scanner 命中即用
+  ``meta.name`` / ``meta.is_archived``。未命中（未绑定 thread 的孤儿 jsonl）
+  走原 fallback：扫首条 user message。这一改动修掉旧 "尾部 4KB 窗口" bug——
+  Claude jsonl 单行 P90=7KB / P99=285KB，原 ``read_custom_title`` /
+  ``read_archived`` 一旦 rename 后又写了大消息就读不到真值。
 
 模块严格无副作用：纯函数，仅读 ``claude_home``，从不写入。
 """
@@ -30,13 +36,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from web.claude_code.jsonl_history import encode_cwd
+from web.thread_metadata import ThreadMetadata
 
 __all__ = [
     "ProjectSummary",
     "SessionSummary",
     "list_projects",
-    "read_archived",
-    "read_custom_title",
 ]
 
 
@@ -88,16 +93,23 @@ def list_projects(
     *,
     claude_home: Path | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
+    thread_metadata_index: dict[str, ThreadMetadata] | None = None,
 ) -> list[ProjectSummary]:
     """按 registry 登记的 cwd 列表扫 ``~/.claude/projects/<encoded(cwd)>/``。
 
     Args:
         registry_cwds: 来自 ``claude_code.projects_registry.load_registry()`` 的
             cwd 列表（绝对路径）。每个 cwd 输出一个 ``ProjectSummary`` 节点。
-            重复的 cwd 会去重（保留首次出现位置）。
+            重复的 cwd 会去重（保留首次出现位置)。
         claude_home: Claude 数据目录，默认 ``Path.home() / ".claude"``。
             单元测试可注入临时目录。
         progress_callback: 流式刷新场景使用，签名 ``(current, total, name)``。
+        thread_metadata_index: ``{claude_thread_id → ThreadMetadata}`` 索引，
+            由 router 层用 :func:`web.thread_metadata.list_thread_metadata`
+            构建后传入。命中的 jsonl 直接用 ``meta.name`` 当 title，并按
+            ``meta.is_archived`` 过滤归档项。未命中走原 fallback（首条 user
+            message → 占位符）。``None`` 表示调用方未提供索引（保持后兼容），
+            等同空 dict。
 
     Returns:
         ProjectSummary 列表，**每个 cwd 一个节点**：
@@ -125,7 +137,12 @@ def list_projects(
     for index, cwd in enumerate(deduped_cwds, start=1):
         encoded = encode_cwd(cwd)
         project_path = projects_dir / encoded
-        project = _build_project_summary(cwd, encoded, project_path)
+        project = _build_project_summary(
+            cwd,
+            encoded,
+            project_path,
+            thread_metadata_index=thread_metadata_index,
+        )
         summaries.append(project)
         if progress_callback is not None:
             progress_callback(index, total, encoded)
@@ -140,12 +157,21 @@ def _project_sort_key(p: ProjectSummary) -> float:
     return max(s.last_modified for s in p.sessions)
 
 
-def _build_project_summary(cwd: str, encoded_name: str, project_path: Path) -> ProjectSummary:
+def _build_project_summary(
+    cwd: str,
+    encoded_name: str,
+    project_path: Path,
+    *,
+    thread_metadata_index: dict[str, ThreadMetadata] | None = None,
+) -> ProjectSummary:
     """收集单个 project 目录下的 session 摘要并打包。
 
     project_path 不存在 / 无权限 → 仍返回 ProjectSummary（``sessions=[]``）。
     这样 registry 登记后但还没产生过 jsonl 的项目也能正常展示，让用户从空白
     开始使用合法。
+
+    ``thread_metadata_index`` 透传给 ``_build_session_summary``：scanner 不
+    在层级 1 解释索引，统一在 session 级别按 ``claude_thread_id`` 查询。
     """
     sessions: list[SessionSummary] = []
     if project_path.is_dir():
@@ -159,7 +185,10 @@ def _build_project_summary(cwd: str, encoded_name: str, project_path: Path) -> P
                         continue
                     if fname.startswith("agent-"):
                         continue
-                    summary = _build_session_summary(Path(entry.path))
+                    summary = _build_session_summary(
+                        Path(entry.path),
+                        thread_metadata_index=thread_metadata_index,
+                    )
                     if summary is not None:
                         sessions.append(summary)
         except OSError:
@@ -177,88 +206,26 @@ def _build_project_summary(cwd: str, encoded_name: str, project_path: Path) -> P
     )
 
 
-def read_custom_title(jsonl_path: Path) -> str | None:
-    """从 jsonl 文件尾部读取最后一条 ``custom-title`` 条目的标题。
-
-    CCUI 或 rename API 会追加 ``{"type":"custom-title","customTitle":"..."}``
-    到文件末尾。本函数从尾部倒读最后 4KB，逐行倒序查找最后一条匹配记录。
-
-    Args:
-        jsonl_path: jsonl 文件路径。
-
-    Returns:
-        找到 → ``customTitle`` 字符串；找不到或文件打不开 → ``None``。
-    """
-    TAIL_BYTES = 4096
-    try:
-        with jsonl_path.open("rb") as f:
-            f.seek(0, 2)  # seek to end
-            size = f.tell()
-            f.seek(max(0, size - TAIL_BYTES))
-            tail = f.read().decode("utf-8", errors="replace")
-    except OSError:
-        return None
-
-    for line in reversed(tail.splitlines()):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            entry = json.loads(stripped)
-        except (ValueError, json.JSONDecodeError):
-            continue
-        if (
-            isinstance(entry, dict)
-            and entry.get("type") == "custom-title"
-            and isinstance(entry.get("customTitle"), str)
-        ):
-            return str(entry["customTitle"])
-    return None
-
-
-def read_archived(jsonl_path: Path) -> bool:
-    """从 jsonl 文件尾部读取最后一条 ``archived`` 条目的归档状态。
-
-    archive API 会追加 ``{"type":"archived","archived":true}`` 到文件末尾。
-    本函数从尾部倒读最后 4KB，逐行倒序查找最后一条匹配记录。
-
-    Args:
-        jsonl_path: jsonl 文件路径。
-
-    Returns:
-        找到 → ``archived`` 字段布尔值；找不到或文件打不开 → ``False``。
-    """
-    TAIL_BYTES = 4096
-    try:
-        with jsonl_path.open("rb") as f:
-            f.seek(0, 2)  # seek to end
-            size = f.tell()
-            f.seek(max(0, size - TAIL_BYTES))
-            tail = f.read().decode("utf-8", errors="replace")
-    except OSError:
-        return False
-
-    for line in reversed(tail.splitlines()):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            entry = json.loads(stripped)
-        except (ValueError, json.JSONDecodeError):
-            continue
-        if isinstance(entry, dict) and entry.get("type") == "archived":
-            return bool(entry.get("archived", False))
-    return False
-
-
-def _build_session_summary(jsonl_path: Path) -> SessionSummary | None:
+def _build_session_summary(
+    jsonl_path: Path,
+    *,
+    thread_metadata_index: dict[str, ThreadMetadata] | None = None,
+) -> SessionSummary | None:
     """读取 jsonl 文件，统计行数 + 提取 title + 取 mtime。
 
     空 jsonl（0 行）→ 返回 None。
     无法 stat / 打开 → 返回 None（损坏到完全没法访问就跳过）。
     打开但 json 全损坏 → message_count 仍按行数算，title 用 ``(无法解析)``。
 
-    title 优先级：custom-title（用户重命名） > 第 1 条 user message > 占位符。
+    title 优先级：
+    1. ``thread_metadata_index[claude_thread_id].name`` —— 用户绑定 thread
+       后元数据落在 ``.kongming/web/threads/<tid>/metadata.json``，是 rename
+       的真源。命中即用，跳过 jsonl 扫描（只用来数行数）。
+    2. fallback：未绑定 thread 的孤儿 jsonl，扫第 1 条 user message。
+    3. 双双没有 → 占位符 ``(空会话)`` / ``(无法解析)``。
+
+    archived 真源同样在 metadata 里：``meta.is_archived=True`` → 返回 None
+    （列表不显示）。未命中 thread metadata 默认视为未归档。
 
     cwd 不再从 entry 反推——由 registry 提供绝对路径真值。
     """
@@ -270,15 +237,18 @@ def _build_session_summary(jsonl_path: Path) -> SessionSummary | None:
 
     claude_thread_id = jsonl_path.stem
 
-    # 优先从尾部取 custom-title
-    custom_title = read_custom_title(jsonl_path)
+    # thread metadata 索引：title / archived 真源
+    meta = (
+        thread_metadata_index.get(claude_thread_id) if thread_metadata_index is not None else None
+    )
 
-    # 已归档的 session 不展示
-    if read_archived(jsonl_path):
+    # 已归档（按 metadata）的 session 不展示
+    if meta is not None and meta.is_archived:
         return None
 
     message_count = 0
-    title: str | None = custom_title
+    # 命中 metadata：直接用 meta.name 当 title，scan 阶段只数行数不解析
+    title: str | None = meta.name if meta is not None else None
     parse_failed = False
     saw_any_json = False
 
@@ -286,7 +256,7 @@ def _build_session_summary(jsonl_path: Path) -> SessionSummary | None:
         with jsonl_path.open("r", encoding="utf-8") as f:
             for line in f:
                 message_count += 1
-                # title 拿到后剩余只数行数
+                # title 已确定（meta 命中 / 已找到首条 user msg）→ 剩余只数行数
                 if title is not None:
                     continue
                 stripped = line.strip()

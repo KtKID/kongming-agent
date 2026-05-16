@@ -1,9 +1,14 @@
-"""GET /api/claude/projects endpoint 单测（v0.2 #7）。
+"""GET /api/claude/projects endpoint 单测（v0.2 #7 + claude-session-rename-archive
+-metadata-source #3）。
 
 覆盖：
 1. 未登录 → 401
 2. mock list_projects 返非空 → projects 数组
 3. mock list_projects 返空 → projects=[]
+4. refresh 流式：progress + done
+
+本轮迁移：list_projects 多了 ``thread_metadata_index`` 参数，所有 mock 用
+``*args, **kwargs`` 兼容（避免 router 调签名变更时再次破测）。
 """
 
 from __future__ import annotations
@@ -49,7 +54,9 @@ def test_returns_projects_dict(tmp_path: Path, monkeypatch) -> None:
             ],
         )
     ]
-    monkeypatch.setattr("web.routers.claude.list_projects", lambda: fake_data)
+    # router 现在用 list_projects(cwds, claude_home=..., thread_metadata_index=...)
+    # mock 用 *args/**kwargs 通吃签名变化
+    monkeypatch.setattr("web.routers.claude.list_projects", lambda *a, **kw: fake_data)
     tm = FakeTM()
     client = _login_client(tmp_path, tm)
     try:
@@ -73,7 +80,7 @@ def test_returns_projects_dict(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_empty_returns_empty_projects(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("web.routers.claude.list_projects", lambda: [])
+    monkeypatch.setattr("web.routers.claude.list_projects", lambda *a, **kw: [])
     tm = FakeTM()
     client = _login_client(tmp_path, tm)
     try:
@@ -101,7 +108,8 @@ def test_refresh_stream_returns_progress_and_done(tmp_path: Path, monkeypatch) -
         )
     ]
 
-    def fake_list_projects(*, progress_callback=None):
+    def fake_list_projects(*args, progress_callback=None, **kwargs):
+        del args, kwargs
         if progress_callback is not None:
             progress_callback(1, 1, "-foo-bar")
         return fake_data

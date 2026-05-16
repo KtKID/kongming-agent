@@ -91,7 +91,7 @@ def test_thread_metadata_name_max_200() -> None:
 
 def test_thread_metadata_default_schema_version() -> None:
     meta = _make_meta()
-    assert meta.schema_version == THREAD_METADATA_SCHEMA_VERSION == 9
+    assert meta.schema_version == THREAD_METADATA_SCHEMA_VERSION == 10
 
 
 def test_thread_metadata_message_count_non_negative() -> None:
@@ -203,8 +203,9 @@ def test_read_v3_lazy_upgrades_through_v9(tmp_path: Path) -> None:
     )
     loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
     assert loaded is not None
-    # v9 schema：3 个 token 字段已物理删除
-    assert loaded.schema_version == 9
+    # v9 schema：3 个 token 字段已物理删除；v10 再补 is_archived 默认 False
+    assert loaded.schema_version == 10
+    assert loaded.is_archived is False
     assert not hasattr(loaded, "cumulative_usage")
     assert not hasattr(loaded, "last_run_snapshot")
     assert not hasattr(loaded, "last_model_name")
@@ -342,8 +343,9 @@ def test_read_v6_lazy_upgrades_through_v9(tmp_path: Path) -> None:
     )
     loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
     assert loaded is not None
-    assert loaded.schema_version == 9
+    assert loaded.schema_version == 10
     assert loaded.is_pinned is False
+    assert loaded.is_archived is False
     # v9：token 字段已物理删除
     assert not hasattr(loaded, "cumulative_usage")
 
@@ -372,7 +374,7 @@ def test_v8_to_v9_drops_token_fields(tmp_path: Path) -> None:
     )
     loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
     assert loaded is not None
-    assert loaded.schema_version == 9
+    assert loaded.schema_version == 10
     # v9：token 字段已物理删除（ThreadMetadata 类不再含这些字段）
     assert not hasattr(loaded, "cumulative_usage")
     assert not hasattr(loaded, "last_run_snapshot")
@@ -391,37 +393,37 @@ def test_v9_idempotent_no_change(tmp_path: Path) -> None:
     # 再读一次（模拟 idempotent 检查）
     loaded2 = read_thread_metadata(tmp_path, meta.id)
     assert loaded1 == loaded2 == meta
-    assert loaded1 is not None and loaded1.schema_version == 9
+    assert loaded1 is not None and loaded1.schema_version == 10
 
 
-def test_v10_unknown_schema_returns_none(tmp_path: Path) -> None:
-    """v10 是未来版本，本进程不认识 → 返回 None（Literal[1..9] 拒绝）。"""
+def test_v11_unknown_schema_returns_none(tmp_path: Path) -> None:
+    """v11 是未来版本，本进程不认识 → 返回 None（Literal[1..10] 拒绝）。"""
     path = thread_metadata_path(tmp_path, "thread-aaaaaaaaaaaa")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         '{"id":"thread-aaaaaaaaaaaa","name":"x","preset_id":"p",'
-        '"created_at":1.0,"updated_at":1.0,"message_count":0,"schema_version":10}',
+        '"created_at":1.0,"updated_at":1.0,"message_count":0,"schema_version":11}',
         encoding="utf-8",
     )
     assert read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa") is None
 
 
-def test_v9_extra_forbid_rejects_unknown_field(tmp_path: Path) -> None:
-    """v9 schema 仍 ``extra="forbid"``：未知字段拒绝。"""
+def test_v10_extra_forbid_rejects_unknown_field(tmp_path: Path) -> None:
+    """v10 schema 仍 ``extra="forbid"``：未知字段拒绝。"""
     path = thread_metadata_path(tmp_path, "thread-aaaaaaaaaaaa")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         '{"id":"thread-aaaaaaaaaaaa","name":"x","preset_id":"p",'
         '"created_at":1.0,"updated_at":1.0,"message_count":0,'
-        '"unknown_v10_field":"hello","schema_version":9}',
+        '"unknown_v11_field":"hello","schema_version":10}',
         encoding="utf-8",
     )
     # extra="forbid" 让 model_validate 拒绝；read_thread_metadata 兜底返 None
     assert read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa") is None
 
 
-def test_v9_write_does_not_include_token_fields(tmp_path: Path) -> None:
-    """v9 schema 写盘 dump 时不含被删的 3 个 token 字段。"""
+def test_v10_write_does_not_include_token_fields(tmp_path: Path) -> None:
+    """v10 schema 写盘 dump 时不含被删的 3 个 token 字段，含 is_archived 默认 False。"""
     import json as _json
 
     meta = _make_meta()
@@ -431,4 +433,5 @@ def test_v9_write_does_not_include_token_fields(tmp_path: Path) -> None:
     assert "cumulative_usage" not in data
     assert "last_run_snapshot" not in data
     assert "last_model_name" not in data
-    assert data["schema_version"] == 9
+    assert data["schema_version"] == 10
+    assert data["is_archived"] is False
