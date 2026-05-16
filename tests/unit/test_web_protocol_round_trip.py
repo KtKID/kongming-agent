@@ -233,9 +233,8 @@ def _make_thread_metadata() -> ThreadMetadataDTO:
         created_at=1_700_000_000.0,
         updated_at=1_700_000_010.5,
         message_count=3,
-        # v9 (usage-token-v2-bigbang): 删 usage_summary 字段；token 数据由独立
-        # 端点 GET /threads/<tid>/usage 提供
-        schema_version=9,
+        # v10 (claude-session-rename-archive-metadata-source): 加 is_archived 真源
+        schema_version=10,
     )
 
 
@@ -662,7 +661,7 @@ def test_kind_default_cell_evicted():
 
 
 def test_thread_metadata_schema_version_default():
-    """``ThreadMetadataDTO.schema_version`` 默认 ``9``（usage-token-v2-bigbang，删 3 token 字段）。"""
+    """``ThreadMetadataDTO.schema_version`` 默认 ``10``（claude-session-rename-archive-metadata-source，加 is_archived）。"""
     dto = ThreadMetadataDTO(
         id="thread-abcdef012345",
         name="x",
@@ -672,4 +671,4 @@ def test_thread_metadata_schema_version_default():
         updated_at=0.0,
         message_count=0,
     )
-    assert dto.schema_version == 9
+    assert dto.schema_version == 10

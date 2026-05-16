@@ -163,13 +163,13 @@ async def test_usage_manager_v2_exposed_with_get_thread_usage_only(tmp_path: Pat
     result = await mgr.usage_manager.get_thread_usage(meta.id)
     assert result is None
 
-    # metadata.json 不含任何 token 字段（schema v9 物理删 3 字段）
+    # metadata.json 不含任何 token 字段（schema v9 物理删 3 字段）；v10 加 is_archived
     loaded = read_thread_metadata(tmp_path, meta.id)
     assert loaded is not None
     assert not hasattr(loaded, "cumulative_usage")
     assert not hasattr(loaded, "last_run_snapshot")
     assert not hasattr(loaded, "last_model_name")
-    assert loaded.schema_version == 9
+    assert loaded.schema_version == 10
 
 
 async def test_list_cells_returns_only_active_cells(tmp_path: Path) -> None:
