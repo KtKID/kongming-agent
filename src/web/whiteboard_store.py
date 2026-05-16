@@ -2,8 +2,8 @@
 
 目录结构：
 
-- ``<workspace>/whiteboard/board.json``：白板元数据与卡片布局
-- ``<workspace>/whiteboard/cards/*.md``：每张卡片的 markdown 正文
+- ``<workspace>/board.json``：白板元数据与卡片布局
+- ``<workspace>/cards/*.md``：每张卡片的 markdown 正文
 
 设计要点：
 
@@ -120,16 +120,12 @@ class WhiteboardInvalidLayoutError(Exception):
     """白板布局请求本身非法。"""
 
 
-def whiteboard_dir(workspace: Path) -> Path:
-    return workspace / "whiteboard"
-
-
 def whiteboard_board_path(workspace: Path) -> Path:
-    return whiteboard_dir(workspace) / "board.json"
+    return workspace / "board.json"
 
 
 def whiteboard_cards_dir(workspace: Path) -> Path:
-    return whiteboard_dir(workspace) / "cards"
+    return workspace / "cards"
 
 
 def whiteboard_card_path(workspace: Path, filename: str) -> Path:
@@ -426,5 +422,4 @@ __all__ = [
     "whiteboard_board_path",
     "whiteboard_card_path",
     "whiteboard_cards_dir",
-    "whiteboard_dir",
 ]

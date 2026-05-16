@@ -301,8 +301,8 @@ def test_R5_post_card_global_scope_with_empty_cwd_succeeds(tmp_path: Path) -> No
         assert resp.status_code == 201
         body = resp.json()
         assert body["scope"] == "global"
-        # 卡片确实落在 global workspace；store.whiteboard_dir 在 workspace/whiteboard/ 下
-        global_board = home / "whiteboard" / "global" / "whiteboard" / "board.json"
+        # 卡片确实落在 global workspace（board.json 与 cards/ 直接在 workspace 根）
+        global_board = home / "whiteboard" / "global" / "board.json"
         assert global_board.exists()
     finally:
         client.__exit__(None, None, None)
@@ -359,10 +359,8 @@ def test_post_project_card_with_cwd_writes_to_project_workspace(tmp_path: Path) 
         assert resp.json()["scope"] == "project"
         encoded = encode_project_dir(project_cwd)
         proj_root = home / "whiteboard" / "projects" / encoded
-        # store.whiteboard_dir 在 workspace/whiteboard/ 下；project workspace 是
-        # ``<root>/projects/<encoded>/``，所以 board.json 路径是
-        # ``<root>/projects/<encoded>/whiteboard/board.json``
-        assert (proj_root / "whiteboard" / "board.json").exists()
+        # project workspace 是 ``<root>/projects/<encoded>/``，board.json 直接在 workspace 根
+        assert (proj_root / "board.json").exists()
         # 首次写 project 时 manager 落 meta.json 记录原始 cwd（在 project workspace 根）
         assert (proj_root / "meta.json").exists()
     finally:
@@ -461,7 +459,7 @@ def test_put_card_content_conflict_returns_409(tmp_path: Path) -> None:
         time.sleep(0.02)
         encoded = encode_project_dir(project_cwd)
         proj_root = home / "whiteboard" / "projects" / encoded
-        card_path = proj_root / "whiteboard" / "cards" / created["filename"]
+        card_path = proj_root / "cards" / created["filename"]
         card_path.write_text("edited outside api", encoding="utf-8")
 
         put_resp = client.put(

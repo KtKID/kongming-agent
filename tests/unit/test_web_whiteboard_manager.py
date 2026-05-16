@@ -48,15 +48,15 @@ def test_m1_create_global_card_writes_to_global_workspace(
     assert record.record.title == "Global Note"
     assert record.record.content == "hello global"
 
-    # 内容落 <root>/global/whiteboard/cards/
-    global_cards_dir = tmp_path / "global" / "whiteboard" / "cards"
+    # 内容落 <root>/global/cards/
+    global_cards_dir = tmp_path / "global" / "cards"
     assert global_cards_dir.is_dir()
     md_files = list(global_cards_dir.glob("*.md"))
     assert len(md_files) == 1
     assert md_files[0].read_text(encoding="utf-8") == "hello global"
 
     # layout 写 global board.json
-    global_board = tmp_path / "global" / "whiteboard" / "board.json"
+    global_board = tmp_path / "global" / "board.json"
     assert global_board.is_file()
 
     # project 目录未被创建
@@ -90,14 +90,14 @@ def test_m2_create_project_card_writes_meta_and_layout(
     assert cwd in meta_path.read_text(encoding="utf-8")
 
     # 内容文件
-    cards_dir = project_ws / "whiteboard" / "cards"
+    cards_dir = project_ws / "cards"
     assert cards_dir.is_dir()
     md_files = list(cards_dir.glob("*.md"))
     assert len(md_files) == 1
     assert md_files[0].read_text(encoding="utf-8") == "project body"
 
     # project board.json
-    assert (project_ws / "whiteboard" / "board.json").is_file()
+    assert (project_ws / "board.json").is_file()
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +261,7 @@ def test_m10_delete_global_card_removes_content_and_layout(
     manager.create_card(cwd=cwd, scope="project", title="P", content="p1")
 
     # 删除前内容存在
-    global_cards_dir = tmp_path / "global" / "whiteboard" / "cards"
+    global_cards_dir = tmp_path / "global" / "cards"
     assert len(list(global_cards_dir.glob("*.md"))) == 1
 
     manager.delete_card(cwd=cwd, card_id=g_card.record.id)
@@ -330,7 +330,7 @@ def test_m13_update_layout_global_does_not_touch_project(
     g_card = manager.create_card(cwd=None, scope="global", title="G", content="g1", x=10, y=10)
     p_card = manager.create_card(cwd=cwd, scope="project", title="P", content="p1", x=20, y=20)
 
-    project_board = tmp_path / "projects" / encode_project_dir(cwd) / "whiteboard" / "board.json"
+    project_board = tmp_path / "projects" / encode_project_dir(cwd) / "board.json"
     project_board_before = project_board.read_text(encoding="utf-8")
 
     manager.update_layout(
@@ -377,7 +377,7 @@ def test_m14_update_layout_project_does_not_touch_global(
     g_card = manager.create_card(cwd=None, scope="global", title="G", content="g1", x=10, y=10)
     p_card = manager.create_card(cwd=cwd, scope="project", title="P", content="p1", x=20, y=20)
 
-    global_board = tmp_path / "global" / "whiteboard" / "board.json"
+    global_board = tmp_path / "global" / "board.json"
     global_board_before = global_board.read_text(encoding="utf-8")
 
     manager.update_layout(
@@ -484,7 +484,7 @@ def test_e1_same_cwd_two_creates_share_workspace(
 
     encoded = encode_project_dir(cwd)
     project_ws = tmp_path / "projects" / encoded
-    cards_dir = project_ws / "whiteboard" / "cards"
+    cards_dir = project_ws / "cards"
 
     md_files = list(cards_dir.glob("*.md"))
     assert len(md_files) == 2
