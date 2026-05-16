@@ -458,6 +458,7 @@ def create_app(
     from web.routers.manage import router as manage_router
     from web.routers.presets import router as presets_router
     from web.routers.server_info import router as server_info_router
+    from web.routers.sitian import router as sitian_router
     from web.routers.slash_candidates import router as slash_candidates_router
     from web.routers.threads import router as threads_router
     from web.routers.whiteboard import router as whiteboard_router
@@ -482,6 +483,7 @@ def create_app(
         app.include_router(workspace_shell_router)
     app.include_router(slash_candidates_router)
     app.include_router(cron_router)
+    app.include_router(sitian_router)
     app.include_router(server_info_router)
 
     # workflow dashboard

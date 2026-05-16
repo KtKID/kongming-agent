@@ -13,9 +13,6 @@ plugins/
 .serena/
 .kongming/
 
-# auto-publish 日志（公开 worktree 写入此目录，不入版本控制）
-error/
-
 # Python
 __pycache__/
 *.py[cod]
@@ -50,3 +47,4 @@ htmlcov/
 .claude/skills/openspec-archive-change/SKILL.md
 .claude/skills/openspec-explore/SKILL.md
 .claude/skills/openspec-propose/SKILL.md
+.playwright-mcp

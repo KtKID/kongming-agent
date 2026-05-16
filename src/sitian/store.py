@@ -193,6 +193,30 @@ class SiTianRecordsStore:
             await asyncio.to_thread(self._atomic_write_json_sync, path, report_dict)
             return path
 
+    async def load_sitian_report(self) -> dict[str, JsonValue] | None:
+        """读取最新司天报告 JSON。
+
+        - 文件不存在 → ``None``
+        - 文件存在但 JSON 损坏 → 直接抛 :class:`json.JSONDecodeError`
+          （上层 web 路由层翻译成 500 ``report_corrupted``）
+
+        语义对称于 :meth:`save_sitian_report`，复用 :meth:`_read_json_optional_sync`
+        的"不存在返 None / 损坏抛异常"行为，不引入新的静默吞容错。
+        """
+        async with self._lock:
+            raw = await asyncio.to_thread(
+                self._read_json_optional_sync,
+                self._root_dir / _SITIAN_REPORT_FILENAME,
+            )
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            # 顶层不是 object（如 list / scalar）也是异常 schema，按损坏处理。
+            raise ValueError(
+                f"sitian_report.json top-level must be JSON object, got {type(raw).__name__}"
+            )
+        return raw
+
     async def save_observations_hash(self, hash_str: str) -> None:
         async with self._lock:
             await asyncio.to_thread(self._ensure_layout_sync)
