@@ -527,8 +527,9 @@ class WhiteboardDTO(_FrameBase):
     用 ``global_title`` + ``project_title`` 取代单一 ``title``：
 
     - ``global_title``：全局白板标题，恒非空。
-    - ``project_title``：项目白板标题。``None`` 表示 cwd 空 / 项目目录不存在，
-      此时白板只展示全局卡片。
+    - ``project_title``：项目白板标题。``None`` **专用**于「cwd 空」（如纯聊天
+      thread），此时前端主按钮 disabled。cwd 非空但 project workspace 尚未创建时
+      取默认标题，让用户能点出第一张 project 卡。
 
     ``cards`` 列表混合包含两个 scope 的卡片，前端按 ``scope`` 字段分别渲染。
     """

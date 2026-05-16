@@ -32,6 +32,7 @@ from web.whiteboard_store import (
     DEFAULT_CARD_TITLE,
     DEFAULT_CARD_X,
     DEFAULT_CARD_Y,
+    DEFAULT_WHITEBOARD_TITLE,
     WhiteboardCardRecord,
     WhiteboardContentConflictError,
     WhiteboardInvalidLayoutError,
@@ -152,8 +153,11 @@ class WhiteboardManager:
     def load(self, cwd: str | None) -> ScopedWhiteboardSnapshot:
         """加载跨 scope 合并白板快照。
 
-        - ``cwd`` 为 ``None`` 或空字符串：只读 global，``project_title=None``。
-        - 否则：合并 global + project；project 目录不存在则视为空，``project_title=None``。
+        - ``cwd`` 为 ``None`` 或空字符串：只读 global，``project_title=None``
+          （前端据此判定按钮 disabled）。
+        - ``cwd`` 非空：合并 global + project；若 project workspace 目录尚不存在
+          （首次访问的 cwd，用户还没建过 project 卡），``project_title`` 取默认值
+          ``DEFAULT_WHITEBOARD_TITLE``——避免按钮被锁死，让用户能点出第一张卡。
         - 合并后按 ``z_index`` 升序排序。
         """
         global_ws = self._global_workspace()
@@ -172,6 +176,8 @@ class WhiteboardManager:
                     ScopedCardRecord(record=card, scope="project")
                     for card in project_snapshot.cards
                 )
+            else:
+                project_title = DEFAULT_WHITEBOARD_TITLE
 
         scoped.sort(key=lambda item: item.record.z_index)
 

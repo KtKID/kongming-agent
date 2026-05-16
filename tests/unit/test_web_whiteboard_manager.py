@@ -161,18 +161,20 @@ def test_m5_load_merges_global_and_project_sorted_by_z_index(
 
 
 # ---------------------------------------------------------------------------
-# M6：load(cwd="/a")，project 目录不存在 → 只返回 global
+# M6：load(cwd="/a")，project 目录不存在 → 只返回 global 卡 + 默认 project_title
+# （cwd 非空时 project_title 不能是 None，否则前端主按钮会被锁死无法建首张卡）
 # ---------------------------------------------------------------------------
 
 
-def test_m6_load_when_project_dir_missing_returns_only_global(
+def test_m6_load_when_project_dir_missing_returns_default_title(
     manager: WhiteboardManager,
 ) -> None:
     manager.create_card(cwd=None, scope="global", title="G1", content="g1")
 
     snapshot = manager.load(cwd="/Users/test/nonexistent")
 
-    assert snapshot.project_title is None
+    # cwd 非空 + workspace 未创建 → project_title 取默认值，**不是** None
+    assert snapshot.project_title == "Whiteboard"
     assert len(snapshot.cards) == 1
     assert snapshot.cards[0].scope == "global"
 
