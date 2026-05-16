@@ -168,8 +168,9 @@ async def _run_llm_analysis(
             _log.warning("sitian analysis error: %s", err)
     else:
         _log.info(
-            "sitian analysis complete: %d items, report_id=%s",
-            len(report.items),
+            "sitian analysis complete: %d alerts, %d projects, report_id=%s",
+            len(report.top_alerts),
+            len(report.projects),
             report.report_id,
         )
 

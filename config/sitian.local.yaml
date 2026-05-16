@@ -108,7 +108,7 @@ sitian:
     # 采样温度（0-2）。0.3 = 低温度稳定输出。
     temperature: 0.3
     # LLM 调用超时秒数。
-    timeout: 30
+    timeout: 90
     # 输入 observations 裁剪上限（字符数）。超出按最新 session 优先裁剪。
     max_context_chars: 50000
     # observations 没变化时跳过 LLM 调用（节省 token）。

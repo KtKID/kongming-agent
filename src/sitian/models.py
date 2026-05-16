@@ -271,60 +271,114 @@ def _as_optional_str(value: Any) -> str | None:
 
 
 @dataclass(frozen=True)
-class SiTianReportItem:
-    """单个项目的 LLM 分析结果。"""
+class SiTianAlert:
+    """单个问题卡片。LLM 按 session 维度产出。"""
+
+    alert_id: str  # f"{project_short}:{session_id_short}:{type_slug}"
+    priority: str  # P0 / P1 / P2
+    severity: str  # high / medium / low
+    severity_reasons: tuple[str, ...]
+    title: str  # 短标题
+    display_message: str  # 司天角色嘴里说的话
+    session_ref: dict[str, str]  # {"sessionId", "projectId", "projectName"}
+    evidence: tuple[dict[str, str], ...]  # [{"threadId", "quote"}]
+    recommendation: str
+    dispatch: dict[str, str]  # {"targetThreadId", "instructionDraft"} — task 1 占位
+    dedupe_key: str  # f"{project_short}:{type_slug}"
+
+    def to_dict(self) -> dict[str, JsonValue]:
+        return {
+            "alertId": self.alert_id,
+            "priority": self.priority,
+            "severity": self.severity,
+            "severityReasons": list(self.severity_reasons),
+            "title": self.title,
+            "displayMessage": self.display_message,
+            "sessionRef": dict(self.session_ref),
+            "evidence": [dict(item) for item in self.evidence],
+            "recommendation": self.recommendation,
+            "dispatch": dict(self.dispatch),
+            "dedupeKey": self.dedupe_key,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> SiTianAlert:
+        return cls(
+            alert_id=str(raw["alertId"]),
+            priority=str(raw["priority"]),
+            severity=str(raw["severity"]),
+            severity_reasons=_tuple_of_str(raw.get("severityReasons", [])),
+            title=str(raw["title"]),
+            display_message=str(raw["displayMessage"]),
+            session_ref={str(k): str(v) for k, v in raw.get("sessionRef", {}).items()},
+            evidence=tuple(
+                {str(k): str(v) for k, v in item.items()} for item in raw.get("evidence", [])
+            ),
+            recommendation=str(raw["recommendation"]),
+            dispatch={str(k): str(v) for k, v in raw.get("dispatch", {}).items()},
+            dedupe_key=str(raw["dedupeKey"]),
+        )
+
+
+@dataclass(frozen=True)
+class SiTianProjectSnapshot:
+    """项目级元数据（替换 V1 SiTianReportItem）。"""
 
     project_id: str
     project_name: str
-    status: str  # active / idle / blocked
-    severity: str  # high / medium / low
-    narrative: str
-    recent_activity: str
-    next_actions: tuple[str, ...]
+    status_by_rule: str  # active / idle / dormant / empty —— 脚本算
+    status_reason: str  # LLM 解释
+    narrative: str  # 项目级总结（不再杂糅多 session）
+    session_stats: dict[
+        str, int
+    ]  # {"total", "activeWithin1h", "activeWithin24h", "activeWithin3d"}
+    alert_ids: tuple[str, ...]  # 关联 top_alerts
 
     def to_dict(self) -> dict[str, JsonValue]:
         return {
             "projectId": self.project_id,
             "projectName": self.project_name,
-            "status": self.status,
-            "severity": self.severity,
+            "statusByRule": self.status_by_rule,
+            "statusReason": self.status_reason,
             "narrative": self.narrative,
-            "recentActivity": self.recent_activity,
-            "nextActions": list(self.next_actions),
+            "sessionStats": dict(self.session_stats),
+            "alertIds": list(self.alert_ids),
         }
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> SiTianReportItem:
+    def from_dict(cls, raw: dict[str, Any]) -> SiTianProjectSnapshot:
         return cls(
             project_id=str(raw["projectId"]),
             project_name=str(raw["projectName"]),
-            status=str(raw["status"]),
-            severity=str(raw["severity"]),
+            status_by_rule=str(raw["statusByRule"]),
+            status_reason=str(raw["statusReason"]),
             narrative=str(raw["narrative"]),
-            recent_activity=str(raw["recentActivity"]),
-            next_actions=_tuple_of_str(raw.get("nextActions", [])),
+            session_stats={str(k): int(v) for k, v in raw.get("sessionStats", {}).items()},
+            alert_ids=_tuple_of_str(raw.get("alertIds", [])),
         )
 
 
 @dataclass(frozen=True)
 class SiTianReport:
-    """一次 LLM 分析的完整报告。"""
+    """顶层报告。"""
 
     report_id: str
     generated_at: str
     summary: str
-    items: tuple[SiTianReportItem, ...]
     model_name: str
     errors: tuple[str, ...]
+    top_alerts: tuple[SiTianAlert, ...]
+    projects: tuple[SiTianProjectSnapshot, ...]
 
     def to_dict(self) -> dict[str, JsonValue]:
         return {
             "reportId": self.report_id,
             "generatedAt": self.generated_at,
             "summary": self.summary,
-            "items": [item.to_dict() for item in self.items],
             "modelName": self.model_name,
             "errors": list(self.errors),
+            "topAlerts": [alert.to_dict() for alert in self.top_alerts],
+            "projects": [project.to_dict() for project in self.projects],
         }
 
     @classmethod
@@ -333,18 +387,20 @@ class SiTianReport:
             report_id=str(raw["reportId"]),
             generated_at=str(raw["generatedAt"]),
             summary=str(raw["summary"]),
-            items=tuple(SiTianReportItem.from_dict(item) for item in raw.get("items", [])),
             model_name=str(raw["modelName"]),
             errors=_tuple_of_str(raw.get("errors", [])),
+            top_alerts=tuple(SiTianAlert.from_dict(a) for a in raw.get("topAlerts", [])),
+            projects=tuple(SiTianProjectSnapshot.from_dict(p) for p in raw.get("projects", [])),
         )
 
 
 __all__ = [
     "JsonValue",
+    "SiTianAlert",
     "SiTianObservation",
     "SiTianPendingApproval",
+    "SiTianProjectSnapshot",
     "SiTianReport",
-    "SiTianReportItem",
     "SiTianSourceRuntimeState",
     "SiTianWorkItem",
     "SiTianWorkspaceBlocker",
