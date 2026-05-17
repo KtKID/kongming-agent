@@ -23,8 +23,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any, Literal
 
 import httpx
@@ -35,9 +36,17 @@ from core.errors import ProviderError
 from core.message import Message, ToolCall
 from executors.llm.anthropic_stream_parser import AnthropicStreamParser
 from executors.llm.base import BaseLLMProvider
+from executors.llm.media_adapter import (
+    AnthropicMediaAdapter,
+    AssetStorage,
+    MediaAdapter,
+    collect_media_parts_from_messages,
+)
 from executors.llm.raw_dump import dump_raw_llm_interaction
 from executors.llm.reasoning import ReasoningConfig, resolve_reasoning_plan
 from executors.llm.sse_reader import iter_sse_events
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class AnthropicMessagesProvider(BaseLLMProvider):
@@ -57,18 +66,28 @@ class AnthropicMessagesProvider(BaseLLMProvider):
         retry_backoff: float = 1.0,
         enable_raw_dump: bool = False,
         stream_read_timeout: float = 120.0,
+        media_adapter: MediaAdapter | None = None,
+        asset_storage: AssetStorage | None = None,
     ) -> None:
         super().__init__(
             model_config=model_config,
             max_retries=max_retries,
             retry_backoff=retry_backoff,
         )
-        # 与 OpenAIResponsesProvider 对齐：raw_dump 由 cfg.trace.raw_llm 驱动；
+        # 与 OpenAIResponsesProvider 对齐:raw_dump 由 cfg.trace.raw_llm 驱动;
         # stream_read_timeout 由 cfg.stream.read_timeout 驱动。
-        # Anthropic 是远端服务（is_local 恒 False），read_timeout 不像 OpenAI 那样
+        # Anthropic 是远端服务(is_local 恒 False),read_timeout 不像 OpenAI 那样
         # 按 is_local 自动上调。
         self._enable_raw_dump = enable_raw_dump
         self._stream_read_timeout = stream_read_timeout
+
+        # claude-image-paste-e2e §5：多模态 user message 装配。
+        # 默认装配 ``AnthropicMediaAdapter()`` + ``AssetStorage()``,让 provider
+        # 在装配层未注入时也能跑(单测 / CLI fallback)。两者都为 ``None`` 时
+        # 仍走 multi-block 路径(默认实例化);仅当 message 不含 attachments 时
+        # 保持原 ``content: str`` 形态,完全向后兼容既有纯文本测试。
+        self._media_adapter: MediaAdapter = media_adapter or AnthropicMediaAdapter()
+        self._asset_storage: AssetStorage = asset_storage or AssetStorage()
 
     async def _do_complete(self, request: LLMRequest) -> LLMResponse:
         url = self._model_config.base_url.rstrip("/") + self._ENDPOINT_PATH
@@ -222,7 +241,34 @@ class AnthropicMessagesProvider(BaseLLMProvider):
         - tool_calls → ``tool_use`` content blocks
         - tool results → user 角色的 ``tool_result`` content blocks
         """
-        system_text, messages = self._split_system_and_convert(list(request.messages))
+        # claude-image-paste-e2e §5：从 ``request.metadata["thread_id"]`` 读 thread_id,
+        # 由 runner 在装配 LLMRequest 时注入(``session.session_id`` 真值)。
+        # 缺失时退化为空串——``collect_media_parts_from_messages`` 内部会按
+        # asset_id 走 storage 路径,thread_id="" 会让 path 解析失败但本来就不应该
+        # 命中(纯文本路径不进 collect)。
+        thread_id = ""
+        if request.metadata:
+            raw_tid = request.metadata.get("thread_id")
+            if isinstance(raw_tid, str):
+                thread_id = raw_tid
+
+        # P1 #1 (R2 boundary fix)：load_bytes / to_blocks 失败时静默退化纯文本,
+        # 收集被丢的 asset_ids 写到 ``request.metadata["dropped_attachments"]``,
+        # 作为后端 audit trail（前端 UI 提示留 Phase 2）。
+        dropped: list[str] = []
+
+        def _convert_user(msg: Message) -> dict[str, Any]:
+            return self._convert_user_message(msg, thread_id=thread_id, dropped=dropped)
+
+        system_text, messages = self._split_system_and_convert(
+            list(request.messages), user_converter=_convert_user
+        )
+
+        # 把 dropped asset_ids 透传给上层(audit / 观测消费方)。
+        # request.metadata 是可变 dict(LLMRequest frozen 但 dict 内容可改),
+        # 这里只写一次(本函数只跑一遍 _build_payload)。
+        if dropped and request.metadata is not None:
+            request.metadata["dropped_attachments"] = list(dropped)
 
         payload: dict[str, Any] = {
             "model": request.model or self._model_config.name,
@@ -282,8 +328,17 @@ class AnthropicMessagesProvider(BaseLLMProvider):
     @staticmethod
     def _split_system_and_convert(
         messages: list[Message],
+        *,
+        user_converter: Callable[[Message], dict[str, Any]] | None = None,
     ) -> tuple[str, list[dict[str, Any]]]:
         """提取 system 消息，转换其余消息为 Anthropic 格式。
+
+        Args:
+            messages: 待转换的消息列表。
+            user_converter: 可选的 user message 转换器，由 provider 实例传入
+                以支持 multi-block 附件（claude-image-paste-e2e §5）。未传时
+                走原 ``{"role": "user", "content": msg.content or ""}`` 路径
+                （向后兼容既有 248+ 纯文本测试）。
 
         Returns:
             (system_text, anthropic_messages) — system 合并文本和消息列表。
@@ -299,7 +354,10 @@ class AnthropicMessagesProvider(BaseLLMProvider):
                 continue
 
             if msg.role == "user":
-                out.append({"role": "user", "content": msg.content or ""})
+                if user_converter is not None:
+                    out.append(user_converter(msg))
+                else:
+                    out.append({"role": "user", "content": msg.content or ""})
                 continue
 
             if msg.role == "tool":
@@ -343,6 +401,88 @@ class AnthropicMessagesProvider(BaseLLMProvider):
 
         system_text = "\n\n".join(system_parts)
         return system_text, out
+
+    def _convert_user_message(
+        self,
+        msg: Message,
+        *,
+        thread_id: str,
+        dropped: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """把单条 user :class:`Message` 转成 Anthropic 格式。
+
+        - 无 ``metadata["attachments"]`` → 保持原 ``content: str`` 形态
+          (向后兼容既有纯文本测试)。
+        - 有 ``metadata["attachments"]`` → 通过 :class:`AnthropicMediaAdapter`
+          把附件 ref 还原成 image blocks,与文本 block 一起组成 multi-block list。
+          文本为空时省略 text block(Anthropic API 接受 image-only content)。
+
+        :func:`collect_media_parts_from_messages` 内部对 unrebuildable / 未知 kind
+        都 warning log + 跳过,不抛错;若所有 attachments 都跳过,结果等价于纯文本路径。
+
+        Args:
+            msg: 待转换的 user 消息。
+            thread_id: 当前 thread id,用于 :class:`AssetStorage` 路径解析。
+            dropped: 可选 list,被退化丢弃的 attachment asset_id 会 append 进去,
+                由调用方(``_build_payload``)写到 ``request.metadata["dropped_attachments"]``
+                作为后端 audit trail(P1 #1 R2 boundary fix)。None 时不收集。
+        """
+        text = msg.content or ""
+        metadata = msg.metadata or {}
+        refs = metadata.get("attachments") if isinstance(metadata, dict) else None
+        if not isinstance(refs, list) or not refs:
+            return {"role": "user", "content": text}
+
+        # 收集 ref 里声明的 asset_ids,用于退化分支的 audit 上报
+        declared_asset_ids: list[str] = []
+        for ref in refs:
+            if isinstance(ref, dict):
+                aid = ref.get("asset_id")
+                if isinstance(aid, str) and aid:
+                    declared_asset_ids.append(aid)
+
+        parts = collect_media_parts_from_messages(
+            [msg], storage=self._asset_storage, thread_id=thread_id
+        )
+        if not parts:
+            # 所有 attachments 均无法还原 → 退化到纯文本(已 warning log)
+            # P1 #1 R2 boundary fix:把这些 asset_id 也算作 dropped。
+            if dropped is not None:
+                _LOGGER.warning(
+                    "drop attachments due to collect_media_parts returning empty for "
+                    "thread %s: asset_ids=%s",
+                    thread_id,
+                    declared_asset_ids,
+                )
+                dropped.extend(declared_asset_ids)
+            return {"role": "user", "content": text}
+
+        # P0-2 (R2 boundary fix)：``MediaAdapter.to_blocks`` 内部按 part 调
+        # ``load_bytes()`` 读盘；任意一个资产文件 missing / 读失败 / mime 不
+        # 合法都会让本轮 turn 整体崩溃，违反 ``media_adapter.py`` docstring
+        # "图片有问题 → 退化纯文本" 承诺。这里把 IO/格式异常统一兜底成
+        # warning log + 退化纯文本路径（与 ``not parts`` 同 return 分支）。
+        try:
+            image_blocks = self._media_adapter.to_blocks(parts)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            # P1 #1 R2 boundary fix:to_blocks 失败 → 收集 parts 里所有 asset_id
+            # 到 dropped(asset 已通过 collect 还原,part.asset_id 一定是合法字符串)。
+            failed_asset_ids = [p.asset_id for p in parts]
+            _LOGGER.warning(
+                "drop attachments due to media adapter to_blocks failure for thread %s: "
+                "asset_ids=%s err=%s",
+                thread_id,
+                failed_asset_ids,
+                exc,
+            )
+            if dropped is not None:
+                dropped.extend(failed_asset_ids)
+            return {"role": "user", "content": text}
+
+        content_blocks: list[dict[str, Any]] = list(image_blocks)
+        if text:
+            content_blocks.append({"type": "text", "text": text})
+        return {"role": "user", "content": content_blocks}
 
     @staticmethod
     def _tools_to_anthropic_format(tools: list[Any]) -> list[dict[str, Any]]:

@@ -115,6 +115,7 @@ class Runner:
         max_turns: int | None = None,
         run_id: str | None = None,
         enabled_tools: Sequence[Tool] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> Result:
         """执行一次完整 run。
 
@@ -130,6 +131,11 @@ class Runner:
             run_id: 外部可以注入 run_id 便于跨进程关联；None 时 runner 自生成。
             enabled_tools: 允许装配层直接传"已解析好的 Tool 列表"绕过 tool_names 查询。
                 若提供，runner 不再按 spec.tool_names 去 tools 里查，避免重复。
+            attachments: 用户输入附件 ref 列表（``UserInputAttachment.model_dump()``
+                输出的 dict 形态）。非 None 时会写到首条 user :class:`Message`
+                的 ``metadata["attachments"]``，供 InputAssembler / provider
+                组装多模态输入。CLI 路径默认 None，不影响纯文本对话。
+                详见 ``dev-pipeline/tasks/claude-image-paste-e2e/README.md`` §1 / §4。
 
         Returns:
             :class:`Result`：运行结束的统一结果。
@@ -152,7 +158,9 @@ class Runner:
             resolved_tools = self._resolve_tools(agent_spec, tools, enabled_tools)
             # _seed_messages 内部完成 user message append + advance_run_index +
             # 写 state.run_id；之后所有 emit / Result 都读 state.run_id（已落定）。
-            await self._seed_messages(session, agent_spec, user_input, state)
+            await self._seed_messages(
+                session, agent_spec, user_input, state, attachments=attachments
+            )
             await self._emit(
                 Event(
                     kind="run.start",
@@ -266,6 +274,8 @@ class Runner:
         agent_spec: AgentSpec,
         user_input: str,
         state: RunState,
+        *,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> None:
         """如果 session 里还没有 system 指令，就先把 AgentSpec.instructions 注入。
 
@@ -275,6 +285,10 @@ class Runner:
         本方法承担两件事：
         1. user message append（必做）
         2. ``session.advance_run_index()`` 拼装 ``state.run_id``（仅当外部未注入 run_id 时）
+
+        ``attachments`` 非 None 时透传到 ``Message.metadata["attachments"]``；
+        全链路保持 dict 形态（``UserInputAttachment.model_dump()`` 输出），
+        避免 provider / assembler 还要处理"原始 BaseModel 还是 dict"两种形态。
         """
         if self._input_assembler is None:
             # 旧路径：由 _seed_messages 自己写 system 消息（兼容 fallback）。
@@ -284,8 +298,9 @@ class Runner:
                 system_msg = Message.system(agent_spec.instructions)
                 await session.append(system_msg)
                 state.record(system_msg)
-        # 始终写入 user 消息。
-        user_msg = Message.user(user_input)
+        # 始终写入 user 消息。attachments 非 None 时写到 metadata。
+        user_metadata: dict[str, Any] | None = {"attachments": attachments} if attachments else None
+        user_msg = Message.user(user_input, metadata=user_metadata)
         await session.append(user_msg)
         # 紧跟 user message append 调 advance_run_index，把"用户消息入历史"和
         # "run 编号递增"绑到同一时机。
@@ -381,10 +396,16 @@ class Runner:
                         payload=compact_meta,
                     )
                 )
+            # claude-image-paste-e2e §5：把 ``session_id``(Web 路径 == ``thread_id``,
+            # 见 src/web/thread_metadata.py:112)透传到 provider,供
+            # :class:`executors.llm.anthropic_messages.AnthropicMessagesProvider`
+            # 还原附件物理路径(``.kongming/web/uploads/images/<thread_id>/<asset_id>.<ext>``)。
+            # CLI 路径无 attachments,thread_id 取值不命中 storage,无副作用。
             llm_request = LLMRequest(
                 model=agent_spec.default_model,
                 messages=tuple(prepared_messages),
                 tools=tuple(resolved_tools),
+                metadata={"thread_id": session.session_id},
             )
             await self._emit(
                 Event(

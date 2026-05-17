@@ -436,6 +436,18 @@ def create_app(
         thread_manager=thread_manager,
     )
 
+    # media uploads（claude-image-paste-e2e §2）：注入 storage / registry /
+    # validator 单例到 app.state，让 routers/uploads.py 直接消费而不是回落
+    # 到 module-level lazy singleton。这样测试时可通过 override app.state 注入
+    # 假实现。
+    from web.uploads.registry import AssetRegistry
+    from web.uploads.storage import AssetStorage
+    from web.uploads.validation import MediaUploadValidator
+
+    app.state.asset_storage = AssetStorage()
+    app.state.asset_registry = AssetRegistry()
+    app.state.upload_validator = MediaUploadValidator(thread_manager)
+
     # 6. middleware（顺序：CSRF → Auth；先注册的最外层）
     app.add_middleware(AuthMiddleware, allow_docs=cfg.web.dev_mode)
     app.add_middleware(CSRFMiddleware)
@@ -461,6 +473,7 @@ def create_app(
     from web.routers.sitian import router as sitian_router
     from web.routers.slash_candidates import router as slash_candidates_router
     from web.routers.threads import router as threads_router
+    from web.routers.uploads import router as uploads_router
     from web.routers.whiteboard import router as whiteboard_router
     from web.routers.workspace_git import router as workspace_git_router
 
@@ -485,6 +498,7 @@ def create_app(
     app.include_router(cron_router)
     app.include_router(sitian_router)
     app.include_router(server_info_router)
+    app.include_router(uploads_router)
 
     # workflow dashboard
     if cfg.workflow.enabled:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from commands.models import (
     CommandExecutionContext,
@@ -18,7 +18,9 @@ if TYPE_CHECKING:
     from executors.agent_runtime.native_runtime import NativeRuntime
     from host.base import HostAdapter
 
-RuntimeDelegate = Callable[[str, str | None], Awaitable[Result]]
+# ``attachments`` 第 3 个位置参数：web 路径透传用户附件 dict 列表
+# （``UserInputAttachment.model_dump()`` 形态），CLI 默认 None 不影响纯文本对话。
+RuntimeDelegate = Callable[[str, str | None, list[dict[str, Any]] | None], Awaitable[Result]]
 
 
 class CommandService:
@@ -38,10 +40,11 @@ class CommandService:
         raw_input: str,
         *,
         context: CommandExecutionContext,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> Result | CommandResult:
         parsed = parse_input(raw_input)
         if parsed.kind == "text":
-            return await self._runtime_delegate(raw_input, context.reasoning_effort)
+            return await self._runtime_delegate(raw_input, context.reasoning_effort, attachments)
 
         command_name = parsed.command_name or ""
         command = self._registry.lookup(command_name, self._host_kind)
@@ -56,7 +59,8 @@ class CommandService:
             prompt_text = command.description
             if parsed.args_text:
                 prompt_text = parsed.args_text
-            return await self._runtime_delegate(prompt_text, context.reasoning_effort)
+            # slash command 路径不带附件（命令展开成纯文本 prompt）。
+            return await self._runtime_delegate(prompt_text, context.reasoning_effort, None)
 
         return CommandResult(
             status="failed",

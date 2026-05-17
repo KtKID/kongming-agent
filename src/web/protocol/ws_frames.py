@@ -30,7 +30,7 @@ from web.protocol._base import (
     _C2SFrameBase,
     _S2CFrameBase,
 )
-from web.protocol.rest_models import HistoryMessageDTO
+from web.protocol.rest_models import HistoryMessageDTO, UserInputAttachment
 
 # ---------------------------------------------------------------------------
 # C2S 帧（浏览器 → 后端，3 个）
@@ -64,12 +64,20 @@ class PingFrame(_C2SFrameBase):
 
 
 class UserInputFrame(_C2SFrameBase):
-    """浏览器提交一轮用户输入；后端按 ``request_id`` 关联回执。"""
+    """浏览器提交一轮用户输入；后端按 ``request_id`` 关联回执。
+
+    claude-image-paste-e2e v0.1（contract layer）加 ``attachments`` 字段：
+    用户在 Composer 粘贴图片后，前端先走 ``POST /api/uploads/images`` 拿到
+    :class:`UserInputAttachment` 列表，再随本帧一并提交。后端按 ``asset_id``
+    在 ``Message.metadata["attachments"]`` 留 ref，由 InputAssembler 组装
+    成 provider 多模态消息。``None`` 表示纯文本输入（绝大多数轮次）。
+    """
 
     kind: Literal["user.input"] = "user.input"
     text: str
     request_id: str
     reasoning_effort: Literal["low", "medium", "high"] | None = None
+    attachments: list[UserInputAttachment] | None = None
 
 
 # ---------------------------------------------------------------------------

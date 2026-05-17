@@ -186,8 +186,21 @@ async def _dispatch_frame(
     if kind == "user.input":
         # 后台跑 run_once；不阻塞读循环
         effort = getattr(frame, "reasoning_effort", None)
+        # claude-image-paste-e2e #20：把 UserInputAttachment(BaseModel) 列表
+        # 提前打成 dict，全链路（runtime / runner / Message.metadata / assembler
+        # / provider）保持 dict 形态，避免下游再处理 BaseModel ↔ dict 双形态。
+        raw_attachments = getattr(frame, "attachments", None)
+        attachments_dicts: list[dict[str, Any]] | None = (
+            [a.model_dump() for a in raw_attachments] if raw_attachments else None
+        )
         task = asyncio.create_task(
-            _run_once_safely(cell, frame.text, websocket, reasoning_effort=effort),
+            _run_once_safely(
+                cell,
+                frame.text,
+                websocket,
+                reasoning_effort=effort,
+                attachments=attachments_dicts,
+            ),
             name=f"web-run-once-{thread_id}",
         )
         # 把 task 暂存到 cell（便于 evict 时 cancel）
@@ -218,14 +231,24 @@ async def _run_once_safely(
     websocket: WebSocket,
     *,
     reasoning_effort: str | None = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> None:
     """在后台跑 ``cell.bridge.run_once``；异常推 ``error`` 帧不沉默死掉。
 
     token 持久化由 :class:`UsagePersistSink` 在每个 turn 的 ``usage``
     event 时增量写盘，不在此处做 run 结束一次性写入。
+
+    ``attachments`` 是 :class:`web.protocol.rest_models.UserInputAttachment`
+    经 ``model_dump()`` 后的 dict 列表；为 None 表示纯文本输入。一路透传到
+    :meth:`core.runner.Runner._seed_messages`，最终写入 user
+    :class:`core.message.Message` 的 ``metadata["attachments"]``。
     """
     try:
-        await cell.bridge.run_once(text, reasoning_effort=reasoning_effort)
+        await cell.bridge.run_once(
+            text,
+            reasoning_effort=reasoning_effort,
+            attachments=attachments,
+        )
     except asyncio.CancelledError:
         raise
     except Exception as exc:

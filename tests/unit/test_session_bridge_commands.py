@@ -44,6 +44,7 @@ class _StubRuntime:
         *,
         session_id: str | None = None,
         reasoning_effort: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> Result:
         self.calls.append((user_input, reasoning_effort))
         return Result(
@@ -62,7 +63,13 @@ class _CapturingCommandService:
         self._result = result
         self.calls: list[tuple[str, CommandExecutionContext]] = []
 
-    async def handle_input(self, raw_input: str, *, context: Any) -> Result | CommandResult:
+    async def handle_input(
+        self,
+        raw_input: str,
+        *,
+        context: Any,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> Result | CommandResult:
         self.calls.append((raw_input, context))
         return self._result
 

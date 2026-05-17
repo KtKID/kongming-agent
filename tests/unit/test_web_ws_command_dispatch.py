@@ -33,7 +33,11 @@ class CommandBridge:
         self.calls: list[str] = []
 
     async def run_once(
-        self, text: str, *, reasoning_effort: str | None = None
+        self,
+        text: str,
+        *,
+        reasoning_effort: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> CommandResult | Result:
         self.calls.append(text)
         return self._result

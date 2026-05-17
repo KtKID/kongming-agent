@@ -32,9 +32,18 @@ THREAD_ID = "thread-aaaaaaaaaaaa"
 class FakeBridge:
     def __init__(self) -> None:
         self.run_once_calls: list[tuple[str, str | None]] = []
+        # claude-image-paste-e2e #20：记录 attachments 透传（旧测试不断言，新测试会查）
+        self.last_attachments: list[dict[str, Any]] | None = None
 
-    async def run_once(self, text: str, *, reasoning_effort: str | None = None) -> None:
+    async def run_once(
+        self,
+        text: str,
+        *,
+        reasoning_effort: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> None:
         self.run_once_calls.append((text, reasoning_effort))
+        self.last_attachments = attachments
 
 
 class FakeAdapter:

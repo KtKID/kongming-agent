@@ -92,6 +92,14 @@ ignore_imports =
     scheduler.runtime_factory -> context.session_bootstrap
     evolution.claude_evidence_selector -> web.claude_code.jsonl_history
     executors.agent_runtime.native_runtime -> evolution
+; claude-image-paste-e2e §4/§5：MediaPart Protocol + ImageMediaPart 需要
+; 引用 ``web.uploads.storage::AssetStorage`` (IO 抽象) 与
+; ``web.uploads.registry::EXT_BY_MIME`` (MIME→ext 白名单)。这两个符号是
+; domain logic（无 framework 耦合），技术上可以提到 core / context 层，
+; 但本任务范围不做搬移。spec-media-input §5 设计文档明确：MediaPart 是
+; assembly → provider 路径上的中间表示，引用 web.uploads 是单点白名单。
+    executors.llm.media_adapter -> web.uploads.storage
+    executors.llm.media_adapter -> web.uploads.registry
 
 ; ---------------------------------------------------------------------------
 ; Contract 4: tools 不允许直接 import safety 内部 policy / guards / decision_engine
@@ -204,6 +212,25 @@ ignore_imports =
     web.claude_code.route -> web.ws_event_sink
     web.claude_code.route -> evolution.claude_transcript_provider
     web.claude_code.route -> core.contracts
+; web.routers.uploads -> web.uploads.{storage,registry,validation}：
+; routers/uploads.py 作为 media-upload-shell controller，必须直接消费 storage
+; / registry / validator 三件套。web.uploads 子模块自身依赖 config_loader
+; （storage 默认 base_dir 走 ``get_kongming_home()``）和 web.thread_manager
+; （validator 校验 thread 存在）——这些都是合理的领域内依赖，但通过
+; ``config_loader.errors -> core.errors`` 与 ``thread_manager -> thread_cell
+; -> native_runtime -> host/safety/...`` 的传递链会被 Contract 6 误判为
+; routers 跨支柱依赖。单点白名单放行（已在 spec-media-input §5 注明）。
+    web.routers.uploads -> web.uploads.storage
+    web.routers.uploads -> web.uploads.registry
+    web.routers.uploads -> web.uploads.validation
+; web.app -> web.uploads.{storage,registry,validation}：
+; app.py 装配期注入单例到 ``app.state.*``（asset_storage / asset_registry
+; / upload_validator），让 routers/uploads.py 优先消费注入的单例而不是
+; module-level lazy singleton。同样通过 ``config_loader.errors -> core.errors``
+; 传递触发 Contract 6，单点白名单放行（与上方 routers 同理）。
+    web.app -> web.uploads.storage
+    web.app -> web.uploads.registry
+    web.app -> web.uploads.validation
 
 ; ---------------------------------------------------------------------------
 ; Contract 7: scheduler 不允许 import web 模块
@@ -218,6 +245,13 @@ source_modules =
     scheduler
 forbidden_modules =
     web
+; claude-image-paste-e2e §5：scheduler.runtime_factory → native_runtime
+; → executors.llm.anthropic_messages → executors.llm.media_adapter
+; → web.uploads.storage 是传递链(media_adapter 的 web.uploads 白名单已在
+; Contract 3 上方注明)。scheduler 本身不直接 import web,这里单点放行透传。
+ignore_imports =
+    executors.llm.media_adapter -> web.uploads.storage
+    executors.llm.media_adapter -> web.uploads.registry
 
 ; ---------------------------------------------------------------------------
 ; Contract 8: evolution 不允许 import web 模块
@@ -235,6 +269,12 @@ forbidden_modules =
     web
 ignore_imports =
     evolution.claude_evidence_selector -> web.claude_code.jsonl_history
+; claude-image-paste-e2e §5：evolution.evolution_manager → native_runtime
+; → executors.llm.anthropic_messages → executors.llm.media_adapter
+; → web.uploads.{storage,registry} 是传递链(已在 Contract 3 白名单)。
+; evolution 自身不直接 import web,这里单点放行透传。
+    executors.llm.media_adapter -> web.uploads.storage
+    executors.llm.media_adapter -> web.uploads.registry
 
 ; ---------------------------------------------------------------------------
 ; Contract 9: usage-token 封装边界

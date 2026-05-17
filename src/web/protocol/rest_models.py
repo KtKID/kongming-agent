@@ -37,10 +37,54 @@ from web.protocol._base import (
 )
 
 
+class UserInputAttachment(_FrameBase):
+    """用户上传附件 ref（asset_id + 元数据），与 TS 侧
+    ``web/src/protocol.ts::UserInputAttachment`` interface 一一对齐。
+
+    本 DTO 是协议层共享形状：
+
+    - C2S WS 帧 :class:`web.protocol.ws_frames.UserInputFrame` 的
+      ``attachments`` 字段透传一组该 DTO，把用户在 Composer 粘贴的图片
+      引用传给后端。
+    - REST :class:`HistoryMessageDTO` 的 ``attachments`` 字段在历史回放时
+      回传同一 DTO 形状，让浏览器刷新后能继续显示缩略图。
+
+    字段语义：
+
+    - ``asset_id``：上传成功后 ``UploadController`` 分配的唯一 ID，可通过
+      ``GET /api/uploads/{asset_id}`` 取回原始资源。
+    - ``kind``：资源类型；当前 Phase 1 仅处理 ``"image"``，``"video"`` /
+      ``"file"`` 已在 union 中预留，后续 Phase 2 接同一上传/组装链路时
+      无需 schema 破坏性升级。
+    - ``mime_type``：MIME 类型，前端白名单与后端校验复用同一字符串
+      （Phase 1 白名单：``image/png`` / ``image/jpeg`` / ``image/webp``
+      / ``image/gif``）。
+    - ``size_bytes``：字节数；前端按硬限制（单图 ≤ 5MB）阻止上传。
+    - ``width`` / ``height``：图片像素尺寸；视频 / 文件类型可为 ``None``。
+    - ``duration_ms``：视频时长（毫秒），图片 / 文件为 ``None``，给未来
+      ``"video"`` kind 留位。
+    - ``preview_url``：前端缩略图 URL；通常指向 ``GET /api/uploads/...``
+      或 data: URL（小图可内联），浏览器历史回放时直接用。
+    - ``status``：上传状态机三态；``"ready"`` 表示落盘完成且可纳入下一轮
+      请求，``"processing"`` 给视频转码等异步链路预留，``"failed"`` 让
+      前端能保留占位并提示重试。
+    """
+
+    asset_id: str
+    kind: Literal["image", "video", "file"]
+    mime_type: str
+    size_bytes: int
+    width: int | None = None
+    height: int | None = None
+    duration_ms: int | None = None
+    preview_url: str
+    status: Literal["ready", "processing", "failed"]
+
+
 class HistoryMessageDTO(_FrameBase):
     """单条历史消息 DTO（user / assistant / tool 三类）。
 
-    既用于 ``GET /api/threads/{id}/history`` REST 响应，也作为
+    既用于 ``GET /api/threads/{id}/history`` REST 响应,也作为
     :class:`web.protocol.ws_frames.ThreadHistoryFrame` 的 ``messages`` 元素。
 
     ``tool_call_id`` / ``tool_name`` / ``ok`` / ``data`` / ``error_message``
@@ -53,6 +97,12 @@ class HistoryMessageDTO(_FrameBase):
     含 ok / data / error_message（见 ``runner._build_tool_result_message``），
     本次把这些信息暴露到 DTO。``arguments`` 仍在 assistant 消息的 tool_calls
     里，需要跨消息查找，留待后续。
+
+    claude-image-paste-e2e v0.1（contract layer）加 ``attachments`` 字段：
+    历史回放时用户消息携带的图片附件 ref 列表，与 user.input WS 帧的
+    ``attachments`` 共享 :class:`UserInputAttachment` DTO，让浏览器刷新后
+    缩略图能从 ``preview_url`` 直接恢复。``None`` 表示该消息没有附件
+    （绝大多数老消息 / 非 user 消息）。
     """
 
     role: HistoryMessageRole
@@ -64,6 +114,7 @@ class HistoryMessageDTO(_FrameBase):
     ok: bool | None = None
     data: dict[str, Any] | None = None
     error_message: str | None = None
+    attachments: list[UserInputAttachment] | None = None
 
 
 class CellSummaryDTO(_FrameBase):
@@ -608,6 +659,7 @@ __all__: list[str] = [
     "UpdateWhiteboardCardRequest",
     "UpdateWhiteboardLayoutRequest",
     "UpdateWorkspaceFileRequest",
+    "UserInputAttachment",
     "WhiteboardCardDTO",
     "WhiteboardCardLayoutDTO",
     "WhiteboardDTO",
