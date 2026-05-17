@@ -32,7 +32,8 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import TYPE_CHECKING
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -47,6 +48,7 @@ from scheduler.domain import (
     TaskOrigin,
     TaskState,
     TaskTarget,
+    TriggerType,
 )
 from scheduler.schedule_parser import parse_schedule
 from scheduler.store import TaskNotFoundError
@@ -88,6 +90,10 @@ class CronTaskDTO(BaseModel):
     last_run_at: str | None
     preset_id: str
     created_by: str
+    # v0.5.4: 前端编辑弹窗需要回填这两个字段，否则用户改 schedule 后整条
+    # task 会失去 input_text / agent_name（GET /tasks 不返回 → 提交时丢空）。
+    input_text: str
+    agent_name: str
 
 
 class CronRunDTO(BaseModel):
@@ -155,6 +161,36 @@ class CreateCronTaskRequest(BaseModel):
     preset_id: str | None = None
 
 
+class UpdateCronTaskRequest(BaseModel):
+    """``PATCH /api/cron/tasks/{task_id}`` 编辑请求体（v0.5.3 cron-task-edit）。
+
+    所有字段 optional：前端只传想改的部分；``None`` 表示"不改"，原值原样保留。
+
+    - ``name`` / ``preset_id`` / ``enabled``：直接覆盖
+    - ``agent`` / ``input_text``：映射到嵌套 :class:`TaskTarget`；store 不支持
+      nested partial update，router 必须先读出 task → 构造新 ``TaskTarget`` → 传
+      整个 ``target=...``
+    - ``schedule``：自由文本（"every 30s"、"0 9 * * *"、ISO timestamp 等），
+      复用 :func:`parse_schedule` 解析后重写 ``trigger`` + 重算 ``next_run_at``。
+      ``default_tz`` 沿用当前 task ``trigger.timezone``，调用方想改时区需先改
+      schedule 表达式（v0.5.3 不暴露独立 timezone 字段，避免双源歧义）
+    - ``concurrency_policy``：映射到嵌套 :class:`TaskExecutionPolicy`，同
+      ``target`` 一样需先读出 ``policy`` 再 ``replace``
+    - ``enabled=False`` → ``state`` 同步 :attr:`TaskState.DISABLED`；``True`` →
+      :attr:`TaskState.SCHEDULED`。domain ``__post_init__`` 强制 ``enabled=False``
+      时 state ∈ {paused, disabled, completed, deleted}，本端点直接选 DISABLED
+      避免误把 PAUSED（pause 端点的语义位）抢走。
+    """
+
+    name: str | None = None
+    schedule: str | None = None
+    agent: str | None = None
+    input_text: str | None = None
+    preset_id: str | None = None
+    enabled: bool | None = None
+    concurrency_policy: Literal["forbid", "allow", "replace"] | None = None
+
+
 # ---------------------------------------------------------------------------
 # Domain → DTO
 # ---------------------------------------------------------------------------
@@ -172,6 +208,9 @@ def _task_to_dto(task: ScheduledTask) -> CronTaskDTO:
         last_run_at=task.last_run_at,
         preset_id=task.preset_id,
         created_by=task.created_by,
+        # v0.5.4: 透出 target 嵌套字段供前端编辑回填
+        input_text=task.target.input_text,
+        agent_name=task.target.agent_name,
     )
 
 
@@ -320,6 +359,140 @@ async def create_cron_task(request: Request, body: CreateCronTaskRequest) -> Cro
         },
     )
     return _task_to_dto(created)
+
+
+# ---------------------------------------------------------------------------
+# PATCH: edit task（v0.5.3 cron-task-edit）
+# ---------------------------------------------------------------------------
+
+
+@router.patch("/tasks/{task_id}", status_code=200)
+async def update_cron_task(
+    request: Request, task_id: str, body: UpdateCronTaskRequest
+) -> CronTaskDTO:
+    """编辑现有 cron task。
+
+    只允许改 "可变字段"（name / schedule / agent / input_text / preset_id /
+    enabled / concurrency_policy）。其他字段（origin / created_by / created_at /
+    trigger.timezone 等）不在本端点暴露。
+
+    边界：
+    - task 不存在 → 404
+    - 入参全部为 None → 200 直接回当前 task（语义：无操作，不算错误）
+    - schedule 解析失败 → 422
+    - enabled / state 组合非法（实际上由路由侧固定映射所以不会触发）→ 422
+
+    实现：先 ``get_task`` 拿现状，按映射构造 ``fields_to_update`` dict 传给
+    :meth:`Store.update_task`。嵌套 dataclass（``target`` / ``policy``）走
+    :func:`dataclasses.replace` 局部覆盖，整体回写；store 层 ``replace(t, **payload)``
+    会消费整体字段。
+    """
+    store = _require_store(request)
+    task = _require_task(store, task_id)
+
+    fields_to_update: dict[str, Any] = {}
+    changed: list[str] = []
+
+    if body.name is not None:
+        fields_to_update["name"] = body.name
+        changed.append("name")
+
+    if body.preset_id is not None:
+        fields_to_update["preset_id"] = body.preset_id
+        changed.append("preset_id")
+
+    # target 嵌套字段：agent / input_text 共用同一份 TaskTarget 重建
+    if body.agent is not None or body.input_text is not None:
+        new_target = replace(
+            task.target,
+            agent_name=body.agent if body.agent is not None else task.target.agent_name,
+            input_text=(body.input_text if body.input_text is not None else task.target.input_text),
+        )
+        fields_to_update["target"] = new_target
+        if body.agent is not None:
+            changed.append("agent")
+        if body.input_text is not None:
+            changed.append("input_text")
+
+    # policy 嵌套字段：concurrency_policy 重建 TaskExecutionPolicy
+    if body.concurrency_policy is not None:
+        try:
+            concurrency = ConcurrencyPolicy(body.concurrency_policy)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"invalid concurrency_policy: {body.concurrency_policy!r}",
+            ) from exc
+        new_policy = replace(task.policy, concurrency_policy=concurrency)
+        fields_to_update["policy"] = new_policy
+        changed.append("concurrency_policy")
+
+    # schedule：重算 trigger + next_run_at
+    new_next_run_at: str | None = None
+    if body.schedule is not None:
+        try:
+            new_trigger = parse_schedule(body.schedule, default_tz=task.trigger.timezone)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        try:
+            new_next_run_at = compute_first_run_at(new_trigger)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        fields_to_update["trigger"] = new_trigger
+        fields_to_update["next_run_at"] = new_next_run_at
+        changed.append("schedule")
+
+    # enabled：同步 state 防止 dataclass __post_init__ 报错
+    if body.enabled is not None:
+        fields_to_update["enabled"] = body.enabled
+        # 当 enabled 翻转时同步 state。enabled=False 必须挑 DISABLED 避免抢
+        # PAUSED 的语义位（PAUSED 是 pause 端点的专属态）。
+        # enabled=True 强制 SCHEDULED；如果之前是 COMPLETED 等态，schedule 不变
+        # 时直接 SCHEDULED 可能让 ticker 立即重跑历史 next_run_at —— 但本端点
+        # 没改 next_run_at 时不主动重算（用户应当显式给 schedule）。
+        fields_to_update["state"] = TaskState.SCHEDULED if body.enabled else TaskState.DISABLED
+        changed.append("enabled")
+
+    # v0.5.4: ONCE 已完成任务改 schedule 时自动复活
+    # 根因：ONCE 跑完后 enabled=False + last_run_at!=None + state=COMPLETED，
+    # ticker.reserve_due_tasks 双重过滤（enabled=True 且 last_run_at=None）会跳过；
+    # 用户改 schedule 想再跑一次也救不回。这里在用户改 schedule 且原任务是已完成
+    # ONCE 时主动翻转三个字段，避免与 pause / disabled 抢语义位（recurring 任务
+    # 自己有 next_run_at 节拍，不在此复活）。
+    if (
+        "trigger" in fields_to_update
+        and fields_to_update["trigger"].trigger_type == TriggerType.ONCE
+        and task.last_run_at is not None
+    ):
+        fields_to_update["enabled"] = True
+        fields_to_update["last_run_at"] = None
+        fields_to_update["state"] = TaskState.SCHEDULED
+        if "revived_once" not in changed:
+            changed.append("revived_once")
+
+    if not fields_to_update:
+        # 入参全空：幂等返回当前 task，不写 audit
+        return _task_to_dto(task)
+
+    try:
+        updated = store.update_task(task_id, **fields_to_update)
+    except TaskNotFoundError:
+        raise HTTPException(status_code=404, detail=f"task not found: {task_id}") from None
+    except (ValueError, TypeError) as exc:
+        # dataclass __post_init__ 触发的不变量违例
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    store.append_audit(
+        action="update",
+        task_id=task_id,
+        actor="web",
+        payload={
+            "source": "cron_router",
+            "changed_fields": changed,
+            **({"new_next_run_at": new_next_run_at} if new_next_run_at is not None else {}),
+        },
+    )
+    return _task_to_dto(updated)
 
 
 # ---------------------------------------------------------------------------
@@ -528,5 +701,6 @@ __all__ = [
     "CronRunsPage",
     "CronTaskDTO",
     "RunNowResponse",
+    "UpdateCronTaskRequest",
     "router",
 ]
