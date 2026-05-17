@@ -10,8 +10,9 @@ SDK 落盘的原始 entry 流翻译成 :class:`NormalizedMessage` 形态的 dict
 - 与 :mod:`web.claude_code.normalizer`（live 流翻译器）**独立实现**——live
   消费 SDK 类型实例，本 parser 消费纯 JSON dict，复用没价值
 - 模块只 import 标准库 + :mod:`web.llm_protocol`（拿 :class:`NormalizedMessage`
-  类型定义）；**不能** import ``claude_agent_sdk``——历史 parser 不依赖 SDK
-  运行时
+  类型定义） + :mod:`web.claude_code._content_filter`（共享前缀过滤规则，
+  保证 live 与 history 对 CLI 注入的过滤行为对齐）；**不能**
+  import ``claude_agent_sdk``——历史 parser 不依赖 SDK 运行时
 - 纯函数：同输入同输出，不带全局状态
 - 流式读：line by line，**不** ``readlines`` / ``readall``，避免大文件 OOM
 - 行级容错：单行 JSON 解析失败 / 关键字段缺失 / ``sessionId`` 不匹配 →
@@ -43,6 +44,8 @@ import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from web.claude_code._content_filter import is_internal_content
 
 if TYPE_CHECKING:
     # 仅用于类型注释——返回 dict 与 NormalizedMessage TypedDict 形态对齐。
@@ -182,6 +185,11 @@ def _translate_user(
     content = message.get("content")
 
     if isinstance(content, str):
+        # CLI 注入的 <task-notification> 等系统通知伪装成 UserMessage，
+        # 过滤掉避免历史回放后渲染成右侧用户气泡（live 流在 normalizer
+        # _handle_user 走 return [] 已隔离；此处对齐 history 路径）
+        if is_internal_content(content):
+            return []
         out = _base(entry, claude_thread_id)
         out["kind"] = "text"
         out["role"] = "user"

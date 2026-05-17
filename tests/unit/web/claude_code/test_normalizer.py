@@ -113,6 +113,30 @@ def test_assistant_internal_content_is_filtered() -> None:
         assert out == [], f"prefix {prefix!r} should be filtered"
 
 
+def test_assistant_task_notification_prefix_in_internal_list() -> None:
+    """`<task-notification>` 必须在 INTERNAL_CONTENT_PREFIXES 内——live 流过滤的回归保护。
+
+    与历史路径（jsonl_history.py）共享同一份列表（``_content_filter``），
+    保证 live 与 history 对 CLI 注入的 task 通知行为对齐。
+    """
+    assert "<task-notification>" in INTERNAL_CONTENT_PREFIXES
+    n = ClaudeNormalizer()
+    msg = _make_assistant(
+        [
+            TextBlock(
+                text=(
+                    "<task-notification>\n"
+                    "  <task-id>abc</task-id>\n"
+                    "  <status>completed</status>\n"
+                    "</task-notification>"
+                )
+            )
+        ]
+    )
+    out = n.normalize(msg, SESSION_ID)
+    assert out == []
+
+
 def test_assistant_multiple_blocks_emits_multiple_messages() -> None:
     n = ClaudeNormalizer()
     msg = _make_assistant(

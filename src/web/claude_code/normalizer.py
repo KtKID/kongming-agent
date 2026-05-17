@@ -57,26 +57,16 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
+from web.claude_code._content_filter import (
+    INTERNAL_CONTENT_PREFIXES,
+    is_internal_content,
+)
 from web.llm_protocol import NormalizedMessage
 
 # ---------------------------------------------------------------------------
-# 内部 system 文本前缀（不泄漏给前端）
+# 内部 system 文本前缀已迁移到 ``web.claude_code._content_filter``
+# 此处 re-export 仅为向后兼容外部 import；新代码请直接从 _content_filter import
 # ---------------------------------------------------------------------------
-
-INTERNAL_CONTENT_PREFIXES: tuple[str, ...] = (
-    "<command-name>",
-    "<command-message>",
-    "<command-args>",
-    "<local-command-stdout>",
-    "<system-reminder>",
-    "Caveat:",
-    "This session is being continued from a previous",
-    "[Request interrupted",
-)
-"""命中任一前缀的 ``TextBlock.text`` 整条丢弃。
-
-参考 ccui ``claude-sessions.provider.ts`` 第 34 行 ``INTERNAL_CONTENT_PREFIXES``。
-"""
 
 _BLOCK_TYPE_TO_PHASE: dict[str, Literal["responding", "thinking", "tool_calling"]] = {
     "text": "responding",
@@ -111,13 +101,6 @@ def _base(session_id: str | None) -> NormalizedMessage:
         timestamp=_now_iso(),
         provider="claude",
     )
-
-
-def _is_internal_content(text: str) -> bool:
-    """检查 text 是否命中内部前缀（应丢弃）。"""
-    if not text:
-        return False
-    return any(text.startswith(p) for p in INTERNAL_CONTENT_PREFIXES)
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +190,7 @@ class ClaudeNormalizer:
         results: list[NormalizedMessage] = []
         for block in msg.content or []:
             if isinstance(block, TextBlock):
-                if _is_internal_content(block.text):
+                if is_internal_content(block.text):
                     # 内部 system 注入文本：整条丢弃
                     continue
                 out = _base(session_id)
