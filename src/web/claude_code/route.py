@@ -177,6 +177,7 @@ async def claude_code_ws(
 
     # 2.5 thread_id 校验（可选）。带上时必须满足：格式合法 + thread 存在 + backend_kind=claude_code
     bound_thread_id: str | None = None
+    meta: Any = None  # 不传 thread_id 时保持 None（修复 v0.1 时未初始化的 UnboundLocalError）
     if thread_id is not None:
         if not _THREAD_ID_RE.match(thread_id):
             await websocket.close(
@@ -215,7 +216,18 @@ async def claude_code_ws(
     bound_claude_tid: str = getattr(meta, "claude_thread_id", "") if meta is not None else ""
 
     normalizer = ClaudeNormalizer()
-    approval = ApprovalBridge(normalizer, sessions)
+    # smart-approval-v1 装配：从 app.state 取 policy/audit（未装配时 None → 走老行为）
+    auto_approval_policy = getattr(websocket.app.state, "auto_approval_policy", None)
+    auto_approval_audit = getattr(websocket.app.state, "auto_approval_audit", None)
+    approval = ApprovalBridge(
+        normalizer,
+        sessions,
+        policy=auto_approval_policy,
+        audit=auto_approval_audit,
+        cwd=bound_cwd,
+        thread_id=bound_thread_id,
+        channel="claude_code",
+    )
     # v0.2 透传 thread_manager（可能为 None — 老路径 / 未配置时仍能运行）
     tm_for_service: ThreadManagerProtocol | None = getattr(
         websocket.app.state,
@@ -240,6 +252,13 @@ async def claude_code_ws(
 
         evo_sink = WSEventSink(ws=websocket)
         evolution_manager.register_event_route(bound_thread_id, evo_sink)
+
+    # 2.8 smart-approval-v1: 连接建立后主动 push 一次 state（前端 toggle 初始状态）
+    if auto_approval_policy is not None and bound_cwd:
+        with contextlib.suppress(Exception):
+            await websocket.send_json(
+                _build_auto_approval_state_msg(auto_approval_policy, bound_cwd),
+            )
 
     # 3. 主循环
     try:
@@ -380,6 +399,36 @@ async def _dispatch(
         )
         return
 
+    # smart-approval-v1: per-cwd toggle 开关 + 回执 state
+    if msg_type == "auto-approval-toggle":
+        policy = getattr(websocket.app.state, "auto_approval_policy", None)
+        if policy is None:
+            await _send_error(websocket, "auto_approval_policy not configured")
+            return
+        cwd = data.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            await _send_error(websocket, "auto-approval-toggle.cwd required")
+            return
+        enabled = bool(data.get("enabled", False))
+        policy.set_enabled(cwd, enabled)
+        with contextlib.suppress(Exception):
+            await websocket.send_json(_build_auto_approval_state_msg(policy, cwd))
+        return
+
+    if msg_type == "auto-approval-query":
+        # 前端按 cwd 主动拉一次 state（切 thread / 重连后用）
+        policy = getattr(websocket.app.state, "auto_approval_policy", None)
+        if policy is None:
+            await _send_error(websocket, "auto_approval_policy not configured")
+            return
+        cwd = data.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            await _send_error(websocket, "auto-approval-query.cwd required")
+            return
+        with contextlib.suppress(Exception):
+            await websocket.send_json(_build_auto_approval_state_msg(policy, cwd))
+        return
+
     await _send_error(websocket, f"unknown command type: {msg_type!r}")
 
 
@@ -393,6 +442,24 @@ async def _send_error(websocket: WebSocket, error_message: str) -> None:
                 "error": error_message,
             },
         )
+
+
+def _build_auto_approval_state_msg(policy: Any, cwd: str) -> dict[str, Any]:
+    """构造 ``auto_approval_state`` S2C 消息。
+
+    单一真源：route 任何需要 push state 的位置（连接建立 / toggle 回执 / query 应答）
+    都走这个 helper，避免字段漂移。
+    """
+    cfg = policy.get_config(cwd)
+    effective_timeout = cfg.timeout_ms or policy.rule_set.default_timeout_ms
+    return {
+        "kind": "auto_approval_state",
+        "channel": "claude_code",
+        "cwd": cfg.cwd or cwd,
+        "enabled": cfg.enabled,
+        "timeoutMs": effective_timeout,
+        "ruleOverrides": dict(cfg.rule_overrides),
+    }
 
 
 __all__ = ["router"]

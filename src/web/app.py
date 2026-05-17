@@ -429,6 +429,28 @@ def create_app(
     app.state.workspace_root = Path.cwd()
     app.state.whiteboard_manager = WhiteboardManager(whiteboard_root=home / "whiteboard")
     app.state.claude_session_manager = _SharedSessionManager()
+
+    # smart-approval-v1：进程级单例
+    # - policy 持 rule_set + config_store；config_store 每次 classify 重读盘，UI toggle 立即生效
+    # - audit 单文件 JSONL 追加（O_APPEND 并发安全）
+    # - 启动时把内置 default_rules.yaml 物化到 <home>/web/auto_approval/rules.yaml
+    #   （用户编辑这份；首次启动复制，已存在则保留用户改动）
+    from web.auto_approval import (
+        AuditLogger,
+        AutoApprovalPolicy,
+        ConfigStore,
+        load_default_rules,
+        materialize_user_rules_yaml,
+    )
+
+    _auto_approval_root = home / "web" / "auto_approval"
+    _auto_approval_root.mkdir(parents=True, exist_ok=True)
+    _user_rules_yaml = materialize_user_rules_yaml(home)
+    app.state.auto_approval_policy = AutoApprovalPolicy(
+        load_default_rules(_user_rules_yaml),
+        ConfigStore(_auto_approval_root),
+    )
+    app.state.auto_approval_audit = AuditLogger(_auto_approval_root / "audit.jsonl")
     # codex 通道（与 claude_code 平级，独立 SessionManager 单例）
     app.state.codex_session_manager = _SharedSessionManager()
     app.state.codex_service = CodexService(

@@ -133,8 +133,12 @@ class ClaudeCodeService:
                 if session_id:
                     self._clients[session_id] = client
 
-            # 3. set active writer
+            # 3. set active writer + cwd（cwd 可能被 options 覆盖；smart-approval-v1 用）
             self._approval.set_active_writer(writer)
+            if isinstance(options, dict):
+                effective_cwd = options.get("cwd")
+                if isinstance(effective_cwd, str) and effective_cwd:
+                    self._approval.set_active_cwd(effective_cwd)
 
             # 4. 注册 session：
             #    优先级 register_id_override > options["sessionId"] > placeholder。
