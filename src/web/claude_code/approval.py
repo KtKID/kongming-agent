@@ -195,14 +195,24 @@ class ApprovalBridge:
             else None
         )
 
+        # v1.0.1: 安全路径用 autoApproveAtMs，危险路径用 autoRejectAtMs，两者互斥
+        # toggle OFF / elevated 时两者都 None（仍走 v0.1 无限等老路径）
         auto_approve_at_ms: int | None = None
+        auto_reject_at_ms: int | None = None
         blocked_by_rule: str | None = None
         timeout_seconds: float | None = None
         if decision is not None:
             blocked_by_rule = decision.blocked_by_rule
+            now_ms = int(time.time() * 1000)
             if decision.auto_eligible:
-                auto_approve_at_ms = int(time.time() * 1000) + decision.timeout_ms
+                # 安全路径：倒计时自动通过
+                auto_approve_at_ms = now_ms + decision.timeout_ms
                 timeout_seconds = decision.timeout_ms / 1000.0
+            elif blocked_by_rule is not None:
+                # v1.0.1 危险路径：倒计时自动拒绝（fail-closed）
+                auto_reject_at_ms = now_ms + decision.timeout_ms
+                timeout_seconds = decision.timeout_ms / 1000.0
+            # else: toggle OFF / elevated → 两者都 None，timeout_seconds 也 None → 无限等
 
         permission_msg: dict[str, Any] = {
             "kind": "permission_request",
@@ -213,6 +223,7 @@ class ApprovalBridge:
             "input": tool_input,
             "sessionId": session_id,
             "autoApproveAtMs": auto_approve_at_ms,
+            "autoRejectAtMs": auto_reject_at_ms,
             "blockedByRule": blocked_by_rule,
         }
 
@@ -250,19 +261,30 @@ class ApprovalBridge:
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
         self._pending[request_id] = future
 
+        # v1.0.1: 区分 timeout 后是 auto-allow 还是 auto-reject
         auto_allowed_by_timeout = False
+        auto_rejected_by_timeout = False
         try:
             if timeout_seconds is not None:
-                # 智能审批：到点自动 allow（不抛 TimeoutError 给上层）
+                # 智能审批：到点自动决策（不抛 TimeoutError 给上层）
                 try:
                     user_decision = await asyncio.wait_for(future, timeout=timeout_seconds)
                 except TimeoutError:
-                    auto_allowed_by_timeout = True
-                    user_decision = {"allow": True, "auto": True}
-                    # 移除 pending（防止后续 resolve 走错路）
-                    self._pending.pop(request_id, None)
+                    self._pending.pop(request_id, None)  # 防止后续 resolve 走错路
+                    if blocked_by_rule is not None:
+                        # v1.0.1 危险路径：自动拒绝（fail-closed）
+                        auto_rejected_by_timeout = True
+                        user_decision = {
+                            "allow": False,
+                            "auto_rejected": True,
+                            "message": f"auto-rejected by rule {blocked_by_rule} after {decision.timeout_ms}ms timeout",
+                        }
+                    else:
+                        # 安全路径：自动通过
+                        auto_allowed_by_timeout = True
+                        user_decision = {"allow": True, "auto": True}
             else:
-                # 老行为：无限等
+                # 老行为：无限等（toggle OFF / elevated / policy=None）
                 user_decision = await future
         except asyncio.CancelledError:
             # 中断（例如 abort）：丢掉 pending 后向上传
@@ -303,14 +325,25 @@ class ApprovalBridge:
 
         # deny 路径：通知 normalizer 去重，返回 deny
         self._normalizer.add_pending_deny(request_id)
-        # 区分"原本就是危险规则命中"和"用户主动拒"
-        outcome = "blocked_then_manual" if blocked_by_rule else "denied"
+        # 三态 outcome：
+        # - rejected_auto_timeout (v1.0.1)：命中规则 + 倒计时到点
+        # - blocked_then_manual：命中规则 + 用户主动拒
+        # - denied：未命中规则 + 用户主动拒
+        if auto_rejected_by_timeout:
+            outcome = "rejected_auto_timeout"
+            decided_by: str | None = "timeout"
+        elif blocked_by_rule:
+            outcome = "blocked_then_manual"
+            decided_by = "user"
+        else:
+            outcome = "denied"
+            decided_by = "user"
         self._log_decision(
             tool_name=tool_name,
             tool_input=tool_input,
             rule_eval=rule_eval,
             outcome=outcome,
-            decided_by="user",
+            decided_by=decided_by,
             timeout_ms=decision.timeout_ms if decision is not None else 0,
         )
         message = user_decision.get("message") or "User denied tool use"

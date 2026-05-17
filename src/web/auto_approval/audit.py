@@ -51,6 +51,7 @@ Outcome = Literal[
     "allowed_manual",
     "allowed_auto_timeout",
     "blocked_then_manual",
+    "rejected_auto_timeout",  # v1.0.1: 命中规则 + 倒计时到点 + 自动拒绝
     "pending",  # request 阶段尚未决策，仅用于 log_request 内部
 ]
 
@@ -60,6 +61,7 @@ _VALID_OUTCOMES: frozenset[str] = frozenset(
         "allowed_manual",
         "allowed_auto_timeout",
         "blocked_then_manual",
+        "rejected_auto_timeout",
         "pending",
     ],
 )

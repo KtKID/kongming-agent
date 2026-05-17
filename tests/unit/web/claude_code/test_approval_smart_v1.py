@@ -223,17 +223,80 @@ class TestAutoApproveTimeout:
         assert records[-1]["decision"]["outcome"] == "allowed_manual"
         assert records[-1]["decision"]["decided_by"] == "user"
 
-    async def test_dangerous_rule_no_timeout(
+    async def test_dangerous_rule_auto_reject_on_timeout(
         self,
         policy: AutoApprovalPolicy,
         audit: AuditLogger,
     ) -> None:
-        """命中规则 → 没有 timeout，await 必须有人 resolve 才返回。"""
+        """v1.0.1: 命中规则 + 无人响应 → 200ms 后自动 reject (fail-closed)。"""
+        policy.set_enabled("/proj", True)
+        bridge, writer = _make_bridge(policy=policy, audit=audit)
+
+        start = time.monotonic()
+        result = await bridge.can_use_tool(
+            "Bash",
+            {"command": "rm -rf /tmp/x"},
+            _make_ctx("toolu_ar"),
+        )
+        elapsed_ms = (time.monotonic() - start) * 1000
+
+        assert isinstance(result, PermissionResultDeny)
+        assert 150 <= elapsed_ms <= 400, f"timeout drift: {elapsed_ms}ms"
+
+        # permission_request 帧应有 autoRejectAtMs，无 autoApproveAtMs
+        msg = writer.sent[0]
+        assert msg["autoRejectAtMs"] is not None
+        assert msg["autoApproveAtMs"] is None
+        assert msg["blockedByRule"] == "bash_rm_any"
+
+        # audit: 2 行（pending + rejected_auto_timeout）
+        records = audit.read_all()
+        assert len(records) == 2
+        assert records[0]["decision"]["outcome"] == "pending"
+        assert records[1]["decision"]["outcome"] == "rejected_auto_timeout"
+        assert records[1]["decision"]["decided_by"] == "timeout"
+        assert records[1]["rule_evaluation"]["matched"] == "bash_rm_any"
+
+    async def test_dangerous_rule_user_accept_before_timeout(
+        self,
+        policy: AutoApprovalPolicy,
+        audit: AuditLogger,
+    ) -> None:
+        """v1.0.1: 命中规则 + 用户在 timeout 前手动允许 → outcome=allowed_manual (取消 timer)。"""
         policy.set_enabled("/proj", True)
         bridge, _writer = _make_bridge(policy=policy, audit=audit)
 
         async def resolver() -> None:
-            await asyncio.sleep(0.4)  # 比 200ms 长，确保 timeout 路径不会先触发
+            await asyncio.sleep(0.05)  # 远早于 200ms timeout
+            bridge.resolve("toolu_acc", {"allow": True})
+
+        asyncio.create_task(resolver())  # noqa: RUF006
+        start = time.monotonic()
+        result = await bridge.can_use_tool(
+            "Bash",
+            {"command": "rm -rf /tmp/x"},
+            _make_ctx("toolu_acc"),
+        )
+        elapsed_ms = (time.monotonic() - start) * 1000
+
+        assert isinstance(result, PermissionResultAllow)
+        assert elapsed_ms < 150, f"user accept must precede timeout: {elapsed_ms}ms"
+
+        records = audit.read_all()
+        assert records[-1]["decision"]["outcome"] == "allowed_manual"
+        assert records[-1]["decision"]["decided_by"] == "user"
+
+    async def test_dangerous_rule_user_reject_before_timeout(
+        self,
+        policy: AutoApprovalPolicy,
+        audit: AuditLogger,
+    ) -> None:
+        """v1.0.1: 命中规则 + 用户在 timeout 前手动拒绝 → outcome=blocked_then_manual。"""
+        policy.set_enabled("/proj", True)
+        bridge, _writer = _make_bridge(policy=policy, audit=audit)
+
+        async def resolver() -> None:
+            await asyncio.sleep(0.05)  # 远早于 200ms timeout
             bridge.resolve("toolu_d", {"allow": False, "message": "blocked"})
 
         asyncio.create_task(resolver())  # noqa: RUF006
@@ -246,6 +309,7 @@ class TestAutoApproveTimeout:
 
         records = audit.read_all()
         assert records[-1]["decision"]["outcome"] == "blocked_then_manual"
+        assert records[-1]["decision"]["decided_by"] == "user"
 
 
 # ============================================================
