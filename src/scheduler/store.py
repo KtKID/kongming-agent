@@ -34,6 +34,7 @@ from typing import Any
 from scheduler.domain import (
     GRACE_MIN_SECONDS,
     SCHEMA_VERSION,
+    ApprovalMode,
     ConcurrencyPolicy,
     DeliveryChannel,
     DeliveryStatus,
@@ -245,6 +246,10 @@ def _task_to_dict(task: ScheduledTask) -> dict[str, Any]:
             "wall_timeout_seconds": task.policy.wall_timeout_seconds,
             "retry_limit": task.policy.retry_limit,
             "silent_marker_enabled": task.policy.silent_marker_enabled,
+            # v0.5: approval_mode；None 表示沿用全局 SchedulerApprovalConfig.mode
+            "approval_mode": task.policy.approval_mode.value
+            if task.policy.approval_mode is not None
+            else None,
         },
         "target": {
             "agent_name": task.target.agent_name,
@@ -279,6 +284,9 @@ def _dict_to_task(payload: dict[str, Any]) -> ScheduledTask:
         timezone=trigger_raw["timezone"],
     )
     policy_raw = payload["policy"]
+    # v0.5: approval_mode；缺字段或 None → None（沿用全局）
+    approval_mode_raw = policy_raw.get("approval_mode")
+    approval_mode = ApprovalMode(approval_mode_raw) if approval_mode_raw is not None else None
     policy = TaskExecutionPolicy(
         session_mode=SessionMode(policy_raw["session_mode"]),
         concurrency_policy=ConcurrencyPolicy(policy_raw["concurrency_policy"]),
@@ -288,6 +296,7 @@ def _dict_to_task(payload: dict[str, Any]) -> ScheduledTask:
         wall_timeout_seconds=policy_raw.get("wall_timeout_seconds"),
         retry_limit=int(policy_raw.get("retry_limit", 0)),
         silent_marker_enabled=bool(policy_raw.get("silent_marker_enabled", True)),
+        approval_mode=approval_mode,
     )
     target_raw = payload["target"]
     metadata = target_raw.get("metadata") or {}

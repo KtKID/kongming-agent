@@ -8,6 +8,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
 import pytest
 import yaml
 
@@ -87,7 +88,9 @@ def _build_temp_config(tmp_path: Path, port: int, password: str) -> Path:
     data["tool"]["file"]["enabled"] = True
 
     config_path = tmp_path / "setting.e2e.yaml"
-    config_path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    config_path.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
     return config_path
 
 
@@ -169,7 +172,9 @@ def test_live_once_task_creates_file_after_trigger(live_server) -> None:
         time.sleep(1)
     else:
         traces_dir = tmp_path / ".kongming" / "cron" / "traces"
-        trace_files = sorted(p.name for p in traces_dir.glob("*.jsonl")) if traces_dir.exists() else []
+        trace_files = (
+            sorted(p.name for p in traces_dir.glob("*.jsonl")) if traces_dir.exists() else []
+        )
         raise AssertionError(f"scheduled file was not created; traces={trace_files}")
 
     target_file.unlink()

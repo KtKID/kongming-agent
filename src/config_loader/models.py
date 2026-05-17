@@ -810,7 +810,22 @@ class SchedulerApprovalConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    mode: Literal["fail_closed", "trust"] = "trust"
+    """v0.5 新增：cron 全局默认审批模式。任务未声明 approval_mode 时走此值。
+
+    **默认 trust**（v0.5 调整）：cron 任务本质是用户主动 schedule 的预批准
+    自动任务，创建时已经过用户判断；执行时再每个工具调用都要求 consent 等于
+    重复批准、毫无意义。HardBlock 兜底真高危（rm -rf / 写 ~/.ssh/ / 系统级
+    不可逆动作），剩下 explicit_consent 自动放行。
+
+    想要严格审批的部署可显式覆盖 ``mode="fail_closed"``（yaml 或
+    ``KONGMING_SCHEDULER_APPROVAL_MODE=fail_closed`` env）。
+    """
+
     allow_write_file_create_in_cwd: bool = True
+    """v0.2 老字段：仅在 mode='fail_closed' 下生效。
+    trust 模式下 write_file 已整体放开，此字段无意义。
+    """
 
 
 class SchedulerConfig(BaseModel):
@@ -847,6 +862,17 @@ class SchedulerConfig(BaseModel):
     max_task_age_seconds: int | None = None
     default_timezone: str = "UTC"
     default_delivery_channel: Literal["web", "cli"] = "web"
+    default_max_turns: int = Field(default=90, gt=0)
+    """v0.5.1 新增：cron task.policy.max_turns 缺省时的兜底 max_turns。
+
+    替换 v0.2 ~ v0.5 期间在 ``execution_bridge._DEFAULT_MAX_TURNS=20`` 的硬编码
+    （违反"默认值集中在 config_loader.models"约束）。默认 ``90`` 是经验值——
+    司天扫描类重型 cron 任务通常需要 40~80 turn 才能稳定完成；20 太低反复
+    触发 max_turns 强制终止。
+
+    任务级 ``task.policy.max_turns`` 仍优先（None 时才走此值）。可通过
+    ``KONGMING_SCHEDULER_DEFAULT_MAX_TURNS`` env 覆盖。
+    """
     approval: SchedulerApprovalConfig = Field(default_factory=SchedulerApprovalConfig)
 
 

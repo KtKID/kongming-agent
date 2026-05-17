@@ -313,7 +313,11 @@ async def create_cron_task(request: Request, body: CreateCronTaskRequest) -> Cro
         action="create",
         task_id=created.task_id,
         actor="web",
-        payload={"source": "cron_router"},
+        payload={
+            "source": "cron_router",
+            "preset_id": created.preset_id or "",
+            "trigger_type": created.trigger.trigger_type.value,
+        },
     )
     return _task_to_dto(created)
 

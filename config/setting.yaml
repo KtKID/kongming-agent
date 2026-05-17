@@ -142,6 +142,8 @@ approval:
 scheduler:
   enabled: true
   default_timezone: Asia/Shanghai
+  # v0.5.1: 任务级 task.policy.max_turns=None 时的兜底；司天扫描类重型任务建议 ≥60。
+  default_max_turns: 90
   approval:
     allow_write_file_create_in_cwd: true
 

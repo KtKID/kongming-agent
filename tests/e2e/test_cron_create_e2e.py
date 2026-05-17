@@ -230,7 +230,5 @@ def test_cron_routes_registered_in_app(tmp_path: Path) -> None:
     assert "/api/cron/tasks" in paths, f"/api/cron/tasks not found in: {paths}"
 
     # 检查 POST 方法存在
-    post_found = any(
-        "POST" in m and p == "/api/cron/tasks" for m, p in cron_routes
-    )
+    post_found = any("POST" in m and p == "/api/cron/tasks" for m, p in cron_routes)
     assert post_found, f"POST /api/cron/tasks not found. Routes: {cron_routes}"

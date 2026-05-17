@@ -252,11 +252,13 @@ def _warn(msg: str) -> None:
 def _apply_scheduler_env_overrides(data: dict[str, Any]) -> None:
     """把 ``KONGMING_SCHEDULER_*`` env 写入 ``data["scheduler"]``。
 
-    支持三个 env：
+    支持的 env：
 
     - ``KONGMING_SCHEDULER_ENABLED``：bool（0/1/true/false/yes/no/on/off）
     - ``KONGMING_SCHEDULER_INTERVAL``：float
     - ``KONGMING_SCHEDULER_MAX_INFLIGHT``：int
+    - ``KONGMING_SCHEDULER_APPROVAL_MODE``：str（fail_closed / trust）
+    - ``KONGMING_SCHEDULER_DEFAULT_MAX_TURNS``：int（>0，v0.5.1 新增）
 
     非法值统一 stderr warning + 不写入 dict（保留 yaml / 默认值）。
     """
@@ -292,6 +294,35 @@ def _apply_scheduler_env_overrides(data: dict[str, Any]) -> None:
             )
         else:
             _set_nested(data, ("scheduler", "max_inflight"), value_int)
+
+    raw_mode = os.environ.get("KONGMING_SCHEDULER_APPROVAL_MODE")
+    if raw_mode is not None:
+        normalized = raw_mode.strip().lower()
+        if normalized in ("fail_closed", "trust"):
+            _set_nested(data, ("scheduler", "approval", "mode"), normalized)
+        else:
+            _warn(
+                f"KONGMING_SCHEDULER_APPROVAL_MODE={raw_mode!r} is not a valid mode "
+                "(expected 'fail_closed' or 'trust'); using default."
+            )
+
+    raw_max_turns = os.environ.get("KONGMING_SCHEDULER_DEFAULT_MAX_TURNS")
+    if raw_max_turns is not None:
+        try:
+            value_turns = int(raw_max_turns)
+        except ValueError:
+            _warn(
+                f"KONGMING_SCHEDULER_DEFAULT_MAX_TURNS={raw_max_turns!r} is not a "
+                "valid int; using default."
+            )
+        else:
+            if value_turns <= 0:
+                _warn(
+                    f"KONGMING_SCHEDULER_DEFAULT_MAX_TURNS={raw_max_turns!r} must be > 0; "
+                    "using default."
+                )
+            else:
+                _set_nested(data, ("scheduler", "default_max_turns"), value_turns)
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

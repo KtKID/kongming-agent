@@ -28,6 +28,7 @@ from typing import Any
 from core.contracts import ToolContext, ToolResult
 from scheduler.domain import (
     DEFAULT_INACTIVITY_TIMEOUT,
+    ApprovalMode,
     ConcurrencyPolicy,
     DueTaskReservation,
     MisfirePolicy,
@@ -116,6 +117,15 @@ class ScheduleTool(BaseBuiltinTool):
             "preset": {
                 "type": "string",
                 "description": "LLM preset id（匹配 cfg.web.llm_presets[].id）；空串用全局默认",
+            },
+            "approval_mode": {
+                "type": "string",
+                "enum": ["fail_closed", "trust"],
+                "description": (
+                    "任务级审批模式（v0.5）：fail_closed=审批必拒（除 write_file 白名单）；"
+                    "trust=cron 信任模式自动放行 explicit_consent（hard_block 仍拒绝）。"
+                    "缺省时沿用全局 cfg.scheduler.approval.mode（v0.5 默认 trust）。"
+                ),
             },
             "include_disabled": {
                 "type": "boolean",
@@ -238,6 +248,17 @@ class ScheduleTool(BaseBuiltinTool):
                 f"invalid concurrency {concurrency_str!r}: must be forbid/allow/replace"
             ) from exc
 
+        # v0.5：任务级 approval_mode；缺省 None → bridge 解析时走全局兜底
+        approval_mode_str = args.get("approval_mode")
+        approval_mode: ApprovalMode | None = None
+        if approval_mode_str is not None:
+            try:
+                approval_mode = ApprovalMode(approval_mode_str)
+            except ValueError as exc:
+                raise ValueError(
+                    f"invalid approval_mode {approval_mode_str!r}: must be fail_closed/trust"
+                ) from exc
+
         trigger = parse_schedule(schedule_expr, default_tz=timezone)
 
         # next_run_at：所有 trigger_type 都立即算出第一次触发时刻。
@@ -291,6 +312,7 @@ class ScheduleTool(BaseBuiltinTool):
                 wall_timeout_seconds=None,
                 retry_limit=0,
                 silent_marker_enabled=True,
+                approval_mode=approval_mode,  # v0.5：None 走全局
             ),
             target=TaskTarget(agent_name=agent_name, input_text=input_text, metadata={}),
             next_run_at=next_run_at,
@@ -312,6 +334,8 @@ class ScheduleTool(BaseBuiltinTool):
                 "schedule": schedule_expr,
                 "trigger_type": trigger.trigger_type.value,
                 "agent": agent_name,
+                "approval_mode": approval_mode.value if approval_mode else None,
+                "preset_id": preset_id,
             },
         )
         content = (
@@ -321,6 +345,8 @@ class ScheduleTool(BaseBuiltinTool):
             f"  agent: {agent_name}\n"
             f"  next_run: {next_run_at}\n"
         )
+        if approval_mode is not None:
+            content += f"  approval_mode: {approval_mode.value}\n"
         return ToolResult(
             ok=True,
             content=content,
@@ -329,6 +355,7 @@ class ScheduleTool(BaseBuiltinTool):
                 "trigger_type": trigger.trigger_type.value,
                 "expr": trigger.expr,
                 "next_run_at": next_run_at,
+                "approval_mode": approval_mode.value if approval_mode else None,
             },
         )
 
@@ -367,6 +394,9 @@ class ScheduleTool(BaseBuiltinTool):
                         "trigger_type": t.trigger.trigger_type.value,
                         "expr": t.trigger.expr,
                         "next_run_at": t.next_run_at,
+                        "approval_mode": (
+                            t.policy.approval_mode.value if t.policy.approval_mode else None
+                        ),
                     }
                     for t in tasks
                 ],

@@ -170,8 +170,8 @@ def test_silent_marker_constant():
 
 
 def test_schema_version_constant():
-    # v0.4：cron-thread-preset-v0.4 引入 ScheduleDelivery.target + ScheduledTask.preset_id
-    assert SCHEMA_VERSION == 4
+    # v0.5：scheduler-approval-task-level-v0.5 引入 TaskExecutionPolicy.approval_mode
+    assert SCHEMA_VERSION == 5
 
 
 # ---------------------------------------------------------------------------

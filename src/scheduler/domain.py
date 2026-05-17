@@ -40,7 +40,7 @@ GRACE_MAX_SECONDS = 7200
 SILENT_MARKER = "[SILENT]"
 """final message 前缀触发投递抑制的标记。"""
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 """``scheduled_tasks.json`` / ``runs/*.jsonl`` 的持久化 schema 版本。
 
 v0.2 重构：引入 :attr:`TriggerType.SECONDS` 等新枚举值，**不兼容 v0.1 数据**。
@@ -52,6 +52,10 @@ v0.3 新增（cron-delivery-v0.3）：``ScheduleDelivery`` 配置 +
 v0.4 新增（cron-thread-preset-v0.4）：``ScheduleDelivery.target`` 投递目标 +
 ``ScheduledTask.preset_id`` LLM 选择。**不兼容 v0.3 数据**；
 旧版由 Store 启动时重置式迁移（备份 + 写空 v4）。
+
+v0.5 新增（scheduler-approval-task-level-v0.5）：``TaskExecutionPolicy``
+新增 ``approval_mode`` 字段（默认 None）。**不兼容 v0.4 数据**；
+旧版由 Store 启动时重置式迁移（备份 + 写空 v5）。
 """
 
 
@@ -191,6 +195,20 @@ class MisfirePolicy(StrEnum):
     FIRE_NOW = "fire_now"
 
 
+class ApprovalMode(StrEnum):
+    """cron 任务的审批模式（v0.5 新增）。
+
+    - FAIL_CLOSED: 当前行为；命中 explicit_consent → rejected
+      （除 SchedulerApprovalConfig.allow_write_file_create_in_cwd 白名单）
+    - TRUST: cron 信任模式；hard_block 仍 rejected，
+      explicit_consent（standard / elevated）自动 approved，
+      silent_allow / standard_allow 透传
+    """
+
+    FAIL_CLOSED = "fail_closed"
+    TRUST = "trust"
+
+
 class TaskOrigin(StrEnum):
     """任务来源入口。"""
 
@@ -290,6 +308,8 @@ class TaskExecutionPolicy:
     - ``wall_timeout_seconds``: v0.1 字段保留但运行时不强制
     - ``retry_limit``: 调度级失败的最多重试次数（不重试 ``needs_approval``）
     - ``silent_marker_enabled``: 是否启用 ``[SILENT]`` 静默投递抑制；默认开启
+    - ``approval_mode``: v0.5 新增；None 表示沿用全局
+      ``SchedulerApprovalConfig.mode``，否则覆盖全局默认
 
     边界：Policy 由 Safety and Policy Integration 解释；Execution Bridge
     负责消费执行相关字段。
@@ -303,6 +323,7 @@ class TaskExecutionPolicy:
     wall_timeout_seconds: int | None = None
     retry_limit: int = 0
     silent_marker_enabled: bool = True
+    approval_mode: ApprovalMode | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.session_mode, SessionMode):
@@ -329,6 +350,11 @@ class TaskExecutionPolicy:
             raise TypeError(
                 "silent_marker_enabled must be bool, "
                 f"got {type(self.silent_marker_enabled).__name__}"
+            )
+        if self.approval_mode is not None and not isinstance(self.approval_mode, ApprovalMode):
+            raise TypeError(
+                f"approval_mode must be ApprovalMode or None, "
+                f"got {type(self.approval_mode).__name__}"
             )
 
 
@@ -647,6 +673,19 @@ class ScheduledRunRequest:
             )
 
 
+# ---------------------------------------------------------------------------
+# 辅助函数（v0.5）
+# ---------------------------------------------------------------------------
+
+
+def resolve_effective_mode(
+    task_mode: ApprovalMode | None,
+    global_mode: ApprovalMode,
+) -> ApprovalMode:
+    """优先级解析：task 显式声明优先，否则全局兜底（v0.5 新增）。"""
+    return task_mode if task_mode is not None else global_mode
+
+
 __all__ = [
     "DEFAULT_INACTIVITY_TIMEOUT",
     "GRACE_MAX_SECONDS",
@@ -654,6 +693,7 @@ __all__ = [
     "ONESHOT_GRACE_SECONDS",
     "SCHEMA_VERSION",
     "SILENT_MARKER",
+    "ApprovalMode",
     "ConcurrencyPolicy",
     "DeliveryChannel",
     "DeliveryStatus",
@@ -673,4 +713,5 @@ __all__ = [
     "TaskState",
     "TaskTarget",
     "TriggerType",
+    "resolve_effective_mode",
 ]

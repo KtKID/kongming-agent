@@ -51,6 +51,7 @@ from core.runner import Runner
 from scheduler.delivery import DeliveryDispatcher
 from scheduler.domain import (
     DEFAULT_INACTIVITY_TIMEOUT,
+    ApprovalMode,
     DueTaskReservation,
     RunFailureReason,
     RunStatus,
@@ -58,6 +59,7 @@ from scheduler.domain import (
     ScheduledRunRequest,
     ScheduledTask,
     TaskExecutionContext,
+    resolve_effective_mode,
 )
 from scheduler.policy import apply_concurrency_policy
 from scheduler.safety_wrapper import ScheduleApprovalProvider
@@ -74,8 +76,12 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-_DEFAULT_MAX_TURNS = 20
-"""task.policy.max_turns 缺省时的兜底；与 :class:`AgentSpec` 默认对齐口径。"""
+_FALLBACK_MAX_TURNS_NO_CONFIG = 90
+"""v0.5.1: ``base_config is None`` 时的最后兜底 max_turns。
+
+正常路径走 ``cfg.scheduler.default_max_turns``（也默认 90），本常量仅在装配方
+完全没传 base_config 时（极少数 CLI 测试场景）使用，与 config 默认保持一致。
+"""
 
 _DEFAULT_POLL_INTERVAL = 5.0
 """watchdog 默认轮询间隔（秒）。文档 §3 约定 5s。"""
@@ -220,6 +226,76 @@ class _FilteredToolLookup:
 
 
 # ---------------------------------------------------------------------------
+# EventSink 聚合（v0.5 cron approval mode audit）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _AggregateEventSink:
+    """聚合多个 :class:`EventSink` 的 emit 调用，供 ScheduleApprovalProvider 使用。
+
+    runner 已经持 ``list[EventSink]`` 用于事件分发，但
+    :class:`scheduler.safety_wrapper.ScheduleApprovalProvider` 在装配阶段需要
+    **单一** sink 引用（其 ``event_sink: EventSink | None`` 字段）；本类把
+    bridge 持有的多 sink 包装成一个统一 EventSink，逐个 emit 给下游。
+
+    某个 sink emit 失败不阻塞其他 sink（防御性 try/except）；ScheduleApproval
+    wrapper 自身也在外层 try/except 兜底，保证 sink 异常不影响审批主链路。
+    """
+
+    sinks: Sequence[EventSink]
+
+    async def emit(self, event: Event) -> None:
+        for sink in self.sinks:
+            # 单个 sink 失败不影响其他；wrapper 也已在外层用 try/except 兜底
+            with contextlib.suppress(Exception):
+                await sink.emit(event)
+
+
+@dataclass(frozen=True)
+class _CronAuditWriterSink:
+    """监听 approval.cron.auto_allow event 转写为 audit 行（v0.5 新增）。
+
+    bridge 装配时把本 sink 注入 wrapper 的 event sink 链；
+    wrapper trust 自动放行 emit event 时，本 sink 把 event payload 关键字段
+    映射到 ``store.append_audit(action="run_approval_auto_allow", ...)``。
+
+    职责单一：只关心 ``approval.cron.auto_allow``，其他 kind 跳过；
+    audit 写入失败用 :func:`contextlib.suppress` 兜底，不阻塞决策链。
+
+    设计动机：把"event 落 audit"作为独立 sink，避免 :class:`_AggregateEventSink`
+    感知 audit 概念；store / task_id 在装配阶段由 bridge 注入，调用阶段无副作用。
+    """
+
+    store: Store
+    task_id: str
+    preset_id: str = ""
+    """v0.5.2: task 显式声明的 preset_id（空串表示 fallback cfg.model）。"""
+    model_name: str = ""
+    """v0.5.2: 装配后实际生效的模型名（preset.model 或 cfg.model.name）。"""
+
+    async def emit(self, event: Event) -> None:
+        if event.kind != "approval.cron.auto_allow":
+            return
+        payload = event.payload or {}
+        with contextlib.suppress(Exception):
+            self.store.append_audit(
+                action="run_approval_auto_allow",
+                task_id=self.task_id,
+                actor="scheduler",
+                payload={
+                    "tool_name": payload.get("tool_name"),
+                    "original_decision_class": payload.get("original_decision_class"),
+                    "original_decision_source": payload.get("original_decision_source"),
+                    "matched_rule": payload.get("matched_rule"),
+                    "arguments_digest": payload.get("arguments_digest"),
+                    "preset_id": self.preset_id,
+                    "model_name": self.model_name,
+                },
+            )
+
+
+# ---------------------------------------------------------------------------
 # ExecutionBridge
 # ---------------------------------------------------------------------------
 
@@ -280,6 +356,80 @@ class ExecutionBridge:
         preset = self._preset_map[preset_id]
         cfg = apply_preset(self._base_config, preset)  # type: ignore[arg-type]
         return build_provider(cfg)
+
+    def _resolve_run_audit_context(self, task: ScheduledTask) -> dict[str, str]:
+        """v0.5.2: 解析 cron run audit payload 中要附加的 model 上下文。
+
+        返回 ``{preset_id, model_name}``：
+
+        - ``preset_id``：task 显式声明（空串表示走默认）
+        - ``model_name``：preset 命中 → ``preset.model``；否则 fallback
+          ``cfg.model.name``；连 base_config 都缺失 → ``""``
+
+        所有 cron run 相关 audit（run_started / run_finished / run_failed /
+        run_silent_suppressed / run_inactivity_timeout / run_skipped_by_concurrency
+        / run_approval_auto_allow）的 payload 都附加这两个字段，
+        让 audits.jsonl 自描述"这条 run 用了什么模型"。
+        """
+        preset_id = task.preset_id or ""
+        model_name = ""
+        if preset_id and self._preset_map and preset_id in self._preset_map:
+            model_name = self._preset_map[preset_id].model
+        elif self._base_config is not None:
+            model_name = self._base_config.model.name
+        return {"preset_id": preset_id, "model_name": model_name}
+
+    # ------------------------------------------------------------------
+    # v0.5 approval wrapper 装配（per-task mode + audit sink 聚合）
+    # ------------------------------------------------------------------
+
+    def _build_approval_wrapper(self, task: ScheduledTask) -> ScheduleApprovalProvider:
+        """解析 effective approval mode + 装配 wrapper（v0.5 新增辅助方法）。
+
+        优先级（高 → 低）：
+
+        1. ``task.policy.approval_mode``（task 显式声明）
+        2. ``self._base_config.scheduler.approval.mode``（全局配置）
+        3. ``ApprovalMode.TRUST``（无 base_config 兜底——v0.5 调整：cron 即用户预批准任务）
+
+        把 bridge 持有的 ``event_sinks`` 聚合成单一
+        :class:`_AggregateEventSink` 注入 wrapper；空列表则传 ``None`` 保持
+        "无 sink 不 emit" 行为不变。
+
+        抽成方法的动机：``_drive_runner`` 太长难以直接单测；本方法纯装配，
+        可直接 instantiate ExecutionBridge 后调用断言 mode / sink 解析结果。
+        """
+        global_mode_value = (
+            self._base_config.scheduler.approval.mode if self._base_config is not None else "trust"
+        )
+        global_mode = ApprovalMode(global_mode_value)
+        effective_mode = resolve_effective_mode(task.policy.approval_mode, global_mode)
+
+        # v0.5 阶段 D：audit writer 永远在链路里——trust 自动放行 emit event 时
+        # 落一行 ``run_approval_auto_allow`` audit。fail_closed 模式下 wrapper
+        # 不会 emit，writer 不被触发，保持向后兼容（不写多余 audit）。
+        audit_ctx = self._resolve_run_audit_context(task)
+        audit_writer = _CronAuditWriterSink(
+            store=self._store,
+            task_id=task.task_id,
+            preset_id=audit_ctx["preset_id"],
+            model_name=audit_ctx["model_name"],
+        )
+        sink_chain: list[EventSink] = [audit_writer]
+        sink_chain.extend(self._event_sinks)
+        audit_sink = _AggregateEventSink(tuple(sink_chain))
+
+        return ScheduleApprovalProvider(
+            inner=self._inner_approval,
+            task_id=task.task_id,
+            mode=effective_mode,
+            policy=(
+                self._base_config.scheduler.approval
+                if self._base_config is not None
+                else SchedulerApprovalConfig()
+            ),
+            event_sink=audit_sink,
+        )
 
     # ------------------------------------------------------------------
     # 公共入口
@@ -345,6 +495,7 @@ class ExecutionBridge:
             silent_suppressed=False,
         )
         self._store.append_run(running_record)
+        run_audit_ctx = self._resolve_run_audit_context(task)
         self._store.append_audit(
             action="run_started",
             task_id=task.task_id,
@@ -353,6 +504,7 @@ class ExecutionBridge:
                 "run_id": run_id,
                 "session_id": session_id,
                 "scheduled_for": scheduled_for,
+                **run_audit_ctx,
             },
         )
 
@@ -395,8 +547,31 @@ class ExecutionBridge:
                 )
 
         # 写收尾 audit
-        self._emit_finishing_audit(task_id=task.task_id, run=final_run)
+        self._emit_finishing_audit(task=task, run=final_run)
         return final_run
+
+    @staticmethod
+    def _augment_wrapper_with_run_trace(
+        wrapper: ScheduleApprovalProvider,
+        trace_sink: EventSink | None,
+    ) -> ScheduleApprovalProvider:
+        """把 per-run trace sink 追加到 wrapper.event_sink（v0.5 补 trace gap）。
+
+        ``_build_approval_wrapper`` 装配时只能拿到 bridge 构造期传入的
+        ``event_sinks``，不知道 ``_drive_runner`` 后续动态创建的 per-run
+        trace sink。本方法在 ``_drive_runner`` 装配 trace_sink 之后调用，
+        把它追加进 wrapper.event_sink 的 ``_AggregateEventSink.sinks``，
+        让 trust 自动放行的 ``approval.cron.auto_allow`` event 同时写到
+        cron audits.jsonl + per-run trace jsonl（DoD#5 双份证据）。
+
+        ``trace_sink=None`` 或 wrapper.event_sink 类型不匹配时返回原 wrapper。
+        """
+        if trace_sink is None or not isinstance(wrapper.event_sink, _AggregateEventSink):
+            return wrapper
+        return replace(
+            wrapper,
+            event_sink=_AggregateEventSink((*wrapper.event_sink.sinks, trace_sink)),
+        )
 
     # ------------------------------------------------------------------
     # 核心：装配 + Runner.run + watchdog + 收尾
@@ -423,16 +598,8 @@ class ExecutionBridge:
             if name in self._tools:
                 enabled_tools.append(self._tools[name])
 
-        # 2) approval wrap
-        wrapped_approval = ScheduleApprovalProvider(
-            inner=self._inner_approval,
-            task_id=task.task_id,
-            policy=(
-                self._base_config.scheduler.approval
-                if self._base_config is not None
-                else SchedulerApprovalConfig()
-            ),
-        )
+        # 2) approval wrap（v0.5：抽到 _build_approval_wrapper 解析 effective mode + 聚合 sink）
+        wrapped_approval = self._build_approval_wrapper(task)
 
         # 3) watchdog
         timeout_seconds = task.policy.inactivity_timeout_seconds
@@ -458,14 +625,19 @@ class ExecutionBridge:
             trace_sink = JsonlTraceSink(trace_path, auto_flush=True)
             sinks_list.append(trace_sink)
 
+        # 4c) v0.5 修复：把 per-run trace sink 也注入 wrapped_approval.event_sink
+        wrapped_approval = self._augment_wrapper_with_run_trace(wrapped_approval, trace_sink)
+
         # 5) fresh session
         session = self._session_factory(request.session_id)
 
-        # 6) max_turns
+        # 6) max_turns 解析（v0.5.1：task.policy.max_turns > cfg.scheduler.default_max_turns > 兜底）
         if task.policy.max_turns is not None:
             max_turns = task.policy.max_turns
+        elif self._base_config is not None:
+            max_turns = self._base_config.scheduler.default_max_turns
         else:
-            max_turns = _DEFAULT_MAX_TURNS
+            max_turns = _FALLBACK_MAX_TURNS_NO_CONFIG
 
         runner_task: asyncio.Task[Result] | None = None
         watch_task: asyncio.Task[None] | None = None
@@ -715,12 +887,15 @@ class ExecutionBridge:
     # audit 收尾
     # ------------------------------------------------------------------
 
-    def _emit_finishing_audit(self, *, task_id: str, run: ScheduledRun) -> None:
-        """按最终 :class:`RunStatus` 写收尾 audit。"""
+    def _emit_finishing_audit(self, *, task: ScheduledTask, run: ScheduledRun) -> None:
+        """按最终 :class:`RunStatus` 写收尾 audit（v0.5.2: 加 preset_id + model_name）。"""
+        task_id = task.task_id
+        audit_ctx = self._resolve_run_audit_context(task)
         common = {
             "run_id": run.run_id,
             "session_id": run.session_id,
             "result_status": run.result_status,
+            **audit_ctx,
         }
         if run.status is RunStatus.COMPLETED:
             self._store.append_audit(
@@ -807,6 +982,7 @@ class ExecutionBridge:
             silent_suppressed=False,
         )
         self._store.append_run(synthesized)
+        audit_ctx = self._resolve_run_audit_context(task)
         self._store.append_audit(
             action="run_skipped_by_concurrency",
             task_id=task.task_id,
@@ -815,6 +991,7 @@ class ExecutionBridge:
                 "run_id": synthesized.run_id,
                 "scheduled_for": scheduled_for,
                 "reason": reason,
+                **audit_ctx,
             },
         )
         return synthesized
@@ -863,4 +1040,6 @@ def _extract_error_message(result: Result) -> str | None:
 __all__ = [
     "ExecutionBridge",
     "InactivityWatchdog",
+    "_AggregateEventSink",
+    "_CronAuditWriterSink",
 ]

@@ -91,8 +91,8 @@ def _login(base_url: str, password: str = "123456") -> str:
 
 def _request(base_url: str, method: str, path: str, cookie: str, body: dict | None = None):
     """发 HTTP 请求并返回 (status_code, response_body_dict)。"""
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(
