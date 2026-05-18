@@ -42,6 +42,7 @@ from claude_agent_sdk.types import (
 from web._shared.session_manager import SessionManager
 from web.auto_approval import AuditLogger, AutoApprovalPolicy
 from web.claude_code.normalizer import ClaudeNormalizer
+from web.global_approvals import ApprovalInboxBroadcaster
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,7 @@ class ApprovalBridge:
         cwd: str = "",
         thread_id: str | None = None,
         channel: str = "claude_code",
+        inbox_broadcaster: ApprovalInboxBroadcaster | None = None,
     ) -> None:
         self._normalizer = normalizer
         self._sessions = sessions
@@ -90,6 +92,8 @@ class ApprovalBridge:
         self._active_cwd: str = cwd
         self._thread_id: str | None = thread_id
         self._channel: str = channel
+        # smart-approval-v2-inbox: fan-out 全局 inbox（None 时跳过，兼容 v1 行为）
+        self._inbox = inbox_broadcaster
 
     # ----- 公共接口 -----
 
@@ -237,6 +241,27 @@ class ApprovalBridge:
             )
             return PermissionResultDeny(message="writer disconnected")
 
+        # === smart-approval-v2-inbox: fan-out 全局 inbox ===
+        if self._inbox is not None and self._thread_id:
+            try:
+                await self._inbox.emit_add(
+                    {
+                        "requestId": request_id,
+                        "threadId": self._thread_id,
+                        "toolName": tool_name,
+                        "toolInput": tool_input,
+                        "autoApproveAtMs": auto_approve_at_ms,
+                        "autoRejectAtMs": auto_reject_at_ms,
+                        "blockedByRule": blocked_by_rule,
+                        "isElevated": _IS_ELEVATED_FOR_CLAUDE_CHANNEL,
+                        "channel": self._channel,
+                        "cwd": self._active_cwd,
+                        "arrivedAtMs": int(time.time() * 1000),
+                    },
+                )
+            except Exception:
+                logger.exception("inbox.emit_add failed (non-fatal)")
+
         # === audit: log_request ===
         rule_eval = (
             decision.rule_evaluation if decision is not None else {"matched": None, "all_rules": []}
@@ -274,13 +299,10 @@ class ApprovalBridge:
                     if blocked_by_rule is not None:
                         # v1.0.1 危险路径：自动拒绝（fail-closed）
                         auto_rejected_by_timeout = True
-                        # 进到这里 timeout_seconds 必然来自 decision.timeout_ms，
-                        # decision 一定非 None；但 mypy 无法推断不变量，显式兜底
-                        timeout_ms = decision.timeout_ms if decision is not None else 0
                         user_decision = {
                             "allow": False,
                             "auto_rejected": True,
-                            "message": f"auto-rejected by rule {blocked_by_rule} after {timeout_ms}ms timeout",
+                            "message": f"auto-rejected by rule {blocked_by_rule} after {decision.timeout_ms}ms timeout",
                         }
                     else:
                         # 安全路径：自动通过
@@ -300,9 +322,18 @@ class ApprovalBridge:
                 decided_by=None,
                 timeout_ms=decision.timeout_ms if decision is not None else 0,
             )
+            # smart-approval-v2-inbox: emit remove(cancelled)
+            await self._inbox_emit_remove_safe(request_id, "cancelled")
             raise
         finally:
             self._pending.pop(request_id, None)
+
+        # smart-approval-v2-inbox: wait_for 正常退出 → emit remove
+        # 区分 reason：timeout 路径 = "timeout"；用户决策 = "user_decided"
+        if auto_allowed_by_timeout or auto_rejected_by_timeout:
+            await self._inbox_emit_remove_safe(request_id, "timeout")
+        else:
+            await self._inbox_emit_remove_safe(request_id, "user_decided")
 
         # 4. 处理 decision
         if user_decision.get("allow"):
@@ -334,7 +365,7 @@ class ApprovalBridge:
         # - denied：未命中规则 + 用户主动拒
         if auto_rejected_by_timeout:
             outcome = "rejected_auto_timeout"
-            decided_by = "timeout"
+            decided_by: str | None = "timeout"
         elif blocked_by_rule:
             outcome = "blocked_then_manual"
             decided_by = "user"
@@ -367,6 +398,18 @@ class ApprovalBridge:
             if record is not None and record.writer is active:
                 return sid
         return None
+
+    async def _inbox_emit_remove_safe(self, request_id: str, reason: str) -> None:
+        """对 ApprovalInboxBroadcaster.emit_remove 的包装：吞所有异常。
+
+        v2-inbox：审批主流程绝不能因 inbox 广播异常而断（断了反而比"卡死"更糟）。
+        """
+        if self._inbox is None:
+            return
+        try:
+            await self._inbox.emit_remove(request_id, reason)
+        except Exception:
+            logger.exception("inbox.emit_remove failed (non-fatal)")
 
     def _log_decision(
         self,

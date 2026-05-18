@@ -220,6 +220,8 @@ async def claude_code_ws(
     # smart-approval-v1 装配：从 app.state 取 policy/audit（未装配时 None → 走老行为）
     auto_approval_policy = getattr(websocket.app.state, "auto_approval_policy", None)
     auto_approval_audit = getattr(websocket.app.state, "auto_approval_audit", None)
+    # smart-approval-v2-inbox 装配：全局 inbox broadcaster（未装配时 None → 走 v1 行为，仅本 thread WS 弹窗）
+    inbox_broadcaster = getattr(websocket.app.state, "approval_inbox_broadcaster", None)
     approval = ApprovalBridge(
         normalizer,
         sessions,
@@ -228,7 +230,11 @@ async def claude_code_ws(
         cwd=bound_cwd,
         thread_id=bound_thread_id,
         channel="claude_code",
+        inbox_broadcaster=inbox_broadcaster,
     )
+    # v2-inbox: 注册 thread_id → bridge 映射，让前端 inbox.resolve 帧能路由回此 bridge
+    if inbox_broadcaster is not None and bound_thread_id:
+        inbox_broadcaster.register_bridge(bound_thread_id, approval)
     # v0.2 透传 thread_manager（可能为 None — 老路径 / 未配置时仍能运行）
     tm_for_service: ThreadManagerProtocol | None = getattr(
         websocket.app.state,
@@ -299,6 +305,10 @@ async def claude_code_ws(
         # evolution hook: unregister event route on any exit path
         if evolution_manager is not None and evolution_manager.enabled and bound_thread_id:
             evolution_manager.unregister_event_route(bound_thread_id)
+        # v2-inbox: unregister bridge（仅在 registry 里是本 bridge 时才删；
+        # 多 tab 同 thread 时新连接会覆盖，老连接断时不应误删新的）
+        if inbox_broadcaster is not None and bound_thread_id:
+            inbox_broadcaster.unregister_bridge(bound_thread_id, approval)
 
 
 async def _dispatch(

@@ -451,6 +451,13 @@ def create_app(
         ConfigStore(_auto_approval_root),
     )
     app.state.auto_approval_audit = AuditLogger(_auto_approval_root / "audit.jsonl")
+
+    # smart-approval-v2-inbox：全局审批 inbox broadcaster（per-process 单例）
+    # 复用 /ws/thread-status 端点 fan-out approval.inbox.* 帧；
+    # 维护 pending snapshot dict（重连补包用）+ bridge_registry（路由 resolve）
+    from web.global_approvals import get_inbox_broadcaster
+
+    app.state.approval_inbox_broadcaster = get_inbox_broadcaster()
     # codex 通道（与 claude_code 平级，独立 SessionManager 单例）
     app.state.codex_session_manager = _SharedSessionManager()
     app.state.codex_service = CodexService(

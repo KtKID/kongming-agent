@@ -230,7 +230,20 @@ def register_thread_status_routes(app: FastAPI) -> None:
 
 
 async def _thread_status_ws_handler(websocket: WebSocket) -> None:
-    """``/ws/thread-status`` 连接生命周期：鉴权 → accept → attach → receive 循环 → detach。"""
+    """``/ws/thread-status`` 连接生命周期：鉴权 → accept → attach → receive 循环 → detach。
+
+    smart-approval-v2-inbox：本端点除原 thread-status broadcaster 之外，**同时挂载
+    ApprovalInboxBroadcaster**——所有 approval.inbox.* 帧也走这条 WS（端点名是
+    历史，现在职责更广；URL 不变是为了不动小绿球 connectionStatus / 客户端 hook）。
+
+    入帧支持 3 种 kind：
+    - ``ping`` → 回 pong（心跳）
+    - ``approval.inbox.resolve`` → 路由到 ApprovalInboxBroadcaster.resolve → bridge
+    - 其他 → 静默丢弃
+    """
+    # 延迟 import 避免循环依赖（thread_status_ws 是基础模块，被多处依赖）
+    from web.global_approvals import get_inbox_broadcaster
+
     # 1. cookie 鉴权
     serializer = getattr(websocket.app.state, "serializer", None)
     if serializer is None:
@@ -249,31 +262,54 @@ async def _thread_status_ws_handler(websocket: WebSocket) -> None:
         )
         return
 
-    # 2. accept + attach
+    # 2. accept + attach 两个 broadcaster
     await websocket.accept()
     broadcaster = get_broadcaster()
+    inbox = get_inbox_broadcaster()
     await broadcaster.attach(websocket)
+    await inbox.attach(websocket)
 
-    # 3. 入帧循环：解析 ping 帧并回 pong，其余静默丢弃
+    # 2.5 连接建立时主动 push inbox snapshot（让新连接看到当前所有 pending 审批）
+    await inbox.push_snapshot(websocket)
+
+    # 3. 入帧循环
     try:
         while True:
             raw = await websocket.receive_text()
             try:
                 data = json.loads(raw)
-                if isinstance(data, dict) and data.get("kind") == "ping":
-                    pong = {
-                        "kind": "pong",
-                        "timestamp_ms": _now_ms(),
-                        "ts": data.get("ts"),
-                    }
-                    await websocket.send_json(pong)
             except (json.JSONDecodeError, TypeError):
-                pass  # 非 JSON 帧静默忽略
+                continue  # 非 JSON 帧静默忽略
+            if not isinstance(data, dict):
+                continue
+
+            kind = data.get("kind")
+            if kind == "ping":
+                pong = {
+                    "kind": "pong",
+                    "timestamp_ms": _now_ms(),
+                    "ts": data.get("ts"),
+                }
+                await websocket.send_json(pong)
+            elif kind == "approval.inbox.resolve":
+                # smart-approval-v2-inbox: 用户点三按钮 → 路由回正确 bridge
+                thread_id = data.get("threadId")
+                request_id = data.get("requestId")
+                if not isinstance(thread_id, str) or not isinstance(request_id, str):
+                    continue
+                decision = {
+                    "allow": bool(data.get("allow", False)),
+                    "message": data.get("message"),
+                    "rememberEntry": data.get("rememberEntry"),
+                }
+                inbox.resolve(thread_id, request_id, decision)
+            # 其他 kind 静默
     except Exception:
         logger.debug("/ws/thread-status client disconnected or errored")
     finally:
-        # 4. detach
+        # 4. detach 两个 broadcaster
         await broadcaster.detach(websocket)
+        await inbox.detach(websocket)
 
 
 __all__ = [
