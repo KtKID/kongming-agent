@@ -223,6 +223,13 @@ ignore_imports =
     web.routers.uploads -> web.uploads.storage
     web.routers.uploads -> web.uploads.registry
     web.routers.uploads -> web.uploads.validation
+; claude-code-channel-image-paste：claude_code 通道补图片粘贴。
+; service.py / _attachment_prefix.py 需要消费 AssetStorage（路径反推） +
+; EXT_BY_MIME（mime→ext 白名单单点真源）。同 routers/uploads.py 通过
+; ``config_loader.errors -> core.errors`` 传递触发 Contract 6，单点放行。
+    web.claude_code.service -> web.uploads.storage
+    web.claude_code._attachment_prefix -> web.uploads.storage
+    web.claude_code._attachment_prefix -> web.uploads.registry
 ; web.app -> web.uploads.{storage,registry,validation}：
 ; app.py 装配期注入单例到 ``app.state.*``（asset_storage / asset_registry
 ; / upload_validator），让 routers/uploads.py 优先消费注入的单例而不是

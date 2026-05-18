@@ -22,14 +22,20 @@ import asyncio
 import contextlib
 import logging
 import re
-from typing import Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
 from web._shared.session_manager import SessionManager
+from web.claude_code._attachment_prefix import AttachmentPrefixBuilder
 from web.claude_code.approval import ApprovalBridge
 from web.claude_code.normalizer import ClaudeNormalizer
 from web.thread_status_ws import get_broadcaster
+
+if TYPE_CHECKING:
+    from web.protocol.rest_models import UserInputAttachment
+    from web.uploads.storage import AssetStorage
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +60,14 @@ class ClaudeCodeService:
         *,
         client_factory: Any = None,
         thread_manager: Any = None,
+        asset_storage: AssetStorage | None = None,
     ) -> None:
-        """v0.2 新增 ``thread_manager`` 注入。
+        """v0.2 新增 ``thread_manager`` 注入；claude-code-channel-image-paste 新增
+        ``asset_storage`` 注入（用于附件 ``@file`` prompt 前缀拼接）。
 
-        ``None`` 表示老路径（v0.1 行为，不做 thread metadata 持久化 / 自动 resume）。
+        ``thread_manager=None``：v0.1 行为不做 thread metadata 持久化 / 自动 resume。
+        ``asset_storage=None``：不支持图片附件（attachments kwarg 会被忽略）；测试
+            stub 可不传，prod 装配在 ``route.py`` 注入 ``app.state.asset_storage``。
         """
         self._normalizer = normalizer
         self._approval = approval
@@ -70,6 +80,10 @@ class ClaudeCodeService:
         self._thread_manager: Any = thread_manager
         # per-thread run 计数器——每次 query 调用自增，用于构造 run_id
         self._run_counters: dict[str, int] = {}
+        # attachment prefix builder：注入 storage 后 lazy 构造一次复用
+        self._prefix_builder: AttachmentPrefixBuilder | None = (
+            AttachmentPrefixBuilder(asset_storage) if asset_storage is not None else None
+        )
 
     # ----- 主入口 -----
 
@@ -80,11 +94,16 @@ class ClaudeCodeService:
         writer: Any,
         *,
         register_id_override: str | None = None,
+        attachments: Sequence[UserInputAttachment] | None = None,
     ) -> None:
         """发起一次 Claude run。
 
         步骤：
 
+        0. (新) 如有 ``attachments`` + ``_prefix_builder`` + ``register_id_override``，
+           调 :meth:`AttachmentPrefixBuilder.build` 把 ``@<abs_path>`` 前缀拼到
+           ``command`` 头部；Claude Code SDK subprocess 端 ``attachments.ts`` 会
+           grep 这些 ``@<path>`` 引用，自动通过 ``FileReadTool`` 读图喂给 Claude。
         1. 装配 ``ClaudeAgentOptions``
         2. 复用或新建 ``ClaudeSDKClient``
         3. ``approval.set_active_writer(writer)`` 让 can_use_tool 能 emit
@@ -98,7 +117,17 @@ class ClaudeCodeService:
                 带 thread_id 时）显式以 thread_id 注册 SessionManager，避免
                 ``pending-XXX`` placeholder 与前端 session id 不一致的歧义。
                 ``None`` 表示走原有逻辑（保留对未传 thread_id 调用方的兼容）。
+            attachments: claude-code-channel-image-paste 新增。当
+                ``register_id_override`` + ``asset_storage`` + ``attachments`` 三者
+                都到位时，按顺序把图片本地路径以 ``@<abs_path>`` 形式拼到 prompt
+                头部；缺任一条件就 fallback 到原纯文本 ``command``，向后兼容。
         """
+        # 0. (新) attachment prefix 拼接——三者齐全才生效，否则保持原 command
+        if attachments and self._prefix_builder is not None and register_id_override:
+            prefix = self._prefix_builder.build(attachments, thread_id=register_id_override)
+            if prefix:
+                command = prefix + command
+
         session_id = options.get("sessionId") if isinstance(options, dict) else None
 
         # v0.2 自动 resume：thread-bound 路径 + thread metadata 已绑定 claude_thread_id →

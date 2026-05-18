@@ -43,6 +43,7 @@ from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 from web.claude_code.approval import ApprovalBridge
 from web.claude_code.normalizer import ClaudeNormalizer
 from web.claude_code.service import ClaudeCodeService
+from web.protocol.rest_models import UserInputAttachment
 
 if TYPE_CHECKING:
     from itsdangerous import URLSafeTimedSerializer
@@ -234,11 +235,15 @@ async def claude_code_ws(
         "thread_manager",
         None,
     )
+    # claude-code-channel-image-paste: 注入 app.state.asset_storage 让 service
+    # 能拼 ``@file`` prefix；缺失（测试 / 老装配）走 None → service 跳过 prefix。
+    asset_storage_for_service = getattr(websocket.app.state, "asset_storage", None)
     service = ClaudeCodeService(
         normalizer,
         approval,
         sessions,
         thread_manager=tm_for_service,
+        asset_storage=asset_storage_for_service,
     )
 
     # 跟踪 fire-and-forget 后台 task，避免 GC 提前回收（asyncio 文档约定）
@@ -318,6 +323,25 @@ async def _dispatch(
         if not isinstance(command, str):
             await _send_error(websocket, "claude-command.command must be string")
             return
+
+        # claude-code-channel-image-paste: 解析 attachments 字段（前端
+        # ClaudeCodeView 粘贴图片后发上来）。容错：
+        # - 字段缺失 / None / 非 list / 空 list → attachments=None 走原 prompt 路径
+        # - 单条 dict 校验失败由 pydantic 抛 ValidationError，捕获后 fallback 到 None
+        raw_attachments = data.get("attachments") if isinstance(data, dict) else None
+        parsed_attachments: list[UserInputAttachment] | None = None
+        if isinstance(raw_attachments, list) and raw_attachments:
+            try:
+                parsed_attachments = [
+                    UserInputAttachment.model_validate(item) for item in raw_attachments
+                ]
+            except Exception:
+                logger.warning(
+                    "claude-command attachments parse failed; falling back to text-only",
+                    exc_info=True,
+                )
+                parsed_attachments = None
+
         # 跑成后台 task —— 让读循环能继续接 approval-response / abort
         # 注意：query 内部已 await session_manager.register/unregister，
         # 异常已经在 service.query finally 处理
@@ -328,6 +352,7 @@ async def _dispatch(
                 options,
                 websocket,
                 register_id_override=bound_thread_id,
+                attachments=parsed_attachments,
             ),
         )
         bg_tasks.add(task)
