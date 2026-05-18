@@ -147,9 +147,30 @@ class AttachmentPrefixBuilder:
             return None
 
         path_str = str(path)
-        # CLI ``@file`` 语法对空格 / 引号敏感；含特殊字符时用 ``@"..."`` quoted
-        if any(ch.isspace() for ch in path_str) or '"' in path_str:
-            # 内嵌双引号转义；其它特殊字符 CLI 自身处理
+        # CLI ``@file`` 语法解析（other/claude-code-main/src/utils/attachments.ts::
+        # extractAtMentionedFiles）：
+        # - quoted regex ``@"([^"]+)"`` 接受任意非 ``"`` 字符（含空格/冒号/反斜杠）
+        # - regular regex ``@([^\s]+)\b`` 到 word boundary 停；Windows 路径含 ``:``
+        #   和 ``\`` 虽可匹配但接近正则歧义边界，**强制走 quoted 更稳**。
+        #
+        # 走 quoted 的触发条件（任一即走）：
+        # 1. 含空白字符（含中文全角空格、tab、换行等）
+        # 2. 含 ``"`` 字面引号
+        # 3. 含 ``\``（Windows 反斜杠分隔符 / Unix 文件名理论可含但极罕见）
+        # 4. 含 ``:`` 但不在首尾（Windows ``C:\...`` 的 drive letter；macOS / Linux
+        #    路径理论可含 ``:`` 但极罕见）
+        #
+        # Unix 纯 ASCII 路径（无空格 / 反斜杠 / 冒号）走 regular，保持原行为。
+        needs_quote = (
+            any(ch.isspace() for ch in path_str)
+            or '"' in path_str
+            or "\\" in path_str
+            or ":" in path_str
+        )
+        if needs_quote:
+            # 内嵌双引号转义；CLI quoted regex 接受 ``[^"]+``，转义 ``"`` 后内容
+            # 仍能被正则匹配（regex 不识别 ``\\"``，但路径里出现真实 ``"`` 极罕见，
+            # 这里转义优先保护 prompt 解析层不破坏）。
             escaped = path_str.replace('"', '\\"')
             return f'@"{escaped}"'
         return f"@{path_str}"

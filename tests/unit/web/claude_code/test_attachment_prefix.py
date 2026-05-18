@@ -237,6 +237,110 @@ class TestPathWithSpaces:
         assert "folder with space" in result
 
 
+class TestPathWithSpecialChars:
+    """跨平台路径处理（Tauri macOS + Windows 套壳）。
+
+    Windows path 含 ``:`` (drive letter) 和 ``\\`` (分隔符)；macOS / Linux 路径
+    理论可含这些字符但极罕见。任一字符出现都走 quoted 语法避开 CLI
+    ``regular regex (@[^\s]+\b)`` 的边界歧义。
+    """
+
+    def test_path_with_backslash_uses_quoted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows 反斜杠路径 → quoted（模拟 ``str(Path)`` 在 Windows 上的输出）。"""
+
+        # 不能真在 Unix 上构造 WindowsPath（文件 IO 会失败），改 monkeypatch
+        # AssetStorage.asset_path 直接返回 fake Windows path
+        from web.uploads import storage as storage_mod
+
+        storage = AssetStorage(base_dir=tmp_path)
+        thread_id = "thread-winpath01"
+        asset_id = "ffeeddccbbaa99887766554433221100"[:32]
+        _write_asset(
+            storage,
+            asset_id=asset_id,
+            thread_id=thread_id,
+            mime_type="image/png",
+            ext=".png",
+        )
+
+        # patch asset_path 返回 Windows 风格 str (含 \\)
+        fake_win_path = Path(
+            r"C:\Users\foo\.kongming\web\uploads\images\thread-winpath01"
+            f"\\{asset_id}.png",
+        )
+        # 让 is_file 返回 True（绕过真实文件系统）
+        monkeypatch.setattr(storage_mod.Path, "is_file", lambda self: True)
+        monkeypatch.setattr(storage, "asset_path", lambda **_: fake_win_path)
+
+        builder = AttachmentPrefixBuilder(storage)
+        result = builder.build(
+            [_make_att(asset_id=asset_id, mime_type="image/png")],
+            thread_id=thread_id,
+        )
+
+        # 含 \\ 和 : → 走 @"..." quoted
+        assert result.startswith('@"')
+        assert result.endswith('"\n\n')
+        assert "C:" in result  # drive letter 保留
+
+    def test_path_with_double_quote_escaped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """路径含 ``"`` → quoted 且内嵌引号被反斜杠转义。"""
+
+        from web.uploads import storage as storage_mod
+
+        storage = AssetStorage(base_dir=tmp_path)
+        thread_id = "thread-quote0001"
+        asset_id = "1234567890abcdef1234567890abcdef"
+        _write_asset(
+            storage,
+            asset_id=asset_id,
+            thread_id=thread_id,
+            mime_type="image/png",
+            ext=".png",
+        )
+
+        fake_path_with_quote = Path('/tmp/weird"name/img.png')
+        monkeypatch.setattr(storage_mod.Path, "is_file", lambda self: True)
+        monkeypatch.setattr(storage, "asset_path", lambda **_: fake_path_with_quote)
+
+        builder = AttachmentPrefixBuilder(storage)
+        result = builder.build(
+            [_make_att(asset_id=asset_id, mime_type="image/png")],
+            thread_id=thread_id,
+        )
+
+        # 内嵌 " 被转义为 \"
+        assert result.startswith('@"')
+        assert '\\"name' in result
+
+    def test_plain_unix_path_uses_regular(self, tmp_path: Path) -> None:
+        """纯 ASCII Unix 路径（无空格/反斜杠/冒号）走 regular 语法不变。"""
+        storage = AssetStorage(base_dir=tmp_path)
+        thread_id = "thread-plain0001"
+        asset_id = "abcdefabcdefabcdefabcdefabcdefab"
+        _write_asset(
+            storage,
+            asset_id=asset_id,
+            thread_id=thread_id,
+            mime_type="image/png",
+            ext=".png",
+        )
+        builder = AttachmentPrefixBuilder(storage)
+
+        result = builder.build(
+            [_make_att(asset_id=asset_id, mime_type="image/png")],
+            thread_id=thread_id,
+        )
+
+        # 纯路径走 @<path> regular（无引号包裹）
+        assert result.startswith("@/")
+        assert not result.startswith('@"')
+
+
 class TestFallbackSkip:
     """失败模式：mime 未知 / 路径不存在 / storage 抛错 → 跳过 + warning log。"""
 
