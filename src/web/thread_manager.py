@@ -53,6 +53,7 @@ from web.thread_metadata import (
     write_thread_metadata,
 )
 from web.thread_status_ws import ThreadStatusEventSink
+from web.uploads.storage import AssetStorage
 from web.usage_token_v2 import (
     ClaudeJsonlLocator,
     CodexRolloutLocator,
@@ -257,10 +258,18 @@ class ThreadManager:
         *,
         kongming_home: Path,
         runtime_factory: RuntimeFactory,
+        asset_storage: AssetStorage | None = None,
     ) -> None:
+        """
+        Args:
+            asset_storage: 可选注入的 :class:`AssetStorage`,用于 ``delete_thread``
+                时同步清理 thread 名下所有上传资产(claude-image-paste-e2e P1 #2
+                R2 boundary fix)。``None`` 时跳过资产清理(CLI / 测试路径常态)。
+        """
         self._cfg = cfg
         self._home = kongming_home
         self._runtime_factory = runtime_factory
+        self._asset_storage = asset_storage
         self._cells: dict[str, ThreadCell] = {}
         self._lock = asyncio.Lock()
         self._idle_task: asyncio.Task[None] | None = None
@@ -524,6 +533,30 @@ class ThreadManager:
             self._home,
             thread_id,
         )
+
+        # P1 #2 (claude-image-paste-e2e R2 boundary fix)：清理 thread 名下所有
+        # 上传资产(images / videos / files)。``_asset_storage`` 在 web 装配层
+        # 注入(CLI / 测试路径常为 None → 跳过,因为这些路径压根不会有上传资产)。
+        # delete_thread_assets 内部对不存在的目录直接跳过,容错 idempotent。
+        if self._asset_storage is not None:
+            try:
+                removed = await asyncio.to_thread(
+                    self._asset_storage.delete_thread_assets,
+                    thread_id=thread_id,
+                )
+                if removed > 0:
+                    logger.info(
+                        "delete_thread(%s): removed %d asset files",
+                        thread_id,
+                        removed,
+                    )
+            except Exception:
+                # 资产清理失败不阻断 thread 删除主流程
+                logger.warning(
+                    "delete_thread(%s): asset cleanup failed; metadata already removed",
+                    thread_id,
+                    exc_info=True,
+                )
 
         # v0.1.5 不删 session backend 历史（需要 cfg.session.backend 路径推算）；
         # 留给 web-app-shell 任务在装配时按需 wire 一个 history_cleaner closure。
