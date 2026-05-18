@@ -274,10 +274,13 @@ class ApprovalBridge:
                     if blocked_by_rule is not None:
                         # v1.0.1 危险路径：自动拒绝（fail-closed）
                         auto_rejected_by_timeout = True
+                        # 进到这里 timeout_seconds 必然来自 decision.timeout_ms，
+                        # decision 一定非 None；但 mypy 无法推断不变量，显式兜底
+                        timeout_ms = decision.timeout_ms if decision is not None else 0
                         user_decision = {
                             "allow": False,
                             "auto_rejected": True,
-                            "message": f"auto-rejected by rule {blocked_by_rule} after {decision.timeout_ms}ms timeout",
+                            "message": f"auto-rejected by rule {blocked_by_rule} after {timeout_ms}ms timeout",
                         }
                     else:
                         # 安全路径：自动通过
@@ -331,7 +334,7 @@ class ApprovalBridge:
         # - denied：未命中规则 + 用户主动拒
         if auto_rejected_by_timeout:
             outcome = "rejected_auto_timeout"
-            decided_by: str | None = "timeout"
+            decided_by = "timeout"
         elif blocked_by_rule:
             outcome = "blocked_then_manual"
             decided_by = "user"

@@ -34,9 +34,10 @@ async def test_dump_cron_instructions_real(capsys) -> None:
         event_sinks=[],
     )
     listing = format_skill_listing(skill_specs_list)
-    if listing:
-        rendered = rendered + f"\n\n# skills\n{listing}"
-        origins = [*origins, "skills"]
+    if not listing:
+        pytest.skip("no skills installed under .kongming/skills/ — 装配链跳过")
+    rendered = rendered + f"\n\n# skills\n{listing}"
+    origins = [*origins, "skills"]
 
     with capsys.disabled():
         print("\n" + "=" * 80)
