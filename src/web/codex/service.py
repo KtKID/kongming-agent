@@ -28,12 +28,18 @@ import asyncio
 import contextlib
 import json
 import logging
-from typing import Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 from web._shared.session_manager import SessionManager
+from web.codex._image_cli_args import CodexImageCliArgsBuilder
 from web.codex.approval import map_permission_mode
 from web.codex.normalizer import normalize
 from web.thread_status_ws import get_broadcaster
+
+if TYPE_CHECKING:
+    from web.protocol.rest_models import UserInputAttachment
+    from web.uploads.storage import AssetStorage
 
 logger = logging.getLogger(__name__)
 
@@ -65,12 +71,28 @@ class CodexService:
       用于 :meth:`abort` 找到当前子进程
     """
 
-    def __init__(self, session_manager: SessionManager, *, thread_manager: Any = None) -> None:
+    def __init__(
+        self,
+        session_manager: SessionManager,
+        *,
+        thread_manager: Any = None,
+        asset_storage: AssetStorage | None = None,
+    ) -> None:
+        """codex-channel-image-paste 新增 ``asset_storage`` 注入：
+
+        ``None`` 表示不支持图片附件（attachments kwarg 会被忽略）；测试 stub /
+        CLI 装配不传时无影响。prod 装配在 ``web.app.create_app`` 注入
+        ``app.state.asset_storage`` 单例。
+        """
         self.session_manager = session_manager
         self.thread_manager = thread_manager
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         # per-thread run 计数器——每次 query 调用自增，用于构造 run_id
         self._run_counters: dict[str, int] = {}
+        # image CLI args builder：注入 storage 后 lazy 构造一次复用
+        self._image_args_builder: CodexImageCliArgsBuilder | None = (
+            CodexImageCliArgsBuilder(asset_storage) if asset_storage is not None else None
+        )
 
     # ------------------------------------------------------------------ query
 
@@ -85,6 +107,7 @@ class CodexService:
         resume: bool = False,
         kongming_thread_id: str | None = None,
         writer: Any,
+        attachments: Sequence[UserInputAttachment] | None = None,
     ) -> None:
         """spawn ``codex exec --json``，把事件流喂到 ``writer``。
 
@@ -102,6 +125,11 @@ class CodexService:
                 ``thread.started`` 的真实 id 回写到 ``codex_thread_id``。
             writer: duck-typed，任何有 ``async def send_json(msg: dict)`` 的对象
         """
+        # codex-channel-image-paste 新增：三者齐全才拼 --image flag，否则空 list 安全
+        image_args: list[str] = []
+        if attachments and self._image_args_builder is not None and kongming_thread_id:
+            image_args = self._image_args_builder.build(attachments, thread_id=kongming_thread_id)
+
         args = self._build_args(
             session_id=session_id,
             command=command,
@@ -109,6 +137,7 @@ class CodexService:
             permission_mode=permission_mode,
             model=model,
             resume=resume,
+            image_args=image_args,
         )
 
         proc: asyncio.subprocess.Process | None = None
@@ -277,6 +306,7 @@ class CodexService:
         permission_mode: str,
         model: str | None,
         resume: bool,
+        image_args: list[str] | None = None,
     ) -> list[str]:
         """构造 ``codex exec`` 启动参数。
 
@@ -319,6 +349,10 @@ class CodexService:
             ]
         if model:
             args += ["-m", model]
+        # codex-channel-image-paste：--image flag 必须在 command (positional) 之前
+        # 否则 Codex CLI 会把 image 路径当成 prompt 的一部分
+        if image_args:
+            args += image_args
         args.append(command)
         return args
 

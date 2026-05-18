@@ -229,6 +229,12 @@ ignore_imports =
 ; ``config_loader.errors -> core.errors`` 传递触发 Contract 6，单点放行。
     web.claude_code.service -> web.uploads.storage
     web.claude_code._attachment_prefix -> web.uploads.storage
+; codex-channel-image-paste §3：codex 通道 service + _image_cli_args 消费
+; AssetStorage (路径反推) + EXT_BY_MIME (mime→ext 白名单)。同 claude_code 通过
+; ``config_loader.errors -> core.errors`` 传递触发 Contract 6，单点放行。
+    web.codex.service -> web.uploads.storage
+    web.codex._image_cli_args -> web.uploads.storage
+    web.codex._image_cli_args -> web.uploads.registry
     web.claude_code._attachment_prefix -> web.uploads.registry
 ; web.app -> web.uploads.{storage,registry,validation}：
 ; app.py 装配期注入单例到 ``app.state.*``（asset_storage / asset_registry

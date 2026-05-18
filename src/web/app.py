@@ -458,17 +458,14 @@ def create_app(
     from web.global_approvals import get_inbox_broadcaster
 
     app.state.approval_inbox_broadcaster = get_inbox_broadcaster()
-    # codex 通道（与 claude_code 平级，独立 SessionManager 单例）
-    app.state.codex_session_manager = _SharedSessionManager()
-    app.state.codex_service = CodexService(
-        app.state.codex_session_manager,
-        thread_manager=thread_manager,
-    )
 
     # media uploads（claude-image-paste-e2e §2）：注入 storage / registry /
     # validator 单例到 app.state，让 routers/uploads.py 直接消费而不是回落
     # 到 module-level lazy singleton。这样测试时可通过 override app.state 注入
     # 假实现。
+    #
+    # 注意：必须在 codex_service / claude_service 创建之**前**就绪，
+    # 让通道 service 构造时能注入 asset_storage（codex-channel-image-paste §3）。
     from web.uploads.registry import AssetRegistry
     from web.uploads.storage import AssetStorage
     from web.uploads.validation import MediaUploadValidator
@@ -476,6 +473,16 @@ def create_app(
     app.state.asset_storage = AssetStorage()
     app.state.asset_registry = AssetRegistry()
     app.state.upload_validator = MediaUploadValidator(thread_manager)
+
+    # codex 通道（与 claude_code 平级，独立 SessionManager 单例）
+    # codex-channel-image-paste §3：service 构造时注入 asset_storage，让
+    # CodexImageCliArgsBuilder 能反推 asset 物理路径生成 --image flag
+    app.state.codex_session_manager = _SharedSessionManager()
+    app.state.codex_service = CodexService(
+        app.state.codex_session_manager,
+        thread_manager=thread_manager,
+        asset_storage=app.state.asset_storage,
+    )
 
     # 6. middleware（顺序：CSRF → Auth；先注册的最外层）
     app.add_middleware(AuthMiddleware, allow_docs=cfg.web.dev_mode)
