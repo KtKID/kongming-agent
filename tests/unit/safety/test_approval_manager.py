@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -73,26 +73,26 @@ def _make_request(call_id: str = "call-1", **overrides: Any) -> ApprovalRequest:
 
 
 def test_pending_approval_has_all_12_fields() -> None:
-    """spec 20-data-model#1 12 字段必须有（阶段 2 接入不再改 dataclass）。"""
-    loop = asyncio.new_event_loop()
-    try:
-        fut: asyncio.Future[ApprovalDecision] = loop.create_future()
-        p = _PendingApproval(
-            request_id="r1",
-            channel="generic_chat",
-            thread_id="t1",
-            cwd="/tmp",
-            tool_name="Bash",
-            tool_input={},
-            metadata={},
-            severity="standard",
-            matched_rule=None,
-            auto_approve_at_ms=None,
-            auto_reject_at_ms=None,
-            future=fut,
-        )
-    finally:
-        loop.close()
+    """spec 20-data-model#1 12 字段必须有（阶段 2 接入不再改 dataclass）。
+
+    用 MagicMock(spec=asyncio.Future) 替代真 Future（避免 new_event_loop + close
+    污染下游 test_instruction_loader 的 get_event_loop()）。
+    """
+    fut: MagicMock = MagicMock(spec=asyncio.Future)
+    p = _PendingApproval(
+        request_id="r1",
+        channel="generic_chat",
+        thread_id="t1",
+        cwd="/tmp",
+        tool_name="Bash",
+        tool_input={},
+        metadata={},
+        severity="standard",
+        matched_rule=None,
+        auto_approve_at_ms=None,
+        auto_reject_at_ms=None,
+        future=fut,
+    )
     # 12 字段：核心 11 + arrived_at_ms（默认）+ timeout_ms（默认 None）
     for fld in (
         "request_id",
