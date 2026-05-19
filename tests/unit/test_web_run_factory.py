@@ -242,18 +242,31 @@ class TestModelConfigOverride:
 
 
 class TestApprovalWiring:
-    """Verify adapter.prompt_approval is passed to build_default_approval."""
+    """smart-approval-manager-stage1：generic_chat web 装配点 prompt_fn 由
+    ``make_manager_prompt_fn(manager, thread_id)`` 提供（不再是 adapter.prompt_approval）。
+
+    阶段 1 改造点：把 generic_chat 通道审批从 WebHostAdapter 旧模态切到 ApprovalManager
+    单例 + InboxEventSink → 浮窗。详见 docs/safety-approval-manager-v0.5/。
+    """
 
     @pytest.mark.asyncio
-    async def test_interactive_mode_passes_prompt_fn(self, test_cfg, mock_adapter, mock_deps):
+    async def test_interactive_mode_passes_manager_prompt_fn(
+        self, test_cfg, mock_adapter, mock_deps
+    ):
+        """验证 build_default_approval 收到的是 make_manager_prompt_fn 工厂返回的闭包。"""
         from web.run import _make_runtime_factory
 
         factory = _make_runtime_factory(test_cfg)
         await factory("thread-1", "test-local", mock_adapter, [])
 
-        mock_deps["build_default_approval"].assert_called_once_with(
-            "interactive", prompt_fn=mock_adapter.prompt_approval
-        )
+        # 不再断言具体 prompt_fn 引用（manager 工厂返回闭包每次新建）；
+        # 只断言：调用过一次 + mode='interactive' + 传了某个 callable 作 prompt_fn
+        mock_deps["build_default_approval"].assert_called_once()
+        call = mock_deps["build_default_approval"].call_args
+        assert call.args == ("interactive",)
+        assert callable(call.kwargs.get("prompt_fn"))
+        # 关键回归：装配后 prompt_fn 必须存在（不能 None；interactive 模式下必须有人接审批）
+        assert call.kwargs["prompt_fn"] is not None
 
 
 class TestSessionBridge:
