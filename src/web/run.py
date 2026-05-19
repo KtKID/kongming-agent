@@ -24,57 +24,83 @@ def main() -> int:
 
     from config_loader import load_config
     from config_loader.paths import get_kongming_home
+    from web._app_lock import acquire_app_instance_lock, release_app_instance_lock
     from web.app import create_app
     from web.startup_progress import StartupProgress
     from web.thread_manager import ThreadManager
 
     home = get_kongming_home()
-    progress = StartupProgress(home)
-    progress.report("imports")
 
-    config_path = os.environ.get("KONGMING_CONFIG", "config/setting.yaml")
-    cfg = load_config(Path(config_path))
-    progress.report("config")
-
-    if not cfg.web.enabled:
-        progress.fail("web.enabled is false")
-        sys.stderr.write(
-            "cfg.web.enabled=false; set web.enabled=true in config/setting.yaml "
-            "or KONGMING_WEB_ENABLED=1 env to start web server\n"
-        )
-        return 1
-
-    runtime_factory = _make_runtime_factory(cfg)
-    progress.report("factory")
-
-    tm = ThreadManager(cfg, kongming_home=home, runtime_factory=runtime_factory)  # type: ignore[arg-type]
+    # P0 #1 修复（reports/cr/cr-report-20260519-web-crash-investigation.md）：
+    # 启动时抢 web app 单实例锁。防止多个 web 进程同时跑 ticker loop 抢
+    # scheduler file lock → SchedulerBusyError 死循环（5/18 实测 30 min
+    # 内 server.log 涨 29 MB / 45 万行）。活进程冲突 → sys.exit(1)；孤儿
+    # 锁（持锁 PID 已死）→ 自动清理重抢。
+    app_lock_fd: int | None = acquire_app_instance_lock(home)
 
     try:
-        app = create_app(
+        progress = StartupProgress(home)
+        progress.report("imports")
+
+        config_path = os.environ.get("KONGMING_CONFIG", "config/setting.yaml")
+        cfg = load_config(Path(config_path))
+        progress.report("config")
+
+        if not cfg.web.enabled:
+            progress.fail("web.enabled is false")
+            sys.stderr.write(
+                "cfg.web.enabled=false; set web.enabled=true in config/setting.yaml "
+                "or KONGMING_WEB_ENABLED=1 env to start web server\n"
+            )
+            return 1
+
+        runtime_factory = _make_runtime_factory(cfg)
+        progress.report("factory")
+
+        # claude-image-paste-e2e P1 #2:注入 AssetStorage 让 ThreadManager.delete_thread
+        # 同步清理 thread 名下上传资产(images / videos / files),否则 thread 删除留孤儿磁盘。
+        from web.uploads.storage import AssetStorage
+
+        asset_storage = AssetStorage()
+
+        tm = ThreadManager(
             cfg,
-            tm,
-            home_dir=home,
-            scheduler_runtime_factory=getattr(runtime_factory, "_scheduler_runtime_factory", None),
+            kongming_home=home,
+            runtime_factory=runtime_factory,  # type: ignore[arg-type]
+            asset_storage=asset_storage,
         )
-    except Exception as exc:
-        progress.fail(f"create_app failed: {exc}")
-        sys.stderr.write(f"create_app failed: {exc}\n")
-        return 1
-    progress.report("app")
 
-    log_level = cfg.logging.level.lower()
-    progress.report("uvicorn")
-    try:
-        uvicorn.run(
-            app,
-            host=cfg.web.host,
-            port=cfg.web.port,
-            log_level=log_level,
-        )
-    except Exception as exc:
-        progress.fail(f"uvicorn.run failed: {exc}")
-        raise
-    return 0
+        try:
+            app = create_app(
+                cfg,
+                tm,
+                home_dir=home,
+                scheduler_runtime_factory=getattr(
+                    runtime_factory, "_scheduler_runtime_factory", None
+                ),
+            )
+        except Exception as exc:
+            progress.fail(f"create_app failed: {exc}")
+            sys.stderr.write(f"create_app failed: {exc}\n")
+            return 1
+        progress.report("app")
+
+        log_level = cfg.logging.level.lower()
+        progress.report("uvicorn")
+        try:
+            uvicorn.run(
+                app,
+                host=cfg.web.host,
+                port=cfg.web.port,
+                log_level=log_level,
+            )
+        except Exception as exc:
+            progress.fail(f"uvicorn.run failed: {exc}")
+            raise
+        return 0
+    finally:
+        # 显式释放锁（进程退出 OS 也会自动释放；本句是 best-effort 兜底）
+        release_app_instance_lock(app_lock_fd)
 
 
 def _make_runtime_factory(cfg: object) -> object:
@@ -87,6 +113,12 @@ def _make_runtime_factory(cfg: object) -> object:
     from executors.agent_runtime.native_runtime import NativeRuntime
     from host.session_bridge import SessionBridge
     from observability import JsonlTraceSink
+    from safety.approval_manager import (
+        get_approval_manager,
+        make_manager_prompt_fn,
+    )
+    from safety.approval_rules import ApprovalRules
+    from safety.inbox_event_sink import InboxEventSink
     from tools import (
         ToolRegistry,
         build_default_approval,
@@ -94,6 +126,7 @@ def _make_runtime_factory(cfg: object) -> object:
         register_evolution_write_tool_if_enabled,
         register_schedule_tool_if_enabled,
     )
+    from web.global_approvals import get_inbox_broadcaster
 
     assert isinstance(cfg, Config)
     real_cfg: Config = cfg
@@ -187,6 +220,26 @@ def _make_runtime_factory(cfg: object) -> object:
             _origins_cache[0] = origins
             _scheduler_runtime_factory_cache[0] = _scheduler_runtime_factory
 
+    def _build_manager_and_inbox_sink() -> Any:
+        """构造或获取 ApprovalManager 单例，并幂等注入 InboxEventSink。
+
+        阶段 1 (smart-approval-manager-v0.5)：generic_chat 通道默认走 manager 路径，
+        无 feature flag；回滚 = git revert 上面 prompt_fn 装配。
+        manager 是 per-process 单例（``get_approval_manager``）；
+        InboxEventSink 用 sink 类型判定幂等，多 cell 装配只注入一次。
+        """
+        broadcaster = get_inbox_broadcaster()
+        manager = get_approval_manager(
+            rules=ApprovalRules(),
+            default_timeout_ms=60_000,
+        )
+        # 幂等：只在首次装配时注入 InboxEventSink；按 sink 类型判定
+        has_inbox_sink = any(isinstance(s, InboxEventSink) for s in manager._event_sinks)
+        if not has_inbox_sink:
+            sink = InboxEventSink(broadcaster=broadcaster, manager=manager)
+            manager.register_event_sink(sink)
+        return manager
+
     async def factory(
         thread_id: str,
         preset_id: str,
@@ -231,7 +284,18 @@ def _make_runtime_factory(cfg: object) -> object:
         assert registry is not None
         enabled_tool_names = _enabled_tools_cache[0] or []
 
-        prompt_fn = adapter.prompt_approval if real_cfg.approval.mode == "interactive" else None  # type: ignore[attr-defined]
+        # 阶段 1 (smart-approval-manager-v0.5)：generic_chat 通道走 ApprovalManager
+        # 路径（无 feature flag；回滚 = git revert）。manager + InboxEventSink 是
+        # per-process 单例，首次装配时注入 sink；后续 cell 装配复用已有单例（幂等）。
+        # 老路径（adapter.prompt_approval 推 per-thread modal）已被 v2-inbox 全局
+        # 浮窗替代，prompt_fn 现在通过 manager.request 调度，前端通过
+        # /ws/thread-status 收 approval.inbox.add 帧。
+        manager = _build_manager_and_inbox_sink()
+        prompt_fn = (
+            make_manager_prompt_fn(manager, thread_id)
+            if real_cfg.approval.mode == "interactive"
+            else None
+        )
         approval = build_default_approval(real_cfg.approval.mode, prompt_fn=prompt_fn)
 
         bootstrap = SessionBootstrap(

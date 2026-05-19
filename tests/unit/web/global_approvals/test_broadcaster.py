@@ -311,3 +311,83 @@ class TestSingleton:
         reset_inbox_broadcaster_for_testing()
         b = get_inbox_broadcaster()
         assert a is not b
+
+
+# ---------- resolve_target registry（阶段 1 新增） ----------
+
+
+class TestRegisterResolveTarget:
+    """阶段 1 新增：register_resolve_target / unregister_resolve_target API。"""
+
+    def test_register_then_resolve_routes_to_callback(self) -> None:
+        """register 后 resolve(thread_id, req_id, ...) 调用对应 callback。"""
+        bc = ApprovalInboxBroadcaster()
+        called: list[tuple[str, dict[str, Any]]] = []
+
+        def cb(req_id: str, dec: dict[str, Any]) -> bool:
+            called.append((req_id, dec))
+            return True
+
+        bc.register_resolve_target("t1", cb)
+        assert bc.resolve("t1", "r1", {"allow": True}) is True
+        assert called == [("r1", {"allow": True})]
+
+    def test_unregister_with_is_check_does_not_delete_overridden(self) -> None:
+        """老 callback unregister 不能删新 callback（is 比较防覆盖误删）。"""
+        bc = ApprovalInboxBroadcaster()
+
+        def cb_old(req_id: str, dec: dict[str, Any]) -> bool:
+            return True
+
+        def cb_new(req_id: str, dec: dict[str, Any]) -> bool:
+            return True
+
+        bc.register_resolve_target("t1", cb_old)
+        bc.register_resolve_target("t1", cb_new)  # 覆盖
+        bc.unregister_resolve_target("t1", cb_old)  # 老 callback unregister
+        # cb_new 仍在 registry
+        assert "t1" in bc._resolve_targets
+        assert bc._resolve_targets["t1"] is cb_new
+
+    def test_resolve_target_priority_over_bridge_registry(self) -> None:
+        """阶段 1 双轨：_resolve_targets 优先于 _bridge_registry。"""
+        bc = ApprovalInboxBroadcaster()
+
+        # 假装注册了一个 bridge
+        mock_bridge = MagicMock()
+        mock_bridge.resolve.return_value = False  # 故意返回 False，区分两路径
+        bc._bridge_registry["t1"] = mock_bridge
+
+        # 同时注册 resolve_target
+        target_called: list[tuple[str, dict[str, Any]]] = []
+
+        def cb(req_id: str, dec: dict[str, Any]) -> bool:
+            target_called.append((req_id, dec))
+            return True  # 区分两路径
+
+        bc.register_resolve_target("t1", cb)
+
+        # 应走 _resolve_targets（True）不走 bridge（False）
+        result = bc.resolve("t1", "r1", {"allow": True})
+        assert result is True
+        assert target_called == [("r1", {"allow": True})]
+        mock_bridge.resolve.assert_not_called()
+
+    def test_register_empty_thread_id_silent(self) -> None:
+        """空 thread_id 静默忽略（与 register_bridge 一致）。"""
+        bc = ApprovalInboxBroadcaster()
+
+        def cb(req_id: str, dec: dict[str, Any]) -> bool:
+            return True
+
+        bc.register_resolve_target("", cb)
+        assert "" not in bc._resolve_targets
+
+    def test_unregister_unknown_silent(self) -> None:
+        """没注册过 unregister 不抛。"""
+        bc = ApprovalInboxBroadcaster()
+
+        def cb(req_id: str, dec: dict[str, Any]) -> bool:
+            return True
+
+        bc.unregister_resolve_target("t-never", cb)  # 不抛

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -34,6 +35,15 @@ if TYPE_CHECKING:
     from web.claude_code.approval import ApprovalBridge
 
 logger = logging.getLogger(__name__)
+
+
+ResolveCallback = Callable[[str, dict[str, Any]], bool]
+"""resolve callback 签名：``(request_id, decision_dict) -> bool``（``True`` 表示成功 set future）。
+
+阶段 1 双轨期：``manager.resolve`` 方法满足此签名；``InboxEventSink`` 装配 generic_chat 通道
+审批时调 ``register_resolve_target(thread_id, manager.resolve)`` 把 manager 注册进来，
+让 broadcaster 在收到前端 ``approval.inbox.resolve`` 帧时能路由回 manager。
+"""
 
 
 class ApprovalInboxBroadcaster:
@@ -49,6 +59,10 @@ class ApprovalInboxBroadcaster:
         self._pending_snapshot: dict[str, dict[str, Any]] = {}
         # thread_id → ApprovalBridge（resolve 路由用；同 thread_id 多 bridge 时只留最新）
         self._bridge_registry: dict[str, ApprovalBridge] = {}
+        # thread_id → resolve callback（manager 路径用，阶段 1 与 bridge_registry 并存）。
+        #
+        # 阶段 2 ApprovalBridge 迁 manager 后，bridge_registry 可考虑废弃（spec 阶段 5）。
+        self._resolve_targets: dict[str, ResolveCallback] = {}
         self._lock = asyncio.Lock()
 
     # ----- 订阅者管理 -----
@@ -165,22 +179,72 @@ class ApprovalInboxBroadcaster:
         """按 thread_id 查 bridge；用于路由 inbox.resolve 帧。"""
         return self._bridge_registry.get(thread_id)
 
+    # ----- resolve target registry（manager 路径，阶段 1 新增）-----
+
+    def register_resolve_target(
+        self,
+        thread_id: str,
+        callback: ResolveCallback,
+    ) -> None:
+        """注册 ``thread_id → resolve callback`` 映射（manager 路径用）。
+
+        同 ``thread_id`` 多次注册：覆盖（多 tab 场景下取最新连接对应的 ``manager.resolve``）。
+        实际上 ``manager.resolve`` 是 per-process 单例方法，多 tab 注册的是同一个 callable，
+        覆盖与否结果一致。
+
+        Args:
+            thread_id: 通道内 thread 标识；同 ``broadcaster.resolve(thread_id, ...)`` 的 key
+            callback: 形如 ``(request_id, decision_dict) -> bool`` 的 callable
+        """
+        if not thread_id:
+            return
+        self._resolve_targets[thread_id] = callback
+
+    def unregister_resolve_target(
+        self,
+        thread_id: str,
+        callback: ResolveCallback,
+    ) -> None:
+        """注销 ``thread_id → callback`` 映射。
+
+        **只在 registry 里就是这个 callback 时才删**——防止被新连接覆盖后又被
+        老连接的 ``unregister`` 误删（与 ``unregister_bridge`` 同款 ``is`` 比较保护）。
+
+        Args:
+            thread_id: 同 ``register_resolve_target`` 时
+            callback: 同 ``register_resolve_target`` 时（用 ``is`` 比较）
+        """
+        if not thread_id:
+            return
+        current = self._resolve_targets.get(thread_id)
+        if current is callback:
+            self._resolve_targets.pop(thread_id, None)
+
     def resolve(
         self,
         thread_id: str,
         request_id: str,
         decision: dict[str, Any],
     ) -> bool:
-        """前端 ``approval.inbox.resolve`` 帧到达时，路由回正确 bridge。
+        """前端 ``approval.inbox.resolve`` 帧到达时，路由回正确 bridge / manager。
+
+        路由优先级（阶段 1 双轨）：
+
+        1. ``_resolve_targets[thread_id]``（manager 路径，generic_chat 通道）
+        2. ``_bridge_registry[thread_id]``（v2-inbox 老路径，claude_code 通道）
 
         Returns:
-            ``True`` 找到 bridge 且成功 set future；``False`` bridge 不存在
-            或 future 已 done（重复 resolve / 超时后）。
+            ``True`` 找到 target 且成功 set future；``False`` 都没找到 / future 已 done
+            （重复 resolve / 超时后）。
         """
+        target = self._resolve_targets.get(thread_id)
+        if target is not None:
+            return target(request_id, decision)
+
         bridge = self._bridge_registry.get(thread_id)
         if bridge is None:
             logger.warning(
-                "inbox.resolve: no bridge for thread_id=%s (already disconnected?)",
+                "inbox.resolve: no target/bridge for thread_id=%s (already disconnected?)",
                 thread_id,
             )
             return False

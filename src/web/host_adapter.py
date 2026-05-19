@@ -89,11 +89,25 @@ class WebHostAdapter(HostAdapter):
         ws: Any,
         *,
         pending_approval_timeout_seconds: float = 60.0,
+        thread_id: str | None = None,
     ) -> None:
+        """构造 WebHostAdapter。
+
+        Args:
+            ws: 当前 WS 连接（duck-typed，含 ``send_json`` / ``close``）。
+            pending_approval_timeout_seconds: 单次审批等待超时（秒）。
+            thread_id: 本 adapter 绑定的 thread ID。阶段 1（smart-approval-manager-v0.5）
+                新增字段，用于 :meth:`close` 时调
+                ``ApprovalManager.cancel_by_thread`` 清该 thread 名下的 manager pending
+                （reviewer 必修 #4：避免用户关 tab 后 manager pending 卡 60s timeout
+                / R10 内存泄漏诱因）。``None`` 时跳过 cancel_by_thread 调用，保持向后
+                兼容（单测里大量 ``WebHostAdapter(_make_ws())`` 不传 thread_id）。
+        """
         self._ws: Any = ws
         self._timeout = float(pending_approval_timeout_seconds)
         self._closed = False
         self._pending_approvals: dict[str, asyncio.Future[ApprovalAction]] = {}
+        self._thread_id: str | None = thread_id
 
     # ------------------------------------------------------------------
     # HostAdapter 接口
@@ -215,6 +229,12 @@ class WebHostAdapter(HostAdapter):
         幂等：多次调用安全。**不**主动 ``ws.close()`` —— WS 生命周期
         由路由层 / FastAPI 管理，避免 adapter 关闭后无法在 evict
         路径里继续推 ``cell.evicted`` 帧。
+
+        阶段 1（smart-approval-manager-v0.5）reviewer 必修 #4 新增：除清自身
+        ``prompt_approval`` pending（老逻辑，本 adapter 内的 future）外，
+        若 adapter 持有 ``thread_id``，还通知 :class:`safety.approval_manager.ApprovalManager`
+        取消该 thread 名下所有 manager 路径的 pending，避免用户关 tab 后 manager pending
+        卡 60s timeout / R10 内存泄漏。``cancel_by_thread`` 失败一律吞掉（非主流程）。
         """
         if self._closed:
             return
@@ -224,6 +244,26 @@ class WebHostAdapter(HostAdapter):
             if not fut.done():
                 fut.set_result(ApprovalAction.REJECT)
         self._pending_approvals.clear()
+
+        # 阶段 1 新增（reviewer 必修 #4）：通知 manager 清该 thread 名下所有 pending。
+        # generic_chat 通道 prompt_fn 走 manager 路径后，pending future 在 manager 侧；
+        # 不在这里 cancel 用户关 tab 时 manager pending 卡 60s 才超时。
+        if self._thread_id:
+            try:
+                from safety.approval_manager import get_approval_manager
+
+                manager = get_approval_manager()
+                cancelled = manager.cancel_by_thread(self._thread_id, reason="cell_evict")
+                if cancelled > 0:
+                    logger.debug(
+                        "WebHostAdapter.close cancelled %d manager pending for thread=%s",
+                        cancelled,
+                        self._thread_id,
+                    )
+            except Exception:
+                logger.exception(
+                    "WebHostAdapter.close: cancel_by_thread failed (non-fatal)",
+                )
 
     # ------------------------------------------------------------------
     # 公开方法（供 ThreadManager / WS 路由层调用）

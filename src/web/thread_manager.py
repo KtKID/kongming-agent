@@ -722,6 +722,9 @@ class ThreadManager:
         adapter = WebHostAdapter(
             ws=fanout,
             pending_approval_timeout_seconds=float(self._cfg.web.pending_approval_timeout_seconds),
+            # 阶段 1 (smart-approval-manager-v0.5)：传 thread_id 让 close() 能调
+            # ApprovalManager.cancel_by_thread 清 manager 路径的 pending（R10 防护）。
+            thread_id=meta.id,
         )
         ws_sink = WSEventSink(fanout)
         # usage-token-v2-bigbang: UsagePersistSink 已删除——v2 manager 是无状态门面，
