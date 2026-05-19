@@ -250,6 +250,57 @@ async def test_close_is_idempotent() -> None:
 
 
 # ---------------------------------------------------------------------------
+# close → ApprovalManager.cancel_by_thread wiring（stage1 reviewer 必修 #4）
+# ---------------------------------------------------------------------------
+
+
+async def test_close_with_thread_id_calls_manager_cancel_by_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """thread_id 传入时，close() 调 manager.cancel_by_thread(thread_id, reason='cell_evict')。
+
+    防止 reviewer 必修 #4 wiring 漂移：用户关 tab → WebHostAdapter.close →
+    ApprovalManager 清该 thread 名下所有 pending（否则卡 60s timeout，R10 内存泄漏诱因）。
+    """
+    from unittest.mock import MagicMock
+
+    manager_spy = MagicMock()
+    manager_spy.cancel_by_thread = MagicMock(return_value=2)  # 假装清掉 2 条 pending
+
+    # 注：源码内是 `from safety.approval_manager import get_approval_manager`（局部 import）
+    import safety.approval_manager as approval_manager_mod
+
+    monkeypatch.setattr(approval_manager_mod, "get_approval_manager", lambda: manager_spy)
+
+    adapter = WebHostAdapter(_make_ws(), thread_id="t-real")
+    await adapter.close()
+
+    manager_spy.cancel_by_thread.assert_called_once_with("t-real", reason="cell_evict")
+
+
+async def test_close_without_thread_id_skips_manager_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """thread_id 未传时（向后兼容老调用），close() 不调 manager.cancel_by_thread。
+
+    避免破坏旧测试 / CLI 装配点 / 任何不需要 inbox 路径的场景。
+    """
+    from unittest.mock import MagicMock
+
+    manager_spy = MagicMock()
+    manager_spy.cancel_by_thread = MagicMock()
+
+    import safety.approval_manager as approval_manager_mod
+
+    monkeypatch.setattr(approval_manager_mod, "get_approval_manager", lambda: manager_spy)
+
+    adapter = WebHostAdapter(_make_ws())  # 不传 thread_id
+    await adapter.close()
+
+    manager_spy.cancel_by_thread.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # attach_ws 重连
 # ---------------------------------------------------------------------------
 
