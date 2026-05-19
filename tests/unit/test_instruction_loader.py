@@ -27,8 +27,13 @@ from context.instruction_loader import InstructionLoader, InstructionSource, ass
 def _run(coro):  # type: ignore[no-untyped-def]
     """在测试中同步运行 async 函数。
 
-    Python 3.11+ ``get_event_loop()`` 在没有 running loop 时会抛 DeprecationWarning
-    并在 CI 严格 warning policy 下转 error，改用官方推荐 ``asyncio.run``。
+    用 ``asyncio.run`` 替代 deprecated 的 ``get_event_loop().run_until_complete``：
+    后者在 Python 3.11+ 下，若当前线程没有 running loop（如前面跑过
+    ``@pytest.mark.asyncio`` 测试关闭了 loop），会抛 RuntimeError。
+    ``asyncio.run`` 始终新建独立 loop，跨测隔离。
+
+    (smart-approval-manager-stage1 加 42 个 async 测后，pytest --picked -n 4
+    分组让 instruction_loader 测试跑在 async 测试之后，pre-push 暴露此 deprecated 问题)
     """
     return asyncio.run(coro)
 
