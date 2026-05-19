@@ -26,6 +26,7 @@ def to_inbox_payload(
     tool_input: dict[str, Any],
     cwd: str,
     arrived_at_ms: int,
+    timeout_ms: int,
     severity: str = "standard",
     auto_approve_at_ms: int | None = None,
     auto_reject_at_ms: int | None = None,
@@ -44,6 +45,10 @@ def to_inbox_payload(
         tool_input: 工具参数原始 dict
         cwd: 触发审批的工作目录
         arrived_at_ms: 到达后端的时间戳（毫秒）
+        timeout_ms: 用户决策超时阈值（毫秒）；与 pending.timeout_ms 一致。
+            前端在 ``autoApproveAtMs`` / ``autoRejectAtMs`` 均为 None（generic_chat
+            阶段 1 场景）时用本字段做 fallback 倒计时；命名采用 camelCase
+            与现有 ``autoApproveAtMs`` / ``autoRejectAtMs`` 风格一致。
         severity: "standard" / "elevated"；映射到 isElevated 布尔
         auto_approve_at_ms: 安全路径倒计时到点 ms；非 claude_code 通道传 None
         auto_reject_at_ms: 危险路径倒计时到点 ms；非 claude_code 通道传 None
@@ -59,6 +64,7 @@ def to_inbox_payload(
         "toolInput": tool_input,
         "autoApproveAtMs": auto_approve_at_ms,
         "autoRejectAtMs": auto_reject_at_ms,
+        "timeoutMs": timeout_ms,
         "blockedByRule": blocked_by_rule,
         "isElevated": severity == "elevated",
         "channel": channel,

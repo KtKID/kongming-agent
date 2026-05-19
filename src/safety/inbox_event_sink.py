@@ -123,6 +123,10 @@ class InboxEventSink:
         异常吞掉：任何步骤抛 → ``logger.exception`` + return（不向上抛）。
         """
         try:
+            # pending.timeout_ms 理论上 manager.request 已填实数（_PendingApproval
+            # 构造时传 actual_timeout_ms）；此处兜底 60_000 防御未来调用方
+            # 直接构造 _PendingApproval 时漏字段，保证前端 timeoutMs 始终是 int。
+            timeout_ms = pending.timeout_ms if pending.timeout_ms is not None else 60_000
             payload = to_inbox_payload(
                 channel=pending.channel,
                 thread_id=pending.thread_id,
@@ -131,6 +135,7 @@ class InboxEventSink:
                 tool_input=pending.tool_input,
                 cwd=pending.cwd,
                 arrived_at_ms=pending.arrived_at_ms,
+                timeout_ms=timeout_ms,
                 severity=pending.severity,
                 auto_approve_at_ms=pending.auto_approve_at_ms,
                 auto_reject_at_ms=pending.auto_reject_at_ms,

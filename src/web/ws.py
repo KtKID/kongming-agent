@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import re
 import time
@@ -44,6 +45,10 @@ from pydantic import ValidationError
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore, resolve_evolution_root
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
+from web.auto_approval.ws_handlers import (
+    handle_auto_approval_query,
+    handle_auto_approval_toggle,
+)
 from web.protocol import (
     ErrorFrame,
     HistoryMessageDTO,
@@ -158,6 +163,38 @@ async def _receive_loop(
         # 1MB 限制（按 UTF-8 字节）
         if len(raw.encode("utf-8")) > MAX_FRAME_BYTES:
             await _send_error_frame(websocket, "internal", "frame too large (>1MB)")
+            continue
+
+        # smart-approval v0.5：auto-approval-toggle / auto-approval-query 走
+        # type 字段（不是 kind），且不在 WSFrameC2S discriminated union 内 ——
+        # 旁路 validate_json，直接拿原 dict 派发到共用 handler。这样既不污染
+        # 协议（命令式 type 字段语义跟流式 kind 不混），也避免 ValidationError
+        # 把 auto-approval 帧识别成"非法帧"。其他帧仍按原 union 校验。
+        peek_type: str | None = None
+        with contextlib.suppress(Exception):
+            preview = json.loads(raw)
+            if isinstance(preview, dict):
+                t = preview.get("type")
+                if isinstance(t, str):
+                    peek_type = t
+        if peek_type in ("auto-approval-toggle", "auto-approval-query"):
+            cell.touch()
+            policy = getattr(websocket.app.state, "auto_approval_policy", None)
+            data: dict[str, Any] = preview
+            if peek_type == "auto-approval-toggle":
+                await handle_auto_approval_toggle(
+                    websocket,
+                    data,
+                    policy,
+                    channel="generic_chat",
+                )
+            else:
+                await handle_auto_approval_query(
+                    websocket,
+                    data,
+                    policy,
+                    channel="generic_chat",
+                )
             continue
 
         # JSON 解析 + discriminated union

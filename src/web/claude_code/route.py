@@ -40,6 +40,11 @@ from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 
 from web._shared.session_manager import SessionManager
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
+from web.auto_approval.ws_handlers import (
+    build_auto_approval_state_msg,
+    handle_auto_approval_query,
+    handle_auto_approval_toggle,
+)
 from web.claude_code.approval import ApprovalBridge
 from web.claude_code.normalizer import ClaudeNormalizer
 from web.claude_code.service import ClaudeCodeService
@@ -268,7 +273,7 @@ async def claude_code_ws(
     if auto_approval_policy is not None and bound_cwd:
         with contextlib.suppress(Exception):
             await websocket.send_json(
-                _build_auto_approval_state_msg(auto_approval_policy, bound_cwd),
+                build_auto_approval_state_msg(auto_approval_policy, bound_cwd),
             )
 
     # 3. 主循环
@@ -435,33 +440,18 @@ async def _dispatch(
         return
 
     # smart-approval-v1: per-cwd toggle 开关 + 回执 state
+    # 真正的 toggle/query/state 构造逻辑迁到 web.auto_approval.ws_handlers，
+    # 让 generic_chat 等其他通道复用。route 这里只负责从 app.state 取 policy
+    # 并透传，保留命令路由分发职责。
     if msg_type == "auto-approval-toggle":
         policy = getattr(websocket.app.state, "auto_approval_policy", None)
-        if policy is None:
-            await _send_error(websocket, "auto_approval_policy not configured")
-            return
-        cwd = data.get("cwd")
-        if not isinstance(cwd, str) or not cwd:
-            await _send_error(websocket, "auto-approval-toggle.cwd required")
-            return
-        enabled = bool(data.get("enabled", False))
-        policy.set_enabled(cwd, enabled)
-        with contextlib.suppress(Exception):
-            await websocket.send_json(_build_auto_approval_state_msg(policy, cwd))
+        await handle_auto_approval_toggle(websocket, data, policy)
         return
 
     if msg_type == "auto-approval-query":
         # 前端按 cwd 主动拉一次 state（切 thread / 重连后用）
         policy = getattr(websocket.app.state, "auto_approval_policy", None)
-        if policy is None:
-            await _send_error(websocket, "auto_approval_policy not configured")
-            return
-        cwd = data.get("cwd")
-        if not isinstance(cwd, str) or not cwd:
-            await _send_error(websocket, "auto-approval-query.cwd required")
-            return
-        with contextlib.suppress(Exception):
-            await websocket.send_json(_build_auto_approval_state_msg(policy, cwd))
+        await handle_auto_approval_query(websocket, data, policy)
         return
 
     await _send_error(websocket, f"unknown command type: {msg_type!r}")
@@ -477,24 +467,6 @@ async def _send_error(websocket: WebSocket, error_message: str) -> None:
                 "error": error_message,
             },
         )
-
-
-def _build_auto_approval_state_msg(policy: Any, cwd: str) -> dict[str, Any]:
-    """构造 ``auto_approval_state`` S2C 消息。
-
-    单一真源：route 任何需要 push state 的位置（连接建立 / toggle 回执 / query 应答）
-    都走这个 helper，避免字段漂移。
-    """
-    cfg = policy.get_config(cwd)
-    effective_timeout = cfg.timeout_ms or policy.rule_set.default_timeout_ms
-    return {
-        "kind": "auto_approval_state",
-        "channel": "claude_code",
-        "cwd": cfg.cwd or cwd,
-        "enabled": cfg.enabled,
-        "timeoutMs": effective_timeout,
-        "ruleOverrides": dict(cfg.rule_overrides),
-    }
 
 
 __all__ = ["router"]

@@ -30,10 +30,13 @@ def _make_pending(
     auto_approve_at_ms: int | None = None,
     auto_reject_at_ms: int | None = None,
     arrived_at_ms: int = 1234,
+    timeout_ms: int | None = 60_000,
 ) -> _PendingApproval:
     """构造 _PendingApproval fixture。
 
     sink 不读 ``future``，所以直接塞 ``MagicMock()`` 兼容 dataclass 字段要求。
+    ``timeout_ms`` 默认 60_000 与 manager.request 默认 actual_timeout_ms 行为一致；
+    测试用例可显式传 None 验证兜底分支。
     """
     return _PendingApproval(
         request_id=request_id,
@@ -49,6 +52,7 @@ def _make_pending(
         auto_reject_at_ms=auto_reject_at_ms,
         future=MagicMock(spec=asyncio.Future),
         arrived_at_ms=arrived_at_ms,
+        timeout_ms=timeout_ms,
     )
 
 
@@ -112,6 +116,40 @@ class TestEmitApprovalRequired:
         assert payload["isElevated"] is True
         assert payload["blockedByRule"] == "Bash(rm:*)"
         assert payload["autoRejectAtMs"] == 30_000
+
+    async def test_payload_timeout_ms_from_pending(self) -> None:
+        """pending.timeout_ms 透传到 broadcaster.emit_add 的 payload.timeoutMs。
+
+        覆盖 smart-approval-generic-chat-autoallow 任务 #1 P0 约束：
+        sink 从 _PendingApproval.timeout_ms 取实际超时值并以 camelCase
+        ``timeoutMs`` 写入 add 帧 payload，与前端 fallback 倒计时契约对齐。
+        """
+        broadcaster = AsyncMock()
+        broadcaster.register_resolve_target = MagicMock()
+        manager = MagicMock(spec=ApprovalManager)
+
+        sink = InboxEventSink(broadcaster=broadcaster, manager=manager)
+        pending = _make_pending(timeout_ms=45_000)
+
+        await sink.emit_approval_required(pending=pending)
+
+        payload = broadcaster.emit_add.call_args.args[0]
+        assert payload["timeoutMs"] == 45_000
+        assert isinstance(payload["timeoutMs"], int)
+
+    async def test_payload_timeout_ms_fallback_when_none(self) -> None:
+        """pending.timeout_ms=None 时 sink 兜底 60_000（防御未来直构 _PendingApproval）。"""
+        broadcaster = AsyncMock()
+        broadcaster.register_resolve_target = MagicMock()
+        manager = MagicMock(spec=ApprovalManager)
+
+        sink = InboxEventSink(broadcaster=broadcaster, manager=manager)
+        pending = _make_pending(timeout_ms=None)
+
+        await sink.emit_approval_required(pending=pending)
+
+        payload = broadcaster.emit_add.call_args.args[0]
+        assert payload["timeoutMs"] == 60_000
 
     async def test_emit_add_exception_swallowed(self) -> None:
         """broadcaster.emit_add 抛 → sink 不向上抛，只 logger.exception。"""

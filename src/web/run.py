@@ -83,6 +83,13 @@ def main() -> int:
             progress.fail(f"create_app failed: {exc}")
             sys.stderr.write(f"create_app failed: {exc}\n")
             return 1
+        # smart-approval-generic-chat-autoallow task #6：把 app 引用回挂给
+        # runtime_factory，让 generic_chat 通道装配时（lazy / per-thread）能从
+        # ``app.state.auto_approval_policy.config_store`` 取**同一份** ConfigStore
+        # 注入 :class:`ApprovalRules`，实现 "用户 UI 一处 toggle 即时生效于所有通道"。
+        # 此处 attr 设置而非 factory 入参修改：ThreadManager 调用签名
+        # ``factory(thread_id, preset_id, adapter, sinks)`` 不可破坏。
+        setattr(runtime_factory, "_app", app)  # noqa: B010
         progress.report("app")
 
         log_level = cfg.logging.level.lower()
@@ -220,17 +227,30 @@ def _make_runtime_factory(cfg: object) -> object:
             _origins_cache[0] = origins
             _scheduler_runtime_factory_cache[0] = _scheduler_runtime_factory
 
-    def _build_manager_and_inbox_sink() -> Any:
-        """构造或获取 ApprovalManager 单例，并幂等注入 InboxEventSink。
+    def _build_manager_and_inbox_sink(*, app: Any = None) -> Any:
+        """构造或获取 ApprovalManager 单例，并幂等注入 InboxEventSink + ConfigReader。
 
         阶段 1 (smart-approval-manager-v0.5)：generic_chat 通道默认走 manager 路径，
         无 feature flag；回滚 = git revert 上面 prompt_fn 装配。
         manager 是 per-process 单例（``get_approval_manager``）；
         InboxEventSink 用 sink 类型判定幂等，多 cell 装配只注入一次。
+
+        task #6（smart-approval-generic-chat-autoallow）：
+        ``ApprovalRules`` 注入 ``app.state.auto_approval_policy.config_store``
+        作为 config_reader——**同一份** :class:`ConfigStore` 实例同时服务
+        claude_code 通道（走 AutoApprovalPolicy 直读）和 generic_chat 通道
+        （走 ApprovalRules.classify 间接读）。用户视角："UI 一处 toggle 管所有通道"。
+
+        Args:
+            app: FastAPI app 实例（lazy；首次装配时 app.state.auto_approval_policy
+                必须已就绪，由 create_app lifespan 装配；缺失时 config_reader=None，
+                fail-safe 降级到「所有 cwd 默认 ask + 60s」行为，不影响主流程）
         """
         broadcaster = get_inbox_broadcaster()
+        policy = getattr(app.state, "auto_approval_policy", None) if app is not None else None
+        config_reader = policy.config_store if policy is not None else None
         manager = get_approval_manager(
-            rules=ApprovalRules(),
+            rules=ApprovalRules(config_reader=config_reader),
             default_timeout_ms=60_000,
         )
         # 幂等：只在首次装配时注入 InboxEventSink；按 sink 类型判定
@@ -290,7 +310,11 @@ def _make_runtime_factory(cfg: object) -> object:
         # 老路径（adapter.prompt_approval 推 per-thread modal）已被 v2-inbox 全局
         # 浮窗替代，prompt_fn 现在通过 manager.request 调度，前端通过
         # /ws/thread-status 收 approval.inbox.add 帧。
-        manager = _build_manager_and_inbox_sink()
+        #
+        # task #6：app 引用从 _make_runtime_factory 调用方（main()）通过 attr 回挂
+        # （``setattr(runtime_factory, "_app", app)``）；首次 factory 调用时已就绪。
+        # 注入 ConfigStore 让 generic_chat 通道能查 cwd 自动通过配置。
+        manager = _build_manager_and_inbox_sink(app=getattr(factory, "_app", None))
         prompt_fn = (
             make_manager_prompt_fn(manager, thread_id)
             if real_cfg.approval.mode == "interactive"

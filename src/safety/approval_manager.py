@@ -144,7 +144,11 @@ class ApprovalManager:
         _default_timeout_ms: 未指定超时时的默认值
         _pending: ``request_id`` → ``_PendingApproval`` 映射
         _timeout_tasks: ``request_id`` → ``asyncio.Task`` 映射（resolve/cancel 时取消）
-        _lock: ``_pending`` / ``_timeout_tasks`` / ``_event_sinks`` 互斥锁
+        _auto_approve_tasks: ``request_id`` → ``asyncio.Task`` 映射；阶段 1.5
+            generic_chat per-cwd 自动通过倒计时 task（rule_dec.auto_approve_at_ms
+            非 None 时创建；resolve / cancel / timeout 三退出路径都要 cancel + pop）
+        _lock: ``_pending`` / ``_timeout_tasks`` / ``_auto_approve_tasks`` /
+            ``_event_sinks`` 互斥锁
     """
 
     def __init__(
@@ -167,6 +171,7 @@ class ApprovalManager:
         self._default_timeout_ms = default_timeout_ms
         self._pending: dict[str, _PendingApproval] = {}
         self._timeout_tasks: dict[str, asyncio.Task[None]] = {}
+        self._auto_approve_tasks: dict[str, asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
 
     def register_event_sink(self, sink: ApprovalEventSink) -> None:
@@ -186,6 +191,15 @@ class ApprovalManager:
     def timeout_task_count(self) -> int:
         """当前 timeout task 数（应等于 pending_count；用于 R10 内存泄漏监控）。"""
         return len(self._timeout_tasks)
+
+    @property
+    def auto_approve_task_count(self) -> int:
+        """当前 auto-approve task 数（阶段 1.5；R10 内存泄漏监控用）。
+
+        非 generic_chat / cwd config disabled 路径不创建 task，恒为 0；
+        启用自动通过且 pending 未结束的 request 才计数。
+        """
+        return len(self._auto_approve_tasks)
 
     async def request(
         self,
@@ -262,11 +276,28 @@ class ApprovalManager:
         )
 
         # R9：lock 内只做 dict 增删 + sinks 快照拷贝；不 await
+        # asyncio.create_task 本身是同步调用（仅 schedule，不 await），允许在 lock 内
+        #
+        # 阶段 1.5 task #6 设计要点（auto-approve 与 timeout 生命周期对齐）：
+        #
+        # - cwd 未启用自动通过（``auto_approve_at_ms is None``）→ 走原 fail-closed
+        #   timeout 路径（_handle_timeout 到点 reject）
+        # - cwd 启用自动通过 → 主路径是 _handle_auto_approve 到点 approve；
+        #   timeout task 仍启动但 delay = auto_approve delay + 5s grace，作为
+        #   **兜底保险**（防 auto-approve task 异常 crash 导致 pending 永挂）。
+        #   正常路径 auto-approve 先触发 → cleanup cancel timeout task → 不会 race。
         async with self._lock:
             self._pending[request_id] = pending
-            timeout_task = asyncio.create_task(
-                self._handle_timeout(request_id, actual_timeout_ms / 1000.0)
-            )
+            timeout_delay = actual_timeout_ms / 1000.0
+            if rule_dec.auto_approve_at_ms is not None:
+                now_ms = int(time.time() * 1000)
+                auto_delay = max(0.0, (rule_dec.auto_approve_at_ms - now_ms) / 1000.0)
+                auto_task = asyncio.create_task(self._handle_auto_approve(request_id, auto_delay))
+                self._auto_approve_tasks[request_id] = auto_task
+                # timeout 兜底必须晚于 auto-approve（避免 race 输给 timeout）；
+                # 加 5s grace 给 auto-approve task 充足执行窗口
+                timeout_delay = max(timeout_delay, auto_delay + 5.0)
+            timeout_task = asyncio.create_task(self._handle_timeout(request_id, timeout_delay))
             self._timeout_tasks[request_id] = timeout_task
             sinks_snapshot = list(self._event_sinks)
 
@@ -284,6 +315,8 @@ class ApprovalManager:
                 reason = "timeout"
             elif source == "manager_cancel":
                 reason = "cancelled"
+            elif source == "rule_auto_allow":
+                reason = "auto_allowed"
             else:
                 reason = "user_decided"
             await self._cleanup_pending(request_id, fan_out_reason=reason)
@@ -414,8 +447,48 @@ class ApprovalManager:
             )
         )
 
+    async def _handle_auto_approve(self, request_id: str, delay_seconds: float) -> None:
+        """auto-approve task 主体：等 N 秒后把 pending future set_result(approved)。
+
+        阶段 1.5 generic_chat per-cwd 自动通过倒计时；与 :meth:`_handle_timeout`
+        对称：sleep → 查 pending → set_result。差异：
+
+        - outcome 是 ``"approved"``（自动通过）而非 ``"rejected"``（fail-closed）
+        - ``metadata.source`` 是 ``"rule_auto_allow"``（让 request() 反推 reason 为
+          ``"auto_allowed"``，给 EventSink 区分自动通过路径 / 触发 audit 写入）
+
+        被 cancel 时（``task.cancel()`` 由 :meth:`_cleanup_pending` 三退出路径触发）
+        静默退出，不动 future。
+
+        **race fail-safe**：sleep 醒来后必查 ``pending.future.done()``——如果用户
+        在最后一刻手动 resolve / cancel / 上一秒 timeout 触发，future 已经被 set，
+        本方法直接 return 不再 set_result（避免 ``InvalidStateError``）。
+
+        Args:
+            request_id: pending 的 ID
+            delay_seconds: 等待秒数（``rule_dec.auto_approve_at_ms - now_ms``）
+        """
+        try:
+            await asyncio.sleep(delay_seconds)
+        except asyncio.CancelledError:
+            return
+        pending = self._pending.get(request_id)
+        if pending is None or pending.future.done():
+            return
+        pending.future.set_result(
+            ApprovalDecision(
+                outcome="approved",
+                metadata={
+                    "source": "rule_auto_allow",
+                    "reason": "auto_allow",
+                    "matched_rule": pending.matched_rule,
+                },
+            )
+        )
+
     async def _cleanup_pending(self, request_id: str, *, fan_out_reason: str | None) -> None:
-        """三退出路径统一清理（R10）：pop ``_pending`` + cancel 并 pop ``_timeout_tasks``。
+        """三退出路径统一清理（R10）：pop ``_pending`` + cancel 并 pop
+        ``_timeout_tasks`` / ``_auto_approve_tasks``。
 
         Args:
             request_id: pending ID
@@ -425,9 +498,12 @@ class ApprovalManager:
         async with self._lock:
             self._pending.pop(request_id, None)
             timeout_task = self._timeout_tasks.pop(request_id, None)
+            auto_approve_task = self._auto_approve_tasks.pop(request_id, None)
             sinks_snapshot = list(self._event_sinks)
         if timeout_task and not timeout_task.done():
             timeout_task.cancel()
+        if auto_approve_task and not auto_approve_task.done():
+            auto_approve_task.cancel()
         if fan_out_reason is not None:
             await asyncio.gather(
                 *(

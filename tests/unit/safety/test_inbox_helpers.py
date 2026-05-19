@@ -22,6 +22,7 @@ class TestToInboxPayload:
             tool_input={"command": "ls"},
             cwd="/tmp",
             arrived_at_ms=1234,
+            timeout_ms=60_000,
         )
         assert payload["channel"] == "generic_chat"
         assert payload["threadId"] == "t1"
@@ -46,6 +47,7 @@ class TestToInboxPayload:
             tool_input={"command": "rm -rf x"},
             cwd="/usr/foo",
             arrived_at_ms=5000,
+            timeout_ms=120_000,
             severity="elevated",
             auto_reject_at_ms=35_000,
             blocked_by_rule="Bash(rm:*)",
@@ -65,6 +67,7 @@ class TestToInboxPayload:
             tool_input={},
             cwd="/",
             arrived_at_ms=0,
+            timeout_ms=60_000,
             severity="elevated",
         )
         std = to_inbox_payload(
@@ -75,10 +78,31 @@ class TestToInboxPayload:
             tool_input={},
             cwd="/",
             arrived_at_ms=0,
+            timeout_ms=60_000,
             severity="standard",
         )
         assert elev["isElevated"] is True
         assert std["isElevated"] is False
+
+    def test_timeout_ms_passthrough(self) -> None:
+        """timeout_ms 入参原样写入 payload.timeoutMs 字段（前端 fallback 用）。
+
+        覆盖 smart-approval-generic-chat-autoallow 任务 #1 P0 约束：
+        前端在 autoApprove/autoReject 均 None 时，按 arrivedAtMs + timeoutMs
+        本地推算到点。
+        """
+        payload = to_inbox_payload(
+            channel="generic_chat",
+            thread_id="t",
+            request_id="r",
+            tool_name="Bash",
+            tool_input={"command": "ls"},
+            cwd="/tmp",
+            arrived_at_ms=1000,
+            timeout_ms=45_000,
+        )
+        assert payload["timeoutMs"] == 45_000
+        assert isinstance(payload["timeoutMs"], int)
 
 
 class TestEmitRemoveSafe:

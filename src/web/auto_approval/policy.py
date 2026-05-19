@@ -72,6 +72,20 @@ class AutoApprovalPolicy:
     def rule_set(self) -> RuleSet:
         return self._rule_set
 
+    @property
+    def config_store(self) -> ConfigStore:
+        """暴露 per-cwd 配置仓库（smart-approval-generic-chat-autoallow task #6）。
+
+        让 generic_chat 通道的 :class:`safety.approval_rules.ApprovalRules` 复用
+        **同一份** :class:`ConfigStore` 实例——保证 "用户在 UI 一处 toggle 即时
+        生效于所有通道（claude_code + generic_chat）"，而不是各通道各持一份
+        store / 读不同盘文件。装配点见 ``src/web/run.py``。
+
+        通过 property 暴露而非直接 ``_config_store`` 私有访问：保留封装边界 +
+        可测试性（测试 ``policy.config_store is store_instance``）。
+        """
+        return self._config_store
+
     def is_enabled_for(self, cwd: str) -> bool:
         """该 cwd 是否启用了智能审批（仅 enabled 开关，不判断规则）。"""
         cfg = self._config_store.get_or_default(cwd)
