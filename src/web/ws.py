@@ -242,6 +242,32 @@ async def _dispatch_frame(
         )
         # 把 task 暂存到 cell（便于 evict 时 cancel）
         cell.current_run_task = task
+
+        # interrupt-run-v0.1：done_callback 在 task 完成时（正常 / 异常 / cancel）
+        # 把 cell.current_run_task 清成 None，避免下次收到 InterruptFrame 时
+        # 看到一个已 done 的 task 误判为"正在跑"。callback 只在 task 仍是当前
+        # 引用时才清，防止 race（新 run 刚启动覆盖了 current_run_task）。
+        def _clear_run_task(
+            t: asyncio.Task[Any], *, _cell: Any = cell, _task: asyncio.Task[Any] = task
+        ) -> None:
+            if getattr(_cell, "current_run_task", None) is _task:
+                _cell.current_run_task = None
+
+        task.add_done_callback(_clear_run_task)
+    elif kind == "interrupt":
+        # interrupt-run-v0.1：浏览器点 Stop。检查当前 run 是否真在跑：
+        # - None / 已 done：推 system notice "no_active_run"，不 cancel
+        # - 否则 task.cancel() → runner 顶层 except → emit run.cancelled
+        #   → WSEventSink fanout 转 RunInterruptedFrame（多 tab 自动同步）
+        current_task: asyncio.Task[Any] | None = getattr(cell, "current_run_task", None)
+        if current_task is None or current_task.done():
+            await _send_no_active_run_notice(websocket, thread_id)
+        else:
+            current_task.cancel()
+            logger.info(
+                "interrupt requested for thread=%s; cancelled current_run_task",
+                thread_id,
+            )
     elif kind == "approval.ack":
         # v0.1.6 三态：传递字符串字面值给 thread_manager，由它转 ApprovalAction
         # 枚举（thread_manager 在装配层，可 import core.contracts；ws 是 app shell
@@ -452,6 +478,28 @@ async def _send_error_frame(
         await websocket.send_json(frame.model_dump())
     except Exception:
         logger.debug("send error frame failed; ignoring")
+
+
+async def _send_no_active_run_notice(websocket: WebSocket, thread_id: str) -> None:
+    """收到 InterruptFrame 但当前没 active run 时，推一条 :class:`SystemNoticeFrame`。
+
+    interrupt-run-v0.1：用户连点 Stop / Stop 时 race 上 run 自然完成 等场景。
+    不报错（不是协议违规），只通知前端"没有可中断的 run"，前端可隐藏 Stop
+    按钮 + 显示 toast。
+    """
+    try:
+        frame = SystemNoticeFrame(
+            timestamp_ms=_now_ms(),
+            notice_key="no_active_run",
+            source="ws.interrupt",
+            status="info",
+            title="无活动任务",
+            message="当前 thread 没有正在跑的 run，无需打断。",
+            icon="info",
+        )
+        await websocket.send_json(frame.model_dump())
+    except Exception:
+        logger.debug("send no_active_run notice failed; ignoring")
 
 
 __all__ = [

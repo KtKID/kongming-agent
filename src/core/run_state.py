@@ -62,6 +62,13 @@ class RunState:
         self.last_error = error
 
     def mark_cancelled(self) -> None:
+        """标记 run 被 cancel（典型 = 用户主动 interrupt）。
+
+        interrupt-run-v0.1 起，runner 顶层 ``except asyncio.CancelledError``
+        会调本方法。``"cancelled"`` 与 ``"failed"`` 的区别：
+        ``failed`` 由代码异常触发并伴随 ``last_error``；``cancelled`` 是
+        协作式取消（外部 task.cancel()），可能不带 error。
+        """
         self.status = "cancelled"
 
     def advance_turn(self) -> int:

@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Iterable, Sequence
@@ -141,7 +142,15 @@ class Runner:
             :class:`Result`：运行结束的统一结果。
 
         Raises:
-            不直接抛异常；所有异常都收口到 Result.error 与 status=failed。
+            不直接抛异常；所有异常都收口到 :class:`Result`：
+
+            - :class:`AgentError` / 意外 :class:`Exception` → ``status="failed"``，
+              ``error`` 字段承载具体异常
+            - :class:`asyncio.CancelledError` → ``status="cancelled"``（v0.1
+              interrupt-run-v0.1 起），不向外 re-raise；上游（SessionBridge /
+              CommandService / Web ws.py）只需要按 ``Result.status`` 分支即可，
+              不需要自己 ``except CancelledError``。
+
             这是为了让 host / cli 只关心 Result 即可。
         """
 
@@ -192,6 +201,40 @@ class Runner:
                 final_message=final_message,
                 turn_count=state.turn,
                 metadata={"usage": accumulated_usage} if accumulated_usage else {},
+            )
+        except asyncio.CancelledError:
+            # interrupt-run-v0.1：外部 task.cancel()（典型 = 用户点 Stop）。
+            # 不向外 re-raise，统一收口到 Result(status="cancelled")，与
+            # AgentError / Exception 分支语义对齐（runner 不抛，host 只看 Result）。
+            #
+            # 此前 _execute_tool_calls 已对当前未配对 tool_use 合成占位 tool_result，
+            # 保证 session jsonl 里 tool_use ↔ tool_result 一一对应（Anthropic 协议
+            # 要求）；这里只负责状态机收尾 + emit 事件。
+            state.mark_cancelled()
+            # state.metadata 是 dict[str, str]；空字符串视为"未在 tool 阶段"。
+            _cancelled_id_raw = state.metadata.get("cancelled_tool_call_id", "")
+            cancelled_tool_call_id: str | None = _cancelled_id_raw if _cancelled_id_raw else None
+            cancel_meta: dict[str, object] = {
+                "cancelled_at_turn": state.turn,
+                "cancelled_tool_call_id": cancelled_tool_call_id,
+                "cancel_reason": "user_interrupt",
+            }
+            await self._emit(
+                Event(
+                    kind="run.cancelled",
+                    run_id=state.run_id,
+                    turn=state.turn,
+                    payload=cancel_meta,
+                )
+            )
+            result = Result(
+                run_id=state.run_id,
+                session_id=session.session_id,
+                status="cancelled",
+                final_message=None,
+                turn_count=state.turn,
+                error=None,
+                metadata=cancel_meta,
             )
         except AgentError as exc:
             state.mark_failed(exc)
@@ -712,144 +755,88 @@ class Runner:
         tool_calls: Iterable[ToolCall],
         tools_by_name: dict[str, Tool],
     ) -> None:
-        for call in tool_calls:
-            await self._run_lifecycle_before_tool(state, call)
-            await self._emit(
-                Event(
-                    kind="tool.call.start",
-                    run_id=state.run_id,
-                    turn=state.turn,
-                    payload={
-                        "call_id": call.call_id,
-                        "tool_name": call.tool_name,
-                    },
-                )
-            )
+        """串行执行 assistant 消息携带的所有 tool_call，把结果回填到 session。
 
-            tool = tools_by_name.get(call.tool_name)
-            if tool is None:
-                error_message = f"tool {call.tool_name!r} not registered"
-                result_message = self._build_tool_error_message(call, error_message)
-                await session.append(result_message)
-                state.record(result_message)
-                await self._emit(
-                    Event(
-                        kind="tool.call.end",
-                        run_id=state.run_id,
-                        turn=state.turn,
-                        payload={
-                            "call_id": call.call_id,
-                            "tool_name": call.tool_name,
-                            "ok": False,
-                            "reason": "not_registered",
-                            "content": "",
-                            "data": None,
-                            "error_message": error_message,
-                        },
+        **interrupt-run-v0.1**：每个 call 用单独 try 包裹，捕获
+        :class:`asyncio.CancelledError` 后：
+
+        1. 给当前正在跑的 call 写一条 ``[interrupted]`` tool_result 占位
+           （``is_error=True``、``interrupted=True`` metadata）；
+        2. 给同一 assistant 消息里**尚未起跑**的剩余 call 也补占位 —— Anthropic
+           协议要求 "同一条 assistant 消息所有 tool_use 必须对应 tool_result"，
+           少一条下次 LLM 调用会被服务端 400 拒掉；
+        3. 把当前被打断的 call_id 写入 ``state.metadata["cancelled_tool_call_id"]``
+           供 runner 顶层 except 读出来塞进 Result.metadata；
+        4. 重新 raise 让 runner 顶层接 → ``Result(status="cancelled")``。
+
+        其它异常（AgentError / 普通 Exception）由 ``_safe_tool_execute`` 包成
+        :class:`ToolError`，不在本方法 except 范围；走原 ``tool_err`` 分支。
+        """
+        # 物化为 list：cancel 时需要知道 "剩余多少个 call 没起跑"。
+        calls_list = list(tool_calls)
+        for idx, call in enumerate(calls_list):
+            try:
+                await self._execute_single_tool_call(
+                    state=state,
+                    session=session,
+                    approval=approval,
+                    call=call,
+                    tools_by_name=tools_by_name,
+                )
+            except asyncio.CancelledError:
+                # 1. 当前 call 占位（覆盖本 call 的任何中间 await 被打断的情形）
+                await self._finalize_unpaired_call(
+                    state=state,
+                    session=session,
+                    call=call,
+                    reason="user_interrupt",
+                )
+                state.metadata["cancelled_tool_call_id"] = call.call_id
+                # 2. 剩余未起跑的 call 也占位
+                for remaining in calls_list[idx + 1 :]:
+                    await self._finalize_unpaired_call(
+                        state=state,
+                        session=session,
+                        call=remaining,
+                        reason="user_interrupt_pending",
                     )
-                )
-                await self._run_lifecycle_after_tool(state, call, result_message)
-                continue
+                # 3. 透传给 runner 顶层 except CancelledError
+                raise
 
-            # 审批：runner 不判 allow/deny，只咨询 ApprovalProvider
-            approval_request = ApprovalRequest(
+    async def _execute_single_tool_call(
+        self,
+        *,
+        state: RunState,
+        session: Session,
+        approval: ApprovalProvider,
+        call: ToolCall,
+        tools_by_name: dict[str, Tool],
+    ) -> None:
+        """执行单个 tool_call。从原 ``_execute_tool_calls`` 循环体抽出。
+
+        把"单 call 全流程"独立成方法的目的：让外层 for 循环只需 try 一次就能
+        统一处理 cancel；同时 lifecycle hook / approval / 执行 / 回填 的顺序
+        与原版完全一致，没有行为变化。
+        """
+        await self._run_lifecycle_before_tool(state, call)
+        await self._emit(
+            Event(
+                kind="tool.call.start",
                 run_id=state.run_id,
-                session_id=state.session_id,
                 turn=state.turn,
-                call_id=call.call_id,
-                tool_name=call.tool_name,
-                arguments=dict(call.arguments),
+                payload={
+                    "call_id": call.call_id,
+                    "tool_name": call.tool_name,
+                },
             )
-            await self._emit(
-                Event(
-                    kind="approval.request",
-                    run_id=state.run_id,
-                    turn=state.turn,
-                    payload={"call_id": call.call_id, "tool_name": call.tool_name},
-                )
-            )
-            previous_status = state.status
-            state.mark_waiting_approval()
-            decision = await approval.decide(approval_request)
-            state.status = previous_status  # 恢复到之前的 running 状态
-            await self._emit(
-                Event(
-                    kind="approval.decision",
-                    run_id=state.run_id,
-                    turn=state.turn,
-                    payload={
-                        "call_id": call.call_id,
-                        "tool_name": call.tool_name,
-                        "outcome": decision.outcome,
-                        "reason": decision.reason,
-                    },
-                )
-            )
+        )
 
-            if not decision.approved:
-                reason = decision.reason or decision.outcome
-                error_message = f"approval {decision.outcome}: {reason}"
-                rejected_msg = self._build_tool_error_message(
-                    call,
-                    error_message,
-                    metadata={"approval_outcome": decision.outcome},
-                )
-                await session.append(rejected_msg)
-                state.record(rejected_msg)
-                await self._emit(
-                    Event(
-                        kind="tool.call.end",
-                        run_id=state.run_id,
-                        turn=state.turn,
-                        payload={
-                            "call_id": call.call_id,
-                            "tool_name": call.tool_name,
-                            "ok": False,
-                            "reason": f"approval_{decision.outcome}",
-                            "content": "",
-                            "data": None,
-                            "error_message": error_message,
-                        },
-                    )
-                )
-                await self._run_lifecycle_after_tool(state, call, rejected_msg)
-                # 审批拒绝不直接终止 run；把"被拒绝"这条事实喂回模型，
-                # 由模型决定下一步。这样 safety 的策略层可以通过文本说明 / reason
-                # 让模型调整计划，而不需要立刻结束 run。
-                continue
-
-            # 真正执行工具
-            ctx = ToolContext(
-                run_id=state.run_id,
-                session_id=state.session_id,
-                turn=state.turn,
-                call_id=call.call_id,
-            )
-            tool_result, tool_err = await self._safe_tool_execute(tool, call, ctx)
-            if tool_err is not None:
-                result_message = self._build_tool_error_message(
-                    call,
-                    tool_err.message,
-                    metadata={"error_type": type(tool_err).__name__},
-                )
-            else:
-                assert tool_result is not None  # for type checker
-                result_message = self._build_tool_result_message(call, tool_result)
-
+        tool = tools_by_name.get(call.tool_name)
+        if tool is None:
+            error_message = f"tool {call.tool_name!r} not registered"
+            result_message = self._build_tool_error_message(call, error_message)
             await session.append(result_message)
             state.record(result_message)
-            # tool.call.end payload 携带 ToolResult 4 字段（content / data / ok /
-            # error_message），让下游 sink（trace / web）拿到工具产出。
-            # tool_err 路径走异常分支，content="" + error_message=异常消息。
-            if tool_err is not None:
-                payload_content = ""
-                payload_data: dict[str, Any] | None = None
-                payload_error_message: str | None = tool_err.message
-            else:
-                assert tool_result is not None
-                payload_content = tool_result.content
-                payload_data = tool_result.data
-                payload_error_message = tool_result.error_message
             await self._emit(
                 Event(
                     kind="tool.call.end",
@@ -858,14 +845,180 @@ class Runner:
                     payload={
                         "call_id": call.call_id,
                         "tool_name": call.tool_name,
-                        "ok": tool_err is None and (tool_result is None or tool_result.ok),
-                        "content": payload_content,
-                        "data": payload_data,
-                        "error_message": payload_error_message,
+                        "ok": False,
+                        "reason": "not_registered",
+                        "content": "",
+                        "data": None,
+                        "error_message": error_message,
                     },
                 )
             )
             await self._run_lifecycle_after_tool(state, call, result_message)
+            return
+
+        # 审批：runner 不判 allow/deny，只咨询 ApprovalProvider
+        approval_request = ApprovalRequest(
+            run_id=state.run_id,
+            session_id=state.session_id,
+            turn=state.turn,
+            call_id=call.call_id,
+            tool_name=call.tool_name,
+            arguments=dict(call.arguments),
+        )
+        await self._emit(
+            Event(
+                kind="approval.request",
+                run_id=state.run_id,
+                turn=state.turn,
+                payload={"call_id": call.call_id, "tool_name": call.tool_name},
+            )
+        )
+        previous_status = state.status
+        state.mark_waiting_approval()
+        decision = await approval.decide(approval_request)
+        state.status = previous_status  # 恢复到之前的 running 状态
+        await self._emit(
+            Event(
+                kind="approval.decision",
+                run_id=state.run_id,
+                turn=state.turn,
+                payload={
+                    "call_id": call.call_id,
+                    "tool_name": call.tool_name,
+                    "outcome": decision.outcome,
+                    "reason": decision.reason,
+                },
+            )
+        )
+
+        if not decision.approved:
+            reason = decision.reason or decision.outcome
+            error_message = f"approval {decision.outcome}: {reason}"
+            rejected_msg = self._build_tool_error_message(
+                call,
+                error_message,
+                metadata={"approval_outcome": decision.outcome},
+            )
+            await session.append(rejected_msg)
+            state.record(rejected_msg)
+            await self._emit(
+                Event(
+                    kind="tool.call.end",
+                    run_id=state.run_id,
+                    turn=state.turn,
+                    payload={
+                        "call_id": call.call_id,
+                        "tool_name": call.tool_name,
+                        "ok": False,
+                        "reason": f"approval_{decision.outcome}",
+                        "content": "",
+                        "data": None,
+                        "error_message": error_message,
+                    },
+                )
+            )
+            await self._run_lifecycle_after_tool(state, call, rejected_msg)
+            # 审批拒绝不直接终止 run；把"被拒绝"这条事实喂回模型，
+            # 由模型决定下一步。这样 safety 的策略层可以通过文本说明 / reason
+            # 让模型调整计划，而不需要立刻结束 run。
+            return
+
+        # 真正执行工具
+        ctx = ToolContext(
+            run_id=state.run_id,
+            session_id=state.session_id,
+            turn=state.turn,
+            call_id=call.call_id,
+        )
+        tool_result, tool_err = await self._safe_tool_execute(tool, call, ctx)
+        if tool_err is not None:
+            result_message = self._build_tool_error_message(
+                call,
+                tool_err.message,
+                metadata={"error_type": type(tool_err).__name__},
+            )
+        else:
+            assert tool_result is not None  # for type checker
+            result_message = self._build_tool_result_message(call, tool_result)
+
+        await session.append(result_message)
+        state.record(result_message)
+        # tool.call.end payload 携带 ToolResult 4 字段（content / data / ok /
+        # error_message），让下游 sink（trace / web）拿到工具产出。
+        # tool_err 路径走异常分支，content="" + error_message=异常消息。
+        if tool_err is not None:
+            payload_content = ""
+            payload_data: dict[str, Any] | None = None
+            payload_error_message: str | None = tool_err.message
+        else:
+            assert tool_result is not None
+            payload_content = tool_result.content
+            payload_data = tool_result.data
+            payload_error_message = tool_result.error_message
+        await self._emit(
+            Event(
+                kind="tool.call.end",
+                run_id=state.run_id,
+                turn=state.turn,
+                payload={
+                    "call_id": call.call_id,
+                    "tool_name": call.tool_name,
+                    "ok": tool_err is None and (tool_result is None or tool_result.ok),
+                    "content": payload_content,
+                    "data": payload_data,
+                    "error_message": payload_error_message,
+                },
+            )
+        )
+        await self._run_lifecycle_after_tool(state, call, result_message)
+
+    async def _finalize_unpaired_call(
+        self,
+        *,
+        state: RunState,
+        session: Session,
+        call: ToolCall,
+        reason: str,
+    ) -> None:
+        """给一个未配对的 tool_use 写占位 tool_result + emit tool.call.end。
+
+        触发场景（interrupt-run-v0.1）：
+
+        - ``reason="user_interrupt"``：当前正在跑的 call 被 cancel
+        - ``reason="user_interrupt_pending"``：同 assistant 消息里**未起跑**的
+          剩余 call —— Anthropic / OpenAI 协议要求所有 tool_use 必须有对应
+          tool_result，不补占位下次 LLM 调用会被服务端 400 拒掉
+
+        占位消息 metadata：``{"ok": False, "interrupted": True,
+        "interrupt_reason": reason, "error_message": "..."}``，content 为
+        JSON 字符串 ``{"error": "[interrupted by user: ...]"}``，
+        :meth:`_build_tool_error_message` 复用，与 approval 拒绝等 error 路径
+        一致，HistoryCompactor 不会把它过滤掉（``role=="tool"`` 无条件保留）。
+        """
+        error_text = f"[interrupted by user: {reason}]"
+        result_message = self._build_tool_error_message(
+            call,
+            error_text,
+            metadata={"interrupted": True, "interrupt_reason": reason},
+        )
+        await session.append(result_message)
+        state.record(result_message)
+        await self._emit(
+            Event(
+                kind="tool.call.end",
+                run_id=state.run_id,
+                turn=state.turn,
+                payload={
+                    "call_id": call.call_id,
+                    "tool_name": call.tool_name,
+                    "ok": False,
+                    "reason": "interrupted",
+                    "content": "",
+                    "data": None,
+                    "error_message": error_text,
+                },
+            )
+        )
 
     async def _safe_tool_execute(
         self,

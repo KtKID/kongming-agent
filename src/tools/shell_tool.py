@@ -148,6 +148,28 @@ class ShellTool(BaseBuiltinTool):
             raise TimeoutError(
                 f"shell command timed out after {timeout} seconds: {command!r}"
             ) from exc
+        except asyncio.CancelledError:
+            # interrupt-run-v0.1：外部 task.cancel()（用户 interrupt）。
+            # ``communicate()`` 抛 CancelledError 后子进程仍在跑，pipe 句柄要
+            # 等 process 对象 GC 才释放 —— 这会留孤儿进程（rm -rf / 长 build
+            # 类命令尤其危险）。这里强制 kill + wait 把 PID 收回，再 raise
+            # 让 runner._execute_tool_calls 的 except 接住做占位。
+            #
+            # 不走 terminate（SIGTERM）/ grace 等待：interrupt 是用户主动且
+            # 即时的操作，越快收回越好；terminate 等同于 timeout 的 "再给两秒"
+            # 友好策略，cancel 路径不需要。
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    # 进程刚好自然退出，无所谓
+                    pass
+                try:
+                    await process.wait()
+                except Exception:
+                    # process.wait 失败无所谓，主目标是把 CancelledError 透传
+                    pass
+            raise
 
         stdout_text, stdout_truncated = _clip(stdout_bytes, self._max_stream_bytes)
         stderr_text, stderr_truncated = _clip(stderr_bytes, self._max_stream_bytes)

@@ -35,9 +35,11 @@ from web.protocol.ws_frames import (
     CellEvictedFrame,
     ContentDeltaFrame,
     ErrorFrame,
+    InterruptFrame,
     PingFrame,
     PongFrame,
     ReasoningDeltaFrame,
+    RunInterruptedFrame,
     SystemNoticeFrame,
     ThreadHistoryFrame,
     ToolCallEndFrame,
@@ -65,6 +67,19 @@ def _make_approval_ack() -> ApprovalAckFrame:
 
 def _make_ping() -> PingFrame:
     return PingFrame()
+
+
+def _make_interrupt() -> InterruptFrame:
+    return InterruptFrame(run_id="run-thread-abc-1")
+
+
+def _make_run_interrupted() -> RunInterruptedFrame:
+    return RunInterruptedFrame(
+        timestamp_ms=1_700_000_000_099,
+        run_id="run-thread-abc-1",
+        cancelled_at_turn=2,
+        cancelled_tool_call_id="call-x",
+    )
 
 
 def _make_thread_history() -> ThreadHistoryFrame:
@@ -290,6 +305,7 @@ WS_FRAME_FACTORIES = [
     pytest.param(_make_user_input, id="user_input_frame"),
     pytest.param(_make_approval_ack, id="approval_ack_frame"),
     pytest.param(_make_ping, id="ping_frame"),
+    pytest.param(_make_interrupt, id="interrupt_frame"),
     pytest.param(_make_thread_history, id="thread_history_frame"),
     pytest.param(_make_assistant_final, id="assistant_final_frame"),
     pytest.param(_make_content_delta, id="content_delta_frame"),
@@ -305,6 +321,7 @@ WS_FRAME_FACTORIES = [
     pytest.param(_make_pong, id="pong_frame"),
     pytest.param(_make_system_notice, id="system_notice_frame"),
     pytest.param(_make_cell_evicted, id="cell_evicted_frame"),
+    pytest.param(_make_run_interrupted, id="run_interrupted_frame"),
 ]
 
 
@@ -360,6 +377,12 @@ C2S_DISPATCH_CASES = [
         id="approval_ack_dispatch",
     ),
     pytest.param({"kind": "ping"}, PingFrame, id="ping_dispatch"),
+    pytest.param({"kind": "interrupt"}, InterruptFrame, id="interrupt_dispatch"),
+    pytest.param(
+        {"kind": "interrupt", "run_id": "run-abc-1"},
+        InterruptFrame,
+        id="interrupt_with_run_id_dispatch",
+    ),
 ]
 
 

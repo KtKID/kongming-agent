@@ -182,6 +182,39 @@ async def test_prompt_approval_cancel_via_close_returns_reject() -> None:
     await close_task
 
 
+async def test_prompt_approval_external_task_cancel_propagates() -> None:
+    """interrupt 路径（外部 task.cancel()）必须把 CancelledError 透传给 runner，
+    **不能**翻译成 REJECT，否则 runner 会以为"用户拒绝了 1 个工具"继续跑下一轮，
+    与 interrupt 语义冲突。
+
+    场景：runner 在 await prompt_approval(...) 阻塞时，外部（如 ws.py 收到
+    InterruptFrame）调 ``task.cancel()``。此时 future 未 done，wait_for
+    抛 CancelledError，本测试验证它**不**被吞成 REJECT。
+    """
+    ws = _make_ws()
+    adapter = WebHostAdapter(ws, pending_approval_timeout_seconds=5.0)
+    request = _make_request("call-external-cancel")
+
+    async def _runner_call() -> ApprovalAction:
+        return await adapter.prompt_approval(request)
+
+    task = asyncio.create_task(_runner_call())
+    # 让 prompt_approval 走到 wait_for（注册 pending future + 推 ws）
+    await asyncio.sleep(0.05)
+    assert adapter.pending_approval_count == 1
+
+    # 外部 cancel（模拟 ws.py 收到 InterruptFrame → cell.current_run_task.cancel()）
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # finally 块仍要清掉 pending 字典（避免泄漏）
+    assert adapter.pending_approval_count == 0
+    # adapter 不应被 cancel 标 closed（cancel 不等于断连）
+    assert adapter.closed is False
+
+
 async def test_prompt_approval_when_already_closed_returns_reject() -> None:
     ws = _make_ws()
     adapter = WebHostAdapter(ws)

@@ -161,7 +161,7 @@ class WebHostAdapter(HostAdapter):
         - 超时（``cfg.web.pending_approval_timeout_seconds``）→ 返回
           ``ApprovalAction.REJECT`` 视为拒绝
         - cell evict / adapter close → :meth:`close` 把 future
-          set_result(REJECT) → 返回 ``ApprovalAction.REJECT``
+          ``set_result(REJECT)`` → 返回 ``ApprovalAction.REJECT``
 
         ``mark_action_aware`` 装饰器告诉 :class:`tools.approval.InteractiveApproval`
         本回调返回 :class:`ApprovalAction` 而非旧 ``bool``，从而把
@@ -171,6 +171,13 @@ class WebHostAdapter(HostAdapter):
         在 ``self._closed`` 时直接返回 REJECT，避免把请求推到已断连接。
         重复 ``call_id`` 抛 ``RuntimeError`` —— call_id 由 runner 生成，
         理论上唯一；冲突意味着上游有逻辑漏洞，不该静默吞。
+
+        **interrupt 语义（v0.1 interrupt-run-v0.1）**：``close()`` 不会让
+        future 抛 ``CancelledError``（走 ``set_result(REJECT)``），因此本方法
+        ``except asyncio.CancelledError`` 的唯一触发来源是**外部 task.cancel()**
+        —— 也就是用户主动 interrupt 路径。此时把 ``CancelledError`` 透传给
+        上游（runner 顶层 except）走 ``Result(status="interrupted")`` 收尾，
+        而不是翻译成 REJECT 让 runner 误以为"用户拒绝了"继续跑下一轮。
         """
         if self._closed:
             return ApprovalAction.REJECT
@@ -211,8 +218,12 @@ class WebHostAdapter(HostAdapter):
             )
             return ApprovalAction.REJECT
         except asyncio.CancelledError:
-            # cell evict 时 close() 主动 cancel；当作拒绝处理
-            return ApprovalAction.REJECT
+            # close() 走 set_result(REJECT) 不会触发这里；唯一来源 = 外部
+            # task.cancel()（interrupt 路径）。把 CancelledError 透传给上游
+            # runner 顶层 except，由 runner 走 Result(status="interrupted") 收尾。
+            # 不能在这里翻译成 REJECT，否则 runner 会以为"用户拒绝了 1 个工具"
+            # 继续跑下一轮，与 interrupt 语义冲突。
+            raise
         finally:
             self._pending_approvals.pop(request.call_id, None)
 

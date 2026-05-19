@@ -119,9 +119,11 @@ from web.protocol.ws_frames import (
     CellEvictedFrame,
     ContentDeltaFrame,
     ErrorFrame,
+    InterruptFrame,
     PingFrame,
     PongFrame,
     ReasoningDeltaFrame,
+    RunInterruptedFrame,
     SystemNoticeFrame,
     ThreadHistoryFrame,
     ToolCallEndFrame,
@@ -144,6 +146,7 @@ __all__: list[str] = [
     "HistoryMessageRole",
     # WS 帧（C2S）
     "ApprovalAckFrame",
+    "InterruptFrame",
     "PingFrame",
     "UserInputFrame",
     # WS 帧（S2C）
@@ -155,6 +158,7 @@ __all__: list[str] = [
     "ErrorFrame",
     "PongFrame",
     "ReasoningDeltaFrame",
+    "RunInterruptedFrame",
     "SystemNoticeFrame",
     "ThreadHistoryFrame",
     "ToolCallEndFrame",

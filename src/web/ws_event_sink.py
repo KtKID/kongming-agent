@@ -38,6 +38,7 @@ from web.protocol import (
     ErrorCode,
     ErrorFrame,
     ReasoningDeltaFrame,
+    RunInterruptedFrame,
     ToolCallEndFrame,
     ToolCallStartFrame,
     TurnEndFrame,
@@ -310,6 +311,21 @@ class WSEventSink:
                 kind=kind,
                 payload=payload,
                 run_id=run_id,
+                timestamp_ms=ts,
+            )
+
+        # ----- interrupt-run-v0.1：run 被用户打断 -----
+        # runner 顶层 ``except asyncio.CancelledError`` emit ``run.cancelled``
+        # 后 fanout 到这里 → 转 :class:`RunInterruptedFrame` 推给 thread 名下
+        # 所有 attach 的 ws（A tab 点 Stop → B tab 自动收到）。
+        if kind == "run.cancelled":
+            cancelled_id_raw = payload.get("cancelled_tool_call_id")
+            cancelled_id: str | None = str(cancelled_id_raw) if cancelled_id_raw else None
+            return RunInterruptedFrame(
+                run_id=run_id,
+                cancelled_at_turn=int(payload.get("cancelled_at_turn", turn) or turn),
+                cancelled_tool_call_id=cancelled_id,
+                cancel_reason=str(payload.get("cancel_reason", "user_interrupt")),
                 timestamp_ms=ts,
             )
 

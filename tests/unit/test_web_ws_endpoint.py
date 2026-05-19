@@ -34,6 +34,10 @@ class FakeBridge:
         self.run_once_calls: list[tuple[str, str | None]] = []
         # claude-image-paste-e2e #20：记录 attachments 透传（旧测试不断言，新测试会查）
         self.last_attachments: list[dict[str, Any]] | None = None
+        # interrupt-run-v0.1：测 cancel 行为时让 run_once 永远 await，模拟
+        # 长跑的 turn；默认 False 保持老测试快速完成
+        self.hang_forever: bool = False
+        self.hang_cancelled: bool = False
 
     async def run_once(
         self,
@@ -44,6 +48,14 @@ class FakeBridge:
     ) -> None:
         self.run_once_calls.append((text, reasoning_effort))
         self.last_attachments = attachments
+        if self.hang_forever:
+            import asyncio
+
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.hang_cancelled = True
+                raise
 
 
 class FakeAdapter:
@@ -311,6 +323,12 @@ def test_ws_disconnect_detaches_current_socket_only(tmp_path: Path) -> None:
 
 
 def test_ws_user_input_spawns_background_run_task(tmp_path: Path) -> None:
+    """user.input 帧 → 异步触发 bridge.run_once。
+
+    interrupt-run-v0.1：原断言 ``cell.current_run_task is not None`` 现在
+    会因 ``add_done_callback`` 在 FakeBridge.run_once 立即返回后自动清成
+    None；改为断言 ``bridge.run_once_calls`` 收到调用（行为目的）。
+    """
     tm = WSFakeTM()
     client = _login(tmp_path, tm)
     try:
@@ -333,9 +351,9 @@ def test_ws_user_input_spawns_background_run_task(tmp_path: Path) -> None:
 
         cell = tm.get_cell(THREAD_ID)
         assert cell is not None
-        # 注意：bridge.run_once 是异步任务；可能在 with 退出后才完成
-        # 至少确保 task 被创建（current_run_task 不为 None）
-        assert cell.current_run_task is not None
+        # bridge.run_once 被异步调过（说明 task 被创建并跑过）
+        assert len(cell.bridge.run_once_calls) == 1
+        assert cell.bridge.run_once_calls[0][0] == "hello"
     finally:
         client.__exit__(None, None, None)
 
@@ -422,5 +440,107 @@ def test_ws_unknown_kind_rejected(tmp_path: Path) -> None:
             ws.send_json({"kind": "nonexistent.kind"})
             err = ws.receive_json()
             assert err["kind"] == "error"
+    finally:
+        client.__exit__(None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# interrupt-run-v0.1：InterruptFrame 处理
+# ---------------------------------------------------------------------------
+
+
+def test_ws_interrupt_with_no_active_run_emits_system_notice(tmp_path: Path) -> None:
+    """收到 InterruptFrame 但 cell.current_run_task is None → 推 SystemNoticeFrame。"""
+    tm = WSFakeTM()
+    client = _login(tmp_path, tm)
+    try:
+        with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
+            _ = ws.receive_json()  # history
+            # 不发 user.input，直接发 interrupt（cell.current_run_task is None）
+            ws.send_json({"kind": "interrupt"})
+            notice = ws.receive_json()
+            assert notice["kind"] == "system.notice"
+            assert notice["notice_key"] == "no_active_run"
+            assert notice["source"] == "ws.interrupt"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_ws_interrupt_cancels_active_run_task(tmp_path: Path) -> None:
+    """收到 InterruptFrame 时 cell.current_run_task 存在且未 done → 应被 cancel。
+
+    用 ``FakeBridge.hang_forever=True`` 让 run_once 永远 await，模拟长 turn；
+    interrupt 后 ``hang_cancelled`` 应被置位（验证 cancel 链路真的打到 bridge）。
+    """
+    import time
+
+    tm = WSFakeTM()
+    # 预先把对应 cell 的 bridge 设为 hang 模式
+    cell = FakeCell(THREAD_ID)
+    cell.bridge.hang_forever = True
+    tm._cells[THREAD_ID] = cell
+
+    client = _login(tmp_path, tm)
+    try:
+        with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
+            _ = ws.receive_json()  # history
+
+            ws.send_json(
+                {
+                    "kind": "user.input",
+                    "text": "hello",
+                    "request_id": "req-1",
+                }
+            )
+            time.sleep(0.1)
+
+            # cell.current_run_task 应仍 active（hang 着）
+            assert cell.current_run_task is not None
+            assert not cell.current_run_task.done()
+
+            # 发 interrupt
+            ws.send_json({"kind": "interrupt"})
+            time.sleep(0.2)
+
+            # bridge 应收到 CancelledError 透传
+            assert cell.bridge.hang_cancelled, (
+                "FakeBridge.run_once 没收到 CancelledError，说明 ws.py 的 "
+                "interrupt 分支没 task.cancel() 或链路断了"
+            )
+            # done_callback 应已清掉 current_run_task
+            assert cell.current_run_task is None
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_ws_user_input_done_callback_clears_current_run_task(tmp_path: Path) -> None:
+    """task.add_done_callback 应该在 run_once 完成后把 cell.current_run_task 清成 None。
+
+    防止后续 InterruptFrame 看到一个已 done 的 task 误判"正在跑"。
+    """
+    tm = WSFakeTM()
+    client = _login(tmp_path, tm)
+    try:
+        with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
+            _ = ws.receive_json()  # history
+            ws.send_json(
+                {
+                    "kind": "user.input",
+                    "text": "hello",
+                    "request_id": "req-1",
+                }
+            )
+            import time
+
+            # FakeBridge.run_once 立即返回，done_callback 应该已触发
+            time.sleep(0.2)
+
+        cell = tm.get_cell(THREAD_ID)
+        assert cell is not None
+        # done_callback 把 current_run_task 清成 None
+        assert cell.current_run_task is None, (
+            "current_run_task 应被 add_done_callback 清成 None，否则下次 "
+            "InterruptFrame 会误判为正在跑"
+        )
     finally:
         client.__exit__(None, None, None)

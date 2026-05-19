@@ -63,6 +63,29 @@ class PingFrame(_C2SFrameBase):
     ts: int | None = None  # 客户端发送时的 epoch ms，用于 RTT 计算
 
 
+class InterruptFrame(_C2SFrameBase):
+    """浏览器请求打断当前 thread 上正在进行的 run（interrupt-run-v0.1）。
+
+    UX 入口：前端在 ``cell.status in ("running","awaiting_approval")`` 时显示
+    "Stop" 按钮，点击后发本帧。
+
+    后端 ws 路由层（``src/web/ws.py``）收到本帧 → 检查
+    ``cell.current_run_task``：
+    - ``None`` / 已 ``done()`` → 推 ``SystemNoticeFrame`` 提示 "no active run"
+    - 否则调 ``task.cancel()`` → runner 顶层 except 收尾 → emit ``run.cancelled``
+      event → WSEventSink fanout 转 :class:`RunInterruptedFrame` 给所有 attach
+      的 ws（多 tab 自动同步）
+
+    ``run_id`` 可选：``None`` = 打断当前正在跑的 run（最常见）；不为 None 时
+    可以让后端校验"我要打断的就是这个 run"，避免 race（用户点 stop 那一刹那
+    旧 run 刚好完成、新 run 又起来了）。本期前端不强制带，后端拿到也仅做
+    诊断日志，不依赖它做正确性。
+    """
+
+    kind: Literal["interrupt"] = "interrupt"
+    run_id: str | None = None
+
+
 class UserInputFrame(_C2SFrameBase):
     """浏览器提交一轮用户输入；后端按 ``request_id`` 关联回执。
 
@@ -148,6 +171,28 @@ class ErrorFrame(_S2CFrameBase):
     error_code: ErrorCode
     message: str
     turn: int | None = None
+
+
+class RunInterruptedFrame(_S2CFrameBase):
+    """run 被用户 interrupt 后的收尾通知（interrupt-run-v0.1）。
+
+    触发路径：runner 顶层 ``except asyncio.CancelledError`` → emit
+    ``run.cancelled`` event → WSEventSink fanout 转本帧给该 thread 名下
+    所有 attach 的 ws（A tab 点 Stop → B tab 也收到）。
+
+    后续 runner 还会 emit 一条 ``run.end``（status="cancelled"），上层
+    cell.status 切回 idle；前端可隐藏 Stop 按钮、显示"已中断"提示。
+
+    payload 字段语义见 :class:`core.contracts.EventKind` ``run.cancelled``
+    段；``interrupted_tool_call_id`` 为 None 表示打断在 LLM / approval 阶段
+    （pending tool 已被 runner 写占位 tool_result）。
+    """
+
+    kind: Literal["run.interrupted"] = "run.interrupted"
+    run_id: str
+    cancelled_at_turn: int
+    cancelled_tool_call_id: str | None = None
+    cancel_reason: str = "user_interrupt"
 
 
 class PongFrame(_S2CFrameBase):
@@ -295,7 +340,7 @@ class UsageFrame(_S2CFrameBase):
 
 
 WSFrameC2S = Annotated[
-    UserInputFrame | ApprovalAckFrame | PingFrame,
+    UserInputFrame | ApprovalAckFrame | PingFrame | InterruptFrame,
     Field(discriminator="kind"),
 ]
 """C2S 帧 union（discriminated by ``kind``）。"""
@@ -316,7 +361,8 @@ WSFrameS2C = Annotated[
     | TurnEndFrame
     | PongFrame
     | SystemNoticeFrame
-    | CellEvictedFrame,
+    | CellEvictedFrame
+    | RunInterruptedFrame,
     Field(discriminator="kind"),
 ]
 """S2C 帧 union（discriminated by ``kind``）。"""
@@ -339,9 +385,11 @@ __all__: list[str] = [
     "CellEvictedFrame",
     "ContentDeltaFrame",
     "ErrorFrame",
+    "InterruptFrame",
     "PingFrame",
     "PongFrame",
     "ReasoningDeltaFrame",
+    "RunInterruptedFrame",
     "SystemNoticeFrame",
     "ThreadHistoryFrame",
     "ToolCallEndFrame",

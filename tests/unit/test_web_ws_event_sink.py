@@ -791,3 +791,57 @@ async def test_run_id_falls_back_to_empty_string_when_event_run_id_is_none() -> 
     )
     sent = ws.send_json.await_args.args[0]
     assert sent["run_id"] == ""
+
+
+# ---------------------------------------------------------------------------
+# interrupt-run-v0.1：run.cancelled → RunInterruptedFrame
+# ---------------------------------------------------------------------------
+
+
+async def test_emit_run_cancelled_translates_to_run_interrupted_frame() -> None:
+    """runner emit ``run.cancelled`` event → 推 :class:`RunInterruptedFrame` 给浏览器。
+
+    payload 字段（cancelled_at_turn / cancelled_tool_call_id / cancel_reason）
+    全部透传到 frame；run_id 走通用 ``event.run_id`` 路径。
+    """
+    ws = _make_ws()
+    sink = WSEventSink(ws)
+    await sink.emit(
+        Event(
+            kind="run.cancelled",
+            run_id="run-thread-aaa-5",
+            turn=3,
+            payload={
+                "cancelled_at_turn": 3,
+                "cancelled_tool_call_id": "call-xyz",
+                "cancel_reason": "user_interrupt",
+            },
+        )
+    )
+    sent = ws.send_json.await_args.args[0]
+    assert sent["kind"] == "run.interrupted"
+    assert sent["run_id"] == "run-thread-aaa-5"
+    assert sent["cancelled_at_turn"] == 3
+    assert sent["cancelled_tool_call_id"] == "call-xyz"
+    assert sent["cancel_reason"] == "user_interrupt"
+
+
+async def test_emit_run_cancelled_with_no_tool_call_id_keeps_none() -> None:
+    """打断在 LLM / approval 阶段时 cancelled_tool_call_id 为 None，需正确传成 null。"""
+    ws = _make_ws()
+    sink = WSEventSink(ws)
+    await sink.emit(
+        Event(
+            kind="run.cancelled",
+            run_id="run-x-1",
+            turn=2,
+            payload={
+                "cancelled_at_turn": 2,
+                "cancelled_tool_call_id": None,
+                "cancel_reason": "user_interrupt",
+            },
+        )
+    )
+    sent = ws.send_json.await_args.args[0]
+    assert sent["kind"] == "run.interrupted"
+    assert sent["cancelled_tool_call_id"] is None
