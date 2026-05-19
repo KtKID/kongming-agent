@@ -1,3 +1,39 @@
+"""
+司天异步文件存储层——管理 observations / state / report 全部 IO。
+
+Role:
+    所有磁盘读写的唯一入口。asyncio.Lock 保证并发安全；
+    原子写（tempfile + os.replace）防止半写损坏。
+    管理 observations.jsonl / runtime_state.json / workspace_state.json /
+    latest_suggestions.json / latest_summary.md / work_items/ / scans/ /
+    config.snapshot.json / sitian_report.json / last_observations_hash 等
+    主要产物文件。
+
+Owns:
+    - 目录布局（ensure_layout）
+    - 原子写 / JSONL 追加 / scan 快照
+    - 文件命名约定（scan_id / work_item 文件名编解码）
+
+Does not own:
+    - 数据模型定义（models.py）
+    - 业务逻辑（扫描/归并/分析）
+    - 配置解析（config.py）
+
+Called by:
+    - service.py（读写 runtime_state / observations / workspace_state）
+    - suggestions.py（写 suggestions / summary）
+    - analyzer.py（写 sitian_report / observations_hash）
+
+Key outputs:
+    - SiTianRecordsStore 类（所有 IO 方法）
+    - resolve_sitian_root()（根目录解析）
+    - decode_work_item_filename()（文件名→work_item ID）
+
+Change risks:
+    - 文件名/路径约定变化会导致存量数据不兼容
+    - 并发写入依赖 asyncio.Lock，跨进程需文件锁
+"""
+
 from __future__ import annotations
 
 import asyncio

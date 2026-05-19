@@ -1,3 +1,33 @@
+"""
+司天建议引擎——observations 归并为 work_items，生成建议/阻塞/风险/摘要。
+
+Role:
+    接收扫描产出的 observations 列表，按 project + thread 归并为 work_items，
+    计算 workspace 级建议（suggestions）、阻塞项（blockers）、风险（risks），
+    并渲染 markdown 摘要。
+
+Owns:
+    - work_item 归并逻辑（claude_workspace per-project 展开；其他 1:1）
+    - suggestion / blocker / risk 分类规则
+    - latest_summary.md 格式
+
+Does not own:
+    - 扫描（scanners.py）
+    - LLM 分析（analyzer.py）
+    - 持久化（store.py）
+
+Called by:
+    - service.py（扫描后调用 SiTianMaterializeState）
+
+Key outputs:
+    - SiTianMaterializeState（归并 + 建议 + 阻塞 + 风险）
+    - SiTianBuildSummaryMarkdown（markdown 摘要文本）
+
+Change risks:
+    - 归并逻辑变化会影响 work_item 数量和去重
+    - suggestion 分类规则变化会影响前端展示
+"""
+
 from __future__ import annotations
 
 from collections import defaultdict

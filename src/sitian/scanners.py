@@ -1,3 +1,34 @@
+"""
+司天扫描引擎——按 source kind 分派 4 种扫描实现。
+
+Role:
+    接收 SiTianSourceConfig，按 kind（generic_channel / claude_project /
+    codex_project / claude_workspace）分派到对应扫描函数，
+    返回 SiTianScanBatch（含 SiTianObservation 列表 + 耗时审计）。
+
+Owns:
+    - 4 种 kind 的扫描逻辑（文件 rglob / claude session 关联 / workspace 展开）
+    - include/exclude 过滤、mtime 窗口、top N 裁剪
+    - scan 耗时审计字段（duration_ms）
+
+Does not own:
+    - 全局项目列表（global_scanner.py）
+    - session 消息读取（session_reader.py）
+    - 持久化（store.py）
+    - 定时调度（service.py）
+
+Called by:
+    - service.py（SiTianRunOnce 编排层）
+
+Key outputs:
+    - SiTianScanSource(source_config) → SiTianScanBatch
+    - SiTianObservation（kind / path / data / observed_at）
+
+Change risks:
+    - kind 枚举变化需同步 config.py 的 SiTianSourceConfig.kind
+    - observation 字段变化会影响 suggestions 归并和 analyzer 输入
+"""
+
 from __future__ import annotations
 
 import fnmatch

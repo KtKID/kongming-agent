@@ -1,10 +1,29 @@
-"""通用 jsonl 会话反向读取工具。
+"""
+司天 session 逆序读取器——从 jsonl 尾部流式取最近消息，纯 stdlib。
 
-用于司天扫描器从 Claude / Codex 会话 jsonl 末尾取最近若干条 user / assistant 消息，
-作为 prompt 注入或上下文摘要的素材。jsonl 可能上百 MB，必须反向分块读取，
-不允许全量 load。
+Role:
+    从 Claude / Codex 会话 jsonl 末尾取最近若干条 user / assistant 消息文本，
+    供扫描器填充 recent_activity。jsonl 可能上百 MB，必须反向分块读取，
+    不允许全量 load。
 
-只用 stdlib，不 import 任何 sitian sibling 模块，保持工具函数纯粹。
+Owns:
+    - _ReverseLineIterator（从文件尾部逐块读，O(1) 内存）
+    - read_claude_session_tail()（取最近 N 条消息文本）
+
+Does not own:
+    - 观察记录生成（scanners.py）
+    - session 列表发现（global_scanner.py）
+    - 任何持久化操作
+
+Called by:
+    - scanners.py（claude_project 扫描时读取最近活动消息）
+
+Key outputs:
+    - read_claude_session_tail(path, max_chars) → list[str]
+
+Change risks:
+    - jsonl 行格式变化会破坏消息提取
+    - 零外部依赖约束：不能引入 sitian 兄弟模块
 """
 
 from __future__ import annotations

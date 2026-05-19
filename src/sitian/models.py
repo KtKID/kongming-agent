@@ -1,3 +1,36 @@
+"""
+司天运行时数据模型——11 个 frozen dataclass，零外部依赖。
+
+Role:
+    定义扫描观察、运行时状态、工作项、建议、报告等全部运行时数据结构。
+    所有模型都是纯数据容器（frozen dataclass），含 to_dict / from_dict 序列化。
+
+Owns:
+    - 11 个 frozen dataclass 的字段定义与不变量校验
+    - to_dict / from_dict / empty 等序列化方法
+
+Does not own:
+    - 配置校验（在 config.py）
+    - 持久化 IO（在 store.py）
+    - 业务计算逻辑（在 scanners / suggestions / analyzer）
+
+Called by:
+    - sitian 包内几乎所有其他模块（作为数据交换格式）
+
+Key outputs:
+    - SiTianObservation     —— 单次扫描观察记录
+    - SiTianSourceRuntimeState —— 每个 source 的运行时状态（next_run_at 等）
+    - SiTianWorkItem        —— 归并后的工作项
+    - SiTianWorkspaceState  —— 工作区全局状态（建议/阻塞/风险）
+    - SiTianAlert           —— analyzer 产出的告警（V2 schema）
+    - SiTianProjectSnapshot —— analyzer 产出的项目快照
+    - SiTianReport          —— analyzer 最终报告
+
+Change risks:
+    - 字段增删会影响 store.py 序列化/反序列化和前端展示
+    - frozen=True 保证不可变，但构造点分散，加必填字段时需逐一补齐
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

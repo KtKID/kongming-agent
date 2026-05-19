@@ -1,9 +1,33 @@
-"""sitian 专用全局扫描器。
+"""
+司天全局扫描器——独立于 web scanner，纯 stdlib 实现。
 
-独立于 web scanner：web scanner 是 worktree 注册视角（只看已登记项目），
-sitian 是全局观察视角（扫描所有最近活跃的项目）。两者语义不同，不共用。
+Role:
+    全局扫描 ~/.claude/projects 和 ~/.codex/sessions 目录结构，
+    列出所有最近活跃的项目和 session 摘要。
+    独立于 web scanner：web 是 worktree 注册视角（只看已登记项目），
+    sitian 是全局观察视角（扫描所有项目）。两者语义不同，不共用。
 
-只依赖 stdlib，不 import web 包。
+Owns:
+    - Claude / Codex 项目目录扫描逻辑
+    - session 索引解析（title / mtime / cwd 提取）
+    - 项目排序（按 mtime desc）
+
+Does not own:
+    - session 消息内容读取（session_reader.py）
+    - 观察记录生成（scanners.py）
+    - 配置（config.py）
+
+Called by:
+    - scanners.py（claude_workspace / claude_project / codex_project 扫描）
+
+Key outputs:
+    - list_claude_projects_global() → list[SiTianProjectInfo]
+    - list_codex_projects_global() → list[SiTianCodexProjectInfo]
+    - SiTianSessionInfo / SiTianCodexSessionInfo（session 摘要）
+
+Change risks:
+    - ~/.claude/projects 目录结构变化会破坏项目发现
+    - 零外部依赖约束：不能引入 pydantic / httpx 等
 """
 
 from __future__ import annotations

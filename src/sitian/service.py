@@ -1,3 +1,34 @@
+"""
+司天编排层——串联扫描 → 建议 → 分析的全链路。
+
+Role:
+    顶层编排器，对外暴露三个入口函数：
+    SiTianRunOnce（单轮扫描全链路）、SiTianRunLoop（循环模式）、
+    SiTianReadState（只读状态查询）。
+
+Owns:
+    - runtime_state 读写与 interval 调度逻辑
+    - scan → materialize → suggestions → (可选) LLM analysis 的调用顺序
+    - 错误处理与 runtime_state 回退
+
+Does not own:
+    - 扫描细节（scanners.py）
+    - 持久化细节（store.py）
+    - LLM prompt 构造（analyzer.py）
+    - CLI 入口（cli.py）
+
+Called by:
+    - cli.py（run-once / loop / state 子命令）
+
+Key outputs:
+    - SiTianRunResult（status / observations_count / suggestions_count / error）
+    - 副作用：写 observations / runtime_state / workspace_state / report 到磁盘
+
+Change risks:
+    - 编排顺序变化会影响全链路输出
+    - interval 逻辑变化会影响循环模式的触发频率
+"""
+
 from __future__ import annotations
 
 import asyncio

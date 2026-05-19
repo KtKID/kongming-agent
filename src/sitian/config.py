@@ -1,18 +1,35 @@
-"""SiTian 配置模型。
+"""
+司天配置模型——pydantic 校验，住在 sitian 包内而非 config_loader。
 
-把 ``SiTianConfig`` / ``SiTianSourceConfig`` 放在 ``sitian`` 包内，
-让 ``config_loader.models`` 不再传递性依赖 ``core``——避免 web 应用层
-通过 ``config_loader`` 触达 core 触发架构合约失败
-（``web app shell must not import core``）。
+Role:
+    定义 SiTianConfig / SiTianSourceConfig / SiTianAnalyzerConfig 等 pydantic 模型，
+    供 YAML 加载和 CLI 参数校验。刻意放在 sitian 包内而非 config_loader，
+    切断 ``web → config_loader → core`` 传递依赖。
 
-设计原则：
-- core 只放跨模块共享协议（Session / Tool / ApprovalProvider 等），
-  业务配置模型属于业务模块自己的事；
-- SiTianConfig 仅被 ``config_loader.models`` 和 ``sitian.*`` 使用，
-  住在 sitian 包里语义最清；
-- 运行时状态模型 ``SiTianSourceRuntimeState`` 是 ``sitian.models`` 里的
-  frozen dataclass，跟这里的配置 schema 不同（一个是配置入参，
-  一个是运行时持久化数据），不要混淆。
+Owns:
+    - source kind 枚举（generic_channel / claude_project / codex_project / claude_workspace）
+    - output_subdir 路径验证
+    - analyzer 配置（interests / prompt / LLM 参数）
+    - scanner 配置（include / exclude / mtime 窗口）
+
+Does not own:
+    - 运行时状态模型（models.py 的 frozen dataclass）
+    - 配置加载/解析（config_loader 或 cli.py）
+    - 扫描逻辑（scanners.py）
+
+Called by:
+    - sitian 内几乎所有模块（作为配置入参）
+    - config_loader.models（类型引用）
+    - cli.py（构造默认配置）
+
+Key outputs:
+    - SiTianConfig（顶层配置）
+    - SiTianSourceConfig（单个 source 配置）
+    - SiTianScannerConfig / SiTianAnalyzerConfig（子配置）
+
+Change risks:
+    - 字段增删需同步 YAML 配置文件和 config_loader 引用
+    - kind 枚举变化需同步 scanners.py 分派逻辑
 """
 
 from __future__ import annotations

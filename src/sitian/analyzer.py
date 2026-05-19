@@ -1,16 +1,36 @@
-"""司天 LLM 分析层 V2。
+"""
+司天 LLM 分析层 V2——observations → LLM prompt → SiTianReport。
 
-V2 schema：按 alert + session 维度产出问题清单，topAlerts 排序后供前端行动队列展示。
-项目级 narrative 不再杂糅多 session 问题，问题独立成 alert。
+Role:
+    接收扫描产出的 observations，调用 LLM 生成结构化报告（SiTianReport）。
+    V2 schema 按 alert + session 维度产出问题清单，topAlerts 排序后供前端行动队列展示。
+    核心流程 7 步：提取 observations → 脚本算 status → 构造 prompt →
+    调 LLM → 规范化 alert → 排序 → 组装 report。
 
-核心流程：
-1. 提取 project + thread observations（按 cwd 关联）
-2. 脚本算 statusByRule + sessionStats（确定性，不交给 LLM）
-3. 构造 LLM input（按 session 展开 work_item，含消息正文）
-4. 调 LLM，解析 JSON
-5. 规范化 alert（生成 alertId / dedupe_key / dispatch 占位）
-6. topAlerts 三级排序（priority → severity → recency）
-7. 组装 SiTianReport 返回
+Owns:
+    - LLM prompt 模板（system + user prompt 构造）
+    - alert 规范化逻辑（alertId / dedupe_key / priority / severity）
+    - topAlerts 三级排序（priority → severity → recency）
+    - observations hash 增量判断
+
+Does not own:
+    - session 原始数据读取（session_reader.py）
+    - 报告落盘（store.py）
+    - Web 展示
+    - 定时调度（service.py）
+
+Called by:
+    - service.py（_run_llm_analysis）
+
+Key outputs:
+    - sitian_analyze() → SiTianReport
+    - report_to_markdown() → str
+    - compute_observations_hash() → str
+
+Change risks:
+    - prompt 改动会影响报告稳定性和 LLM 调用成本
+    - SiTianReport / SiTianAlert 字段变化会影响 store.py 和 Web 前端
+    - 跨包引用 core.contracts（LLMProvider）—— analyzer 是 sitian 内唯一依赖 core 的模块
 """
 
 from __future__ import annotations

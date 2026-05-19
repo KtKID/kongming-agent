@@ -1,3 +1,30 @@
+"""
+司天命令行入口——run-once / loop / state 三个子命令。
+
+Role:
+    click 命令组，把 CLI 参数翻译为 service 层调用。
+    支持 --config / --root-dir 覆盖默认配置路径和产物目录。
+
+Owns:
+    - CLI 参数解析与校验
+    - 输出格式化（JSON / 表格 / markdown）
+    - 异步事件循环管理
+
+Does not own:
+    - 业务逻辑（service.py）
+    - 持久化（store.py）
+    - 扫描（scanners.py）
+
+Called by:
+    - ``python -m sitian.cli`` 或 ``./sitian.sh`` 封装脚本
+
+Key outputs:
+    - 终端输出（扫描结果 / 状态查询 / 循环日志）
+
+Change risks:
+    - 子命令名/参数变化会影响 sitian.sh 脚本和用户习惯
+"""
+
 from __future__ import annotations
 
 import asyncio
