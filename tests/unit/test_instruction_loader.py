@@ -25,8 +25,12 @@ from context.instruction_loader import InstructionLoader, InstructionSource, ass
 
 
 def _run(coro):  # type: ignore[no-untyped-def]
-    """在测试中同步运行 async 函数。"""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """在测试中同步运行 async 函数。
+
+    Python 3.11+ ``get_event_loop()`` 在没有 running loop 时会抛 DeprecationWarning
+    并在 CI 严格 warning policy 下转 error，改用官方推荐 ``asyncio.run``。
+    """
+    return asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------
