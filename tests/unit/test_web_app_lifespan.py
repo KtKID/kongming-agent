@@ -145,8 +145,14 @@ def _seed_password(home: Path, password: str = "test-password") -> None:
     (web_dir / "password.hash").write_text(h, encoding="utf-8")
 
 
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
 def test_lifespan_startup_calls_start(tmp_path: Path) -> None:
-    """启动 app 时 thread_manager.start() 被调。"""
+    """启动 app 时 thread_manager.start() 被调。
+
+    CI 上 TestClient 退出时 FastAPI/asyncio 内部 socket+event loop 释放有时滞，
+    pytest strict warning policy 会把 unclosed-resource warning 转 error。
+    单测试级 filterwarnings 忽略此类资源警告，断言 ``tm.start_called`` 仍正常生效。
+    """
     cfg = _make_cfg()
     tm = FakeThreadManager()
     _seed_password(tmp_path)
