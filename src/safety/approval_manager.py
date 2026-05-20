@@ -545,7 +545,10 @@ def get_approval_manager(
     global _singleton
     if _singleton is None:
         if rules is None:
-            rules = ApprovalRules(default_timeout_ms=default_timeout_ms)
+            # approval-rules-unified：ApprovalRules 不再持 default_timeout_ms，
+            # 走 fail-closed 默认 60s（policy=None 时安全网）。manager 自己的
+            # default_timeout_ms 仍按入参生效。
+            rules = ApprovalRules()
         _singleton = ApprovalManager(
             rules=rules,
             event_sinks=event_sinks,
