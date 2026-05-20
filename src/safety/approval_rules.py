@@ -1,23 +1,22 @@
-"""审批策略层容器（阶段 1 空骨架 + 阶段 1.5 generic_chat per-cwd 自动通过注入）。
+"""审批策略层容器（approval-rules-unified：generic_chat 复用统一 AutoApprovalPolicy）。
 
-manager 调 `classify(channel, thread_id, cwd, tool_name, tool_input)` 拿初步决策。
+manager 调 ``classify(channel, thread_id, cwd, tool_name, tool_input)`` 拿初步决策。
 
-阶段 1：所有输入都返回 `_RuleDecision(is_immediate=False, severity='standard', timeout_ms=60_000)`，
-意思 = "需要用户决策，60s 默认 timeout"。
+设计目标：**一份 rule，多通道共用**——让 generic_chat 通道完全复用 claude_code
+已有的成熟 :class:`web.auto_approval.policy.AutoApprovalPolicy` + ``default_rules.yaml``
++ per-cwd :class:`web.auto_approval.config_store.ConfigStore`，**不再两套并存**。
 
-阶段 1.5（task #3）：generic_chat 通道可注入 :class:`_ConfigReaderProto`
-（web 装配点把 ``web.auto_approval.config_store.ConfigStore`` 包成本接口注入），
-启用 per-cwd 自动通过倒计时——cwd config.enabled=True 时把 ``auto_approve_at_ms``
-透传给 manager，manager 在倒计时到点把 pending future set_result(approved)。
-对其他通道（claude_code / cron / evolution / cli）保持阶段 1 默认行为不变。
+设计真源：
+- ``dev-pipeline/tasks/approval-rules-unified/README.md`` — 技术设计 + DoD
+- ``docs/safety-approval-manager-v0.5/30-rules-schema.md`` — 长期 schema 演进
 
-阶段 2-3：迁通道时把规则注入（claude_code 24 条 / cron auto-allow / evolution auto-allow），
-但仍 hardcode 在 Python 里。
+duck typing 边界（safety 不直接 import web）：
+通过 :class:`_AutoApprovalPolicyProto` + :class:`_PolicyDecisionLike` Protocol
+注入 :class:`AutoApprovalPolicy` 实例，import-linter Contract 强制
+``safety → web`` 跨层 import 不存在；装配点在 ``src/web/run.py``。
 
-阶段 5：从 rules.yaml 加载完整 schema（per-channel + per-thread + per-cwd 三层 scope）。
-
-设计真源：docs/safety-approval-manager-v0.5/30-rules-schema.md
-        docs/safety-approval-manager-v0.5/（task #3 spec）
+claude_code 通道仍走 :meth:`web.host_adapter.WebHostAdapter.prompt_approval`
+直调 policy，**不经** ApprovalRules；本模块仅服务 generic_chat 路径。
 """
 
 from __future__ import annotations
@@ -39,11 +38,11 @@ class _RuleDecision:
             False = 需要 explicit_consent（manager 创建 pending future）
         immediate_outcome: is_immediate=True 时的 outcome（'allowed' / 'rejected'）；
             is_immediate=False 时无意义
-        matched_rule: 命中的规则 ID（如 "Bash(rm:*)"）；未命中 = None
-        severity: 'standard' / 'elevated'（用于 inbox payload + UI 渲染）
-        auto_approve_at_ms: 安全路径倒计时到点 ms；阶段 1 generic_chat 不用，None
-        auto_reject_at_ms: 危险路径倒计时到点 ms；阶段 1 generic_chat 不用，None
-        timeout_ms: 用户决策的超时阈值；阶段 1 默认 60_000（与 WebHostAdapter._timeout 一致）
+        matched_rule: 命中的规则 ID（如 ``"bash_rm_any"``）；未命中 = None
+        severity: ``'standard'`` / ``'elevated'``（用于 inbox payload + UI 渲染）
+        auto_approve_at_ms: 安全路径倒计时到点 ms；非自动通过路径恒 None
+        auto_reject_at_ms: 危险路径倒计时到点 ms；当前实现恒 None（规则命中改强制人审，不倒计时拒绝）
+        timeout_ms: 用户决策的超时阈值；fallback 60_000（与 WebHostAdapter._timeout 默认一致）
     """
 
     is_immediate: bool
@@ -60,61 +59,99 @@ class _RuleDecision:
 # ---------------------------------------------------------------------------
 
 
-class ProjectConfigLike(Protocol):
-    """对 :class:`web.auto_approval.config_store.ProjectConfig` 的 duck typing 协议。
+class _PolicyDecisionLike(Protocol):
+    """对 :class:`web.auto_approval.policy.Decision` 的 duck typing 协议。
 
-    仅读 ``enabled`` + ``timeout_ms`` 两字段；阶段 1.5 的 generic_chat 自动通过
-    路径忽略 ``rule_overrides``（仅依赖 cwd 维度的总开关 + 超时）。
+    仅消费 ``auto_eligible`` / ``blocked_by_rule`` / ``timeout_ms`` 三字段
+    （``rule_evaluation`` audit 快照本层不消费）。
 
-    用 class body 字段形式声明（不是 ``@property``），与 dataclass 字段
-    结构匹配；与 :class:`safety.inbox_event_sink._BroadcasterProto` 同款解耦。
+    实际真源签名：``src/web/auto_approval/policy.py:33-46`` —— ``Decision`` 是
+    ``@dataclass(frozen=True, slots=True)``，字段以 attribute 暴露，duck-typing
+    匹配本 Protocol 即可（无需显式继承）。
     """
 
-    enabled: bool
-    timeout_ms: int
+    @property
+    def auto_eligible(self) -> bool: ...
+
+    @property
+    def blocked_by_rule(self) -> str | None: ...
+
+    @property
+    def timeout_ms(self) -> int: ...
 
 
-class _ConfigReaderProto(Protocol):
-    """per-cwd 配置读取协议（duck typing 注入；避免 safety→web 跨层 import）。
+class _AutoApprovalPolicyProto(Protocol):
+    """对 :class:`web.auto_approval.policy.AutoApprovalPolicy` 的 duck typing 协议。
 
-    web 装配时把 :class:`web.auto_approval.config_store.ConfigStore` 直接传进
-    :class:`ApprovalRules`，结构匹配本 Protocol 即可（无需显式继承）。
-    与 stage1 的 :class:`safety.inbox_event_sink._BroadcasterProto` 同款解耦模式。
+    仅消费 ``classify`` + ``is_enabled_for`` 两方法（``set_enabled`` / ``get_config``
+    等 UI 写入路径不在 safety 层使用）。
+
+    实际真源签名：``src/web/auto_approval/policy.py:107-114``::
+
+        def classify(
+            self,
+            *,
+            tool_name: str,
+            tool_input: dict[str, Any],
+            cwd: str,
+            is_elevated: bool,
+        ) -> Decision: ...
+
+    与 :class:`safety.inbox_event_sink._BroadcasterProto` 同款解耦模式
+    （stage1 任务沿用至今）。
     """
 
-    def get(self, cwd: str) -> ProjectConfigLike | None:
-        """按 cwd 取 per-project 配置；未配置返回 None。"""
-        ...
+    def classify(
+        self,
+        *,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        cwd: str,
+        is_elevated: bool,
+    ) -> _PolicyDecisionLike: ...
+
+    def is_enabled_for(self, cwd: str) -> bool: ...
+
+
+# ---------------------------------------------------------------------------
+# ApprovalRules
+# ---------------------------------------------------------------------------
 
 
 class ApprovalRules:
-    """per-channel + per-thread + per-cwd 三层 scope 的规则容器（阶段 1 空骨架）。
+    """统一规则代理层——把 generic_chat 通道的 ``classify`` 委托给注入的
+    :class:`AutoApprovalPolicy` 实例。
 
-    阶段 1：仅持空骨架，所有输入返回 "ask + standard + 60s timeout" 默认决策。
-    阶段 1.5（task #3）：可选注入 :class:`_ConfigReaderProto` 启用 generic_chat
-    通道的 per-cwd 自动通过倒计时（cwd config.enabled=True → auto_approve_at_ms
-    透传到 manager）。
-    阶段 2-3：claude_code 24 规则 / cron auto-allow / evolution auto-allow 迁入（hardcode）。
-    阶段 5：完整 yaml schema 加载。
+    架构：完整复用 policy 的 ``classify``（含 24 条规则匹配 + cwd 开关 +
+    audit 快照），不再仅查 cwd 总开关 + timeout。
+
+    历史变更（approval-rules-unified）：见 changelog；旧 Protocol / 字段架构
+    已废弃，不在 source 文档保留旧名字（避免外部脆弱 grep 误匹配）。
+
+    fail-closed 设计：
+    ``policy=None`` 时（test 环境 / lifespan 漂移）走默认 ask + 60s，
+    保证审批主流程在配置缺失时仍可阻塞等用户决策（**不开自动通过倒计时**）。
+
+    阶段范围：
+    - 当前：仅 generic_chat 通道；其他通道（cron / evolution / cli / claude_code）
+      恒走默认 ask + 60s（claude_code 自走 WebHostAdapter.prompt_approval）
+    - 阶段 5（spec 演进）：rules.yaml 完整 schema + per-thread + session grants
     """
 
     def __init__(
         self,
         *,
-        default_timeout_ms: int = 60_000,
-        config_reader: _ConfigReaderProto | None = None,
+        policy: _AutoApprovalPolicyProto | None = None,
     ) -> None:
-        """构造空骨架 ApprovalRules（可选注入 ``config_reader`` 启用 per-cwd 自动通过）。
+        """构造 ApprovalRules（注入可选 AutoApprovalPolicy）。
 
         Args:
-            default_timeout_ms: 未匹配规则时的默认 timeout（毫秒），默认 60s
-            config_reader: 阶段 1.5 generic_chat per-cwd 自动通过配置读取器；
-                None = 关闭自动通过（保持阶段 1 默认 ask 行为）。装配点典型注入：
-                ``web.auto_approval.config_store.ConfigStore`` 实例
-                （duck typing 匹配 :class:`_ConfigReaderProto`）。
+            policy: 智能审批决策器实例（duck-typed 真源
+                :class:`web.auto_approval.policy.AutoApprovalPolicy`）；
+                ``None`` = fail-closed 走默认 ask（test 环境 / app.state 未就绪时
+                的安全网）。
         """
-        self._default_timeout_ms = default_timeout_ms
-        self._config_reader = config_reader
+        self._policy = policy
 
     def classify(
         self,
@@ -125,70 +162,100 @@ class ApprovalRules:
         tool_name: str,
         tool_input: dict[str, Any],
     ) -> _RuleDecision:
-        """根据 channel + thread + cwd + tool 拿初步决策。
+        """根据 channel + cwd + tool 拿初步决策。
 
-        阶段 1 实现：所有输入都返回 "ask + standard + 60s"。
-        阶段 1.5（task #3）：若注入 ``config_reader`` 且 channel=='generic_chat' 且
-        cwd config.enabled=True，返 ``_RuleDecision(auto_approve_at_ms=now+timeout)``
-        让 manager 启动自动通过倒计时；其他通道仍走默认 ask。
-        阶段 2-3 改：按 channel 分支匹配规则。
-        阶段 5 改：从 yaml 三层 scope 命中。
+        语义（与 :meth:`AutoApprovalPolicy.classify` 对齐）::
 
-        **fail-closed 兜底**：``config_reader.get`` 抛任何异常时降级走默认 ask
-        + 60s，不向上抛——审批主流程不能因配置读取失败而中断
-        （与 manager 用 ``asyncio.gather(..., return_exceptions=True)`` 包裹
-        sink 调用的设计思路一致）。
+            if policy is None:                     → fail-closed 默认 ask + 60s
+            elif channel != 'generic_chat':        → 默认 ask + 60s（其他通道不接入）
+            elif pdec.blocked_by_rule:             → 强制人审（不启 auto-approve；matched_rule 透传）
+            elif pdec.auto_eligible and enabled:   → auto-approve 倒计时（timeout fallback 60s）
+            else:                                  → 默认 ask + 60s
+
+        ``is_elevated`` 阶段 1 generic_chat 都按 ``False``（spec 阶段 5 才区分；
+        codex / cli 后续接入时再处理）。
+
+        **fail-closed 兜底**：``policy.classify`` 抛任何异常时降级走默认 ask + 60s，
+        不向上抛——审批主流程不能因配置读取失败而中断（与 manager 用
+        ``asyncio.gather(..., return_exceptions=True)`` 包裹 sink 调用同款思路）。
 
         Args:
-            channel: 'claude_code' / 'generic_chat' / 'cron' / 'evolution' / 'cli'
-            thread_id: 通道内 thread 标识
+            channel: ``'claude_code'`` / ``'generic_chat'`` / ``'cron'`` / ``'evolution'`` / ``'cli'``
+            thread_id: 通道内 thread 标识（阶段 1 不参与判定）
             cwd: 触发审批的工作目录
-            tool_name: 工具名（如 "Bash" / "Edit"）
+            tool_name: 工具名（如 ``"Bash"`` / ``"Edit"``）
             tool_input: 工具参数 dict
 
         Returns:
-            _RuleDecision；阶段 1.5 generic_chat enabled cwd 返自动通过倒计时，
-            其他情况恒为 "ask + standard + 60s"
+            ``_RuleDecision``；severity 恒 ``"standard"``（阶段 5 才区分 elevated）。
         """
-        # thread_id / tool_name / tool_input 阶段 1.5 不参与判定（阶段 5 才用）
-        _ = (thread_id, tool_name, tool_input)
+        # thread_id 阶段 1 不参与判定（阶段 5 才用）
+        _ = thread_id
 
-        # 阶段 1.5：仅 generic_chat 通道才查 reader（其他通道走默认 ask）
-        if channel == "generic_chat" and self._config_reader is not None:
-            try:
-                cfg = self._config_reader.get(cwd)
-            except Exception:
-                # fail-closed：reader 异常不影响审批主流程，走默认 ask
-                logger.exception(
-                    "config_reader.get(cwd=%r) raised; falling back to default ask",
-                    cwd,
-                )
-                cfg = None
-            if cfg is not None and cfg.enabled:
-                # ProjectConfig.timeout_ms == 0 表示「用全局默认」（见 web.auto_approval
-                # .config_store.ProjectConfig 字段约定），这里降级到 default_timeout_ms
-                timeout = cfg.timeout_ms if cfg.timeout_ms else self._default_timeout_ms
-                now_ms = int(time.time() * 1000)
-                return _RuleDecision(
-                    is_immediate=False,
-                    immediate_outcome=None,
-                    matched_rule=None,
-                    severity="standard",
-                    auto_approve_at_ms=now_ms + timeout,
-                    auto_reject_at_ms=None,
-                    timeout_ms=timeout,
-                )
+        # 1. fail-closed：policy 缺失走默认 ask
+        if self._policy is None:
+            return self._default_decision()
 
-        # 默认：所有其他输入返 ask + 60s
-        return _RuleDecision(
-            is_immediate=False,
-            immediate_outcome=None,
-            matched_rule=None,
-            severity="standard",
-            auto_approve_at_ms=None,
-            auto_reject_at_ms=None,
-            timeout_ms=self._default_timeout_ms,
-        )
+        # 2. 非 generic_chat 通道走默认 ask（claude_code 自走 host_adapter.prompt_approval，
+        #    不该进 manager.request → ApprovalRules.classify 这条路径；防御性兜底）
+        if channel != "generic_chat":
+            return self._default_decision()
+
+        # 3. 委托 policy 决策（fail-closed 包裹）
+        try:
+            pdec = self._policy.classify(
+                tool_name=tool_name,
+                tool_input=tool_input,
+                cwd=cwd,
+                is_elevated=False,
+            )
+        except Exception:
+            logger.exception(
+                "policy.classify(cwd=%r, tool=%r) raised; falling back to default ask",
+                cwd,
+                tool_name,
+            )
+            return self._default_decision()
+
+        # timeout fallback：policy 返回 ≤0 时降级 60s（用户硬约束）
+        timeout_ms = pdec.timeout_ms if pdec.timeout_ms > 0 else 60_000
+
+        # 4. 命中危险规则 → 强制人审（不启 auto-approve）
+        if pdec.blocked_by_rule:
+            return _RuleDecision(
+                is_immediate=False,
+                immediate_outcome=None,
+                matched_rule=pdec.blocked_by_rule,
+                severity="standard",
+                auto_approve_at_ms=None,  # 不启 auto-approve
+                auto_reject_at_ms=None,
+                timeout_ms=timeout_ms,
+            )
+
+        # 5. Zap ON + 非危险 + auto_eligible → auto-approve 倒计时
+        try:
+            enabled_for_cwd = self._policy.is_enabled_for(cwd)
+        except Exception:
+            logger.exception(
+                "policy.is_enabled_for(cwd=%r) raised; falling back to default ask",
+                cwd,
+            )
+            return self._default_decision()
+
+        if pdec.auto_eligible and enabled_for_cwd:
+            now_ms = int(time.time() * 1000)
+            return _RuleDecision(
+                is_immediate=False,
+                immediate_outcome=None,
+                matched_rule=None,
+                severity="standard",
+                auto_approve_at_ms=now_ms + timeout_ms,
+                auto_reject_at_ms=None,
+                timeout_ms=timeout_ms,
+            )
+
+        # 6. Zap OFF / 非 auto_eligible → 默认 ask + 60s
+        return self._default_decision()
 
     def add_session_grant(
         self,
@@ -198,10 +265,28 @@ class ApprovalRules:
         cwd: str,
         tool_name: str,
     ) -> None:
-        """用户选了"本 session 都同意"后调用，向 thread 级 overrides 加规则。
+        """用户选了「本 session 都同意」后调用，向 thread 级 overrides 加规则。
 
         阶段 1：no-op（generic_chat 卡片已隐藏「本 session」按钮，不会调到这）。
-        阶段 5：写 _thread_overrides，thread 销毁时清空。
+        阶段 5：写 ``_thread_overrides``，thread 销毁时清空。
         """
         _ = (channel, thread_id, cwd, tool_name)
         # 阶段 1 no-op
+
+    # ----- 内部 -----
+
+    @staticmethod
+    def _default_decision() -> _RuleDecision:
+        """默认 ask + 60s（fail-closed 兜底）。"""
+        return _RuleDecision(
+            is_immediate=False,
+            immediate_outcome=None,
+            matched_rule=None,
+            severity="standard",
+            auto_approve_at_ms=None,
+            auto_reject_at_ms=None,
+            timeout_ms=60_000,
+        )
+
+
+__all__ = ["ApprovalRules", "_RuleDecision"]
