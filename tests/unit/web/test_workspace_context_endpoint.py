@@ -155,7 +155,12 @@ def test_workspace_context_for_claude_code_thread(tmp_path: Path) -> None:
         client.__exit__(None, None, None)
 
 
-def test_workspace_context_for_thread_without_cwd(tmp_path: Path) -> None:
+def test_workspace_context_empty_cwd_falls_back_to_server_cwd(tmp_path: Path) -> None:
+    """thread.cwd 空时 fallback 到 ``app.state.workspace_root`` (server 启动目录)。
+
+    task #2：纯聊天 thread 不再返回 ``workspace_root=""``，统一走 server cwd，
+    让 files/shell 直接可用，与 ``resolve_workspace_cwd`` helper 行为对齐。
+    """
     tm = FakeTM(
         [
             ThreadMetadata(
@@ -173,17 +178,20 @@ def test_workspace_context_for_thread_without_cwd(tmp_path: Path) -> None:
     )
     client = _login_client(tmp_path, tm)
     try:
+        # 显式覆盖 app.state.workspace_root，固定 fallback 目标
+        client.app.state.workspace_root = tmp_path  # type: ignore[attr-defined]
         resp = client.get(
             "/api/threads/thread-000000000002/workspace-context",
             headers=CSRF_HEADERS,
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body["workspace_root"] == ""
-        assert body["shell_provider"] == "none"
-        assert body["files_available"] is False
-        assert body["shell_available"] is False
-        assert body["unavailable_reason"] == "thread has no workspace cwd"
+        assert body["workspace_root"] == str(tmp_path)
+        assert body["files_available"] is True
+        assert body["shell_available"] is True
+        # generic_chat thread 走 system_shell（非 claude_code）
+        assert body["shell_provider"] == "system_shell"
+        assert body["unavailable_reason"] is None
     finally:
         client.__exit__(None, None, None)
 
