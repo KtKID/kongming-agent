@@ -181,7 +181,7 @@ async def test_request_then_resolve_deny_returns_rejected(
 
 async def test_request_timeout_returns_rejected_with_manager_timeout_source() -> None:
     """timeout 触发 → outcome='rejected', source='manager_timeout', reason='timeout'。"""
-    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=100)
+    m = ApprovalManager(rules=ApprovalRules(default_timeout_ms=100), default_timeout_ms=100)
     decision = await m.request(
         channel="generic_chat",
         thread_id="t1",
@@ -420,7 +420,7 @@ def test_reset_for_testing_clears_singleton() -> None:
 
 def test_get_approval_manager_accepts_custom_rules() -> None:
     """首次调用传入的 rules / timeout 生效。"""
-    custom_rules = ApprovalRules()
+    custom_rules = ApprovalRules(default_timeout_ms=5_000)
     m = get_approval_manager(rules=custom_rules, default_timeout_ms=5_000)
     assert m._rules is custom_rules
     assert m._default_timeout_ms == 5_000
