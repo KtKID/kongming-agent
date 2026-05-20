@@ -64,7 +64,9 @@ def _make_integrated_setup(
     """
     broadcaster = ApprovalInboxBroadcaster()
     manager = ApprovalManager(
-        rules=ApprovalRules(default_timeout_ms=default_timeout_ms),
+        # approval-rules-unified：ApprovalRules 不再持 timeout；policy=None
+        # 时走 fail-closed 60s（本 e2e 测覆盖 user 路径，不依赖 auto-approve）。
+        rules=ApprovalRules(),
         default_timeout_ms=default_timeout_ms,
     )
     sink = InboxEventSink(broadcaster=broadcaster, manager=manager)
