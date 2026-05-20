@@ -75,6 +75,7 @@ from web.workspace import (
     list_workspace_entries,
     read_workspace_text_file,
     require_workspace_root,
+    resolve_workspace_cwd,
     write_workspace_text_file,
 )
 
@@ -121,8 +122,22 @@ async def _to_dto(meta: ThreadMetadata, tm: ThreadManagerProtocol) -> ThreadMeta
     )
 
 
-def _to_workspace_context(meta: ThreadMetadata) -> WorkspaceContextDTO:
-    workspace_root = meta.cwd.strip()
+def _to_workspace_context(
+    meta: ThreadMetadata,
+    *,
+    server_workspace_root: Path,
+) -> WorkspaceContextDTO:
+    """构造 WorkspaceContextDTO；thread.cwd 空时 fallback 到 server 启动目录。
+
+    用户心智："纯聊天 thread 默认 cwd = server 启动路径"，让 files/shell/Zap
+    都能在没绑 cwd 的 thread 上工作（统一走 ``resolve_workspace_cwd`` helper）。
+
+    Args:
+        meta: thread 元数据。
+        server_workspace_root: server 启动目录（``app.state.workspace_root``）；
+            kw-only 强制显式传入，让代码读者一眼看出 fallback 来源。
+    """
+    workspace_root = resolve_workspace_cwd(meta, server_workspace_root)
     files_available = bool(workspace_root)
     shell_available = files_available
     unavailable_reason: str | None = None
@@ -497,7 +512,10 @@ async def get_workspace_context(
     meta = get_thread_meta(thread_id, metas)
     if meta is None:
         raise ThreadNotFoundError(f"thread not found: {thread_id}")
-    return _to_workspace_context(meta)
+    return _to_workspace_context(
+        meta,
+        server_workspace_root=cast(Path, request.app.state.workspace_root),
+    )
 
 
 @router.get("/{thread_id}/evolution/reviews")
@@ -666,7 +684,10 @@ async def get_workspace_tree(
     _validate_thread_id(thread_id)
     try:
         meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
-        root = require_workspace_root(meta)
+        root = require_workspace_root(
+            meta,
+            fallback_to=cast(Path, request.app.state.workspace_root),
+        )
         entries = await asyncio.to_thread(list_workspace_entries, root, path)
     except ThreadNotFoundError:
         raise
@@ -692,10 +713,10 @@ async def get_workspace_file(
     _validate_thread_id(thread_id)
     try:
         meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
-        try:
-            root = require_workspace_root(meta)
-        except WorkspaceError:
-            root = cast(Path, request.app.state.workspace_root)
+        root = require_workspace_root(
+            meta,
+            fallback_to=cast(Path, request.app.state.workspace_root),
+        )
         resolved_path = path.strip()
         if resolved_path.startswith("/"):
             abs_p = Path(resolved_path).resolve()
@@ -723,7 +744,10 @@ async def put_workspace_file(
     _validate_thread_id(thread_id)
     try:
         meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
-        root = require_workspace_root(meta)
+        root = require_workspace_root(
+            meta,
+            fallback_to=cast(Path, request.app.state.workspace_root),
+        )
         payload = await asyncio.to_thread(
             write_workspace_text_file,
             root,
