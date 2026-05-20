@@ -407,19 +407,27 @@ async def _dispatch(
         return
 
     if msg_type == "abort-session":
+        # interrupt-claude-channel-v0.1：
+        # - service.abort() 返回 True（有活 run 被 cancel）→ _consume() 的
+        #   CancelledError finally 分支会 emit complete（service.py:192-201），
+        #   route 层**不**再发，避免双重 emit 让前端渲染 2 张"对话已中止"
+        # - service.abort() 返回 False（无活 run：unknown sid / 已 disconnect /
+        #   register 已 unregister）→ route 主动发 complete 兜底，否则前端
+        #   等不到任何回应卡死
         session_id = data.get("sessionId")
         if not isinstance(session_id, str):
             await _send_error(websocket, "abort-session.sessionId required")
             return
-        await service.abort(session_id)
-        await websocket.send_json(
-            {
-                "kind": "complete",
-                "provider": "claude",
-                "sessionId": session_id,
-                "aborted": True,
-            },
-        )
+        aborted = await service.abort(session_id)
+        if not aborted:
+            await websocket.send_json(
+                {
+                    "kind": "complete",
+                    "provider": "claude",
+                    "sessionId": session_id,
+                    "aborted": True,
+                },
+            )
         return
 
     if msg_type == "check-session-status":

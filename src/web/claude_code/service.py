@@ -231,10 +231,88 @@ class ClaudeCodeService:
     async def abort(self, session_id: str) -> bool:
         """请求中止指定 session 的当前 run。
 
-        通过 :class:`SessionManager` 设 abort_event + cancel query_task。
-        正在跑的 ``query`` 主循环会捕到 CancelledError 退出。
+        interrupt-claude-channel-v0.1：SDK 原生 interrupt + task.cancel 兜底。
+
+        1. SDK 路径（主）：调 ``ClaudeSDKClient.interrupt()`` 通过 control_request
+           通知 CLI 子进程 → QueryEngine.abortController.abort() → AbortController
+           树级联打断所有子 agent（含递归 subagent + 它们的 Bash subprocess）
+        2. task.cancel() 路径（兜底）：调 :meth:`SessionManager.request_abort`
+           强 cancel Python 侧 ``_consume`` 协程，防 SDK 失败 / 子进程僵尸 /
+           tool 不响应 abort
+
+        幂等：反复调多次必须无害——``client.interrupt`` 异常吞掉；
+        ``request_abort`` 本身幂等（重复 set abort_event + cancel 已 done task 无副作用）。
+
+        v0.2 rename race：``_clients`` 字典 key 可能是 placeholder（首次 query 用
+        thread_id / pending-XXX 占位）或真 SDK uuid（``session_created`` 后 rename）；
+        前端发 abort 用 sdk_uuid 但 ``_clients[uuid]`` 可能为 None（rename 只动
+        ``_sessions`` 没同步到 ``_clients``）。这里通过
+        :meth:`_lookup_client_for_abort` 双 key 查 client。
+
+        Args:
+            session_id: 前端传来的 sessionId（可能是 placeholder 或 sdk_uuid）
+
+        Returns:
+            ``True`` session 存在且已发出 abort；``False`` session 不存在
         """
+        # 1. SDK 原生 interrupt（fire-and-forget，防 60s control_request timeout
+        #    阻塞 ws 读循环）
+        client = self._lookup_client_for_abort(session_id)
+        if client is not None:
+            try:
+                # RUF006 不存引用是有意的——abort 是终态操作，子 agent 树打断
+                # 完就完，不需要 await 结果；task 异常已在 _safe_interrupt 内吞
+                asyncio.create_task(  # noqa: RUF006
+                    self._safe_interrupt(client),
+                    name=f"claude-interrupt-{session_id}",
+                )
+            except Exception:
+                logger.exception(
+                    "scheduling client.interrupt task failed; tolerate (task.cancel covers)"
+                )
+
+        # 2. task.cancel() 兜底
         return await self._sessions.request_abort(session_id)
+
+    def _lookup_client_for_abort(self, session_id: str) -> ClaudeSDKClient | None:
+        """双 key 查 ``_clients[session_id]``，处理 v0.2 rename race。
+
+        场景：``SessionManager.rename(placeholder, sdk_uuid)`` 改了
+        ``_sessions`` 的 key 与 ``record.session_id``，但 ``_clients`` 字典 key
+        未同步。前端发 abort 用 sdk_uuid 时，``_clients.get(uuid)`` 返回 None；
+        fallback 用 ``SessionManager`` 反查同 record 下的另一 id 试一次。
+
+        注意：访问 ``self._sessions._sessions`` 是私有字段，没有公开接口
+        遍历记录；接受这个临时耦合直到 SessionManager 暴露 iter API。
+        """
+        # 直接查
+        client = self._clients.get(session_id)
+        if client is not None:
+            return client
+
+        # fallback：遍历 _clients，看哪一项的 key 在 SessionManager 里映射到
+        # 同一个 record.session_id（即前端传的 session_id）
+        try:
+            for cli_key, cli in self._clients.items():
+                sm_rec = self._sessions._sessions.get(cli_key)
+                if sm_rec is not None and sm_rec.session_id == session_id:
+                    return cli
+        except Exception:
+            logger.debug("_lookup_client_for_abort fallback failed", exc_info=True)
+        return None
+
+    @staticmethod
+    async def _safe_interrupt(client: ClaudeSDKClient) -> None:
+        """后台跑 ``client.interrupt()``，异常吞掉不传播。
+
+        幂等 + 防 control_request 60s timeout 影响调用方。
+        ``task.cancel`` 兜底已经在 :meth:`abort` 里 await，所以 SDK
+        interrupt 失败不会让 abort 整体失效。
+        """
+        try:
+            await client.interrupt()
+        except Exception:
+            logger.exception("client.interrupt() raised; tolerate (task.cancel will cover)")
 
     async def shutdown_all(self) -> None:
         """进程关停：释放所有缓存的 ``ClaudeSDKClient``。"""

@@ -186,7 +186,11 @@ def test_check_session_status_returns_inactive(app_client: TestClient) -> None:
 
 
 def test_abort_session_unknown_returns_complete_aborted(app_client: TestClient) -> None:
-    """abort-session：未注册 session 仍然回 complete(aborted=True) 给前端。"""
+    """abort-session：未注册 session（service.abort 返 False）→ route 兜底发 complete。
+
+    interrupt-claude-channel-v0.1：unknown sid 无活 _consume，必须有 route 层
+    主动兜底 emit，否则前端 isRunning 卡在 true 等不到任何回应。
+    """
     with app_client.websocket_connect("/ws/claude-code") as ws:
         ws.send_json(
             {
@@ -198,6 +202,55 @@ def test_abort_session_unknown_returns_complete_aborted(app_client: TestClient) 
         assert msg.get("kind") == "complete"
         assert msg.get("aborted") is True
         assert msg.get("sessionId") == "ghost-sid"
+
+
+def test_abort_session_active_does_not_emit_complete_from_route(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """abort-session：有活 session（service.abort 返 True）→ route **不**主动发 complete。
+
+    interrupt-claude-channel-v0.1 #2 改造核心契约：避免 route + service._consume 双重
+    emit 让前端渲染 2 张"对话已中止"卡片。aborted=True 时 complete 帧由
+    service._consume() CancelledError finally 单一来源 emit。
+
+    实现细节：因为 _consume 的 CancelledError 路径**也会**通过同一个 ws
+    （websocket.send_json）发 complete，本测试用 service.abort monkeypatch 让它
+    返 True 但不触发 _consume，验证 route handler 自身**不**主动 send_json
+    complete 帧（队列里只有 ws.receive_json timeout 或 pong）。
+    """
+    from web.claude_code import route as route_mod
+
+    # 拦截 service.abort 让它返 True（模拟"有活 session 被 cancel"），但不真起
+    # _consume → 不会有 _consume finally 路径发 complete
+    async def _mock_abort_true(self: Any, sid: str) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        route_mod.ClaudeCodeService,
+        "abort",
+        _mock_abort_true,
+    )
+
+    with app_client.websocket_connect("/ws/claude-code") as ws:
+        ws.send_json(
+            {
+                "type": "abort-session",
+                "sessionId": "active-sid",
+            },
+        )
+        # route 不应主动发 complete；如果发了 receive_json 会立刻拿到 complete
+        # 反之 ws 没新帧，receive_json 会卡或抛 — 用 ws.send_json + 立即 receive
+        # 一个 ping/pong 探针（ws.receive_json 不带 timeout 会卡死，这里用
+        # 第二条消息后受控 yield）
+        ws.send_json({"type": "check-session-status", "sessionId": "active-sid"})
+        msg = ws.receive_json()
+        # 期望直接拿到 check-session-status 的 session-status 应答；
+        # 如果 route 误发了 complete，会先拿到 complete（kind="complete"）
+        assert msg.get("type") == "session-status", (
+            f"route 不应主动 emit complete（aborted=True 路径），但收到 {msg!r}"
+        )
+        assert msg.get("sessionId") == "active-sid"
 
 
 def test_permission_response_routed_to_approval(
