@@ -112,6 +112,44 @@ def test_workspace_file_marks_nul_binary_as_non_text(tmp_path: Path) -> None:
         client.__exit__(None, None, None)
 
 
+def test_workspace_tree_falls_back_to_server_cwd_when_thread_cwd_empty(
+    tmp_path: Path,
+) -> None:
+    """thread.cwd 空时 workspace-tree 端点 fallback 到 server 启动目录。
+
+    task #2：``require_workspace_root(..., fallback_to=app.state.workspace_root)``
+    让纯聊天 thread 也能正常列文件，不再 400 ``WorkspaceError``。
+    """
+    workspace = tmp_path / "server_proj"
+    workspace.mkdir()
+    (workspace / "hello.txt").write_text("hi", encoding="utf-8")
+    tm = FakeTM(
+        [
+            ThreadMetadata(
+                id="thread-000000000004",
+                name="Generic",
+                preset_id="preset-a",
+                backend_kind="generic_chat",
+                claude_thread_id="",
+                cwd="",  # 故意留空，触发 fallback
+                created_at=1.0,
+                updated_at=2.0,
+                message_count=0,
+            )
+        ]
+    )
+    client = _login_client(tmp_path, tm)
+    try:
+        client.app.state.workspace_root = workspace  # type: ignore[attr-defined]
+        resp = client.get("/api/threads/thread-000000000004/workspace-tree")
+        assert resp.status_code == 200
+        body = resp.json()
+        names = [entry["name"] for entry in body["entries"]]
+        assert "hello.txt" in names
+    finally:
+        client.__exit__(None, None, None)
+
+
 def test_workspace_file_marks_invalid_utf8_as_non_text(tmp_path: Path) -> None:
     workspace = tmp_path / "proj"
     workspace.mkdir()

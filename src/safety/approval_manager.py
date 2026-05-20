@@ -570,6 +570,7 @@ def make_manager_prompt_fn(
     thread_id: str,
     *,
     channel: str = "generic_chat",
+    default_cwd: str = "",
 ) -> Callable[[ApprovalRequest], Awaitable[ApprovalAction]]:
     """生成 prompt_fn，内部调 ``manager.request``；返回值映射成 :class:`ApprovalAction`。
 
@@ -578,10 +579,10 @@ def make_manager_prompt_fn(
 
     .. code-block:: python
 
-        prompt_fn = make_manager_prompt_fn(manager, thread_id)
+        prompt_fn = make_manager_prompt_fn(manager, thread_id, default_cwd=resolved_cwd)
         approval = build_default_approval(mode, prompt_fn=prompt_fn)
 
-    二态映射（reviewer 必修 #2，阶段 1）：
+    二态映射(reviewer 必修 #2，阶段 1):
 
     - ``decision.outcome="approved"`` → ``ApprovalAction.ACCEPT_ONCE``
     - ``decision.outcome="rejected"`` → ``ApprovalAction.REJECT``
@@ -596,10 +597,20 @@ def make_manager_prompt_fn(
     :class:`tools.approval.InteractiveApproval` 识别为 action-aware
     （返回 ApprovalAction 而非 bool）。
 
+    cwd 解析优先级（thread-cwd-fallback 任务 #3）:
+
+    1. ``req.metadata["cwd"]``：运行时显式传入，优先级最高
+    2. ``default_cwd``：装配时由调用方解析后传入的 fallback（通常是 thread.cwd
+       或 server 启动目录 ``app.state.workspace_root``）
+    3. ``""``：两者都空时落到空字符串（与改前行为一致，兼容老调用方）
+
     Args:
         manager: ApprovalManager 单例
         thread_id: 该 prompt_fn 绑定的 thread（多 thread 一个 thread 一个 prompt_fn）
         channel: 通道名（默认 ``"generic_chat"``，阶段 2 改 ``"claude_code"``）
+        default_cwd: thread.cwd 空时的 fallback（由装配点解析传入；
+            通常是 server 启动目录 ``app.state.workspace_root``）；
+            空字符串 = 不 fallback（保持原行为，兼容旧调用方）
 
     Returns:
         action-aware prompt_fn，签名 ``(ApprovalRequest) -> Awaitable[ApprovalAction]``
@@ -607,10 +618,13 @@ def make_manager_prompt_fn(
 
     async def prompt_fn(req: ApprovalRequest) -> ApprovalAction:
         """从 ApprovalRequest 提取信息调 manager.request，映射回 ApprovalAction。"""
+        # cwd 优先级：req.metadata.cwd（运行时显式传） > default_cwd（装配时 thread.cwd 解析后的值）
+        req_cwd = (req.metadata or {}).get("cwd", "")
+        resolved_cwd = req_cwd if req_cwd else default_cwd
         decision = await manager.request(
             channel=channel,
             thread_id=thread_id,
-            cwd=(req.metadata or {}).get("cwd", ""),
+            cwd=resolved_cwd,
             tool_name=req.tool_name,
             tool_input=dict(req.arguments),
             metadata=dict(req.metadata) if req.metadata else {},
