@@ -110,31 +110,32 @@ def main() -> int:
         release_app_instance_lock(app_lock_fd)
 
 
-def _build_manager_and_inbox_sink(*, app: Any) -> Any:
-    """构造或获取 ApprovalManager 单例，幂等注入 InboxEventSink + AutoApprovalPolicy。
-
-    approval-rules-unified（破坏性改造）：
-
-    - 删除 ``default_timeout_ms`` 参数。manager 走默认 60s 即可（与
-      :attr:`web.host_adapter.WebHostAdapter._timeout` 默认对齐）；
-      ``cfg.web.pending_approval_timeout_seconds`` 仍归 host_adapter 用，
-      不再串通到 manager / ApprovalRules。
-    - :class:`ApprovalRules` 注入 ``app.state.auto_approval_policy`` 完整实例
-      （而非仅 ``config_store``）——让 generic_chat 通道完全复用 claude_code
-      的 24 条规则 + per-cwd 总开关 + audit 评估快照（同一份真源）。
-    - policy 缺失（test 环境 / lifespan 漂移）→ ``ApprovalRules`` fail-closed
-      走默认 ask + 60s（不抛错）；正常生产路径 policy 必就绪（由
-      ``create_app`` lifespan 装配；见 ``src/web/app.py`` 真源）。
+def _build_manager_and_inbox_sink(*, app: Any, default_timeout_ms: int) -> Any:
+    """构造或获取 ApprovalManager 单例，幂等注入 InboxEventSink + ConfigReader。
 
     阶段 1 (smart-approval-manager-v0.5)：generic_chat 通道默认走 manager 路径，
     无 feature flag；回滚 = git revert factory 内的 prompt_fn 装配。
     manager 是 per-process 单例（``get_approval_manager``）；
     InboxEventSink 用 sink 类型判定幂等，多 cell 装配只注入一次。
 
+    task #6（smart-approval-generic-chat-autoallow）：
+    ``ApprovalRules`` 注入 ``app.state.auto_approval_policy.config_store``
+    作为 config_reader——**同一份** :class:`ConfigStore` 实例同时服务
+    claude_code 通道（走 AutoApprovalPolicy 直读）和 generic_chat 通道
+    （走 ApprovalRules.classify 间接读）。用户视角："UI 一处 toggle 管所有通道"。
+
+    task #4（thread-cwd-fallback）：``default_timeout_ms`` 由装配点（factory
+    外层）读 ``cfg.web.pending_approval_timeout_seconds`` 后传入，与
+    claude_code 通道 (:attr:`web.host_adapter.WebHostAdapter._timeout`)
+    共用同一 cfg 真源——破坏性变更：移除默认值 60_000 硬编码，老调用方
+    不传参直接 TypeError（与"拒绝过度兼容"用户约束一致）。
+
     Args:
         app: FastAPI app 实例（lazy；首次装配时 ``app.state.auto_approval_policy``
-            必须已就绪，由 create_app lifespan 装配；缺失时 policy=None，
-            fail-safe 降级到「所有 cwd 默认 ask + 60s」行为）。
+            必须已就绪，由 create_app lifespan 装配；缺失时 config_reader=None，
+            fail-safe 降级到「所有 cwd 默认 ask + default_timeout_ms」行为）。
+        default_timeout_ms: 装配点显式传入的审批默认超时（毫秒），同时注入
+            :class:`ApprovalRules` 与 :class:`ApprovalManager` 单例。
     """
     from safety.approval_manager import get_approval_manager
     from safety.approval_rules import ApprovalRules
@@ -143,8 +144,13 @@ def _build_manager_and_inbox_sink(*, app: Any) -> Any:
 
     broadcaster = get_inbox_broadcaster()
     policy = getattr(app.state, "auto_approval_policy", None) if app is not None else None
+    config_reader = policy.config_store if policy is not None else None
     manager = get_approval_manager(
-        rules=ApprovalRules(policy=policy),
+        rules=ApprovalRules(
+            config_reader=config_reader,
+            default_timeout_ms=default_timeout_ms,
+        ),
+        default_timeout_ms=default_timeout_ms,
     )
     # 幂等：只在首次装配时注入 InboxEventSink；按 sink 类型判定
     has_inbox_sink = any(isinstance(s, InboxEventSink) for s in manager._event_sinks)
@@ -379,20 +385,20 @@ def _make_runtime_factory(cfg: object) -> object:
         # （``setattr(runtime_factory, "_app", app)``）；首次 factory 调用时已就绪。
         # 注入 ConfigStore 让 generic_chat 通道能查 cwd 自动通过配置。
         #
-        # approval-rules-unified：
-        # - manager 默认 timeout 60s（与 host_adapter 默认对齐），不再读 cfg
-        #   ``pending_approval_timeout_seconds``（仍归 host_adapter 用）。
-        # - ApprovalRules 直接拿 ``app.state.auto_approval_policy`` 完整实例，
-        #   走 24 规则 + per-cwd 总开关统一真源。
-        #
         # task #4 (thread-cwd-fallback)：
+        # - ``default_timeout_ms`` 走 cfg.web.pending_approval_timeout_seconds 真源
+        #   （与 claude_code 通道 WebHostAdapter._timeout 同源），不再硬编码 60s。
         # - ``default_cwd`` 由 thread metadata 解析：thread.cwd 非空直接用，
         #   空时 fallback 到 server 启动目录（``app.state.workspace_root``），
         #   交给 prompt_fn 作为 ``req.metadata.cwd`` 空时的兜底——保证 generic_chat
         #   通道在「纯聊天 thread 未绑 cwd」场景下仍能命中 cwd 自动通过规则。
         app_ref = getattr(factory, "_app", None)
+        default_timeout_ms = int(real_cfg.web.pending_approval_timeout_seconds * 1000)
         default_cwd = _resolve_default_cwd_for_thread(app_ref, thread_id)
-        manager = _build_manager_and_inbox_sink(app=app_ref)
+        manager = _build_manager_and_inbox_sink(
+            app=app_ref,
+            default_timeout_ms=default_timeout_ms,
+        )
         prompt_fn = (
             make_manager_prompt_fn(
                 manager,
