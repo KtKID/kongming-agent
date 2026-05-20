@@ -1,19 +1,16 @@
-"""thread-cwd-fallback + approval-rules-unified 集成测：``src/web/run.py`` factory 装配链。
+"""thread-cwd-fallback 任务 #4 集成测：``src/web/run.py`` factory 装配链。
 
 覆盖两件事：
 
-1. ``_build_manager_and_inbox_sink`` 把 ``app.state.auto_approval_policy`` 完整
-   注入 :class:`ApprovalRules._policy`——证明 generic_chat 通道与 claude_code
-   共享同一份策略真源（24 规则 + per-cwd 总开关）。
-   approval-rules-unified 删除了原 ``default_timeout_ms`` 串通逻辑（manager 走
-   默认 60s 即可，``cfg.web.pending_approval_timeout_seconds`` 仅归 host_adapter
-   用），本套用例同步去除老断言。
+1. ``_build_manager_and_inbox_sink`` 把 ``default_timeout_ms`` 串到
+   :class:`ApprovalRules` 与 :class:`ApprovalManager`（cfg 真源传递），
+   破坏掉历史硬编码 60_000。
 2. ``_resolve_default_cwd_for_thread`` 让 generic_chat 通道 prompt_fn 装配时
    把 ``thread.cwd → server cwd → 进程 cwd`` 三级 fallback 装入；空 thread.cwd
    场景下仍能命中 cwd 自动通过规则。
 
-不依赖 FastAPI TestClient：构造 stub app + stub ThreadManager + 真实
-``AutoApprovalPolicy + ConfigStore``，集中验证装配点行为。
+不依赖 FastAPI TestClient：构造 stub app + stub ThreadManager + 内存 ConfigStore，
+集中验证装配点行为。
 """
 
 from __future__ import annotations
@@ -23,7 +20,6 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
@@ -93,54 +89,51 @@ def _make_app(
 
 
 # ---------------------------------------------------------------------------
-# 用例 1：_build_manager_and_inbox_sink 装配契约
+# 用例 1：_build_manager_and_inbox_sink 把 cfg 真源 timeout 串到 manager + rules
 # ---------------------------------------------------------------------------
 
 
-def test_manager_build_fail_safe_when_policy_missing() -> None:
-    """approval-rules-unified：``app.state.auto_approval_policy`` 缺失
-    （test 环境 / lifespan 漂移）→ ``ApprovalRules._policy is None``，
-    走 fail-closed 默认 ask + 60s（不抛错）。
+def test_manager_default_timeout_from_cfg_propagates_to_rules_and_manager() -> None:
+    """task #4 A 部分：``default_timeout_ms`` 同时落到 ``ApprovalManager``
+    与 ``ApprovalRules``——证明硬编码 60_000 已被 cfg 真源替代。
 
-    生产路径正常装配时 policy 必就绪（由 ``create_app`` lifespan 写入
-    ``app.state.auto_approval_policy``）；本测覆盖"安全网"路径。
+    断言：
+
+    - ``manager._default_timeout_ms == 30_000``
+    - ``manager._rules._default_timeout_ms == 30_000``
+    - 即使 ``app=None``（policy 缺失，config_reader=None 降级路径），
+      timeout 串通仍生效（不会回 60_000）。
     """
-    app = _make_app(policy=None)  # 故意不挂 policy
-    manager = _build_manager_and_inbox_sink(app=app)
+    app = _make_app(policy=None)  # 故意不挂 policy，走 fail-safe 路径
+    manager = _build_manager_and_inbox_sink(app=app, default_timeout_ms=30_000)
 
     assert isinstance(manager, ApprovalManager)
-    assert manager._rules._policy is None
-    # manager 仍按默认 60s 运行
-    assert manager._default_timeout_ms == 60_000
+    assert manager._default_timeout_ms == 30_000
+    assert manager._rules._default_timeout_ms == 30_000
 
 
-def test_manager_build_injects_policy_when_present() -> None:
-    """approval-rules-unified 架构契约：policy 在场时，``ApprovalRules._policy``
-    指向**同一份** policy 对象（generic_chat 与 claude_code 共享真源）。
+def test_manager_build_requires_default_timeout_ms_kwarg() -> None:
+    """task #4 A 部分：破坏性变更——不传 ``default_timeout_ms`` 直接 TypeError。
 
-    此前版本只注入 ``config_store``；改造后注入完整 policy，让 generic_chat
-    通道走 ``policy.classify`` 的 24 规则匹配。
+    断言 helper 拒绝老调用方式（用户硬约束："拒绝过度兼容"）。
+    """
+    app = _make_app(policy=None)
+    with pytest.raises(TypeError):
+        _build_manager_and_inbox_sink(app=app)  # type: ignore[call-arg]
+
+
+def test_manager_build_threads_config_store_when_policy_present() -> None:
+    """task #4 A + task #6：policy 在场时，``ApprovalRules.config_reader``
+    指向同一份 ``ConfigStore`` 实例（架构契约）。
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
-        # 用真实 AutoApprovalPolicy（验证 duck typing 不漂移）
-        from web.auto_approval.policy import AutoApprovalPolicy
-        from web.auto_approval.rules import RuleSet
-
         store = ConfigStore(Path(tmp_dir))
-        rule_set = RuleSet(version=1, default_timeout_ms=10_000, rules=())
-        policy = AutoApprovalPolicy(rule_set, store)
-
+        policy = SimpleNamespace(config_store=store)
         app = _make_app(policy=policy)
-        manager = _build_manager_and_inbox_sink(app=app)
-
-        # 关键断言：policy 完整对象注入，不是只拿 config_store
-        assert manager._rules._policy is policy, (
-            "ApprovalRules._policy must be the AutoApprovalPolicy instance "
-            "(generic_chat 与 claude_code 共享同一份策略真源)"
-        )
-        # 历史断言已删：rules 不再有 _config_reader / _default_timeout_ms 字段
-        assert not hasattr(manager._rules, "_config_reader")
-        assert not hasattr(manager._rules, "_default_timeout_ms")
+        manager = _build_manager_and_inbox_sink(app=app, default_timeout_ms=15_000)
+        assert manager._rules._config_reader is store
+        assert manager._default_timeout_ms == 15_000
+        assert manager._rules._default_timeout_ms == 15_000
 
 
 # ---------------------------------------------------------------------------
@@ -186,19 +179,6 @@ def test_resolve_default_cwd_falls_back_when_app_missing() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_real_policy(store: ConfigStore) -> Any:
-    """构造真实 ``AutoApprovalPolicy``（空规则集，仅依赖 cwd 总开关 + auto_eligible）。
-
-    端到端用例用真实 policy 验证 duck typing 不漂移 + cwd 总开关串通。
-    本套测不验证 24 规则匹配（rm 命中走 ``tests/integration/safety/...``）。
-    """
-    from web.auto_approval.policy import AutoApprovalPolicy
-    from web.auto_approval.rules import RuleSet
-
-    rule_set = RuleSet(version=1, default_timeout_ms=10_000, rules=())
-    return AutoApprovalPolicy(rule_set, store)
-
-
 @pytest.mark.asyncio
 async def test_prompt_fn_uses_default_cwd_when_thread_cwd_empty_end_to_end() -> None:
     """端到端：thread.cwd="" + workspace_root="/proj/server-root" →
@@ -219,7 +199,7 @@ async def test_prompt_fn_uses_default_cwd_when_thread_cwd_empty_end_to_end() -> 
         store = ConfigStore(Path(tmp_dir))
         # 关键：把 server cwd 配为 auto-allow（短 timeout 保证不等真用户）
         store.set(ProjectConfig(cwd="/proj/server-root", enabled=True, timeout_ms=50))
-        policy = _make_real_policy(store)
+        policy = SimpleNamespace(config_store=store)
 
         meta = _make_thread_meta(cwd="")  # 空 thread cwd，触发 fallback
         app = _make_app(
@@ -232,7 +212,10 @@ async def test_prompt_fn_uses_default_cwd_when_thread_cwd_empty_end_to_end() -> 
         default_cwd = _resolve_default_cwd_for_thread(app, meta.id)
         assert default_cwd == "/proj/server-root"
 
-        manager = _build_manager_and_inbox_sink(app=app)
+        manager = _build_manager_and_inbox_sink(
+            app=app,
+            default_timeout_ms=5_000,
+        )
         prompt_fn = make_manager_prompt_fn(
             manager,
             meta.id,
@@ -272,7 +255,7 @@ async def test_prompt_fn_thread_cwd_takes_priority_over_default() -> None:
         store = ConfigStore(Path(tmp_dir))
         store.set(ProjectConfig(cwd="/proj/bound", enabled=True, timeout_ms=50))
         # 关键：server cwd 不在 store 里，命中 server cwd 不会自动通过
-        policy = _make_real_policy(store)
+        policy = SimpleNamespace(config_store=store)
 
         meta = _make_thread_meta(cwd="/proj/bound")
         app = _make_app(
@@ -284,7 +267,10 @@ async def test_prompt_fn_thread_cwd_takes_priority_over_default() -> None:
         default_cwd = _resolve_default_cwd_for_thread(app, meta.id)
         assert default_cwd == "/proj/bound"  # 走 thread.cwd，不 fallback
 
-        manager = _build_manager_and_inbox_sink(app=app)
+        manager = _build_manager_and_inbox_sink(
+            app=app,
+            default_timeout_ms=5_000,
+        )
         prompt_fn = make_manager_prompt_fn(
             manager,
             meta.id,
