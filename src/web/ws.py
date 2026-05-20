@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import re
 import time
@@ -44,6 +45,10 @@ from pydantic import ValidationError
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore, resolve_evolution_root
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
+from web.auto_approval.ws_handlers import (
+    handle_auto_approval_query,
+    handle_auto_approval_toggle,
+)
 from web.protocol import (
     ErrorFrame,
     HistoryMessageDTO,
@@ -160,6 +165,38 @@ async def _receive_loop(
             await _send_error_frame(websocket, "internal", "frame too large (>1MB)")
             continue
 
+        # smart-approval v0.5：auto-approval-toggle / auto-approval-query 走
+        # type 字段（不是 kind），且不在 WSFrameC2S discriminated union 内 ——
+        # 旁路 validate_json，直接拿原 dict 派发到共用 handler。这样既不污染
+        # 协议（命令式 type 字段语义跟流式 kind 不混），也避免 ValidationError
+        # 把 auto-approval 帧识别成"非法帧"。其他帧仍按原 union 校验。
+        peek_type: str | None = None
+        with contextlib.suppress(Exception):
+            preview = json.loads(raw)
+            if isinstance(preview, dict):
+                t = preview.get("type")
+                if isinstance(t, str):
+                    peek_type = t
+        if peek_type in ("auto-approval-toggle", "auto-approval-query"):
+            cell.touch()
+            policy = getattr(websocket.app.state, "auto_approval_policy", None)
+            data: dict[str, Any] = preview
+            if peek_type == "auto-approval-toggle":
+                await handle_auto_approval_toggle(
+                    websocket,
+                    data,
+                    policy,
+                    channel="generic_chat",
+                )
+            else:
+                await handle_auto_approval_query(
+                    websocket,
+                    data,
+                    policy,
+                    channel="generic_chat",
+                )
+            continue
+
         # JSON 解析 + discriminated union
         try:
             frame = WSFrameC2SAdapter.validate_json(raw)
@@ -186,12 +223,51 @@ async def _dispatch_frame(
     if kind == "user.input":
         # 后台跑 run_once；不阻塞读循环
         effort = getattr(frame, "reasoning_effort", None)
+        # claude-image-paste-e2e #20：把 UserInputAttachment(BaseModel) 列表
+        # 提前打成 dict，全链路（runtime / runner / Message.metadata / assembler
+        # / provider）保持 dict 形态，避免下游再处理 BaseModel ↔ dict 双形态。
+        raw_attachments = getattr(frame, "attachments", None)
+        attachments_dicts: list[dict[str, Any]] | None = (
+            [a.model_dump() for a in raw_attachments] if raw_attachments else None
+        )
         task = asyncio.create_task(
-            _run_once_safely(cell, frame.text, websocket, reasoning_effort=effort),
+            _run_once_safely(
+                cell,
+                frame.text,
+                websocket,
+                reasoning_effort=effort,
+                attachments=attachments_dicts,
+            ),
             name=f"web-run-once-{thread_id}",
         )
         # 把 task 暂存到 cell（便于 evict 时 cancel）
         cell.current_run_task = task
+
+        # interrupt-run-v0.1：done_callback 在 task 完成时（正常 / 异常 / cancel）
+        # 把 cell.current_run_task 清成 None，避免下次收到 InterruptFrame 时
+        # 看到一个已 done 的 task 误判为"正在跑"。callback 只在 task 仍是当前
+        # 引用时才清，防止 race（新 run 刚启动覆盖了 current_run_task）。
+        def _clear_run_task(
+            t: asyncio.Task[Any], *, _cell: Any = cell, _task: asyncio.Task[Any] = task
+        ) -> None:
+            if getattr(_cell, "current_run_task", None) is _task:
+                _cell.current_run_task = None
+
+        task.add_done_callback(_clear_run_task)
+    elif kind == "interrupt":
+        # interrupt-run-v0.1：浏览器点 Stop。检查当前 run 是否真在跑：
+        # - None / 已 done：推 system notice "no_active_run"，不 cancel
+        # - 否则 task.cancel() → runner 顶层 except → emit run.cancelled
+        #   → WSEventSink fanout 转 RunInterruptedFrame（多 tab 自动同步）
+        current_task: asyncio.Task[Any] | None = getattr(cell, "current_run_task", None)
+        if current_task is None or current_task.done():
+            await _send_no_active_run_notice(websocket, thread_id)
+        else:
+            current_task.cancel()
+            logger.info(
+                "interrupt requested for thread=%s; cancelled current_run_task",
+                thread_id,
+            )
     elif kind == "approval.ack":
         # v0.1.6 三态：传递字符串字面值给 thread_manager，由它转 ApprovalAction
         # 枚举（thread_manager 在装配层，可 import core.contracts；ws 是 app shell
@@ -202,7 +278,7 @@ async def _dispatch_frame(
             logger.exception("resolve_approval raised; ignored")
     elif kind == "ping":
         try:
-            pong = PongFrame(timestamp_ms=_now_ms())
+            pong = PongFrame(timestamp_ms=_now_ms(), ts=getattr(frame, "ts", None))
             await websocket.send_json(pong.model_dump())
         except Exception:
             # 推 pong 失败说明 ws 断了；让下次 receive 抛 WebSocketDisconnect
@@ -218,14 +294,24 @@ async def _run_once_safely(
     websocket: WebSocket,
     *,
     reasoning_effort: str | None = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> None:
     """在后台跑 ``cell.bridge.run_once``；异常推 ``error`` 帧不沉默死掉。
 
     token 持久化由 :class:`UsagePersistSink` 在每个 turn 的 ``usage``
     event 时增量写盘，不在此处做 run 结束一次性写入。
+
+    ``attachments`` 是 :class:`web.protocol.rest_models.UserInputAttachment`
+    经 ``model_dump()`` 后的 dict 列表；为 None 表示纯文本输入。一路透传到
+    :meth:`core.runner.Runner._seed_messages`，最终写入 user
+    :class:`core.message.Message` 的 ``metadata["attachments"]``。
     """
     try:
-        await cell.bridge.run_once(text, reasoning_effort=reasoning_effort)
+        await cell.bridge.run_once(
+            text,
+            reasoning_effort=reasoning_effort,
+            attachments=attachments,
+        )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -392,6 +478,28 @@ async def _send_error_frame(
         await websocket.send_json(frame.model_dump())
     except Exception:
         logger.debug("send error frame failed; ignoring")
+
+
+async def _send_no_active_run_notice(websocket: WebSocket, thread_id: str) -> None:
+    """收到 InterruptFrame 但当前没 active run 时，推一条 :class:`SystemNoticeFrame`。
+
+    interrupt-run-v0.1：用户连点 Stop / Stop 时 race 上 run 自然完成 等场景。
+    不报错（不是协议违规），只通知前端"没有可中断的 run"，前端可隐藏 Stop
+    按钮 + 显示 toast。
+    """
+    try:
+        frame = SystemNoticeFrame(
+            timestamp_ms=_now_ms(),
+            notice_key="no_active_run",
+            source="ws.interrupt",
+            status="info",
+            title="无活动任务",
+            message="当前 thread 没有正在跑的 run，无需打断。",
+            icon="info",
+        )
+        await websocket.send_json(frame.model_dump())
+    except Exception:
+        logger.debug("send no_active_run notice failed; ignoring")
 
 
 __all__ = [

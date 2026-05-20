@@ -56,6 +56,8 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
+    "pytest-xdist>=3.5",
+    "pytest-picked>=0.5",
     "ruff>=0.5",
     "mypy>=1.10",
     "import-linter>=2.0",
@@ -64,6 +66,7 @@ dev = [
 
 [project.scripts]
 kongming = "cli.main:main"
+kongming-sitian = "sitian.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/kongming-agent/kongming-agent"
@@ -87,6 +90,7 @@ packages = [
     "src/memory",
     "src/prompts",
     "src/web",
+    "src/sitian",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -103,6 +107,7 @@ include = [
     "src/memory",
     "src/prompts",
     "src/web",
+    "src/sitian",
     "config",
     "README.md",
     "pyproject.toml",
@@ -172,6 +177,7 @@ known-first-party = [
     "memory",
     "prompts",
     "web",
+    "sitian",
 ]
 
 [tool.ruff.format]
@@ -254,6 +260,10 @@ filterwarnings = [
     "error",
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
+    # 测试 teardown 时 gc 触发的 unclosed socket / event loop 警告：
+    # 测试进程短命，资源被进程退出兜底回收；生产代码（src/）使用 asyncio.run /
+    # asyncio.get_running_loop() 正确 API，不存在此类泄漏。一律忽略避免 CI 误挂。
+    "ignore::pytest.PytestUnraisableExceptionWarning",
 ]
 
 # ---------------------------------------------------------------------------
@@ -273,6 +283,7 @@ source = [
     "observability",
     "memory",
     "config_loader",
+    "sitian",
 ]
 omit = [
     "tests/*",

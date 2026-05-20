@@ -365,20 +365,34 @@ class OpenAIResponsesProvider(BaseLLMProvider):
         )
 
         usage = data.get("usage") or {}
-        # 只保留平铺后的 int 字段；复杂嵌套结构留给未来 observability 消化。
-        normalized_usage: dict[str, Any] = {}
+        # task#3.1：OpenAI usage 字段透传 SDK 原生字段 + provider_kind 标识，
+        # 用于 web.usage_token.UsageTokenManager 按 channel 解析。
+        normalized_usage: dict[str, Any] = {
+            "provider_kind": "openai_compatible",
+        }
+        # 标准 3 字段
         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
             if key in usage:
                 normalized_usage[key] = usage[key]
-
-        # 厂商扩展字段：按原始字段名收集，不归一化。
-        provider_metadata: dict[str, Any] = {}
-
-        # usage 细分：reasoning_tokens / cached_tokens
+        # 派生 channel-specific 字段（OpenAI 系命名跟 usage_token._channel_openai 对齐）
+        # prompt_tokens 视为 input_tokens（OpenAI 语义：含 cached_input 子集）
+        # completion_tokens 视为 output_tokens（含 reasoning_output 子集）
+        if "prompt_tokens" in usage:
+            normalized_usage["input_tokens"] = usage["prompt_tokens"]
+        if "completion_tokens" in usage:
+            normalized_usage["output_tokens"] = usage["completion_tokens"]
+        # cached_tokens / reasoning_tokens：从 details 子结构提到 usage 主体
         completion_details = usage.get("completion_tokens_details") or {}
         if "reasoning_tokens" in completion_details:
-            provider_metadata["reasoning_tokens"] = completion_details["reasoning_tokens"]
+            normalized_usage["reasoning_output_tokens"] = completion_details["reasoning_tokens"]
         prompt_details = usage.get("prompt_tokens_details") or {}
+        if "cached_tokens" in prompt_details:
+            normalized_usage["cached_input_tokens"] = prompt_details["cached_tokens"]
+
+        # 厂商扩展字段：按原始字段名收集，不归一化（observability 老消费者用）
+        provider_metadata: dict[str, Any] = {}
+        if "reasoning_tokens" in completion_details:
+            provider_metadata["reasoning_tokens"] = completion_details["reasoning_tokens"]
         if "cached_tokens" in prompt_details:
             provider_metadata["cached_tokens"] = prompt_details["cached_tokens"]
 

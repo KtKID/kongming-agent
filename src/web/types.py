@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from web.protocol import CellSummaryDTO
+    from web.protocol import CellSummaryDTO, EvictReason
     from web.thread_metadata import ThreadMetadata
 
 
@@ -73,6 +73,10 @@ class ThreadManagerProtocol(Protocol):
 
     async def rename_thread(self, thread_id: str, new_name: str) -> ThreadMetadata: ...
 
+    async def pin_thread(self, thread_id: str, is_pinned: bool) -> ThreadMetadata: ...
+
+    async def set_archived(self, thread_id: str, is_archived: bool) -> ThreadMetadata: ...
+
     async def delete_thread(self, thread_id: str, *, keep_history: bool = False) -> None: ...
 
     async def boot_or_attach(self, thread_id: str) -> ThreadCellProtocol: ...
@@ -80,7 +84,7 @@ class ThreadManagerProtocol(Protocol):
     async def evict_cell(
         self,
         thread_id: str,
-        reason: str,
+        reason: EvictReason,
         message: str | None = None,
         *,
         notify_ws: bool = True,
@@ -104,6 +108,15 @@ class ThreadManagerProtocol(Protocol):
         cwd: str,
     ) -> ThreadMetadata: ...
 
+    async def create_and_bind_claude_thread(
+        self,
+        *,
+        claude_thread_id: str,
+        cwd: str,
+        name: str,
+        preset_id: str = "",
+    ) -> tuple[ThreadMetadata, bool]: ...
+
     async def bind_codex_thread(
         self,
         thread_id: str,
@@ -111,16 +124,27 @@ class ThreadManagerProtocol(Protocol):
         cwd: str,
     ) -> ThreadMetadata: ...
 
-    async def add_thread_usage(
-        self,
-        thread_id: str,
-        *,
-        prompt_tokens: int,
-        completion_tokens: int,
-        total_tokens: int,
-    ) -> ThreadMetadata: ...
+    # usage-token-v2-bigbang：``usage_manager`` 是 :class:`web.usage_token_v2.
+    # UsageTokenManager` 实例，唯一公共方法 ``get_thread_usage(thread_id)``。
+    # v1 的 record_run_usage / set_last_assistant_usage / get_thread_summary
+    # 等方法全部删除。
 
-    def resolve_approval(self, thread_id: str, call_id: str, approved: bool) -> None: ...
+    @property
+    def usage_manager(self) -> Any:
+        """:class:`web.usage_token_v2.UsageTokenManager` 实例（v2 无状态门面）。
+
+        ``Any`` 而非具体类型——避免 ``web.types`` Protocol 文件 import
+        ``web.usage_token_v2``（保持 types.py 零运行时依赖）。具体类型由
+        ``web.thread_manager.ThreadManager.usage_manager`` 提供。
+        """
+        ...
+
+    def resolve_approval(self, thread_id: str, call_id: str, action: Any) -> None: ...
+
+    # ``action`` 实际是 :class:`core.contracts.ApprovalAction` 或同义 string 字面值
+    # （``"accept_once"`` / ``"accept_for_session"`` / ``"reject"``）。
+    # 类型注解保持 ``Any``——避免 ``web.types`` import ``core.contracts``
+    # （Contract: web.* → core.* 禁止；跟 ``usage_manager`` 同款 escape）。
 
 
 __all__ = [

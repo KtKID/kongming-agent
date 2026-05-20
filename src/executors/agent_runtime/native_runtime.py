@@ -37,7 +37,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from config_loader.models import Config
 from context import HistoryCompactor
@@ -367,6 +367,7 @@ class NativeRuntime:
         *,
         session_id: str | None = None,
         reasoning_effort: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> Result:
         """执行一次"输入 → 结果"主链路。
 
@@ -374,6 +375,8 @@ class NativeRuntime:
         - ``session_id`` 为 ``None`` 时走匿名新 session。
         - ``reasoning_effort`` 非 None 时临时覆盖 model_config.reasoning_effort，
           本次 run 结束后恢复原值。Provider 每次调用都读 model_config，无需改动。
+        - ``attachments`` 是用户输入附件 ref 的 dict 列表（``UserInputAttachment.model_dump()``
+          形态），由 web ws.py 透传过来；CLI 路径默认 None 不影响行为。
         """
         session = self._get_or_create_session(session_id)
         result: Result
@@ -391,6 +394,7 @@ class NativeRuntime:
                     approval=self._approval,
                     max_turns=self._config.runner.max_turns,
                     enabled_tools=self._resolve_enabled_tools(),
+                    attachments=attachments,
                 )
             finally:
                 self._config.model.reasoning_effort = saved
@@ -404,6 +408,7 @@ class NativeRuntime:
                 approval=self._approval,
                 max_turns=self._config.runner.max_turns,
                 enabled_tools=self._resolve_enabled_tools(),
+                attachments=attachments,
             )
 
         await self._maybe_start_evolution_review(session=session, result=result)

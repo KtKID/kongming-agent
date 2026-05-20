@@ -111,10 +111,29 @@ class TrustResolver:
         if result is not None:
             return result
 
-        # 2. tool: 通配（allow_tools_silent）
+        # 2. tool: 精确命令前缀匹配（session grant 细化后不再通配）
         tool_name = request.tool_name
         if tool_name:
             tool_capability = f"tool:{tool_name}"
+
+            # 2a. shell 命令：用命令前缀查 grant（如 "ls"、"git"）
+            if tool_name in _SHELL_TOOLS:
+                cmd = (request.arguments or {}).get("command")
+                if isinstance(cmd, str) and cmd.strip():
+                    from safety.chain import extract_command_base
+
+                    cmd_base = extract_command_base(cmd)
+                    if cmd_base:
+                        result = self._grants.find_matching(
+                            capability=tool_capability,
+                            path_or_action=cmd_base,
+                            boundary_kind=BoundaryKind.HOST,
+                            session_id=request.session_id,
+                        )
+                        if result is not None:
+                            return result
+
+            # 2b. 通配 matcher="*"（allow_tools_silent / 非 shell 工具的 session grant）
             result = self._grants.find_matching(
                 capability=tool_capability,
                 path_or_action="*",

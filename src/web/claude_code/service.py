@@ -22,13 +22,20 @@ import asyncio
 import contextlib
 import logging
 import re
-from typing import Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
 from web._shared.session_manager import SessionManager
+from web.claude_code._attachment_prefix import AttachmentPrefixBuilder
 from web.claude_code.approval import ApprovalBridge
 from web.claude_code.normalizer import ClaudeNormalizer
+from web.thread_status_ws import get_broadcaster
+
+if TYPE_CHECKING:
+    from web.protocol.rest_models import UserInputAttachment
+    from web.uploads.storage import AssetStorage
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +60,14 @@ class ClaudeCodeService:
         *,
         client_factory: Any = None,
         thread_manager: Any = None,
+        asset_storage: AssetStorage | None = None,
     ) -> None:
-        """v0.2 新增 ``thread_manager`` 注入。
+        """v0.2 新增 ``thread_manager`` 注入；claude-code-channel-image-paste 新增
+        ``asset_storage`` 注入（用于附件 ``@file`` prompt 前缀拼接）。
 
-        ``None`` 表示老路径（v0.1 行为，不做 thread metadata 持久化 / 自动 resume）。
+        ``thread_manager=None``：v0.1 行为不做 thread metadata 持久化 / 自动 resume。
+        ``asset_storage=None``：不支持图片附件（attachments kwarg 会被忽略）；测试
+            stub 可不传，prod 装配在 ``route.py`` 注入 ``app.state.asset_storage``。
         """
         self._normalizer = normalizer
         self._approval = approval
@@ -67,6 +78,12 @@ class ClaudeCodeService:
             client_factory if client_factory is not None else ClaudeSDKClient
         )
         self._thread_manager: Any = thread_manager
+        # per-thread run 计数器——每次 query 调用自增，用于构造 run_id
+        self._run_counters: dict[str, int] = {}
+        # attachment prefix builder：注入 storage 后 lazy 构造一次复用
+        self._prefix_builder: AttachmentPrefixBuilder | None = (
+            AttachmentPrefixBuilder(asset_storage) if asset_storage is not None else None
+        )
 
     # ----- 主入口 -----
 
@@ -77,11 +94,16 @@ class ClaudeCodeService:
         writer: Any,
         *,
         register_id_override: str | None = None,
+        attachments: Sequence[UserInputAttachment] | None = None,
     ) -> None:
         """发起一次 Claude run。
 
         步骤：
 
+        0. (新) 如有 ``attachments`` + ``_prefix_builder`` + ``register_id_override``，
+           调 :meth:`AttachmentPrefixBuilder.build` 把 ``@<abs_path>`` 前缀拼到
+           ``command`` 头部；Claude Code SDK subprocess 端 ``attachments.ts`` 会
+           grep 这些 ``@<path>`` 引用，自动通过 ``FileReadTool`` 读图喂给 Claude。
         1. 装配 ``ClaudeAgentOptions``
         2. 复用或新建 ``ClaudeSDKClient``
         3. ``approval.set_active_writer(writer)`` 让 can_use_tool 能 emit
@@ -95,7 +117,17 @@ class ClaudeCodeService:
                 带 thread_id 时）显式以 thread_id 注册 SessionManager，避免
                 ``pending-XXX`` placeholder 与前端 session id 不一致的歧义。
                 ``None`` 表示走原有逻辑（保留对未传 thread_id 调用方的兼容）。
+            attachments: claude-code-channel-image-paste 新增。当
+                ``register_id_override`` + ``asset_storage`` + ``attachments`` 三者
+                都到位时，按顺序把图片本地路径以 ``@<abs_path>`` 形式拼到 prompt
+                头部；缺任一条件就 fallback 到原纯文本 ``command``，向后兼容。
         """
+        # 0. (新) attachment prefix 拼接——三者齐全才生效，否则保持原 command
+        if attachments and self._prefix_builder is not None and register_id_override:
+            prefix = self._prefix_builder.build(attachments, thread_id=register_id_override)
+            if prefix:
+                command = prefix + command
+
         session_id = options.get("sessionId") if isinstance(options, dict) else None
 
         # v0.2 自动 resume：thread-bound 路径 + thread metadata 已绑定 claude_thread_id →
@@ -130,8 +162,12 @@ class ClaudeCodeService:
                 if session_id:
                     self._clients[session_id] = client
 
-            # 3. set active writer
+            # 3. set active writer + cwd（cwd 可能被 options 覆盖；smart-approval-v1 用）
             self._approval.set_active_writer(writer)
+            if isinstance(options, dict):
+                effective_cwd = options.get("cwd")
+                if isinstance(effective_cwd, str) and effective_cwd:
+                    self._approval.set_active_cwd(effective_cwd)
 
             # 4. 注册 session：
             #    优先级 register_id_override > options["sessionId"] > placeholder。
@@ -140,9 +176,13 @@ class ClaudeCodeService:
             register_id = register_id_override or session_id or f"pending-{id(client)}"
             record = await self._sessions.register(register_id, writer)
 
+            # run_index：per-thread 自增，用于构造 run_id（跟 core.Runner 一致）
+            run_index = self._run_counters.get(register_id, 0) + 1
+            self._run_counters[register_id] = run_index
+
             # 5. 主循环——把 async for 包成 task 以便能被 abort cancel
             query_task = asyncio.create_task(
-                self._consume(client, command, writer, register_id),
+                self._consume(client, command, writer, register_id, run_index=run_index),
             )
             record.query_task = query_task
             await query_task
@@ -211,6 +251,8 @@ class ClaudeCodeService:
         command: str,
         writer: Any,
         register_id: str,
+        *,
+        run_index: int = 0,
     ) -> None:
         """主流式循环——单独包成方法以便能用 task.cancel() 强制中断。
 
@@ -224,8 +266,33 @@ class ClaudeCodeService:
 
         # 当前用于出站消息 sessionId 字段的真值——首次见到 session_created 后切换
         active_sid = register_id
+        broadcaster = get_broadcaster()
 
         async for msg in client.receive_response():
+            # AssistantMessage 到达时：从 SDK jsonl 真源派生最新 usage 推前端刷新。
+            # **v2**：manager 无状态门面，不接受 push；直接调 get_thread_usage 派生
+            # 后广播（前端收到 usage_summary_updated 帧重新渲染）。
+            if (
+                self._thread_manager is not None
+                and self._is_thread_id(register_id)
+                and hasattr(msg, "usage")
+                and hasattr(msg, "content")  # AssistantMessage 特征：有 content 字段
+            ):
+                raw_assistant_usage = getattr(msg, "usage", None)
+                if isinstance(raw_assistant_usage, dict) and raw_assistant_usage:
+                    with contextlib.suppress(Exception):
+                        usage_dto = await self._thread_manager.usage_manager.get_thread_usage(
+                            register_id
+                        )
+                        if usage_dto is not None:
+                            await broadcaster.broadcast(
+                                {
+                                    "type": "usage_summary_updated",
+                                    "threadId": register_id,
+                                    "usage": usage_dto.model_dump(),
+                                }
+                            )
+
             normalized = self._normalizer.normalize(msg, active_sid)
             for n in normalized:
                 # 第一次见到 session_created → 把 placeholder 改名成真实 SDK id
@@ -258,11 +325,31 @@ class ClaudeCodeService:
                                 "claude-code _consume bind_claude_thread failed",
                                 exc_info=True,
                             )
+                # ResultMessage（complete）到达时：从 SDK 真源 jsonl 派生最新 usage
+                # 推前端刷新。**v2**：用 manager.get_thread_usage（无状态门面）。
+                if (
+                    n.get("kind") == "complete"
+                    and self._thread_manager is not None
+                    and self._is_thread_id(register_id)
+                ):
+                    with contextlib.suppress(Exception):
+                        usage_dto = await self._thread_manager.usage_manager.get_thread_usage(
+                            register_id
+                        )
+                        if usage_dto is not None:
+                            await broadcaster.broadcast(
+                                {
+                                    "type": "usage_summary_updated",
+                                    "threadId": register_id,
+                                    "usage": usage_dto.model_dump(),
+                                }
+                            )
                 # 把出站消息的 sessionId 字段同步成真实 id
                 if n.get("sessionId") != active_sid:
                     n["sessionId"] = active_sid
                 with contextlib.suppress(Exception):
                     await writer.send_json(dict(n))
+                await broadcaster.emit(register_id, dict(n))
 
     @staticmethod
     def _is_thread_id(s: str) -> bool:

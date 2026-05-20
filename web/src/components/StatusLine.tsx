@@ -1,4 +1,4 @@
-import { ArrowUp, ArrowDown, Sigma, Brain } from "lucide-react";
+import { ArrowUp, ArrowDown, Sigma, Brain, DatabaseZap } from "lucide-react";
 import { useChatStore } from "@/stores/chat";
 import type { ReasoningEffort } from "@/components/Composer";
 
@@ -6,6 +6,11 @@ function fmt(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(n);
+}
+
+function fmtOrDash(n: number | null | undefined): string {
+  if (n == null) return "-";
+  return fmt(n);
 }
 
 function Stat({
@@ -54,6 +59,8 @@ export function StatusLine({ threadId, reasoningEffort }: StatusLineProps) {
       <Stat icon={ArrowUp} label="累计输入 tokens" value={fmt(usage?.cumulativePrompt ?? 0)} />
       <Stat icon={ArrowDown} label="累计输出 tokens" value={fmt(usage?.cumulativeCompletion ?? 0)} />
       <Stat icon={Sigma} label="累计 tokens" value={fmt(usage?.cumulativeTotal ?? 0)} />
+      <Stat icon={DatabaseZap} label="cache 读取 tokens" value={fmtOrDash(usage?.cumulativeCacheRead)} />
+      <Stat icon={DatabaseZap} label="cache 写入 tokens" value={fmtOrDash(usage?.cumulativeCacheCreation)} />
       </span>
     </div>
   );

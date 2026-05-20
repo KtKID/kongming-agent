@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from scheduler.domain import (
     ConcurrencyPolicy,
     DeliveryChannel,
@@ -180,21 +182,17 @@ def test_list_recent_runs_limit(tmp_path: Path) -> None:
     assert [r.run_id for r in runs] == ["r-09", "r-08", "r-07"]
 
 
-def test_list_recent_runs_limit_zero_or_negative_unlimited(tmp_path: Path) -> None:
-    """``limit <= 0`` 不限制条数。"""
+def test_list_recent_runs_limit_zero_or_negative_raises(tmp_path: Path) -> None:
+    """``limit <= 0`` 越界（web-cron-router-v0.1 收紧契约）→ ``ValueError``。
+
+    v0.3 旧契约 "limit <= 0 不限制" 已被 web-cron-router-v0.1 替换为严格
+    1..200；越界值（``0`` / ``-1`` / ``> 200``）一律抛 ``ValueError``。
+    详见 ``tests/unit/scheduler/test_store_recent_runs.py``。
+    """
     store = Store(tmp_path)
     store.create_task(_make_task(task_id="t-1"))
-    for i in range(5):
-        store.append_run(
-            _make_run(
-                run_id=f"r-{i}",
-                task_id="t-1",
-                started_at=f"2026-05-04T00:00:0{i}+00:00",
-            )
-        )
-
-    runs = store.list_recent_runs(limit=0)
-    assert len(runs) == 5
+    with pytest.raises(ValueError, match="limit"):
+        store.list_recent_runs(limit=0)
 
 
 # ---------------------------------------------------------------------------

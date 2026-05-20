@@ -21,6 +21,7 @@ root_packages =
     config_loader
     memory
     prompts
+    evolution
     scheduler
     web
 source_paths = src
@@ -89,6 +90,16 @@ ignore_imports =
     tools.schedule_tool -> scheduler.schedule_parser
     tools.schedule_tool -> scheduler.timing
     scheduler.runtime_factory -> context.session_bootstrap
+    evolution.claude_evidence_selector -> web.claude_code.jsonl_history
+    executors.agent_runtime.native_runtime -> evolution
+; claude-image-paste-e2e §4/§5：MediaPart Protocol + ImageMediaPart 需要
+; 引用 ``web.uploads.storage::AssetStorage`` (IO 抽象) 与
+; ``web.uploads.registry::EXT_BY_MIME`` (MIME→ext 白名单)。这两个符号是
+; domain logic（无 framework 耦合），技术上可以提到 core / context 层，
+; 但本任务范围不做搬移。spec-media-input §5 设计文档明确：MediaPart 是
+; assembly → provider 路径上的中间表示，引用 web.uploads 是单点白名单。
+    executors.llm.media_adapter -> web.uploads.storage
+    executors.llm.media_adapter -> web.uploads.registry
 
 ; ---------------------------------------------------------------------------
 ; Contract 4: tools 不允许直接 import safety 内部 policy / guards / decision_engine
@@ -190,6 +201,49 @@ ignore_imports =
     web.app -> scheduler.store
     web.app -> scheduler.ticker
     web.app -> scheduler.delivery
+    web.app -> evolution.apply_executor
+    web.app -> evolution.evolution_manager
+    web.routers.threads -> evolution.apply_executor
+    web.routers.threads -> evolution.models
+    web.routers.threads -> evolution.state_store
+    web.routers.threads -> evolution.store
+    web.ws -> evolution.state_store
+    web.ws -> evolution.store
+    web.claude_code.route -> web.ws_event_sink
+    web.claude_code.route -> evolution.claude_transcript_provider
+    web.claude_code.route -> core.contracts
+; web.routers.uploads -> web.uploads.{storage,registry,validation}：
+; routers/uploads.py 作为 media-upload-shell controller，必须直接消费 storage
+; / registry / validator 三件套。web.uploads 子模块自身依赖 config_loader
+; （storage 默认 base_dir 走 ``get_kongming_home()``）和 web.thread_manager
+; （validator 校验 thread 存在）——这些都是合理的领域内依赖，但通过
+; ``config_loader.errors -> core.errors`` 与 ``thread_manager -> thread_cell
+; -> native_runtime -> host/safety/...`` 的传递链会被 Contract 6 误判为
+; routers 跨支柱依赖。单点白名单放行（已在 spec-media-input §5 注明）。
+    web.routers.uploads -> web.uploads.storage
+    web.routers.uploads -> web.uploads.registry
+    web.routers.uploads -> web.uploads.validation
+; claude-code-channel-image-paste：claude_code 通道补图片粘贴。
+; service.py / _attachment_prefix.py 需要消费 AssetStorage（路径反推） +
+; EXT_BY_MIME（mime→ext 白名单单点真源）。同 routers/uploads.py 通过
+; ``config_loader.errors -> core.errors`` 传递触发 Contract 6，单点放行。
+    web.claude_code.service -> web.uploads.storage
+    web.claude_code._attachment_prefix -> web.uploads.storage
+; codex-channel-image-paste §3：codex 通道 service + _image_cli_args 消费
+; AssetStorage (路径反推) + EXT_BY_MIME (mime→ext 白名单)。同 claude_code 通过
+; ``config_loader.errors -> core.errors`` 传递触发 Contract 6，单点放行。
+    web.codex.service -> web.uploads.storage
+    web.codex._image_cli_args -> web.uploads.storage
+    web.codex._image_cli_args -> web.uploads.registry
+    web.claude_code._attachment_prefix -> web.uploads.registry
+; web.app -> web.uploads.{storage,registry,validation}：
+; app.py 装配期注入单例到 ``app.state.*``（asset_storage / asset_registry
+; / upload_validator），让 routers/uploads.py 优先消费注入的单例而不是
+; module-level lazy singleton。同样通过 ``config_loader.errors -> core.errors``
+; 传递触发 Contract 6，单点白名单放行（与上方 routers 同理）。
+    web.app -> web.uploads.storage
+    web.app -> web.uploads.registry
+    web.app -> web.uploads.validation
 
 ; ---------------------------------------------------------------------------
 ; Contract 7: scheduler 不允许 import web 模块
@@ -204,3 +258,98 @@ source_modules =
     scheduler
 forbidden_modules =
     web
+; claude-image-paste-e2e §5：scheduler.runtime_factory → native_runtime
+; → executors.llm.anthropic_messages → executors.llm.media_adapter
+; → web.uploads.storage 是传递链(media_adapter 的 web.uploads 白名单已在
+; Contract 3 上方注明)。scheduler 本身不直接 import web,这里单点放行透传。
+ignore_imports =
+    executors.llm.media_adapter -> web.uploads.storage
+    executors.llm.media_adapter -> web.uploads.registry
+
+; ---------------------------------------------------------------------------
+; Contract 8: evolution 不允许 import web 模块
+;             evolution 通过 TranscriptProvider Protocol 与频道层解耦；
+;             唯一例外：claude_evidence_selector -> web.claude_code.jsonl_history
+;             （单点白名单，借 jsonl 解析能力）。
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:evolution-no-web]
+name = evolution must not import web
+type = forbidden
+source_modules =
+    evolution
+forbidden_modules =
+    web
+ignore_imports =
+    evolution.claude_evidence_selector -> web.claude_code.jsonl_history
+; claude-image-paste-e2e §5：evolution.evolution_manager → native_runtime
+; → executors.llm.anthropic_messages → executors.llm.media_adapter
+; → web.uploads.{storage,registry} 是传递链(已在 Contract 3 白名单)。
+; evolution 自身不直接 import web,这里单点放行透传。
+    executors.llm.media_adapter -> web.uploads.storage
+    executors.llm.media_adapter -> web.uploads.registry
+
+; ---------------------------------------------------------------------------
+; Contract 9: usage-token 封装边界
+;             ``web.usage_token`` 是 Token 用量的唯一对外入口。
+;             外部模块禁止 import 内部子模块（_models / _channel_anthropic /
+;             _channel_openai / _persistence / _migration），只能通过
+;             ``UsageTokenManager`` + 公共 DTO（UsageTokenSnapshot /
+;             ThreadUsageSummary / UsageFrame / ThreadMetadataIO）访问。
+;
+;             5 大硬性约束的机器强制；详见 docs/usage-token/。
+;
+;             白名单：
+;             - ``web.thread_metadata -> web.usage_token._migration``
+;               task#2 阶段 thread_metadata.py 的 lazy upgrade 链需要单点调用
+;               ``upgrade_v7_to_v8`` 纯函数（迁移逻辑沉到 _migration 模块）
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:usage-token-encapsulation]
+name = Only UsageTokenManager v2 and public DTOs exposed; derivers and private models are forbidden
+type = forbidden
+; allow_indirect_imports=True：只禁直接 import；透过公共入口 web.usage_token_v2 →
+; manager.py 间接接触内部模型是合法的（manager 内部消费自家私有 helper）。
+allow_indirect_imports = True
+source_modules =
+    core
+    cli
+    host
+    safety
+    observability
+    config_loader
+    executors
+    web.app
+    web.routers
+    web.cron_delivery
+    web.cron_ws
+    web.ws
+    web.ws_event_sink
+    web.thread_metadata
+    web.claude_code
+    web.codex
+    web.protocol
+forbidden_modules =
+    web.usage_token_v2._derive_claude
+    web.usage_token_v2._derive_codex
+    web.usage_token_v2._derive_generic
+    web.usage_token_v2._models
+    web.usage_token_v2._model_context_table
+; web.thread_manager 是装配层，允许构造 v2 manager + 注入 locator；
+; 但仍禁止直接 import 派生器（manager 内部消费）。
+
+; ---------------------------------------------------------------------------
+; Contract 10: whiteboard router 不允许绕过 manager 直接 import store
+;              router 必须只通过 WhiteboardManager 操作白板数据，
+;              store 是内部实现细节，不能成为 router 的直接依赖。
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:whiteboard-isolation]
+name = Whiteboard router must go through manager
+type = forbidden
+source_modules =
+    web.routers.whiteboard
+forbidden_modules =
+    web.whiteboard_store
+; router → manager → store 是合法链路，只禁直接 import
+allow_indirect_imports = True

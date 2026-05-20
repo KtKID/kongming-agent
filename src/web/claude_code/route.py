@@ -36,13 +36,19 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 
 from web._shared.session_manager import SessionManager
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
+from web.auto_approval.ws_handlers import (
+    build_auto_approval_state_msg,
+    handle_auto_approval_query,
+    handle_auto_approval_toggle,
+)
 from web.claude_code.approval import ApprovalBridge
 from web.claude_code.normalizer import ClaudeNormalizer
 from web.claude_code.service import ClaudeCodeService
+from web.protocol.rest_models import UserInputAttachment
 
 if TYPE_CHECKING:
     from itsdangerous import URLSafeTimedSerializer
@@ -58,6 +64,80 @@ WS_CLOSE_POLICY_VIOLATION = 1008
 _THREAD_ID_RE: re.Pattern[str] = re.compile(r"^thread-[a-f0-9]{12}$")
 
 router = APIRouter()
+
+
+@router.get("/api/claude-code/test-evolution-event")
+async def test_evolution_event(
+    request: Request,
+    thread_id: str = Query(...),
+    status: str = Query(default="completed"),
+) -> dict[str, Any]:
+    """临时测试端点：往 EvolutionManager 的 EventBus 注入模拟 evolution 帧。"""
+    from core.contracts import Event
+
+    manager = getattr(request.app.state, "evolution_manager", None)
+    if manager is None:
+        return {"error": "evolution_manager not available"}
+
+    import time
+
+    run_id = f"run-claude-{thread_id}-test-{int(time.time())}"
+    review_id = f"evo-review:{run_id}"
+
+    if status == "started":
+        event = Event(
+            kind="evolution.review.started",
+            run_id=run_id,
+            payload={
+                "review_id": review_id,
+                "session_id": thread_id,
+                "timeout_seconds": 120,
+            },
+        )
+    elif status == "completed":
+        event = Event(
+            kind="evolution.review.completed",
+            run_id=run_id,
+            payload={
+                "review_id": review_id,
+                "session_id": thread_id,
+                "nutrients_written": 3,
+                "duration_ms": 45000,
+                "timeout_hit": False,
+                "review_summary": "本轮对话涉及 Git 提交规范和测试隔离经验",
+                "nutrient_summaries": [
+                    "commit 前必须验证相关测试通过",
+                    "路径参数需要 resolve 为绝对路径",
+                    "不要用 python -c 做一次性验证",
+                ],
+            },
+        )
+    else:
+        event = Event(
+            kind="evolution.review.failed",
+            run_id=run_id,
+            payload={
+                "review_id": review_id,
+                "session_id": thread_id,
+                "error": "test failure",
+            },
+        )
+
+    # 诊断：bus 路由表
+    routes = {k: type(v).__name__ for k, v in manager._event_bus._routes.items()}
+    sink = manager._event_bus._routes.get(thread_id)
+    sink_closed = getattr(sink, "_closed", "N/A") if sink else "no sink"
+
+    await manager._event_bus.emit(event)
+    return {
+        "ok": True,
+        "kind": event.kind,
+        "run_id": run_id,
+        "thread_id": thread_id,
+        "bus_routes": routes,
+        "sink_type": type(sink).__name__ if sink else None,
+        "sink_closed": sink_closed,
+    }
 
 
 @router.websocket("/ws/claude-code")
@@ -103,6 +183,7 @@ async def claude_code_ws(
 
     # 2.5 thread_id 校验（可选）。带上时必须满足：格式合法 + thread 存在 + backend_kind=claude_code
     bound_thread_id: str | None = None
+    meta: Any = None  # 不传 thread_id 时保持 None（修复 v0.1 时未初始化的 UnboundLocalError）
     if thread_id is not None:
         if not _THREAD_ID_RE.match(thread_id):
             await websocket.close(
@@ -134,25 +215,66 @@ async def claude_code_ws(
             return
         bound_thread_id = thread_id
 
+    # evolution manager（频道无关 evolution 子系统门面，可能为 None — 未配置时）
+    evolution_manager = getattr(websocket.app.state, "evolution_manager", None)
+    # 缓存 thread metadata 字段供 evolution hook 用
+    bound_cwd: str = getattr(meta, "cwd", "") if meta is not None else ""
+    bound_claude_tid: str = getattr(meta, "claude_thread_id", "") if meta is not None else ""
+
     normalizer = ClaudeNormalizer()
-    approval = ApprovalBridge(normalizer, sessions)
+    # smart-approval-v1 装配：从 app.state 取 policy/audit（未装配时 None → 走老行为）
+    auto_approval_policy = getattr(websocket.app.state, "auto_approval_policy", None)
+    auto_approval_audit = getattr(websocket.app.state, "auto_approval_audit", None)
+    # smart-approval-v2-inbox 装配：全局 inbox broadcaster（未装配时 None → 走 v1 行为，仅本 thread WS 弹窗）
+    inbox_broadcaster = getattr(websocket.app.state, "approval_inbox_broadcaster", None)
+    approval = ApprovalBridge(
+        normalizer,
+        sessions,
+        policy=auto_approval_policy,
+        audit=auto_approval_audit,
+        cwd=bound_cwd,
+        thread_id=bound_thread_id,
+        channel="claude_code",
+        inbox_broadcaster=inbox_broadcaster,
+    )
+    # v2-inbox: 注册 thread_id → bridge 映射，让前端 inbox.resolve 帧能路由回此 bridge
+    if inbox_broadcaster is not None and bound_thread_id:
+        inbox_broadcaster.register_bridge(bound_thread_id, approval)
     # v0.2 透传 thread_manager（可能为 None — 老路径 / 未配置时仍能运行）
     tm_for_service: ThreadManagerProtocol | None = getattr(
         websocket.app.state,
         "thread_manager",
         None,
     )
+    # claude-code-channel-image-paste: 注入 app.state.asset_storage 让 service
+    # 能拼 ``@file`` prefix；缺失（测试 / 老装配）走 None → service 跳过 prefix。
+    asset_storage_for_service = getattr(websocket.app.state, "asset_storage", None)
     service = ClaudeCodeService(
         normalizer,
         approval,
         sessions,
         thread_manager=tm_for_service,
+        asset_storage=asset_storage_for_service,
     )
 
     # 跟踪 fire-and-forget 后台 task，避免 GC 提前回收（asyncio 文档约定）
     bg_tasks: set[asyncio.Task[Any]] = set()
 
     await websocket.accept()
+
+    # 2.7 evolution hook: register event route
+    if evolution_manager is not None and evolution_manager.enabled and bound_thread_id:
+        from web.ws_event_sink import WSEventSink
+
+        evo_sink = WSEventSink(ws=websocket)
+        evolution_manager.register_event_route(bound_thread_id, evo_sink)
+
+    # 2.8 smart-approval-v1: 连接建立后主动 push 一次 state（前端 toggle 初始状态）
+    if auto_approval_policy is not None and bound_cwd:
+        with contextlib.suppress(Exception):
+            await websocket.send_json(
+                build_auto_approval_state_msg(auto_approval_policy, bound_cwd),
+            )
 
     # 3. 主循环
     try:
@@ -166,9 +288,11 @@ async def claude_code_ws(
                 sessions,
                 bg_tasks,
                 bound_thread_id=bound_thread_id,
+                evolution_manager=evolution_manager,
+                bound_cwd=bound_cwd,
+                bound_claude_tid=bound_claude_tid,
             )
     except WebSocketDisconnect:
-        # 客户端断连：保留 active sessions 以便重连
         logger.debug("claude-code ws disconnected")
     except Exception as exc:
         logger.exception("claude-code ws unhandled error")
@@ -182,6 +306,14 @@ async def claude_code_ws(
             )
         with contextlib.suppress(Exception):
             await websocket.close()
+    finally:
+        # evolution hook: unregister event route on any exit path
+        if evolution_manager is not None and evolution_manager.enabled and bound_thread_id:
+            evolution_manager.unregister_event_route(bound_thread_id)
+        # v2-inbox: unregister bridge（仅在 registry 里是本 bridge 时才删；
+        # 多 tab 同 thread 时新连接会覆盖，老连接断时不应误删新的）
+        if inbox_broadcaster is not None and bound_thread_id:
+            inbox_broadcaster.unregister_bridge(bound_thread_id, approval)
 
 
 async def _dispatch(
@@ -193,6 +325,9 @@ async def _dispatch(
     bg_tasks: set[asyncio.Task[Any]],
     *,
     bound_thread_id: str | None = None,
+    evolution_manager: Any = None,
+    bound_cwd: str = "",
+    bound_claude_tid: str = "",
 ) -> None:
     """单条入站帧分发。"""
     msg_type = data.get("type") if isinstance(data, dict) else None
@@ -203,6 +338,25 @@ async def _dispatch(
         if not isinstance(command, str):
             await _send_error(websocket, "claude-command.command must be string")
             return
+
+        # claude-code-channel-image-paste: 解析 attachments 字段（前端
+        # ClaudeCodeView 粘贴图片后发上来）。容错：
+        # - 字段缺失 / None / 非 list / 空 list → attachments=None 走原 prompt 路径
+        # - 单条 dict 校验失败由 pydantic 抛 ValidationError，捕获后 fallback 到 None
+        raw_attachments = data.get("attachments") if isinstance(data, dict) else None
+        parsed_attachments: list[UserInputAttachment] | None = None
+        if isinstance(raw_attachments, list) and raw_attachments:
+            try:
+                parsed_attachments = [
+                    UserInputAttachment.model_validate(item) for item in raw_attachments
+                ]
+            except Exception:
+                logger.warning(
+                    "claude-command attachments parse failed; falling back to text-only",
+                    exc_info=True,
+                )
+                parsed_attachments = None
+
         # 跑成后台 task —— 让读循环能继续接 approval-response / abort
         # 注意：query 内部已 await session_manager.register/unregister，
         # 异常已经在 service.query finally 处理
@@ -213,10 +367,35 @@ async def _dispatch(
                 options,
                 websocket,
                 register_id_override=bound_thread_id,
+                attachments=parsed_attachments,
             ),
         )
         bg_tasks.add(task)
         task.add_done_callback(bg_tasks.discard)
+
+        # evolution hook: fire-and-forget notify_user_message
+        if (
+            evolution_manager is not None
+            and evolution_manager.enabled
+            and bound_thread_id
+            and bound_claude_tid
+        ):
+            from evolution.claude_transcript_provider import ClaudeTranscriptProvider
+
+            evo_task = asyncio.create_task(
+                evolution_manager.notify_user_message(
+                    thread_id=bound_thread_id,
+                    provider=ClaudeTranscriptProvider(
+                        thread_id=bound_thread_id,
+                        claude_thread_id=bound_claude_tid,
+                        cwd=bound_cwd,
+                    ),
+                    cwd=bound_cwd,
+                ),
+            )
+            bg_tasks.add(evo_task)
+            evo_task.add_done_callback(bg_tasks.discard)
+
         return
 
     if msg_type == "claude-permission-response":
@@ -258,6 +437,21 @@ async def _dispatch(
                 "isProcessing": active,
             },
         )
+        return
+
+    # smart-approval-v1: per-cwd toggle 开关 + 回执 state
+    # 真正的 toggle/query/state 构造逻辑迁到 web.auto_approval.ws_handlers，
+    # 让 generic_chat 等其他通道复用。route 这里只负责从 app.state 取 policy
+    # 并透传，保留命令路由分发职责。
+    if msg_type == "auto-approval-toggle":
+        policy = getattr(websocket.app.state, "auto_approval_policy", None)
+        await handle_auto_approval_toggle(websocket, data, policy)
+        return
+
+    if msg_type == "auto-approval-query":
+        # 前端按 cwd 主动拉一次 state（切 thread / 重连后用）
+        policy = getattr(websocket.app.state, "auto_approval_policy", None)
+        await handle_auto_approval_query(websocket, data, policy)
         return
 
     await _send_error(websocket, f"unknown command type: {msg_type!r}")

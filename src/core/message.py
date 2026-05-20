@@ -45,6 +45,19 @@ class Message:
         tool_call_id: 仅 tool 消息使用，关联对应的 ToolCall.call_id。
         name: 可选的发言者名，保留给 provider 需要区分同角色不同身份时用。
         metadata: 附加元信息，比如 provider 原始 id、token usage 等。不参与语义。
+
+    Metadata 字段约定:
+        以下 key 是 v0.1.6+ 跨模块共享的"软契约"，结构由调用方保证，
+        Message 本身不做校验。缺失/空值都视为"无附件/无该字段"。
+
+        ``attachments`` (``list[dict[str, Any]]``):
+            仅在 ``role="user"`` 时有意义；其他角色应忽略此字段。
+            结构与 :class:`web.protocol.ws_frames.UserInputAttachment` 对齐
+            （asset_id / kind / mime_type / size_bytes / width / height /
+            duration_ms / preview_url / status），下游 InputAssembler 读出后
+            组装为多模态 provider content block。
+            空列表或缺失 = 该消息无附件。
+            详见 ``dev-pipeline/tasks/claude-image-paste-e2e/README.md`` §1。
     """
 
     role: MessageRole

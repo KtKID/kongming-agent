@@ -90,6 +90,9 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("evolution", "learning", "mode"),
     ("evolution", "learning", "background"),
     ("evolution", "learning", "model_name"),
+    ("evolution", "learning", "base_url"),
+    ("evolution", "learning", "api_key_env"),
+    ("evolution", "learning", "provider"),
     ("evolution", "learning", "reasoning_effort"),
     ("evolution", "learning", "every_n_runs"),
     ("evolution", "learning", "min_user_turns"),
@@ -114,9 +117,31 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("web", "host"),
     ("web", "port"),
     ("web", "dev_mode"),
+    ("web", "initial_password"),
     ("web", "idle_timeout_seconds"),
     ("web", "idle_check_interval_seconds"),
     ("web", "pending_approval_timeout_seconds"),
+    ("scheduler", "approval", "allow_write_file_create_in_cwd"),
+    ("sitian", "version"),
+    ("sitian", "default_scan_interval_sec"),
+    ("sitian", "idle_sleep_sec"),
+    ("sitian", "scanner", "recent_session_window_days"),
+    ("sitian", "scanner", "session_recent_user_messages"),
+    ("sitian", "scanner", "session_recent_assistant_messages"),
+    ("sitian", "scanner", "session_message_max_chars"),
+    # sitian.analyzer
+    ("sitian", "analyzer", "enabled"),
+    ("sitian", "analyzer", "model_name"),
+    ("sitian", "analyzer", "base_url"),
+    ("sitian", "analyzer", "api_key_env"),
+    ("sitian", "analyzer", "max_tokens"),
+    ("sitian", "analyzer", "temperature"),
+    ("sitian", "analyzer", "timeout"),
+    ("sitian", "analyzer", "max_context_chars"),
+    ("sitian", "analyzer", "skip_if_unchanged"),
+    ("sitian", "analyzer", "full_log_enabled"),
+    # sitian.interests
+    ("sitian", "interests", "focus"),
 )
 
 # per-module YAML 文件名 → 合并到 Config 的顶层 key。
@@ -227,11 +252,13 @@ def _warn(msg: str) -> None:
 def _apply_scheduler_env_overrides(data: dict[str, Any]) -> None:
     """把 ``KONGMING_SCHEDULER_*`` env 写入 ``data["scheduler"]``。
 
-    支持三个 env：
+    支持的 env：
 
     - ``KONGMING_SCHEDULER_ENABLED``：bool（0/1/true/false/yes/no/on/off）
     - ``KONGMING_SCHEDULER_INTERVAL``：float
     - ``KONGMING_SCHEDULER_MAX_INFLIGHT``：int
+    - ``KONGMING_SCHEDULER_APPROVAL_MODE``：str（fail_closed / trust）
+    - ``KONGMING_SCHEDULER_DEFAULT_MAX_TURNS``：int（>0，v0.5.1 新增）
 
     非法值统一 stderr warning + 不写入 dict（保留 yaml / 默认值）。
     """
@@ -267,6 +294,35 @@ def _apply_scheduler_env_overrides(data: dict[str, Any]) -> None:
             )
         else:
             _set_nested(data, ("scheduler", "max_inflight"), value_int)
+
+    raw_mode = os.environ.get("KONGMING_SCHEDULER_APPROVAL_MODE")
+    if raw_mode is not None:
+        normalized = raw_mode.strip().lower()
+        if normalized in ("fail_closed", "trust"):
+            _set_nested(data, ("scheduler", "approval", "mode"), normalized)
+        else:
+            _warn(
+                f"KONGMING_SCHEDULER_APPROVAL_MODE={raw_mode!r} is not a valid mode "
+                "(expected 'fail_closed' or 'trust'); using default."
+            )
+
+    raw_max_turns = os.environ.get("KONGMING_SCHEDULER_DEFAULT_MAX_TURNS")
+    if raw_max_turns is not None:
+        try:
+            value_turns = int(raw_max_turns)
+        except ValueError:
+            _warn(
+                f"KONGMING_SCHEDULER_DEFAULT_MAX_TURNS={raw_max_turns!r} is not a "
+                "valid int; using default."
+            )
+        else:
+            if value_turns <= 0:
+                _warn(
+                    f"KONGMING_SCHEDULER_DEFAULT_MAX_TURNS={raw_max_turns!r} must be > 0; "
+                    "using default."
+                )
+            else:
+                _set_nested(data, ("scheduler", "default_max_turns"), value_turns)
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

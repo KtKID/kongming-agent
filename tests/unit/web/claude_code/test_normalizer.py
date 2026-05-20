@@ -113,6 +113,30 @@ def test_assistant_internal_content_is_filtered() -> None:
         assert out == [], f"prefix {prefix!r} should be filtered"
 
 
+def test_assistant_task_notification_prefix_in_internal_list() -> None:
+    """`<task-notification>` 必须在 INTERNAL_CONTENT_PREFIXES 内——live 流过滤的回归保护。
+
+    与历史路径（jsonl_history.py）共享同一份列表（``_content_filter``），
+    保证 live 与 history 对 CLI 注入的 task 通知行为对齐。
+    """
+    assert "<task-notification>" in INTERNAL_CONTENT_PREFIXES
+    n = ClaudeNormalizer()
+    msg = _make_assistant(
+        [
+            TextBlock(
+                text=(
+                    "<task-notification>\n"
+                    "  <task-id>abc</task-id>\n"
+                    "  <status>completed</status>\n"
+                    "</task-notification>"
+                )
+            )
+        ]
+    )
+    out = n.normalize(msg, SESSION_ID)
+    assert out == []
+
+
 def test_assistant_multiple_blocks_emits_multiple_messages() -> None:
     n = ClaudeNormalizer()
     msg = _make_assistant(
@@ -354,7 +378,7 @@ def test_stream_event_block_start_text_emits_status() -> None:
 
 
 def test_stream_event_block_start_tool_use_emits_status_with_tool_name() -> None:
-    """``content_block_start(tool_use)`` → ``stream_status(phase="tool_calling", toolName)``。"""
+    """``content_block_start(tool_use)`` → ``stream_status(phase="tool_calling", toolName, toolId)``。"""
     n = ClaudeNormalizer()
     msg = StreamEvent(
         uuid="uuid-blk-tool",
@@ -377,6 +401,58 @@ def test_stream_event_block_start_tool_use_emits_status_with_tool_name() -> None
     assert out[0]["phase"] == "tool_calling"
     assert out[0]["blockIndex"] == 2
     assert out[0]["toolName"] == "Read"
+    assert out[0]["toolId"] == "tu_1"
+
+
+def test_stream_event_block_start_tool_use_missing_id_omits_tool_id() -> None:
+    """``content_block.id`` 缺失时 ``toolId`` 字段不写入（让前端走兜底匹配）。"""
+    n = ClaudeNormalizer()
+    msg = StreamEvent(
+        uuid="uuid-blk-tool-no-id",
+        session_id="sid",
+        event={
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+                "type": "tool_use",
+                "name": "Read",
+                "input": {},
+            },
+        },
+        parent_tool_use_id=None,
+    )
+    out = n.normalize(msg, SESSION_ID)
+    assert len(out) == 1
+    assert out[0]["kind"] == "stream_status"
+    assert out[0]["phase"] == "tool_calling"
+    assert out[0]["toolName"] == "Read"
+    assert "toolId" not in out[0]
+
+
+def test_stream_event_block_start_server_tool_use_carries_tool_id() -> None:
+    """``server_tool_use`` 同样产出 ``stream_status(phase=tool_calling, toolId)``。"""
+    n = ClaudeNormalizer()
+    msg = StreamEvent(
+        uuid="uuid-blk-srv",
+        session_id="sid",
+        event={
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "server_tool_use",
+                "id": "stu_42",
+                "name": "WebSearch",
+                "input": {},
+            },
+        },
+        parent_tool_use_id=None,
+    )
+    out = n.normalize(msg, SESSION_ID)
+    assert len(out) == 1
+    assert out[0]["kind"] == "stream_status"
+    assert out[0]["phase"] == "tool_calling"
+    assert out[0]["toolName"] == "WebSearch"
+    assert out[0]["toolId"] == "stu_42"
 
 
 def test_stream_event_block_start_unknown_type_dropped() -> None:

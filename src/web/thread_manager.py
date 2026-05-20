@@ -36,9 +36,11 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal
 
-from config_loader.models import Config
+from config_loader.models import Config, LLMPresetConfig
 from core.contracts import ApprovalAction
 from core.message import Message
+from web.claude_code.jsonl_history import jsonl_path_for
+from web.codex.projects_scanner import list_codex_projects
 from web.host_adapter import WebHostAdapter
 from web.protocol import CellEvictedFrame, CellSummaryDTO, EvictReason
 from web.thread_cell import ThreadCell
@@ -50,7 +52,16 @@ from web.thread_metadata import (
     thread_metadata_path,
     write_thread_metadata,
 )
-from web.ws_event_sink import UsagePersistSink, WSEventSink
+from web.thread_status_ws import ThreadStatusEventSink
+from web.uploads.storage import AssetStorage
+from web.usage_token_v2 import (
+    ClaudeJsonlLocator,
+    CodexRolloutLocator,
+    ProviderKind,
+    ThreadMetadataReader,
+    UsageTokenManager,
+)
+from web.ws_event_sink import WSEventSink
 from web.ws_fanout import WebSocketFanout
 
 logger = logging.getLogger(__name__)
@@ -62,6 +73,135 @@ class ClaudeThreadAlreadyBoundError(ValueError):
 
 class ClaudeThreadConflictError(ValueError):
     """claude_thread_id 已被另一 thread 绑定，禁止重复绑定（v0.2 invariant：1:1 绑定）。"""
+
+
+class _ThreadMetadataReaderImpl:
+    """``ThreadMetadataReader`` v2 Protocol 实现 —— 从 thread metadata.json 读
+    轻量字段（backend_kind / cwd / claude_thread_id / codex_thread_id / preset_id）
+    给 UsageTokenManager v2 派发派生器用。
+    """
+
+    def __init__(self, home: Path) -> None:
+        self._home = home
+
+    async def read(self, thread_id: str) -> dict[str, Any] | None:
+        meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
+        if meta is None:
+            return None
+        return {
+            "backend_kind": meta.backend_kind,
+            "cwd": meta.cwd,
+            "claude_thread_id": meta.claude_thread_id,
+            "codex_thread_id": meta.codex_thread_id,
+            "preset_id": meta.preset_id,
+        }
+
+
+class _ClaudeJsonlLocatorImpl:
+    """``ClaudeJsonlLocator`` v2 Protocol 实现 —— 拼 Claude SDK jsonl 路径。
+
+    非 ``backend_kind="claude_code"`` 或缺 ``cwd`` / ``claude_thread_id`` → None。
+    """
+
+    def __init__(self, home: Path) -> None:
+        self._home = home
+
+    async def locate(self, thread_id: str) -> Path | None:
+        meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
+        if meta is None or meta.backend_kind != "claude_code":
+            return None
+        if not meta.cwd or not meta.claude_thread_id:
+            return None
+        return jsonl_path_for(meta.cwd, meta.claude_thread_id)
+
+
+class _CodexRolloutLocatorImpl:
+    """``CodexRolloutLocator`` v2 Protocol 实现 —— 扫 ~/.codex/sessions/ 找 rollout 路径。
+
+    非 ``backend_kind="codex"`` 或缺 ``codex_thread_id`` → None。
+    复用 ``web/codex/projects_scanner.py::list_codex_projects`` 的扫描结果，
+    按 codex_thread_id 匹配 rollout uuid。
+    """
+
+    def __init__(self, home: Path) -> None:
+        self._home = home
+
+    async def locate(self, thread_id: str) -> Path | None:
+        meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
+        if meta is None or meta.backend_kind != "codex":
+            return None
+        codex_tid = meta.codex_thread_id
+        if not codex_tid:
+            return None
+        # 扫 codex sessions 找匹配 uuid 的 rollout 文件
+        try:
+            projects = await asyncio.to_thread(list_codex_projects, registry_cwds=[])
+        except Exception:
+            logger.warning(
+                "_CodexRolloutLocatorImpl.locate failed for %s", thread_id, exc_info=True
+            )
+            return None
+        for proj in projects:
+            for session in getattr(proj, "sessions", []):
+                if getattr(session, "session_id", "") == codex_tid:
+                    rollout_path = getattr(session, "rollout_path", None)
+                    if isinstance(rollout_path, (str, Path)):
+                        return Path(rollout_path)
+        return None
+
+
+class _GenericChatSessionLocatorImpl:
+    """``GenericChatSessionLocator`` v2 Protocol 实现 —— 拼 FileSession messages.jsonl
+    路径 + 按 preset_id 决定 provider 厂商。
+
+    返回 None：
+    - 非 ``backend_kind="generic_chat"``
+    - session backend 不是 FileSession（memory / sqlite 不支持派生）
+    - 找不到 preset_id 对应的 provider
+    - thread 未跑过（messages.jsonl 未 materialize）
+    """
+
+    def __init__(self, home: Path, cfg: Config) -> None:
+        self._home = home
+        self._cfg = cfg
+        # 建索引：preset_id → LLMPresetConfig（启动时一次，运行时只读）
+        presets: dict[str, LLMPresetConfig] = {}
+        web_cfg = getattr(cfg, "web", None)
+        if web_cfg is not None:
+            for preset in getattr(web_cfg, "llm_presets", []) or []:
+                presets[preset.id] = preset
+        self._presets = presets
+
+    async def locate(self, thread_id: str) -> tuple[Path, ProviderKind] | None:
+        meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
+        if meta is None or meta.backend_kind != "generic_chat":
+            return None
+        # 检查 session backend 是否 file（D-1 决策：只支持 FileSession）
+        session_cfg = getattr(self._cfg, "session", None)
+        backend_kind = getattr(session_cfg, "backend", "file") if session_cfg else "file"
+        if backend_kind != "file":
+            # memory / sqlite backend → 不支持派生
+            return None
+        # 拼 FileSession messages.jsonl 路径
+        jsonl_path = self._home / "sessions" / thread_id / "messages.jsonl"
+        if not jsonl_path.is_file():
+            return None
+        # 查 preset_id → provider 厂商
+        preset = self._presets.get(meta.preset_id)
+        if preset is None:
+            return None
+        provider = preset.provider
+        if provider not in ("anthropic", "openai_compatible"):
+            return None
+        return (jsonl_path, provider)
+
+
+# Protocol 兼容性自检（启动时一次性，运行时零开销）
+assert isinstance(_ThreadMetadataReaderImpl(Path("/tmp")), ThreadMetadataReader)
+assert isinstance(_ClaudeJsonlLocatorImpl(Path("/tmp")), ClaudeJsonlLocator)
+assert isinstance(_CodexRolloutLocatorImpl(Path("/tmp")), CodexRolloutLocator)
+# _GenericChatSessionLocatorImpl 需要 Config，无法静态实例化校验；
+# 运行时 ThreadManager.__init__ 装配时隐式校验
 
 
 class CodexThreadAlreadyBoundError(ValueError):
@@ -118,15 +258,42 @@ class ThreadManager:
         *,
         kongming_home: Path,
         runtime_factory: RuntimeFactory,
+        asset_storage: AssetStorage | None = None,
     ) -> None:
+        """
+        Args:
+            asset_storage: 可选注入的 :class:`AssetStorage`,用于 ``delete_thread``
+                时同步清理 thread 名下所有上传资产(claude-image-paste-e2e P1 #2
+                R2 boundary fix)。``None`` 时跳过资产清理(CLI / 测试路径常态)。
+        """
         self._cfg = cfg
         self._home = kongming_home
         self._runtime_factory = runtime_factory
+        self._asset_storage = asset_storage
         self._cells: dict[str, ThreadCell] = {}
         self._lock = asyncio.Lock()
         self._idle_task: asyncio.Task[None] | None = None
         self._started = False
         self._closed = False
+        # usage-token-v2-bigbang: UsageTokenManager v2 注入——无状态门面。
+        # token 真源来自 SDK 写的 jsonl/rollout，由 manager 内部派生器现场算。
+        # metadata.json 不再缓存 token（schema v9 已物理删 3 个 token 字段）。
+        self._usage_manager: UsageTokenManager = UsageTokenManager(
+            meta_reader=_ThreadMetadataReaderImpl(kongming_home),
+            claude_locator=_ClaudeJsonlLocatorImpl(kongming_home),
+            codex_locator=_CodexRolloutLocatorImpl(kongming_home),
+            generic_locator=_GenericChatSessionLocatorImpl(kongming_home, cfg),
+        )
+
+    @property
+    def usage_manager(self) -> UsageTokenManager:
+        """v2 manager: 暴露给 router / ws handler / service 调
+        ``get_thread_usage(thread_id)`` 唯一公共方法。
+
+        外部消费方**只能**调这一个方法；v1 时代的 record_run_usage /
+        set_last_assistant_usage / get_thread_summary 等方法 v2 全部删除。
+        """
+        return self._usage_manager
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -211,33 +378,31 @@ class ThreadManager:
         浏览器先 ``POST /api/threads`` 创建，再单独建 WS 触发 boot。
 
         Args:
-            name: thread 名（剥前后空白后非空）。
+            name: thread 名（可选；为空时用 thread_id 兜底）。
             preset_id: ``backend_kind="generic_chat"`` 时必须非空，
                 ``backend_kind="claude_code"`` / ``"codex"`` 时允许空字符串占位。
             backend_kind: 后端类型；决定后续 WS endpoint 走通用 chat、Claude Code
                 或 Codex 通道。
             cwd: 可选 workspace 根目录；为空表示纯聊天 thread。
         """
-        if not name or not name.strip():
-            raise ValueError("thread name must not be empty")
         if backend_kind == "generic_chat" and (not preset_id or not preset_id.strip()):
             raise ValueError("preset_id required for generic_chat backend")
         normalized_cwd = cwd.strip()
 
         thread_id = _generate_thread_id()
+        resolved_name = name.strip() or thread_id
         now = _now()
         meta = ThreadMetadata(
             id=thread_id,
-            name=name.strip(),
+            name=resolved_name,
             preset_id=preset_id,
             backend_kind=backend_kind,
             cwd=normalized_cwd,
             created_at=now,
             updated_at=now,
             message_count=0,
-            cumulative_prompt_tokens=0,
-            cumulative_completion_tokens=0,
-            cumulative_total_tokens=0,
+            # v9 (usage-token-v2-bigbang)：删 cumulative_usage 字段；token 真源
+            # 在 SDK jsonl/rollout，由 UsageTokenManager v2 派生器现场算。
         )
         # 写盘可能阻塞，放 to_thread
         await asyncio.to_thread(write_thread_metadata, self._home, meta)
@@ -266,9 +431,8 @@ class ThreadManager:
             created_at=meta.created_at,
             updated_at=_now(),
             message_count=meta.message_count,
-            cumulative_prompt_tokens=meta.cumulative_prompt_tokens,
-            cumulative_completion_tokens=meta.cumulative_completion_tokens,
-            cumulative_total_tokens=meta.cumulative_total_tokens,
+            is_pinned=meta.is_pinned,
+            is_archived=meta.is_archived,
         )
         await asyncio.to_thread(write_thread_metadata, self._home, updated)
         async with self._lock:
@@ -277,34 +441,56 @@ class ThreadManager:
                 cell.metadata = updated
         return updated
 
-    async def add_thread_usage(
-        self,
-        thread_id: str,
-        *,
-        prompt_tokens: int,
-        completion_tokens: int,
-        total_tokens: int,
-    ) -> ThreadMetadata:
-        """把一次 run 的累计 usage 回写到 thread metadata。
+    async def pin_thread(self, thread_id: str, is_pinned: bool) -> ThreadMetadata:
+        """置顶/取消置顶 thread。"""
+        meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
+        if meta is None:
+            raise KeyError(f"thread not found: {thread_id}")
+        updated = ThreadMetadata(
+            id=meta.id,
+            name=meta.name,
+            preset_id=meta.preset_id,
+            backend_kind=meta.backend_kind,
+            claude_thread_id=meta.claude_thread_id,
+            codex_thread_id=meta.codex_thread_id,
+            cwd=meta.cwd,
+            created_at=meta.created_at,
+            updated_at=meta.updated_at,  # pin 不改 updated_at
+            message_count=meta.message_count,
+            is_pinned=is_pinned,
+            is_archived=meta.is_archived,
+        )
+        await asyncio.to_thread(write_thread_metadata, self._home, updated)
+        async with self._lock:
+            cell = self._cells.get(thread_id)
+            if cell is not None:
+                cell.metadata = updated
+        return updated
 
-        用于 generic chat 路径在 ``bridge.run_once`` 结束后落盘 thread 级累计
-        ``prompt / completion / total``。负数一律按 0 处理，避免上游异常值污染累计量。
+    async def set_archived(self, thread_id: str, is_archived: bool) -> ThreadMetadata:
+        """归档/取消归档 thread（v10 claude-session-rename-archive-metadata-source）。
+
+        与 ``pin_thread`` 同款：read → model_copy → atomic write → 同步 cell.metadata。
+        归档不算"活跃"，所以**不**更新 ``updated_at``（保持与 pin 一致）。
+
+        失败：thread 不存在抛 :class:`KeyError`。
         """
         meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
         if meta is None:
             raise KeyError(f"thread not found: {thread_id}")
-
-        prompt = max(0, int(prompt_tokens))
-        completion = max(0, int(completion_tokens))
-        total = max(0, int(total_tokens))
-        updated = meta.model_copy(
-            update={
-                "updated_at": _now(),
-                "cumulative_prompt_tokens": meta.cumulative_prompt_tokens + prompt,
-                "cumulative_completion_tokens": meta.cumulative_completion_tokens + completion,
-                "cumulative_total_tokens": meta.cumulative_total_tokens + total,
-                "schema_version": 6,
-            }
+        updated = ThreadMetadata(
+            id=meta.id,
+            name=meta.name,
+            preset_id=meta.preset_id,
+            backend_kind=meta.backend_kind,
+            claude_thread_id=meta.claude_thread_id,
+            codex_thread_id=meta.codex_thread_id,
+            cwd=meta.cwd,
+            created_at=meta.created_at,
+            updated_at=meta.updated_at,  # archive 不改 updated_at（与 pin 一致）
+            message_count=meta.message_count,
+            is_pinned=meta.is_pinned,
+            is_archived=is_archived,
         )
         await asyncio.to_thread(write_thread_metadata, self._home, updated)
         async with self._lock:
@@ -312,6 +498,11 @@ class ThreadManager:
             if cell is not None:
                 cell.metadata = updated
         return updated
+
+    # task#3.3：``add_thread_usage`` 已删除——UsagePersistSink 改走
+    # ``self._usage_manager.record_run_usage(channel, raw_payload, ...)``；
+    # router / WS handler 通过 ``self.usage_manager`` 属性拿数据。
+    # 历史调用方（包括测试 mock）应同步迁移到 manager API。
 
     async def delete_thread(
         self,
@@ -342,6 +533,30 @@ class ThreadManager:
             self._home,
             thread_id,
         )
+
+        # P1 #2 (claude-image-paste-e2e R2 boundary fix)：清理 thread 名下所有
+        # 上传资产(images / videos / files)。``_asset_storage`` 在 web 装配层
+        # 注入(CLI / 测试路径常为 None → 跳过,因为这些路径压根不会有上传资产)。
+        # delete_thread_assets 内部对不存在的目录直接跳过,容错 idempotent。
+        if self._asset_storage is not None:
+            try:
+                removed = await asyncio.to_thread(
+                    self._asset_storage.delete_thread_assets,
+                    thread_id=thread_id,
+                )
+                if removed > 0:
+                    logger.info(
+                        "delete_thread(%s): removed %d asset files",
+                        thread_id,
+                        removed,
+                    )
+            except Exception:
+                # 资产清理失败不阻断 thread 删除主流程
+                logger.warning(
+                    "delete_thread(%s): asset cleanup failed; metadata already removed",
+                    thread_id,
+                    exc_info=True,
+                )
 
         # v0.1.5 不删 session backend 历史（需要 cfg.session.backend 路径推算）；
         # 留给 web-app-shell 任务在装配时按需 wire 一个 history_cleaner closure。
@@ -411,6 +626,81 @@ class ThreadManager:
             self._boot_locks_storage: dict[str, asyncio.Lock] = {}
         return self._boot_locks_storage
 
+    # claude_bind_locks 字典：claude_thread_id → asyncio.Lock
+    # 只在 create_and_bind_claude_thread 路径用，串行化"反查→不存在则 create+bind"
+    # 的临界区，避免两个 import_claude_session 请求同时进入"不存在"分支产生重复
+    # thread metadata（"幽灵 thread"——曾在用户机器上发现 3 组 ctid 各挂 2-3 条
+    # thread metadata，根因是该临界区非原子）。
+    @property
+    def _claude_bind_locks(self) -> dict[str, asyncio.Lock]:
+        if not hasattr(self, "_claude_bind_locks_storage"):
+            self._claude_bind_locks_storage: dict[str, asyncio.Lock] = {}
+        return self._claude_bind_locks_storage
+
+    async def create_and_bind_claude_thread(
+        self,
+        *,
+        claude_thread_id: str,
+        cwd: str,
+        name: str,
+        preset_id: str = "",
+    ) -> tuple[ThreadMetadata, bool]:
+        """原子地完成"反查 ctid → 不存在则 create_thread + bind_claude_thread"。
+
+        替代老的两步非原子调用（import_claude_session router 旧实现），消除
+        race window（参见 ``docs/fixes/claude-session-rename-archive-
+        metadata-source.md`` 的根因调查）。
+
+        实现：per-claude_thread_id :class:`asyncio.Lock` 串行化临界区。
+
+        Returns:
+            元组 ``(meta, imported)``：
+
+            - ``imported=False``：``claude_thread_id`` 已绑过另一个 thread，
+              返回 existing thread metadata。
+            - ``imported=True``：新建了 thread + 完成 bind。
+
+        Raises:
+            ValueError: ``claude_thread_id`` 为空。
+            ClaudeThreadConflictError: 极端 race（如 worktree 共享 .kongming
+                并行写盘）下仍可能抛出；create_thread 阶段写入的 metadata 会被
+                回滚（``delete_thread``），不留幽灵。
+        """
+        if not claude_thread_id:
+            raise ValueError("claude_thread_id must not be empty")
+
+        # 拿/创建 per-ctid lock；用 self._lock 保护字典 setdefault 防止并发
+        # 创建两把不同 Lock 实例（那样就完全失去串行化效果了）
+        async with self._lock:
+            ctid_lock = self._claude_bind_locks.setdefault(claude_thread_id, asyncio.Lock())
+
+        async with ctid_lock:
+            # 临界区开始：double-check 反查（等锁期间可能有人已经绑好）
+            existing = self.find_thread_by_claude_thread_id(claude_thread_id)
+            if existing is not None:
+                return existing, False
+
+            # 未绑定 → create_thread + bind_claude_thread 原子完成
+            new_thread = await self.create_thread(
+                name,
+                preset_id,
+                backend_kind="claude_code",
+                cwd=cwd,
+            )
+            try:
+                bound = await self.bind_claude_thread(
+                    new_thread.id,
+                    claude_thread_id,
+                    cwd,
+                )
+            except Exception:
+                # bind 失败（如 ClaudeThreadConflictError）→ 回滚 create_thread
+                # 避免留下未绑定的孤儿 thread metadata（"幽灵 thread"）
+                with suppress(Exception):
+                    await self.delete_thread(new_thread.id, keep_history=False)
+                raise
+            return bound, True
+
     async def _build_cell(self, meta: ThreadMetadata) -> ThreadCell:
         """装配单个 cell。
 
@@ -432,11 +722,17 @@ class ThreadManager:
         adapter = WebHostAdapter(
             ws=fanout,
             pending_approval_timeout_seconds=float(self._cfg.web.pending_approval_timeout_seconds),
+            # 阶段 1 (smart-approval-manager-v0.5)：传 thread_id 让 close() 能调
+            # ApprovalManager.cancel_by_thread 清 manager 路径的 pending（R10 防护）。
+            thread_id=meta.id,
         )
         ws_sink = WSEventSink(fanout)
-        usage_sink = UsagePersistSink(meta.id, self.add_thread_usage)
+        # usage-token-v2-bigbang: UsagePersistSink 已删除——v2 manager 是无状态门面，
+        # 不接受外部 push token。usage 事件无需持久化 sink；前端通过
+        # GET /threads/<tid>/usage 端点拉取派生结果。
 
-        sinks: list[Any] = [ws_sink, usage_sink]
+        status_sink = ThreadStatusEventSink(meta.id)
+        sinks: list[Any] = [ws_sink, status_sink]
         runtime, bridge = await self._runtime_factory(
             meta.id,
             meta.preset_id,
@@ -574,7 +870,8 @@ class ThreadManager:
         merged: dict[str, ThreadMetadata] = {m.id: m for m in disk_metas}
         merged.update(in_memory)
         out = list(merged.values())
-        out.sort(key=lambda m: m.updated_at, reverse=True)
+        # 先按 is_pinned 降序（置顶排前），再按 updated_at 降序
+        out.sort(key=lambda m: (m.is_pinned, m.updated_at), reverse=True)
         return out
 
     def list_cells(self) -> list[CellSummaryDTO]:
@@ -680,7 +977,7 @@ class ThreadManager:
             update={
                 "claude_thread_id": claude_thread_id,
                 "cwd": cwd,
-                "schema_version": 6,
+                "schema_version": 7,
                 "updated_at": _now(),
             }
         )
@@ -725,7 +1022,7 @@ class ThreadManager:
             update={
                 "codex_thread_id": codex_thread_id,
                 "cwd": cwd,
-                "schema_version": 6,
+                "schema_version": 7,
                 "updated_at": _now(),
             }
         )

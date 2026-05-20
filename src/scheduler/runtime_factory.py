@@ -26,6 +26,7 @@ session + 工具裁剪 + watchdog，但 LLM / safety / tool registry / session �
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
 
     from config_loader.models import LLMPresetConfig
     from context.session_bootstrap import SessionBootstrap
-    from core.contracts import EventSink, Session
+    from core.contracts import EventSink, Session, Tool, ToolLookup
     from scheduler.delivery import DeliveryDispatcher
 
 
@@ -86,6 +87,8 @@ def build_cron_execution_bridge(
     store: Store,
     *,
     event_sinks: list[EventSink] | None = None,
+    tools: ToolLookup | Mapping[str, Tool] | None = None,
+    enabled_tool_names: list[str] | None = None,
     instructions: str | None = None,
     session_factory: Callable[[str], Session] | None = None,
     session_bootstrap: SessionBootstrap | None = None,
@@ -128,6 +131,8 @@ def build_cron_execution_bridge(
     runtime = NativeRuntime.build(
         config,
         event_sinks=sinks,
+        tools=tools,
+        enabled_tool_names=enabled_tool_names,
         instructions=instructions,
         session_factory=resolved_factory,
     )

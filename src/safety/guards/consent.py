@@ -328,7 +328,6 @@ class ConsentResolver:
         """
         tool = request.tool_name
         args = request.arguments
-
         if tool in _SKILL_TOOLS:
             return self._classify_skill(args)
 

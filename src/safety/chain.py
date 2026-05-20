@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -44,6 +45,7 @@ from safety.capability_policy import CapabilityPolicy
 from safety.decision_engine import SafetyDecisionEngine, TraceEmitter
 from safety.grant_store import GrantStore, grant_with_now
 from safety.guards.consent import ConsentResolver
+from safety.guards.destructive import DestructiveForceAskGuard
 from safety.guards.hard_block import HardBlockGuard
 from safety.guards.trust import TrustResolver
 from safety.permission_policy import PermissionPolicy
@@ -150,13 +152,15 @@ class SafetyGatedApproval:
         """ACCEPT_FOR_SESSION 写回 GrantStore。
 
         触发条件：``decision.outcome=="approved"`` + ``metadata.grant_scope=="session"``。
-        capability 命名 ``tool:<tool_name>`` + matcher=``"*"``，对齐
-        :func:`GrantStore.from_config` 的 ``allow_tools_silent`` 转换路径
-        （``grant_store.py:_TOOL_CAPABILITY_PREFIX`` / ``_WILDCARD_MATCHER``），
-        保证下一轮 :class:`TrustResolver.find_matching` 能命中。
 
-        ``request.session_id`` 缺失时静默跳过（防御性；schema 上 session_id
-        是必填字段，但避免运行时 stub 测试场景下崩链）。
+        Grant matcher 策略（P0 安全修复）：
+
+        - ``run_shell``：提取命令前缀（第一个 word）作为 matcher。
+          例：``ls /tmp`` → ``matcher="ls"``，``git status`` → ``matcher="git"``。
+          解析失败时 fallback 到 ``"*"``（兼容旧行为）。
+        - 非 shell 工具：保持 ``matcher="*"``（``memory`` / ``schedule`` 等）。
+
+        ``request.session_id`` 缺失时静默跳过（防御性）。
         """
         metadata = decision.metadata or {}
         if decision.outcome != "approved":
@@ -164,13 +168,23 @@ class SafetyGatedApproval:
         if metadata.get(ApprovalMetadataKeys.GRANT_SCOPE) != "session":
             return
         if not request.session_id:
-            # session grant 必须绑定到具体 session_id；空串 / None 视为不写
             return
 
+        # shell 命令：按命令前缀细化 matcher
+        matcher = "*"
+        if request.tool_name == "run_shell":
+            cmd = (request.arguments or {}).get("command")
+            if isinstance(cmd, str):
+                if not cmd.strip():
+                    # 空/纯空白命令不写 grant（避免 fallback 到 "*" 过度授权）
+                    return
+                cmd_base = extract_command_base(cmd)
+                if cmd_base:
+                    matcher = cmd_base
+
         grant = grant_with_now(
-            # 字面值 "tool:" 对齐 grant_store.py:_TOOL_CAPABILITY_PREFIX
             capability=f"tool:{request.tool_name}",
-            matcher="*",
+            matcher=matcher,
             scope="session",
             source=DecisionSource.SESSION,
             request_id=request.call_id,
@@ -276,6 +290,7 @@ def build_safety_chain(
     boundary = boundary_resolver or BoundaryResolver.from_project_root()
     grants = grant_store or GrantStore.from_config(config)
     hard_block = HardBlockGuard.from_config(config)
+    destructive = DestructiveForceAskGuard.from_config(config)
     trust = TrustResolver(boundary, grants)
     consent = ConsentResolver.from_config(config, interactive_approval=interactive_approval)
 
@@ -290,6 +305,7 @@ def build_safety_chain(
     engine = SafetyDecisionEngine(
         hard_block=hard_block,
         boundary=boundary,
+        destructive=destructive,
         trust=trust,
         consent=consent,
         trace_emitter=resolved_emitter,
@@ -332,7 +348,7 @@ def _build_event_sink_emitter(
 
     - read 类工具的 ``tool.silently_allowed`` 默认不写（除非
       ``log_silent_reads=True``）；write 类总写。
-    - ``tool.denied`` / ``tool.approval_required`` 总写。
+    - ``tool.denied`` / ``tool.approval_required`` / ``tool.destructive_force_ask`` 总写。
     """
     from core.contracts import Event
 
@@ -341,7 +357,7 @@ def _build_event_sink_emitter(
         decision: ApprovalDecision,
         request: ApprovalRequest,
     ) -> None:
-        # read silent 写盘控制
+        # read silent 写盘控制（destructive_force_ask 永远写盘，不过滤）
         if (
             event_kind == "tool.silently_allowed"
             and request.tool_name in _READ_TOOL_NAMES
@@ -396,7 +412,7 @@ def _build_event_payload(
     ``boundary_kind`` / ``tool_name`` / ``path_or_command`` / ``request_id``。
     """
     metadata = decision.metadata or {}
-    return {
+    payload: dict[str, Any] = {
         "decision_class": metadata.get(ApprovalMetadataKeys.DECISION_CLASS),
         "decision_source": metadata.get(ApprovalMetadataKeys.DECISION_SOURCE),
         "matched_rule": metadata.get(ApprovalMetadataKeys.MATCHED_RULE),
@@ -408,6 +424,12 @@ def _build_event_payload(
         "request_id": request.call_id,
         "outcome": decision.outcome,
     }
+    # shell 命令：追加完整 command 文本（便于审计 destructive 操作）
+    if request.tool_name == "run_shell":
+        cmd = (request.arguments or {}).get("command")
+        if isinstance(cmd, str):
+            payload["command"] = cmd
+    return payload
 
 
 def _extract_path_or_command(request: ApprovalRequest) -> str | None:
@@ -422,8 +444,37 @@ def _extract_path_or_command(request: ApprovalRequest) -> str | None:
     return None
 
 
+# shell 分隔符正则（复用 hard_block 的逻辑）
+_CMD_SEGMENT_SPLITTER = re.compile(r"(?:&&|\|\||;|\|)")
+
+
+def extract_command_base(command: str) -> str:
+    """从 shell 命令提取命令前缀（第一段的第一个 word）。
+
+    用于 session grant 的 matcher 细化：``ls /tmp`` → ``"ls"``，
+    ``cd /tmp && rm -rf foo`` → ``"cd"``。
+
+    逻辑：
+    1. 按 ``&&`` / ``||`` / ``;`` / ``|`` 拆段
+    2. 取第一段
+    3. strip 后取第一个 word（空格分隔）
+    4. 返回小写
+
+    返回空串表示解析失败。
+    """
+    if not command or not command.strip():
+        return ""
+    segments = _CMD_SEGMENT_SPLITTER.split(command)
+    first_segment = segments[0].strip() if segments else ""
+    if not first_segment:
+        return ""
+    first_word = first_segment.split(maxsplit=1)[0]
+    return first_word.lower()
+
+
 __all__ = [
     "SafetyChainError",
     "SafetyGatedApproval",
     "build_safety_chain",
+    "extract_command_base",
 ]

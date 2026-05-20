@@ -74,8 +74,13 @@ async def test_pure_text_block() -> None:
             assert c.index == 0
     # finish_reason 映射
     assert chunks[-1].finish_reason == "stop"
-    # usage 透传 + 累加
+    # usage 透传 + 累加（task#3.1：新增 SDK 原生字段 + provider_kind）
     assert chunks[-1].usage == {
+        "provider_kind": "anthropic",
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
         "prompt_tokens": 10,
         "completion_tokens": 5,
         "total_tokens": 15,
@@ -221,10 +226,17 @@ async def test_usage_and_cache_tokens() -> None:
     ]
     chunks = await _run(events)
     last = chunks[-1]
+    # task#3.1：prompt_tokens 修 lossy bug，现在含 cache_read + cache_creation
+    # 真值 = 100 + 300 + 200 = 600
     assert last.usage == {
-        "prompt_tokens": 100,
+        "provider_kind": "anthropic",
+        "input_tokens": 100,
+        "output_tokens": 42,
+        "cache_read_input_tokens": 300,
+        "cache_creation_input_tokens": 200,
+        "prompt_tokens": 600,  # ← 修 lossy: input + cache_read + cache_creation
         "completion_tokens": 42,
-        "total_tokens": 142,
+        "total_tokens": 642,  # ← 600 + 42
     }
     meta = last.provider_metadata
     assert meta["id"] == "msg_cached"

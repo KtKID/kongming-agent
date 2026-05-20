@@ -1,9 +1,14 @@
-"""GET /api/claude/projects endpoint 单测（v0.2 #7）。
+"""GET /api/claude/projects endpoint 单测（v0.2 #7 + claude-session-rename-archive
+-metadata-source #3）。
 
 覆盖：
 1. 未登录 → 401
 2. mock list_projects 返非空 → projects 数组
 3. mock list_projects 返空 → projects=[]
+4. refresh 流式：progress + done
+
+本轮迁移：list_projects 多了 ``thread_metadata_index`` 参数，所有 mock 用
+``*args, **kwargs`` 兼容（避免 router 调签名变更时再次破测）。
 """
 
 from __future__ import annotations
@@ -49,7 +54,20 @@ def test_returns_projects_dict(tmp_path: Path, monkeypatch) -> None:
             ],
         )
     ]
-    monkeypatch.setattr("web.routers.claude.list_projects", lambda: fake_data)
+
+    # router 现在用 list_projects(cwds, *, claude_home, progress_callback, thread_metadata_index)
+    # mock 用显式签名钉死调用契约——router 加新参数时 TypeError 提示更新测试
+    def fake_list_projects(
+        registry_cwds,
+        *,
+        claude_home=None,
+        progress_callback=None,
+        thread_metadata_index=None,
+    ):
+        del registry_cwds, claude_home, progress_callback, thread_metadata_index
+        return fake_data
+
+    monkeypatch.setattr("web.routers.claude.list_projects", fake_list_projects)
     tm = FakeTM()
     client = _login_client(tmp_path, tm)
     try:
@@ -73,7 +91,17 @@ def test_returns_projects_dict(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_empty_returns_empty_projects(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("web.routers.claude.list_projects", lambda: [])
+    def fake_empty_list_projects(
+        registry_cwds,
+        *,
+        claude_home=None,
+        progress_callback=None,
+        thread_metadata_index=None,
+    ):
+        del registry_cwds, claude_home, progress_callback, thread_metadata_index
+        return []
+
+    monkeypatch.setattr("web.routers.claude.list_projects", fake_empty_list_projects)
     tm = FakeTM()
     client = _login_client(tmp_path, tm)
     try:
@@ -101,7 +129,14 @@ def test_refresh_stream_returns_progress_and_done(tmp_path: Path, monkeypatch) -
         )
     ]
 
-    def fake_list_projects(*, progress_callback=None):
+    def fake_list_projects(
+        registry_cwds,
+        *,
+        claude_home=None,
+        progress_callback=None,
+        thread_metadata_index=None,
+    ):
+        del registry_cwds, claude_home, thread_metadata_index
         if progress_callback is not None:
             progress_callback(1, 1, "-foo-bar")
         return fake_data

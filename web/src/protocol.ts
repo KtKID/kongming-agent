@@ -274,6 +274,10 @@ export interface ThreadMetadataDTO {
   cumulative_completion_tokens: number;
   /** thread 级累计总 token */
   cumulative_total_tokens: number;
+  /** cache read token 累计；null 表示数据不可用（前端显示 "-"） */
+  cumulative_cache_read_tokens: number | null;
+  /** cache creation token 累计；null 表示数据不可用（前端显示 "-"） */
+  cumulative_cache_creation_tokens: number | null;
   /** 元数据 schema 版本号，当前 6；接受 1-6（老文件兼容），写盘永远写最新版 */
   schema_version?: 1 | 2 | 3 | 4 | 5 | 6;
 }
@@ -690,6 +694,10 @@ export interface ApprovalRequestFrame {
   arguments: Record<string, unknown>;
   reason?: string;
   turn: number;
+  /** elevated 审批时为 "elevated"，标准审批时为 "standard" 或 undefined */
+  policy_hint?: string;
+  /** elevated 审批时的确认令牌（8 hex），用户需输入后才能点同意 */
+  confirm_token?: string;
 }
 
 /**
@@ -837,6 +845,8 @@ export interface UsageFrame {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  cache_read_tokens?: number | null;
+  cache_creation_tokens?: number | null;
   turn: number;
   run_id?: string;
 }
@@ -1070,4 +1080,24 @@ export interface NormalizedMessage {
   deltaType?: "text" | "thinking" | "input_json";
   /** kind="stream_status"：message_start 携带的 model 名 */
   model?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Thread Status（全局 WS 广播 /ws/thread-status）
+// ---------------------------------------------------------------------------
+
+export type ThreadStatusPhase =
+  | "idle"
+  | "responding"
+  | "thinking"
+  | "tool_calling"
+  | "waiting_approval"
+  | "complete"
+  | "error";
+
+export interface ThreadStatusFrame {
+  type: "thread-status";
+  threadId: string;
+  phase: ThreadStatusPhase;
+  toolName?: string | null;
 }

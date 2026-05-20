@@ -21,6 +21,8 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from sitian.config import SiTianConfig
+
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
@@ -570,23 +572,43 @@ class EvolutionMemoryConfig(BaseModel):
 
 
 class EvolutionLearningConfig(BaseModel):
-    """Self evolution learning 配置。"""
+    """自我进化 learning 配置——控制 reviewer 子 agent 的触发、模型、窗口和产物。"""
 
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = False
-    mode: Literal["child_agent"] = "child_agent"
-    background: bool = True
-    model_name: str | None = None
-    reasoning_effort: str | None = None
-    every_n_runs: int = Field(default=5, ge=1)
-    min_user_turns: int = Field(default=3, ge=1)
-    max_history_messages: int = Field(default=20, ge=1)
-    max_nutrients: int = Field(default=2, ge=1)
-    nutrient_confidence_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
-    review_timeout_seconds: float = Field(default=10.0, gt=0)
-    drain_on_close_seconds: float = Field(default=3.0, gt=0)
-    root_path: str = ".kongming/evolution"
+    # --- 总开关 ---
+    enabled: bool = False  # 是否启用自我进化。False 时所有 API no-op
+    mode: Literal["child_agent"] = "child_agent"  # 进化模式，当前仅支持 child_agent
+    background: bool = True  # reviewer 是否在后台异步执行（不阻塞主对话）
+
+    # --- reviewer 独立模型配置（全部留空则继承主 agent）---
+    model_name: str | None = None  # reviewer 模型名（如 claude-sonnet-4-20250514）
+    base_url: str | None = None  # reviewer 独立 API 地址（如 https://api.anthropic.com）
+    api_key_env: str | None = None  # API key 环境变量名（如 EVOLUTION_REVIEWER_API_KEY）
+    provider: str | None = None  # provider 类型：openai_compatible / anthropic，留空自动检测
+    reasoning_effort: str | None = None  # reviewer 推理深度（如 high / medium / low）
+
+    # --- 触发节律 ---
+    every_n_runs: int = Field(default=5, ge=1)  # 每 N 轮用户消息触发一次 reviewer
+    min_user_turns: int = Field(default=3, ge=1)  # 累计不足 N 轮时不触发（冷启动保护）
+
+    # --- reviewer 证据窗口 ---
+    max_history_messages: int = Field(default=20, ge=1)  # reviewer 看到的最近消息条数
+
+    # --- 养料提炼 ---
+    max_nutrients: int = Field(default=2, ge=1)  # 单次 review 最多提炼几条养料
+    nutrient_confidence_threshold: float = Field(
+        default=0.75, ge=0.0, le=1.0
+    )  # 低于此置信度的养料丢弃
+
+    # --- 超时与生命周期 ---
+    review_timeout_seconds: float = Field(default=10.0, gt=0)  # reviewer 单次执行超时（秒）
+    drain_on_close_seconds: float = Field(
+        default=3.0, gt=0
+    )  # app 关闭时等待后台 reviewer 的最大时间
+
+    # --- 存储 ---
+    root_path: str = ".kongming/evolution"  # evolution 产物根目录（reviews / nutrients / state）
 
 
 class EvolutionConfig(BaseModel):
@@ -783,6 +805,29 @@ class SafetyConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class SchedulerApprovalConfig(BaseModel):
+    """Scheduler-triggered approval policy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["fail_closed", "trust"] = "trust"
+    """v0.5 新增：cron 全局默认审批模式。任务未声明 approval_mode 时走此值。
+
+    **默认 trust**（v0.5 调整）：cron 任务本质是用户主动 schedule 的预批准
+    自动任务，创建时已经过用户判断；执行时再每个工具调用都要求 consent 等于
+    重复批准、毫无意义。HardBlock 兜底真高危（rm -rf / 写 ~/.ssh/ / 系统级
+    不可逆动作），剩下 explicit_consent 自动放行。
+
+    想要严格审批的部署可显式覆盖 ``mode="fail_closed"``（yaml 或
+    ``KONGMING_SCHEDULER_APPROVAL_MODE=fail_closed`` env）。
+    """
+
+    allow_write_file_create_in_cwd: bool = True
+    """v0.2 老字段：仅在 mode='fail_closed' 下生效。
+    trust 模式下 write_file 已整体放开，此字段无意义。
+    """
+
+
 class SchedulerConfig(BaseModel):
     """cron 模块运行配置（v0.2 引入）。
 
@@ -817,6 +862,33 @@ class SchedulerConfig(BaseModel):
     max_task_age_seconds: int | None = None
     default_timezone: str = "UTC"
     default_delivery_channel: Literal["web", "cli"] = "web"
+    default_max_turns: int = Field(default=90, gt=0)
+    """v0.5.1 新增：cron task.policy.max_turns 缺省时的兜底 max_turns。
+
+    替换 v0.2 ~ v0.5 期间在 ``execution_bridge._DEFAULT_MAX_TURNS=20`` 的硬编码
+    （违反"默认值集中在 config_loader.models"约束）。默认 ``90`` 是经验值——
+    司天扫描类重型 cron 任务通常需要 40~80 turn 才能稳定完成；20 太低反复
+    触发 max_turns 强制终止。
+
+    任务级 ``task.policy.max_turns`` 仍优先（None 时才走此值）。可通过
+    ``KONGMING_SCHEDULER_DEFAULT_MAX_TURNS`` env 覆盖。
+    """
+    approval: SchedulerApprovalConfig = Field(default_factory=SchedulerApprovalConfig)
+
+
+# ---------------------------------------------------------------------------
+# Workflow Dashboard
+# ---------------------------------------------------------------------------
+
+
+class WorkflowConfig(BaseModel):
+    """工作流看板配置。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    home: Path | None = None
+    scan_interval: float = Field(default=30.0, ge=5.0)
 
 
 # ---------------------------------------------------------------------------
@@ -877,11 +949,18 @@ class WebConfig(BaseModel):
             ``"127.0.0.1"`` 更安全。
         port: HTTP / WS 端口。
         dev_mode: 跳过登录鉴权（仅本地开发）；上线必须 False。
+        initial_password: 首次部署启动时使用的明文初始密码。仅在
+            ``password.hash`` 缺失时生效；落盘后长期以文件为准。
         cors_origins: 允许的浏览器 Origin；空列表 = 拒绝所有跨域。
         idle_timeout_seconds: cell 空闲多久后被 ``_idle_eviction_loop`` 自动
             evict（默认 30 分钟）。下限 60s 防误配。
         idle_check_interval_seconds: 后台扫盘周期（默认 60s）。下限 10s。
         pending_approval_timeout_seconds: 单次审批等待上限（默认 60s）。下限 10s。
+        ws_heartbeat_interval_ms: 前端发 ping 的间隔（毫秒）。默认 30s。
+            下限 5s 防过频。
+        ws_heartbeat_timeout_ms: 单次 pong 等待超时（毫秒）。默认 10s。
+            下限 3s。
+        ws_heartbeat_max_missed: 连续丢失几次 pong 判定连接死亡。默认 3 次。
         llm_presets: 可用的 LLM preset 列表；浏览器创建 thread 时下拉选其一。
             v0.1.5 schema 留空，由 web-app-shell 任务实际填默认 preset。
     """
@@ -892,10 +971,20 @@ class WebConfig(BaseModel):
     host: str = "0.0.0.0"
     port: Annotated[int, Field(ge=1, le=65535)] = 8080
     dev_mode: bool = False
+    initial_password: str | None = None
     cors_origins: list[str] = Field(default_factory=list)
     idle_timeout_seconds: Annotated[int, Field(ge=60)] = 1800
     idle_check_interval_seconds: Annotated[int, Field(ge=10)] = 60
     pending_approval_timeout_seconds: Annotated[int, Field(ge=10)] = 60
+
+    # 心跳配置（前端读取，不硬编码）
+    ws_heartbeat_interval_ms: Annotated[int, Field(ge=5000)] = 30000
+    """前端发 ping 的间隔（毫秒）。默认 30s。下限 5s 防过频。"""
+    ws_heartbeat_timeout_ms: Annotated[int, Field(ge=3000)] = 10000
+    """单次 pong 等待超时（毫秒）。默认 10s。"""
+    ws_heartbeat_max_missed: Annotated[int, Field(ge=1)] = 3
+    """连续丢失几次 pong 判定连接死亡。默认 3 次。"""
+
     llm_presets: list[LLMPresetConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -941,6 +1030,8 @@ class Config(BaseModel):
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     web: WebConfig = Field(default_factory=WebConfig)
+    workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
+    sitian: SiTianConfig = Field(default_factory=SiTianConfig)
 
 
 __all__ = [
@@ -963,11 +1054,14 @@ __all__ = [
     "SafetyHardDenyConfig",
     "SafetySensitivePathConfig",
     "SafetySkillCallConfig",
+    "SchedulerApprovalConfig",
     "SchedulerConfig",
     "SessionConfig",
     "ShellToolConfig",
+    "SiTianConfig",
     "StreamConfig",
     "ToolConfig",
     "TraceConfig",
     "WebConfig",
+    "WorkflowConfig",
 ]

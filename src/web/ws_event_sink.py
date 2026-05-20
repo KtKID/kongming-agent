@@ -28,7 +28,6 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from core.contracts import Event
@@ -39,6 +38,7 @@ from web.protocol import (
     ErrorCode,
     ErrorFrame,
     ReasoningDeltaFrame,
+    RunInterruptedFrame,
     ToolCallEndFrame,
     ToolCallStartFrame,
     TurnEndFrame,
@@ -71,45 +71,71 @@ _EVOLUTION_NOTICE_KEY = "self_evolution.review"
 _EVOLUTION_NOTICE_SOURCE = "self_evolution"
 
 
-class UsagePersistSink:
-    """每 turn 把 usage 增量写盘的 EventSink。
+def _build_usage_dto(payload: dict[str, Any]) -> dict[str, Any]:
+    """从 runtime ``usage`` event payload 构造 v2 channel-specific DTO dict。
 
-    只关心 ``kind="usage"`` 事件；其余静默跳过。
-    由 ThreadManager._build_cell 注册到 sinks 列表，替代
-    _run_once_safely 中的 run 结束一次性持久化，保证刷新页面
-    后 hydrateUsageFromThreads 能拿到最新累计值。
+    payload 字段来源：LLMProvider 透传 SDK 原生字段 + provider_kind。
+    本函数按 provider_kind 决定通道：
+
+    - ``anthropic`` → ``ClaudeUsage`` 形态（含 cache_creation TTL 子结构）
+    - ``openai_compatible`` → ``GenericChatOpenAIUsage`` 形态（只填 last）
+    - 老 payload 无 provider_kind 退化为 openai 系基础字段
+
+    返回 dict 自带 ``provider`` discriminator，前端按 ``provider`` narrowing。
+    详见 docs/usage-token-v2/04-data-and-state.md。
     """
+    provider_kind = payload.get("provider_kind")
 
-    def __init__(
-        self,
-        thread_id: str,
-        persist_fn: Callable[..., Awaitable[Any]],
-    ) -> None:
-        self._thread_id = thread_id
-        self._persist_fn = persist_fn
+    if provider_kind == "anthropic":
+        input_tokens = int(payload.get("input_tokens", 0) or 0)
+        output_tokens = int(payload.get("output_tokens", 0) or 0)
+        cache_read = int(payload.get("cache_read_input_tokens", 0) or 0)
+        cache_creation_total = int(payload.get("cache_creation_input_tokens", 0) or 0)
+        cc_raw = payload.get("cache_creation") or {}
+        if not isinstance(cc_raw, dict):
+            cc_raw = {}
+        model = str(payload.get("model") or "")
+        return {
+            "provider": "claude",
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_creation_total,
+            "cache_creation": {
+                "ephemeral_1h_input_tokens": int(cc_raw.get("ephemeral_1h_input_tokens", 0) or 0),
+                "ephemeral_5m_input_tokens": int(cc_raw.get("ephemeral_5m_input_tokens", 0) or 0),
+            },
+            "context_usage": input_tokens + cache_read + cache_creation_total,
+            "model": model,
+            "context_window": 0,  # 不查表（live event 没需要）
+        }
 
-    async def emit(self, event: Event) -> None:
-        if event.kind != "usage":
-            return
-        payload = event.payload or {}
-        prompt = int(payload.get("prompt_tokens", 0) or 0)
-        completion = int(payload.get("completion_tokens", 0) or 0)
-        total = int(payload.get("total_tokens", 0) or 0)
-        if prompt == 0 and completion == 0 and total == 0:
-            return
-        try:
-            await self._persist_fn(
-                self._thread_id,
-                prompt_tokens=prompt,
-                completion_tokens=completion,
-                total_tokens=total,
-            )
-        except Exception:
-            logger.warning(
-                "UsagePersistSink: failed to persist usage for thread %s",
-                self._thread_id,
-                exc_info=True,
-            )
+    # openai_compatible 或老 payload 退化
+    input_tokens = int(payload.get("input_tokens", 0) or payload.get("prompt_tokens", 0) or 0)
+    output_tokens = int(payload.get("output_tokens", 0) or payload.get("completion_tokens", 0) or 0)
+    cached_input = int(payload.get("cached_input_tokens", 0) or 0)
+    reasoning_output = int(payload.get("reasoning_output_tokens", 0) or 0)
+    total_tokens = int(payload.get("total_tokens", 0) or 0) or (input_tokens + output_tokens)
+    model = str(payload.get("model") or "")
+    return {
+        "provider": "openai",
+        "last": {
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input,
+            "output_tokens": output_tokens,
+            "reasoning_output_tokens": reasoning_output,
+            "total_tokens": total_tokens,
+        },
+        "model": model,
+        "context_window": 0,
+    }
+
+
+# ⚠️ UsagePersistSink 已在 usage-token-v2-bigbang 删除。
+# v2 manager 是无状态门面，不接受外部 push token；所有 token 数据现场从 SDK
+# 真源（jsonl/rollout）派生。Event(kind="usage") 不再需要持久化 sink；前端 token
+# 显示通过 GET /threads/<tid>/usage 端点拿 v2 manager.get_thread_usage 的派生
+# 结果。详见 docs/usage-token-v2/03-core-workflows.md。
 
 
 class WSEventSink:
@@ -249,17 +275,16 @@ class WSEventSink:
                 timestamp_ms=ts,
             )
 
-        # ----- 用量 -----
-        # runtime 在 turn.end 的 metadata.usage 里携带 token 用量；某些版本
-        # 也单独 emit ``usage`` event。本 sink 接受 ``usage`` kind，把字段映射到
-        # UsageFrame；其它字段缺失时给 0（不抛）。
+        # ----- 用量（usage-token-v2-bigbang 重构）-----
+        # runtime emit ``kind="usage"`` event 时，payload 已含 LLMProvider 透传的
+        # SDK 原生字段 + provider_kind。本 sink 按 provider 派生 v2 DTO dict
+        # 嵌入 UsageFrame.usage——前端按 ``usage.provider`` discriminator 分支。
         if kind == "usage":
+            usage_dto = _build_usage_dto(payload)
             return UsageFrame(
-                prompt_tokens=int(payload.get("prompt_tokens", 0) or 0),
-                completion_tokens=int(payload.get("completion_tokens", 0) or 0),
-                total_tokens=int(payload.get("total_tokens", 0) or 0),
                 turn=turn,
-                run_id=event.run_id or "",
+                run_id=run_id,
+                usage=usage_dto,
                 timestamp_ms=ts,
             )
 
@@ -286,6 +311,21 @@ class WSEventSink:
                 kind=kind,
                 payload=payload,
                 run_id=run_id,
+                timestamp_ms=ts,
+            )
+
+        # ----- interrupt-run-v0.1：run 被用户打断 -----
+        # runner 顶层 ``except asyncio.CancelledError`` emit ``run.cancelled``
+        # 后 fanout 到这里 → 转 :class:`RunInterruptedFrame` 推给 thread 名下
+        # 所有 attach 的 ws（A tab 点 Stop → B tab 自动收到）。
+        if kind == "run.cancelled":
+            cancelled_id_raw = payload.get("cancelled_tool_call_id")
+            cancelled_id: str | None = str(cancelled_id_raw) if cancelled_id_raw else None
+            return RunInterruptedFrame(
+                run_id=run_id,
+                cancelled_at_turn=int(payload.get("cancelled_at_turn", turn) or turn),
+                cancelled_tool_call_id=cancelled_id,
+                cancel_reason=str(payload.get("cancel_reason", "user_interrupt")),
                 timestamp_ms=ts,
             )
 
@@ -343,11 +383,20 @@ def _translate_evolution_notice(
         review_id = _optional_str(payload.get("review_id")) or ""
         review_run_id = _optional_str(payload.get("review_run_id"))
         nutrients_written = _coerce_int(payload.get("nutrients_written"))
-        handled_message = (
-            f"发现 {nutrients_written} 条进化养料"
-            if nutrients_written is not None
-            else "已完成复盘并写入进化养料"
-        )
+        review_summary = _optional_str(payload.get("review_summary"))
+        nutrient_summaries = payload.get("nutrient_summaries") or []
+        if not isinstance(nutrient_summaries, list):
+            nutrient_summaries = []
+
+        if review_summary and nutrient_summaries:
+            titles = "\n".join(f"• {t}" for t in nutrient_summaries[:5])
+            handled_message = f"{review_summary}\n{titles}"
+        elif review_summary:
+            handled_message = review_summary
+        elif nutrients_written is not None:
+            handled_message = f"发现 {nutrients_written} 条进化养料"
+        else:
+            handled_message = "已完成复盘并写入进化养料"
         title = "进化复盘"
         return SystemNoticeFrame(
             notice_key=_EVOLUTION_NOTICE_KEY,
@@ -365,6 +414,8 @@ def _translate_evolution_notice(
                 "timeout_seconds": _coerce_number(payload.get("timeout_seconds")),
                 "nutrients_written": nutrients_written,
                 "written_nutrient_ids": _coerce_str_list(payload.get("written_nutrient_ids")),
+                "review_summary": review_summary,
+                "nutrient_summaries": nutrient_summaries,
             },
             icon="success",
             run_id=run_id,

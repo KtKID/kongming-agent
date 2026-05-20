@@ -205,6 +205,35 @@ KONGMING_TOOL_FILE_ENABLED=false uv run python -m cli.main
 
 ---
 
+### 11. 运行 SiTian 主动扫描
+
+仓库内已经提供现成配置和一键脚本：
+
+```powershell
+.\SiTianRun.ps1
+```
+
+这条命令会依次执行：
+- `kongming-sitian run-once`
+- `kongming-sitian state`
+- 打印 `latest_summary.md`
+
+常用写法：
+
+```powershell
+.\SiTianRun.ps1 -Action scan
+.\SiTianRun.ps1 -Action state
+.\SiTianRun.ps1 -Action summary
+.\SiTianRun.ps1 -Action loop
+```
+
+默认配置文件是 [config/sitian.local.yaml](/E:/xgt/proj/agent-proj/kongming-agent/config/sitian.local.yaml)，默认记录目录是 `~/.kongming/SiTian/`。司天产物全部使用 JSON / JSONL / Markdown：
+- `observations.jsonl`
+- `runtime_state.json`
+- `workspace_state.json`
+- `latest_suggestions.json`
+- `latest_summary.md`
+
 ## 开发命令
 
 也可以用 `make` 入口：

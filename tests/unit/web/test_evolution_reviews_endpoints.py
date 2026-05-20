@@ -69,8 +69,8 @@ class FakeTM:
     async def bind_claude_thread(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
-    async def add_thread_usage(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-        raise NotImplementedError
+    # task#3.3：``add_thread_usage`` 已删除；mock 改提供 ``usage_manager``。
+    usage_manager = None  # type: ignore[assignment]
 
     def resolve_approval(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         return None

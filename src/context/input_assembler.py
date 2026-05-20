@@ -11,9 +11,19 @@ v1-mini 的装配职责：
 **刻意不做**的事：
 
 - 不拼 token 精算：交给 provider 或后续 context_engine（v0.2+）
-- 不处理附件 / 图像 / 文件引用：v1-mini 没有 attachment 概念，只在 metadata 里留
-  ``attachments`` 占位字段，方便上层未来扩展时不用改签名
+- 不在 assembly 阶段读附件 bytes：附件引用透传，bytes 由 provider 通过
+  :class:`executors.llm.media_adapter.MediaPart` 的 lazy ``load_bytes()`` 按需读取
 - 不改变任何消息内容（除非 compactor 自己截断了 tool 结果）
+
+附件透传（claude-image-paste-e2e §4）：
+
+- 每条 user 消息的 ``Message.metadata["attachments"]`` 自然透传给 provider
+  （Message 本身就是装配产物的字段），assembly 不拆解、不还原 MediaPart
+- assembly 的 :attr:`AssembledInput.metadata["attachments"]` 是**汇总视图**：
+  把本轮所有 user 消息的 attachments 引用拍平到一个 list，便于 trace 观测；
+  不参与 provider 输入构造（provider 直接遍历 ``messages[i].metadata``）
+- provider 通过 :func:`executors.llm.media_adapter.collect_media_parts_from_messages`
+  把 ``messages`` 还原成 ``list[MediaPart]``（解耦：context 层不依赖 executors 层）
 
 返回的 :class:`AssembledInput` 是 frozen dataclass，只读；调用方要追加字段自己拿
 dict 拷一份。
@@ -86,12 +96,25 @@ class InputAssembler:
             final_messages.append(system_message)
         final_messages.extend(compacted)
 
+        # 汇总本轮所有 user message 的 attachments 引用，便于 trace 观测。
+        # 真正的输入构造由 provider 通过
+        # ``executors.llm.media_adapter.collect_media_parts_from_messages``
+        # 直接读 ``messages[i].metadata["attachments"]``，不消费此汇总字段——
+        # 此字段仅供日志 / trace 看一眼"这一轮带了几张图"。
+        attachments_summary: list[dict[str, Any]] = []
+        for m in compacted:
+            if m.role != "user":
+                continue
+            refs = (m.metadata or {}).get("attachments")
+            if isinstance(refs, list):
+                attachments_summary.extend(r for r in refs if isinstance(r, dict))
+
         metadata: dict[str, Any] = {
             "original_count": len(history),
             "compacted_count": len(compacted),
             "added_system": system_message is not None,
             "instruction_sources": [s.origin for s in instructions],
-            "attachments": [],  # 占位，v1-mini 不处理。
+            "attachments": attachments_summary,
         }
         return AssembledInput(
             system_message=system_message,

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -56,7 +57,11 @@ class TestCommandServiceRouting:
     async def test_text_delegates_to_runtime(self) -> None:
         calls: list[str] = []
 
-        async def runtime_delegate(text: str, effort: str | None = None) -> Result:
+        async def runtime_delegate(
+            text: str,
+            effort: str | None = None,
+            attachments: list[dict[str, Any]] | None = None,
+        ) -> Result:
             calls.append(text)
             return _ok_result()
 
@@ -76,7 +81,11 @@ class TestCommandServiceRouting:
         """prompt 命令带参数时，args_text 发给主 agent。"""
         calls: list[str] = []
 
-        async def runtime_delegate(text: str, effort: str | None = None) -> Result:
+        async def runtime_delegate(
+            text: str,
+            effort: str | None = None,
+            attachments: list[dict[str, Any]] | None = None,
+        ) -> Result:
             calls.append(text)
             return _ok_result()
 
@@ -96,7 +105,11 @@ class TestCommandServiceRouting:
         """prompt 命令无参数时，发 description 给主 agent。"""
         calls: list[str] = []
 
-        async def runtime_delegate(text: str, effort: str | None = None) -> Result:
+        async def runtime_delegate(
+            text: str,
+            effort: str | None = None,
+            attachments: list[dict[str, Any]] | None = None,
+        ) -> Result:
             calls.append(text)
             return _ok_result()
 
@@ -113,7 +126,11 @@ class TestCommandServiceRouting:
 
     @pytest.mark.asyncio
     async def test_unknown_command_returns_failed(self) -> None:
-        async def runtime_delegate(text: str, effort: str | None = None) -> Result:
+        async def runtime_delegate(
+            text: str,
+            effort: str | None = None,
+            attachments: list[dict[str, Any]] | None = None,
+        ) -> Result:
             pytest.fail("runtime should not be called for unknown commands")
 
         from commands.registry import CommandRegistry
@@ -132,7 +149,11 @@ class TestCommandServiceRouting:
     async def test_path_input_treated_as_text(self) -> None:
         calls: list[str] = []
 
-        async def runtime_delegate(text: str, effort: str | None = None) -> Result:
+        async def runtime_delegate(
+            text: str,
+            effort: str | None = None,
+            attachments: list[dict[str, Any]] | None = None,
+        ) -> Result:
             calls.append(text)
             return _ok_result()
 
@@ -151,7 +172,11 @@ class TestCommandServiceRouting:
     async def test_reasoning_effort_passes_through(self) -> None:
         received_effort: list[str | None] = []
 
-        async def runtime_delegate(text: str, effort: str | None = None) -> Result:
+        async def runtime_delegate(
+            text: str,
+            effort: str | None = None,
+            attachments: list[dict[str, Any]] | None = None,
+        ) -> Result:
             received_effort.append(effort)
             return _ok_result()
 
@@ -184,7 +209,11 @@ class TestCommandServiceRouting:
             executor_key="prompt",
         )
 
-        async def runtime_delegate(text: str, effort: str | None = None) -> Result:
+        async def runtime_delegate(
+            text: str,
+            effort: str | None = None,
+            attachments: list[dict[str, Any]] | None = None,
+        ) -> Result:
             pytest.fail("should not reach runtime")
 
         from commands.registry import CommandRegistry

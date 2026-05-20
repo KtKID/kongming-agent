@@ -28,11 +28,12 @@ URL 里出现的资源是新 thread（``imported=true`` 时），与 thread CRUD
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -95,7 +96,14 @@ def _validate_thread_id(thread_id: str) -> None:
         )
 
 
-def _to_dto(meta: ThreadMetadata) -> ThreadMetadataDTO:
+async def _to_dto(meta: ThreadMetadata, tm: ThreadManagerProtocol) -> ThreadMetadataDTO:
+    """把 ThreadMetadata 转 REST DTO。
+
+    **usage-token-v2-bigbang**：不再返回 ``usage_summary`` 字段。token 数据
+    通过独立端点 ``GET /threads/<tid>/usage`` 拿 v2 manager.get_thread_usage
+    的派生结果。``tm`` 参数保留作未来扩展，本函数当前未使用。
+    """
+    _ = tm  # 暂时未用；保留参数兼容现有调用方
     return ThreadMetadataDTO(
         id=meta.id,
         name=meta.name,
@@ -107,9 +115,8 @@ def _to_dto(meta: ThreadMetadata) -> ThreadMetadataDTO:
         created_at=meta.created_at,
         updated_at=meta.updated_at,
         message_count=meta.message_count,
-        cumulative_prompt_tokens=meta.cumulative_prompt_tokens,
-        cumulative_completion_tokens=meta.cumulative_completion_tokens,
-        cumulative_total_tokens=meta.cumulative_total_tokens,
+        is_pinned=meta.is_pinned,
+        is_archived=meta.is_archived,
         schema_version=meta.schema_version,
     )
 
@@ -250,7 +257,7 @@ async def list_threads(request: Request) -> list[ThreadMetadataDTO]:
     """
     tm: ThreadManagerProtocol = request.app.state.thread_manager
     metas = await asyncio.to_thread(tm.list_threads)
-    return [_to_dto(m) for m in metas]
+    return [await _to_dto(m, tm) for m in metas]
 
 
 @router.post("", status_code=201)
@@ -283,7 +290,7 @@ async def create_thread(
         backend_kind=body.backend_kind,
         cwd=normalized_cwd,
     )
-    return _to_dto(meta)
+    return await _to_dto(meta, tm)
 
 
 @router.post("/import-claude-session")
@@ -295,39 +302,27 @@ async def import_claude_session(
 
     防重复语义：
 
-    1. ``find_thread_by_claude_thread_id(claude_thread_id)`` 命中 → 返回该 thread
-       + ``imported=False``（用户重复点同一 session，不再多创建 thread）。
-    2. 未命中 → ``create_thread(name, "", backend_kind="claude_code")`` 后
-       ``bind_claude_thread(thread_id, claude_thread_id, cwd)`` → ``imported=True``。
+    1. ``claude_thread_id`` 已绑过 → 返回该 thread + ``imported=False``。
+    2. 未绑定 → 新建 thread + 绑定 → ``imported=True``。
 
-    bind_claude_thread 内部已守 invariant（已绑 / 1:1 冲突会抛），这里不再
-    重复检查；竞态下两个 import 同时打到同 ``claude_thread_id`` 时，第二个会被
-    bind 阶段的全局反查拦下抛 ``ClaudeThreadConflictError``，走 500（v0.2 接受
-    极小概率失败 —— 单用户场景下不构成问题）。
+    走 :meth:`ThreadManager.create_and_bind_claude_thread`：用 per-ctid
+    :class:`asyncio.Lock` 串行化"反查→不存在则 create+bind"临界区，根治原
+    "两步非原子写入"的 race window（曾让同 ctid 并发请求产出多条 thread
+    metadata，即"幽灵 thread"——参见 ``docs/fixes/claude-session-rename-
+    archive-metadata-source.md``）。
 
     校验：DTO 已强制 ``cwd`` 必须以 ``/`` 开头、``name`` / ``claude_thread_id``
     长度上限。鉴权由全局 :class:`web.auth.AuthMiddleware` 兜底。
     """
     tm: ThreadManagerProtocol = request.app.state.thread_manager
-    existing = tm.find_thread_by_claude_thread_id(body.claude_thread_id)
-    if existing is not None:
-        return ImportClaudeSessionResponse(
-            thread=_to_dto(existing),
-            imported=False,
-        )
-    new_thread = await tm.create_thread(
-        body.name,
-        "",
-        backend_kind="claude_code",
-    )
-    bound = await tm.bind_claude_thread(
-        new_thread.id,
-        body.claude_thread_id,
-        body.cwd,
+    meta, imported = await tm.create_and_bind_claude_thread(
+        claude_thread_id=body.claude_thread_id,
+        cwd=body.cwd,
+        name=body.name,
     )
     return ImportClaudeSessionResponse(
-        thread=_to_dto(bound),
-        imported=True,
+        thread=await _to_dto(meta, tm),
+        imported=imported,
     )
 
 
@@ -344,7 +339,7 @@ async def import_codex_session(
     existing = tm.find_thread_by_codex_thread_id(body.codex_thread_id)
     if existing is not None:
         return ImportCodexSessionResponse(
-            thread=_to_dto(existing),
+            thread=await _to_dto(existing, tm),
             imported=False,
         )
     new_thread = await tm.create_thread(
@@ -358,7 +353,7 @@ async def import_codex_session(
         body.cwd,
     )
     return ImportCodexSessionResponse(
-        thread=_to_dto(bound),
+        thread=await _to_dto(bound, tm),
         imported=True,
     )
 
@@ -369,14 +364,64 @@ async def rename_thread(
     body: RenameThreadRequest,
     request: Request,
 ) -> ThreadMetadataDTO:
-    """重命名 thread。"""
+    """更新 thread 属性（重命名 / 置顶）。"""
     _validate_thread_id(thread_id)
     tm: ThreadManagerProtocol = request.app.state.thread_manager
-    try:
-        meta = await tm.rename_thread(thread_id, body.name)
-    except KeyError as exc:
-        raise ThreadNotFoundError(f"thread not found: {thread_id}") from exc
-    return _to_dto(meta)
+
+    meta: ThreadMetadata | None = None
+
+    if body.name is not None:
+        try:
+            meta = await tm.rename_thread(thread_id, body.name)
+        except KeyError as exc:
+            raise ThreadNotFoundError(f"thread not found: {thread_id}") from exc
+
+    if body.is_pinned is not None:
+        try:
+            meta = await tm.pin_thread(thread_id, body.is_pinned)
+        except KeyError as exc:
+            raise ThreadNotFoundError(f"thread not found: {thread_id}") from exc
+
+    if body.is_archived is not None:
+        try:
+            meta = await tm.set_archived(thread_id, body.is_archived)
+        except KeyError as exc:
+            raise ThreadNotFoundError(f"thread not found: {thread_id}") from exc
+
+    if meta is None:
+        # 什么都没改，读取当前状态返回
+        from web.thread_metadata import read_thread_metadata
+
+        meta_read = await asyncio.to_thread(
+            read_thread_metadata, request.app.state.kongming_home, thread_id
+        )
+        if meta_read is None:
+            raise ThreadNotFoundError(f"thread not found: {thread_id}")
+        return await _to_dto(meta_read, tm)
+
+    return await _to_dto(meta, tm)
+
+
+@router.get("/{thread_id}/usage")
+async def get_thread_usage(thread_id: str, request: Request) -> dict[str, Any]:
+    """v2 新端点：返回 thread 当前 token 用量 DTO（按通道分支返回不同 DTO）。
+
+    内部走 ``manager.get_thread_usage(thread_id)`` 派生 SDK 真源（jsonl/rollout）。
+    返回 ``{"usage": <ClaudeUsage|CodexUsage|GenericChat*Usage|None>}``——前端按
+    ``usage.provider`` 字段做 narrowing 分支渲染。
+
+    错误：
+
+    - 404 thread 不存在
+    - 200 + ``usage=None`` thread 没绑 SDK 真源 / 派生失败（不是错误，前端 StatusLine 留空）
+    """
+    _validate_thread_id(thread_id)
+    tm: ThreadManagerProtocol = request.app.state.thread_manager
+    metas = await asyncio.to_thread(tm.list_threads)
+    if not any(m.id == thread_id for m in metas):
+        raise ThreadNotFoundError(f"thread not found: {thread_id}")
+    usage = await tm.usage_manager.get_thread_usage(thread_id)
+    return {"usage": usage.model_dump() if usage is not None else None}
 
 
 @router.delete("/{thread_id}", status_code=204)
@@ -647,8 +692,16 @@ async def get_workspace_file(
     _validate_thread_id(thread_id)
     try:
         meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
-        root = require_workspace_root(meta)
-        payload = await asyncio.to_thread(read_workspace_text_file, root, path)
+        try:
+            root = require_workspace_root(meta)
+        except WorkspaceError:
+            root = cast(Path, request.app.state.workspace_root)
+        resolved_path = path.strip()
+        if resolved_path.startswith("/"):
+            abs_p = Path(resolved_path).resolve()
+            with contextlib.suppress(ValueError):
+                resolved_path = str(abs_p.relative_to(root.resolve()))
+        payload = await asyncio.to_thread(read_workspace_text_file, root, resolved_path)
     except ThreadNotFoundError:
         raise
     except FileNotFoundError as exc:

@@ -35,9 +35,11 @@ from web.protocol.ws_frames import (
     CellEvictedFrame,
     ContentDeltaFrame,
     ErrorFrame,
+    InterruptFrame,
     PingFrame,
     PongFrame,
     ReasoningDeltaFrame,
+    RunInterruptedFrame,
     SystemNoticeFrame,
     ThreadHistoryFrame,
     ToolCallEndFrame,
@@ -65,6 +67,19 @@ def _make_approval_ack() -> ApprovalAckFrame:
 
 def _make_ping() -> PingFrame:
     return PingFrame()
+
+
+def _make_interrupt() -> InterruptFrame:
+    return InterruptFrame(run_id="run-thread-abc-1")
+
+
+def _make_run_interrupted() -> RunInterruptedFrame:
+    return RunInterruptedFrame(
+        timestamp_ms=1_700_000_000_099,
+        run_id="run-thread-abc-1",
+        cancelled_at_turn=2,
+        cancelled_tool_call_id="call-x",
+    )
 
 
 def _make_thread_history() -> ThreadHistoryFrame:
@@ -145,10 +160,22 @@ def _make_approval_decision() -> ApprovalDecisionFrame:
 def _make_usage() -> UsageFrame:
     return UsageFrame(
         timestamp_ms=1_700_000_000_009,
-        prompt_tokens=10,
-        completion_tokens=20,
-        total_tokens=30,
         turn=1,
+        run_id="run-xxx",
+        usage={
+            "provider": "claude",
+            "input_tokens": 6,
+            "output_tokens": 881,
+            "cache_read_input_tokens": 341086,
+            "cache_creation_input_tokens": 431,
+            "cache_creation": {
+                "ephemeral_1h_input_tokens": 431,
+                "ephemeral_5m_input_tokens": 0,
+            },
+            "context_usage": 341523,
+            "model": "claude-opus-4",
+            "context_window": 1_000_000,
+        },
     )
 
 
@@ -221,10 +248,8 @@ def _make_thread_metadata() -> ThreadMetadataDTO:
         created_at=1_700_000_000.0,
         updated_at=1_700_000_010.5,
         message_count=3,
-        cumulative_prompt_tokens=1200,
-        cumulative_completion_tokens=340,
-        cumulative_total_tokens=1540,
-        schema_version=6,
+        # v10 (claude-session-rename-archive-metadata-source): 加 is_archived 真源
+        schema_version=10,
     )
 
 
@@ -280,6 +305,7 @@ WS_FRAME_FACTORIES = [
     pytest.param(_make_user_input, id="user_input_frame"),
     pytest.param(_make_approval_ack, id="approval_ack_frame"),
     pytest.param(_make_ping, id="ping_frame"),
+    pytest.param(_make_interrupt, id="interrupt_frame"),
     pytest.param(_make_thread_history, id="thread_history_frame"),
     pytest.param(_make_assistant_final, id="assistant_final_frame"),
     pytest.param(_make_content_delta, id="content_delta_frame"),
@@ -295,6 +321,7 @@ WS_FRAME_FACTORIES = [
     pytest.param(_make_pong, id="pong_frame"),
     pytest.param(_make_system_notice, id="system_notice_frame"),
     pytest.param(_make_cell_evicted, id="cell_evicted_frame"),
+    pytest.param(_make_run_interrupted, id="run_interrupted_frame"),
 ]
 
 
@@ -350,6 +377,12 @@ C2S_DISPATCH_CASES = [
         id="approval_ack_dispatch",
     ),
     pytest.param({"kind": "ping"}, PingFrame, id="ping_dispatch"),
+    pytest.param({"kind": "interrupt"}, InterruptFrame, id="interrupt_dispatch"),
+    pytest.param(
+        {"kind": "interrupt", "run_id": "run-abc-1"},
+        InterruptFrame,
+        id="interrupt_with_run_id_dispatch",
+    ),
 ]
 
 
@@ -458,10 +491,19 @@ S2C_DISPATCH_CASES = [
         {
             "kind": "usage",
             "timestamp_ms": 1,
-            "prompt_tokens": 1,
-            "completion_tokens": 2,
-            "total_tokens": 3,
             "turn": 1,
+            "usage": {
+                "provider": "openai",
+                "last": {
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "cached_input_tokens": 0,
+                    "reasoning_output_tokens": 0,
+                    "total_tokens": 3,
+                },
+                "model": "",
+                "context_window": 0,
+            },
         },
         UsageFrame,
         id="usage_dispatch",
@@ -588,10 +630,19 @@ def test_kind_default_approval_decision():
 def test_kind_default_usage():
     frame = UsageFrame(
         timestamp_ms=1,
-        prompt_tokens=0,
-        completion_tokens=0,
-        total_tokens=0,
         turn=1,
+        usage={
+            "provider": "openai",
+            "last": {
+                "input_tokens": 0,
+                "cached_input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_output_tokens": 0,
+                "total_tokens": 0,
+            },
+            "model": "",
+            "context_window": 0,
+        },
     )
     assert frame.kind == "usage"
 
@@ -633,7 +684,7 @@ def test_kind_default_cell_evicted():
 
 
 def test_thread_metadata_schema_version_default():
-    """``ThreadMetadataDTO.schema_version`` 默认 ``6``（v0.2.2 bump，加 codex thread 字段）。"""
+    """``ThreadMetadataDTO.schema_version`` 默认 ``10``（claude-session-rename-archive-metadata-source，加 is_archived）。"""
     dto = ThreadMetadataDTO(
         id="thread-abcdef012345",
         name="x",
@@ -643,4 +694,4 @@ def test_thread_metadata_schema_version_default():
         updated_at=0.0,
         message_count=0,
     )
-    assert dto.schema_version == 6
+    assert dto.schema_version == 10

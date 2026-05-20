@@ -28,6 +28,16 @@ from web.thread_metadata import ThreadMetadata
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 
 
+class _FakeUsageManager:
+    """task#3.3 minimal stub for ``_to_dto`` ``tm.usage_manager`` 调用。"""
+
+    async def get_thread_summary(self, thread_id: str):  # type: ignore[no-untyped-def]
+        from web.usage_token import ThreadUsageSummary
+
+        del thread_id
+        return ThreadUsageSummary(channel="anthropic")
+
+
 class FakeTM:
     """支持 thread CRUD 的 FakeThreadManager（v0.1.6 加 backend_kind 字段）。"""
 
@@ -35,6 +45,8 @@ class FakeTM:
         self._threads: dict[str, ThreadMetadata] = {}
         self._started = False
         self._closed = False
+        # task#3.3: router ``_to_dto`` 调 ``tm.usage_manager.get_thread_summary``
+        self.usage_manager = _FakeUsageManager()
 
     @property
     def started(self) -> bool:
@@ -58,17 +70,16 @@ class FakeTM:
         backend_kind: str = "generic_chat",
         cwd: str = "",
     ) -> ThreadMetadata:
-        # 这里复刻真实 ThreadManager 的校验逻辑，让单测能验证路由层 + manager 都校验
-        if not name or not name.strip():
-            raise ValueError("thread name must not be empty")
+        # 复刻真实 ThreadManager 的校验逻辑
         if backend_kind == "generic_chat" and (not preset_id or not preset_id.strip()):
             raise ValueError("preset_id required for generic_chat backend")
         idx = len(self._threads)
         # 12 位 hex；用 idx 占位，前 11 位填 0
         thread_id = f"thread-{idx:012x}"
+        resolved_name = name.strip() or thread_id
         meta = ThreadMetadata(
             id=thread_id,
-            name=name,
+            name=resolved_name,
             preset_id=preset_id,
             backend_kind=backend_kind,  # type: ignore[arg-type]
             cwd=cwd,
@@ -403,3 +414,60 @@ def test_post_threads_invalid_backend_kind_returns_422(tmp_path: Path) -> None:
         assert resp.status_code == 422
     finally:
         client.__exit__(None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# 空 name 场景（name 可选，后端用 thread_id 兜底）
+# ---------------------------------------------------------------------------
+
+
+def test_post_threads_empty_name_uses_thread_id(tmp_path: Path) -> None:
+    """REST: name 空串 → 201，返回的 name 等于 thread_id。"""
+    tm = FakeTM()
+    client = _login_client(tmp_path, tm)
+    try:
+        resp = client.post(
+            "/api/threads",
+            json={"name": "", "preset_id": "p1"},
+            headers=CSRF_HEADERS,
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["name"] == body["id"]
+        assert body["name"].startswith("thread-")
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_post_threads_omitted_name_uses_thread_id(tmp_path: Path) -> None:
+    """REST: 完全省略 name → 201，返回的 name 等于 thread_id。"""
+    tm = FakeTM()
+    client = _login_client(tmp_path, tm)
+    try:
+        resp = client.post(
+            "/api/threads",
+            json={"preset_id": "p1"},
+            headers=CSRF_HEADERS,
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["name"] == body["id"]
+    finally:
+        client.__exit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_real_create_thread_empty_name_uses_thread_id(tmp_path: Path) -> None:
+    """ThreadManager 真实实例：空 name → 用 thread_id 兜底。"""
+    from web.thread_manager import ThreadManager
+
+    cfg = _make_cfg()
+
+    async def _fake_factory(tid: str, pid: str, adapter: Any, sinks: list[Any]) -> tuple[Any, Any]:
+        del tid, pid, adapter, sinks
+        raise NotImplementedError
+
+    tm = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=_fake_factory)
+    meta = await tm.create_thread("", "preset-1")
+    assert meta.name == meta.id
+    assert meta.name.startswith("thread-")

@@ -27,6 +27,21 @@ from web.thread_metadata import ThreadMetadata
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 
 
+class _FakeUsageManager:
+    """task#3.3 minimal stub：``ThreadManager.usage_manager`` 在 router ``_to_dto``
+    里被调 ``get_thread_summary(thread_id)`` 派生 ``usage_summary`` dict。
+
+    本 stub 返回空 ``ThreadUsageSummary``（全零 anthropic），让 router 测试
+    无需真实 manager。
+    """
+
+    async def get_thread_summary(self, thread_id: str):  # type: ignore[no-untyped-def]
+        from web.usage_token import ThreadUsageSummary
+
+        del thread_id
+        return ThreadUsageSummary(channel="anthropic")
+
+
 class FakeTM:
     """支持 thread CRUD 的 FakeThreadManager。"""
 
@@ -35,6 +50,9 @@ class FakeTM:
         self.delete_calls: list[str] = []
         self._started = False
         self._closed = False
+        # task#3.3：router ``_to_dto`` 通过 ``tm.usage_manager.get_thread_summary``
+        # 拿 token usage summary
+        self.usage_manager = _FakeUsageManager()
 
     @property
     def started(self) -> bool:
@@ -89,6 +107,22 @@ class FakeTM:
         self._threads[thread_id] = new_meta
         return new_meta
 
+    async def pin_thread(self, thread_id: str, is_pinned: bool) -> ThreadMetadata:
+        if thread_id not in self._threads:
+            raise KeyError(thread_id)
+        old = self._threads[thread_id]
+        new_meta = ThreadMetadata(
+            id=old.id,
+            name=old.name,
+            preset_id=old.preset_id,
+            created_at=old.created_at,
+            updated_at=old.updated_at,
+            message_count=old.message_count,
+            is_pinned=is_pinned,
+        )
+        self._threads[thread_id] = new_meta
+        return new_meta
+
     async def delete_thread(self, thread_id: str, *, keep_history: bool = False) -> None:
         del keep_history
         self.delete_calls.append(thread_id)
@@ -127,6 +161,36 @@ class FakeTM:
         cwd: str,
     ) -> Any:
         raise NotImplementedError  # 默认；测试 mock 时按需 override
+
+    async def create_and_bind_claude_thread(
+        self,
+        *,
+        claude_thread_id: str,
+        cwd: str,
+        name: str,
+        preset_id: str = "",
+    ) -> Any:
+        """默认实现：复用 find / create / bind 三个旧方法，让历史测试 mock 仍然生效。
+
+        历史 test_import_claude_session_endpoint 测试通过 mock
+        ``find_thread_by_claude_thread_id`` / ``create_thread`` / ``bind_claude_thread``
+        来验证防重复语义；router 改用 ``create_and_bind_claude_thread`` 后需要
+        FakeTM 兜底翻译，否则那些测试全部 AttributeError。
+
+        生产 ThreadManager 的实现含 per-ctid asyncio.Lock 串行化；FakeTM 不需要
+        并发保护（测试用例顺序调用，不会真并发命中 race）。
+        """
+        existing = self.find_thread_by_claude_thread_id(claude_thread_id)
+        if existing is not None:
+            return existing, False
+        new_thread = await self.create_thread(
+            name,
+            preset_id,
+            backend_kind="claude_code",
+            cwd=cwd,
+        )
+        bound = await self.bind_claude_thread(new_thread.id, claude_thread_id, cwd)
+        return bound, True
 
     def resolve_approval(self, thread_id: str, call_id: str, approved: bool) -> None:
         del thread_id, call_id, approved
@@ -274,6 +338,43 @@ def test_invalid_thread_id_returns_422(tmp_path: Path) -> None:
             headers=CSRF_HEADERS,
         )
         assert resp.status_code == 422
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_pin_thread(tmp_path: Path) -> None:
+    tm = FakeTM()
+    client = _login_client(tmp_path, tm)
+    try:
+        cresp = client.post(
+            "/api/threads",
+            json={"name": "t", "preset_id": "p1"},
+            headers=CSRF_HEADERS,
+        )
+        thread_id = cresp.json()["id"]
+        assert cresp.json()["is_pinned"] is False
+
+        resp = client.patch(
+            f"/api/threads/{thread_id}",
+            json={"is_pinned": True},
+            headers=CSRF_HEADERS,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["is_pinned"] is True
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_pin_nonexistent_returns_404(tmp_path: Path) -> None:
+    tm = FakeTM()
+    client = _login_client(tmp_path, tm)
+    try:
+        resp = client.patch(
+            "/api/threads/thread-aaaaaaaaaaaa",
+            json={"is_pinned": True},
+            headers=CSRF_HEADERS,
+        )
+        assert resp.status_code == 404
     finally:
         client.__exit__(None, None, None)
 

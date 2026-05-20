@@ -139,6 +139,14 @@ approval:
   # interactive | auto_allow | auto_deny
   mode: interactive
 
+scheduler:
+  enabled: true
+  default_timezone: Asia/Shanghai
+  # v0.5.1: 任务级 task.policy.max_turns=None 时的兜底；司天扫描类重型任务建议 ≥60。
+  default_max_turns: 90
+  approval:
+    allow_write_file_create_in_cwd: true
+
 tool:
   shell:
     enabled: true
@@ -208,46 +216,52 @@ evolution:
     # memory tool view 动作返回的最大字符数。
     view_max_chars: 3000
   learning:
-    # v0.1.9 自我进化副链。主任务完成后创建 child reviewer，
-    # 直接把进化养料写入 .kongming/evolution/。
-    # true：开启 after-run review；false：完全关闭自我进化副链。
+    # ---------- 总开关 ----------
+    # 是否启用自我进化。关闭后 EvolutionManager 所有 API 都是 no-op。
     enabled: true
-    # 进化执行模式。v0.1.9 只支持 child_agent：
-    # 主 agent 回答完成后，再起一个独立 reviewer 子 agent 做复盘。
+    # 进化模式，当前仅支持 child_agent（派子 agent 复盘）。
     mode: child_agent
-    # 是否后台执行 reviewer。
-    # true：主回答先返回，reviewer 异步继续跑；false：保留给后续同步模式扩展。
+    # reviewer 是否在后台异步执行（不阻塞主对话）。
     background: true
-    # reviewer 复用同一 provider，可单独指定模型名和推理深度。
-    # 留空时继承主 agent。
-    # 独立 reviewer 模型名。空值表示沿用主 agent 的 model_name。
+
+    # ---------- reviewer 独立模型配置 ----------
+    # 全部留空时继承主 agent 的 model / base_url / api_key / provider。
+    # 跟 web.llm_presets 同模式：可以让 reviewer 用跟主模型完全不同的服务。
+    # reviewer 模型名（如 claude-sonnet-4-20250514 / MiniMax-M2.7）。
     model_name:
-    # reviewer 推理深度。空值表示沿用主 agent 的 reasoning_effort。
-    # 常见值：minimal / low / medium / high。
-    reasoning_effort: low
-    # cadence 触发阈值：每完成 N 次主 run，触发 1 次 reviewer。
-    # 1 表示每轮都复盘；5 表示每 5 个 completed run 复盘一次。
+    # reviewer 独立 API 地址（如 https://api.anthropic.com / https://api.minimaxi.com/anthropic）。
+    base_url:
+    # API key 从哪个环境变量读。值填环境变量名，不填 key 本身。
+    api_key_env: EVOLUTION_REVIEWER_API_KEY
+    # provider 类型：openai_compatible / anthropic。留空时按 URL 自动检测。
+    provider:
+    # reviewer 推理深度：high / medium / low。留空时继承主 agent。
+    reasoning_effort:
+
+    # ---------- 触发节律 ----------
+    # 每 N 轮用户消息触发一次 reviewer。所有频道（claude/codex/native）共用。
     every_n_runs: 10
-    # session 内最少 user turn 数。低于这个阈值时跳过 review，
-    # 避免对单句闲聊或初始化空对话做无意义复盘。
+    # 累计不足 N 轮时不触发（冷启动保护，避免前几条消息就跑 reviewer）。
     min_user_turns: 5
-    # reviewer 可回看的历史消息上限。
-    # 只截最近若干条消息构造 transcript window，控制成本并减少噪音。
+
+    # ---------- reviewer 证据窗口 ----------
+    # reviewer 看到的最近消息条数。越大 token 消耗越高，但上下文越完整。
     max_history_messages: 20
-    # 单次 review 最多允许写出的进化养料条数。
-    # reviewer 超过这个数量时，写入层只保留前 N 条。
+
+    # ---------- 养料提炼 ----------
+    # 单次 review 最多提炼几条养料（nutrient）。
     max_nutrients: 5
-    # 养料写入置信度阈值。低于该值的候选会被跳过，
-    # 避免把噪声、偶发行为或低价值结论写进 evo 目录。
+    # 低于此置信度的养料直接丢弃，不进候选队列。
     nutrient_confidence_threshold: 0.75
-    # reviewer 最长运行时间，单位秒。
-    # 超时后本轮 review 标记 failed / TimeoutError，并停止继续等待。
-    review_timeout_seconds: 100.0
-    # runtime 关闭时等待后台 reviewer 收尾的最长时间，单位秒。
-    # 主要影响 CLI 退出、web 线程回收和测试中的 drain 行为。
-    drain_on_close_seconds: 30.0
-    # evo 目录根路径。review 结果、state 和 nutrients 都写在这里。
-    # 相对路径按当前工作区 cwd 解析。
+
+    # ---------- 超时与生命周期 ----------
+    # reviewer 单次执行超时（秒）。超时后如果 evolution_write 已调用则保留结果。
+    review_timeout_seconds: 120.0
+    # app 关闭时等待后台 reviewer 完成的最大时间（秒）。超时则取消。
+    drain_on_close_seconds: 120.0
+
+    # ---------- 存储 ----------
+    # evolution 产物根目录。包含 reviews/ / evolution-nutrients.jsonl / evolution.state.json。
     root_path: .kongming/evolution
 
 # ---------------------------------------------------------------------------
@@ -409,15 +423,8 @@ safety:
       boundary_scope: "any"
       reason: "禁止删除/修改个人音乐"
 
-    # 跨卷写：当前项目所在卷之外的卷，写入要 elevated 审批
-    # （read 不拦，agent 跨卷读资料是合理用例）
-    - name: "cross-volume-write"
-      matcher: "/Volumes/"
-      match_mode: "path_prefix"
-      ops: ["write"]
-      effect: "elevated"
-      boundary_scope: "any"
-      reason: "跨卷写入需明确审批，避免误删其他卷数据"
+    # 跨卷写规则已删除：项目本身在 /Volumes/ 下，该规则导致所有写操作
+    # 都被升级为 elevated 审批（需输确认码），误伤正常文件操作。
   # 例子：
   # sensitive_paths:
   #   - name: "kubeconfig"
@@ -509,11 +516,11 @@ safety:
 # 文档：docs/web-multi-thread-frontend-v0.1.5/
 web:
   # 是否启用 web 宿主壳（默认 false；启用前先 review 整段配置）
-  enabled: false
+  enabled: true
 
   # uvicorn bind IP：仅本机用 127.0.0.1；需外网访问改 0.0.0.0 + 防火墙
   host: "0.0.0.0"
-  port: 8080
+  port: 60000
 
   # 跳过登录鉴权（仅本地开发！）；上线必须 false 并设强密码
   dev_mode: false
@@ -562,20 +569,3 @@ web:
 
   # ---- 启用 / 调优请改上方 yaml 字段，或用 KONGMING_WEB_* env 覆盖 ----
   # 完整 env 清单见 .env.example 的「Web 服务」段（单一真源；本处不再列）。
-
-# cron 定时任务模块（v0.2+）。LLM 通过 schedule_tool 创建/管理定时任务。
-scheduler:
-  enabled: true
-  # ticker 扫描间隔（秒）。下限 0.1。
-  interval: 1.0
-  # 同时并发跑的 cron 任务上限（asyncio.Semaphore 限流）。下限 1。
-  max_inflight: 8
-  # 用户当前时区（IANA 名称，如 "Asia/Shanghai" / "America/New_York" / "UTC"）。
-  # LLM 通过 schedule_tool 创建任务时**默认按此时区解释 cron 表达式**；
-  # 不让 LLM 自己猜时区（实战发现 LLM 常误填 UTC 导致 cron 时间偏 8 小时）。
-  # 务必按你实际所在时区填，否则到点不触发或时间偏移。
-  default_timezone: "Asia/Shanghai"
-  # 默认投递渠道：web | cli。
-  # - web：主要在浏览器使用 → cron 触发后通过 /ws/cron 广播给所有 web 客户端
-  # - cli：主要在终端使用 → cron 触发后下次提示符前 flush 到 stdout
-  default_delivery_channel: "web"

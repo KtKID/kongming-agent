@@ -34,6 +34,7 @@ from typing import Any
 from scheduler.domain import (
     GRACE_MIN_SECONDS,
     SCHEMA_VERSION,
+    ApprovalMode,
     ConcurrencyPolicy,
     DeliveryChannel,
     DeliveryStatus,
@@ -245,6 +246,10 @@ def _task_to_dict(task: ScheduledTask) -> dict[str, Any]:
             "wall_timeout_seconds": task.policy.wall_timeout_seconds,
             "retry_limit": task.policy.retry_limit,
             "silent_marker_enabled": task.policy.silent_marker_enabled,
+            # v0.5: approval_mode；None 表示沿用全局 SchedulerApprovalConfig.mode
+            "approval_mode": task.policy.approval_mode.value
+            if task.policy.approval_mode is not None
+            else None,
         },
         "target": {
             "agent_name": task.target.agent_name,
@@ -279,6 +284,9 @@ def _dict_to_task(payload: dict[str, Any]) -> ScheduledTask:
         timezone=trigger_raw["timezone"],
     )
     policy_raw = payload["policy"]
+    # v0.5: approval_mode；缺字段或 None → None（沿用全局）
+    approval_mode_raw = policy_raw.get("approval_mode")
+    approval_mode = ApprovalMode(approval_mode_raw) if approval_mode_raw is not None else None
     policy = TaskExecutionPolicy(
         session_mode=SessionMode(policy_raw["session_mode"]),
         concurrency_policy=ConcurrencyPolicy(policy_raw["concurrency_policy"]),
@@ -288,6 +296,7 @@ def _dict_to_task(payload: dict[str, Any]) -> ScheduledTask:
         wall_timeout_seconds=policy_raw.get("wall_timeout_seconds"),
         retry_limit=int(policy_raw.get("retry_limit", 0)),
         silent_marker_enabled=bool(policy_raw.get("silent_marker_enabled", True)),
+        approval_mode=approval_mode,
     )
     target_raw = payload["target"]
     metadata = target_raw.get("metadata") or {}
@@ -734,21 +743,30 @@ class Store:
         limit: int = 50,
         since: str | None = None,
         task_id: str | None = None,
+        cursor: str | None = None,
     ) -> list[ScheduledRun]:
-        """v0.3：列出最近的 runs，跨 task 聚合，按 ``started_at`` 倒序。
+        """列出最近的 runs，跨 task 聚合，按 ``started_at`` 倒序。
 
         - ``task_id``：限定单 task；``None`` 表示扫所有 task 的 runs（``runs/*.jsonl``）
         - ``since``：ISO8601；只返回 ``started_at >= since`` 的 run；缺 ``started_at``
-          的 run 被过滤
-        - ``limit``：取前 N 条；``<= 0`` 表示不限
-        - 排序键：``(started_at or "", run_id)`` 倒序；缺 started_at 的排到最后
+          的 run 被过滤（v0.3 cron-delivery 引入）
+        - ``cursor``：ISO8601；非 ``None`` 时只返回 ``started_at`` **严格 <** cursor
+          的 run；缺 ``started_at`` 的 run 被过滤（v0.5 web-cron-router 引入，配合
+          ``GET /api/cron/runs?cursor=`` 分页；与 ``since`` 正交，可同时给）
+        - ``limit``：默认 50，上限 200，超出抛 ``ValueError``；``<= 0`` 同样越界
+        - 排序键：``(started_at is None, started_at or "", run_id)``；
+          ``started_at=None`` 的 run（PENDING）排到最后；同 started_at 用 run_id
+          做 tie-break。整体倒序（``reverse=True``）。
 
-        实现方式：复用 ``list_runs(task_id)`` 的 superseded 过滤；新方法只做
-        跨 task 聚合 + 排序 + 切片，不引入新的物理读路径。
+        实现方式：复用 ``list_runs(task_id)`` 的 superseded 过滤；本方法只做
+        跨 task 聚合 + 过滤 + 排序 + 切片，不引入新的物理读路径。
 
         性能：当前 runs/*.jsonl 数量 <100、每个 jsonl <1k 行，全扫 ~10ms 量级；
-        v0.4 若数据量上来再加索引（``DeliveryStatus`` / 时间范围）。
+        若数据量上来再加索引（``DeliveryStatus`` / 时间范围）。
         """
+        if not isinstance(limit, int) or limit <= 0 or limit > 200:
+            raise ValueError(f"limit must be 1..200, got {limit!r}")
+
         if task_id is not None:
             runs = self.list_runs(task_id, limit=None)
         else:
@@ -759,14 +777,19 @@ class Store:
         if since is not None:
             runs = [r for r in runs if r.started_at is not None and r.started_at >= since]
 
+        if cursor is not None:
+            runs = [r for r in runs if r.started_at is not None and r.started_at < cursor]
+
+        # 排序键说明：(started_at is None, started_at or "", run_id) + reverse=True
+        # - started_at is None → True 排在 False 前（reverse 后 None 在末尾）
+        # - 有 started_at 时按字典序倒序（ISO8601 字符串字典序 == 时间序）
+        # - tie-break 用 run_id 保证 deterministic
         runs.sort(
-            key=lambda r: (r.started_at or "", r.run_id),
+            key=lambda r: (r.started_at is None, r.started_at or "", r.run_id),
             reverse=True,
         )
 
-        if limit > 0:
-            return runs[:limit]
-        return runs
+        return runs[:limit]
 
     def mark_run_seen(self, run_id: str) -> ScheduledRun | None:
         """v0.3：把 ``run_id`` 对应 run 的 ``seen_at`` 设为现在 ISO 时间，

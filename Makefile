@@ -30,7 +30,7 @@ install:
 	bash scripts/dev-setup.sh
 
 install-hooks:
-	uv run pre-commit install
+	uv run pre-commit install --hook-type pre-commit --hook-type pre-push
 
 precommit:
 	uv run pre-commit run --all-files

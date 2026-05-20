@@ -346,6 +346,9 @@ class TestWebDeliverySinkDeliveryTarget:
         assert payload["kind"] == "cron.run.completed"
         assert payload["task_id"] == "t1"
         assert payload["final_message"] == "hello from cron"
+        # v0.5 web-cron-router 扩展字段
+        assert payload["next_run_at"] == task.next_run_at
+        assert payload["status"] == "completed"
 
     async def test_web_delivery_sink_broadcast_delivery_target_none(self) -> None:
         """task.delivery.target 为 None 时，broadcast payload 中 delivery_target 为 None。"""
@@ -378,3 +381,6 @@ class TestWebDeliverySinkDeliveryTarget:
 
         payload = broker.broadcast.call_args[0][0]
         assert payload["delivery_target"] is None
+        # v0.5 web-cron-router 扩展字段
+        assert payload["next_run_at"] == task.next_run_at
+        assert payload["status"] == "completed"

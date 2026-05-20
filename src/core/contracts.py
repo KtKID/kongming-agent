@@ -109,7 +109,7 @@ class ToolLookup(Protocol):
 # ---------------------------------------------------------------------------
 
 
-ApprovalOutcome = Literal["approved", "rejected", "cancelled"]
+ApprovalOutcome = Literal["approved", "rejected", "cancelled", "pending"]
 
 
 @dataclass(frozen=True)
@@ -139,7 +139,9 @@ class ApprovalDecision:
     """一次审批结果。
 
     Attributes:
-        outcome: approved / rejected / cancelled 之一。
+        outcome: approved / rejected / cancelled / pending 之一。
+                 ``pending`` 仅用于 trace 占位（如 destructive_force_ask / approval_required），
+                 不参与控制流决策。
         reason: 人工或策略给出的理由文本。
         metadata: 附加信息，比如操作者身份、来源 UI 等。
 
@@ -431,6 +433,15 @@ class Session(Protocol):
 EventKind = Literal[
     "run.start",
     "run.end",
+    # interrupt-run-v0.1：runner 顶层捕获到 ``asyncio.CancelledError``（典型 =
+    # 用户在 web 端发 ``InterruptFrame`` → ``cell.current_run_task.cancel()``）后
+    # emit；紧接着会 emit ``run.end``（status="cancelled"）。WSEventSink 会把
+    # 这条转成 S2C ``RunInterruptedFrame`` 推给所有 attach 的 ws，多 tab 自动
+    # 同步。payload={"cancelled_at_turn": int, "cancelled_tool_call_id": str | None,
+    # "cancel_reason": str}。``cancelled_tool_call_id`` 非空时表示打断时正卡在
+    # 某个 tool；为 None 表示打断在 LLM 阶段 / approval 阶段（pending tool 已被
+    # ``_finalize_unpaired_call`` 写占位 tool_result，session jsonl 配对完整）。
+    "run.cancelled",
     "turn.start",
     "turn.end",
     "llm.request",

@@ -89,11 +89,25 @@ class WebHostAdapter(HostAdapter):
         ws: Any,
         *,
         pending_approval_timeout_seconds: float = 60.0,
+        thread_id: str | None = None,
     ) -> None:
+        """构造 WebHostAdapter。
+
+        Args:
+            ws: 当前 WS 连接（duck-typed，含 ``send_json`` / ``close``）。
+            pending_approval_timeout_seconds: 单次审批等待超时（秒）。
+            thread_id: 本 adapter 绑定的 thread ID。阶段 1（smart-approval-manager-v0.5）
+                新增字段，用于 :meth:`close` 时调
+                ``ApprovalManager.cancel_by_thread`` 清该 thread 名下的 manager pending
+                （reviewer 必修 #4：避免用户关 tab 后 manager pending 卡 60s timeout
+                / R10 内存泄漏诱因）。``None`` 时跳过 cancel_by_thread 调用，保持向后
+                兼容（单测里大量 ``WebHostAdapter(_make_ws())`` 不传 thread_id）。
+        """
         self._ws: Any = ws
         self._timeout = float(pending_approval_timeout_seconds)
         self._closed = False
         self._pending_approvals: dict[str, asyncio.Future[ApprovalAction]] = {}
+        self._thread_id: str | None = thread_id
 
     # ------------------------------------------------------------------
     # HostAdapter 接口
@@ -147,7 +161,7 @@ class WebHostAdapter(HostAdapter):
         - 超时（``cfg.web.pending_approval_timeout_seconds``）→ 返回
           ``ApprovalAction.REJECT`` 视为拒绝
         - cell evict / adapter close → :meth:`close` 把 future
-          set_result(REJECT) → 返回 ``ApprovalAction.REJECT``
+          ``set_result(REJECT)`` → 返回 ``ApprovalAction.REJECT``
 
         ``mark_action_aware`` 装饰器告诉 :class:`tools.approval.InteractiveApproval`
         本回调返回 :class:`ApprovalAction` 而非旧 ``bool``，从而把
@@ -157,6 +171,13 @@ class WebHostAdapter(HostAdapter):
         在 ``self._closed`` 时直接返回 REJECT，避免把请求推到已断连接。
         重复 ``call_id`` 抛 ``RuntimeError`` —— call_id 由 runner 生成，
         理论上唯一；冲突意味着上游有逻辑漏洞，不该静默吞。
+
+        **interrupt 语义（v0.1 interrupt-run-v0.1）**：``close()`` 不会让
+        future 抛 ``CancelledError``（走 ``set_result(REJECT)``），因此本方法
+        ``except asyncio.CancelledError`` 的唯一触发来源是**外部 task.cancel()**
+        —— 也就是用户主动 interrupt 路径。此时把 ``CancelledError`` 透传给
+        上游（runner 顶层 except）走 ``Result(status="interrupted")`` 收尾，
+        而不是翻译成 REJECT 让 runner 误以为"用户拒绝了"继续跑下一轮。
         """
         if self._closed:
             return ApprovalAction.REJECT
@@ -171,6 +192,8 @@ class WebHostAdapter(HostAdapter):
         self._pending_approvals[request.call_id] = future
 
         # 推 ApprovalRequestFrame 给浏览器
+        # 从 request.metadata 透传 policy_hint / confirm_token（ConsentResolver 写入）
+        req_meta = request.metadata or {}
         frame = ApprovalRequestFrame(
             call_id=request.call_id,
             tool_name=request.tool_name,
@@ -178,6 +201,8 @@ class WebHostAdapter(HostAdapter):
             reason=request.reason,
             turn=request.turn,
             timestamp_ms=_now_ms(),
+            policy_hint=req_meta.get("policy_hint"),
+            confirm_token=req_meta.get("confirm_token"),
         )
         await self._safe_send_json(frame.model_dump())
 
@@ -193,8 +218,12 @@ class WebHostAdapter(HostAdapter):
             )
             return ApprovalAction.REJECT
         except asyncio.CancelledError:
-            # cell evict 时 close() 主动 cancel；当作拒绝处理
-            return ApprovalAction.REJECT
+            # close() 走 set_result(REJECT) 不会触发这里；唯一来源 = 外部
+            # task.cancel()（interrupt 路径）。把 CancelledError 透传给上游
+            # runner 顶层 except，由 runner 走 Result(status="interrupted") 收尾。
+            # 不能在这里翻译成 REJECT，否则 runner 会以为"用户拒绝了 1 个工具"
+            # 继续跑下一轮，与 interrupt 语义冲突。
+            raise
         finally:
             self._pending_approvals.pop(request.call_id, None)
 
@@ -211,6 +240,12 @@ class WebHostAdapter(HostAdapter):
         幂等：多次调用安全。**不**主动 ``ws.close()`` —— WS 生命周期
         由路由层 / FastAPI 管理，避免 adapter 关闭后无法在 evict
         路径里继续推 ``cell.evicted`` 帧。
+
+        阶段 1（smart-approval-manager-v0.5）reviewer 必修 #4 新增：除清自身
+        ``prompt_approval`` pending（老逻辑，本 adapter 内的 future）外，
+        若 adapter 持有 ``thread_id``，还通知 :class:`safety.approval_manager.ApprovalManager`
+        取消该 thread 名下所有 manager 路径的 pending，避免用户关 tab 后 manager pending
+        卡 60s timeout / R10 内存泄漏。``cancel_by_thread`` 失败一律吞掉（非主流程）。
         """
         if self._closed:
             return
@@ -220,6 +255,26 @@ class WebHostAdapter(HostAdapter):
             if not fut.done():
                 fut.set_result(ApprovalAction.REJECT)
         self._pending_approvals.clear()
+
+        # 阶段 1 新增（reviewer 必修 #4）：通知 manager 清该 thread 名下所有 pending。
+        # generic_chat 通道 prompt_fn 走 manager 路径后，pending future 在 manager 侧；
+        # 不在这里 cancel 用户关 tab 时 manager pending 卡 60s 才超时。
+        if self._thread_id:
+            try:
+                from safety.approval_manager import get_approval_manager
+
+                manager = get_approval_manager()
+                cancelled = manager.cancel_by_thread(self._thread_id, reason="cell_evict")
+                if cancelled > 0:
+                    logger.debug(
+                        "WebHostAdapter.close cancelled %d manager pending for thread=%s",
+                        cancelled,
+                        self._thread_id,
+                    )
+            except Exception:
+                logger.exception(
+                    "WebHostAdapter.close: cancel_by_thread failed (non-fatal)",
+                )
 
     # ------------------------------------------------------------------
     # 公开方法（供 ThreadManager / WS 路由层调用）

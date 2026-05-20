@@ -219,6 +219,11 @@ async def test_emit_tool_call_end_non_dict_data_falls_to_none() -> None:
 
 
 async def test_emit_usage_includes_run_id() -> None:
+    """v2：UsageFrame.usage 是 channel-specific DTO dict（含 provider discriminator）。
+
+    无 ``provider_kind`` 时走 fallback openai 分支：``prompt_tokens`` → ``input_tokens``、
+    ``completion_tokens`` → ``output_tokens``。
+    """
     ws = _make_ws()
     sink = WSEventSink(ws)
     await sink.emit(
@@ -236,9 +241,11 @@ async def test_emit_usage_includes_run_id() -> None:
     sent = ws.send_json.await_args.args[0]
     assert sent["kind"] == "usage"
     assert sent["run_id"] == "run-42"
-    assert sent["prompt_tokens"] == 100
-    assert sent["completion_tokens"] == 25
-    assert sent["total_tokens"] == 125
+    assert sent["turn"] == 3
+    usage = sent["usage"]
+    assert usage["provider"] == "openai"
+    assert usage["last"]["input_tokens"] == 100
+    assert usage["last"]["output_tokens"] == 25
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +320,7 @@ async def test_emit_approval_decision_unknown_outcome_falls_back_to_cancelled() 
 
 
 async def test_emit_usage() -> None:
+    """v2：UsageFrame.usage 是 channel-specific DTO dict（含 provider）。"""
     ws = _make_ws()
     sink = WSEventSink(ws)
     await sink.emit(
@@ -329,9 +337,10 @@ async def test_emit_usage() -> None:
     )
     sent = ws.send_json.await_args.args[0]
     assert sent["kind"] == "usage"
-    assert sent["prompt_tokens"] == 100
-    assert sent["completion_tokens"] == 50
-    assert sent["total_tokens"] == 150
+    usage = sent["usage"]
+    assert usage["provider"] == "openai"
+    assert usage["last"]["input_tokens"] == 100
+    assert usage["last"]["output_tokens"] == 50
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +480,8 @@ async def test_emit_evolution_review_completed_notice() -> None:
                 "timeout_seconds": 30.0,
                 "nutrients_written": 2,
                 "written_nutrient_ids": ["n-1", "n-2"],
+                "review_summary": "Git 提交规范和测试隔离经验",
+                "nutrient_summaries": ["commit 前验证测试", "路径参数需 resolve"],
             },
         )
     )
@@ -478,7 +489,9 @@ async def test_emit_evolution_review_completed_notice() -> None:
     assert sent["kind"] == "system.notice"
     assert sent["status"] == "completed"
     assert sent["title"] == "进化复盘"
-    assert sent["message"] == "发现 2 条进化养料"
+    assert (
+        sent["message"] == "Git 提交规范和测试隔离经验\n• commit 前验证测试\n• 路径参数需 resolve"
+    )
     assert sent["icon"] == "success"
     assert sent["details"] == {
         "review_id": "evo-review:run-parent-2",
@@ -490,6 +503,8 @@ async def test_emit_evolution_review_completed_notice() -> None:
         "timeout_seconds": 30.0,
         "nutrients_written": 2,
         "written_nutrient_ids": ["n-1", "n-2"],
+        "review_summary": "Git 提交规范和测试隔离经验",
+        "nutrient_summaries": ["commit 前验证测试", "路径参数需 resolve"],
     }
 
 
@@ -681,13 +696,16 @@ async def test_emit_tool_call_start_with_no_arguments() -> None:
 
 
 async def test_emit_usage_with_missing_fields_defaults_to_zero() -> None:
+    """v2：空 payload → usage DTO 全 0；走 fallback openai provider 分支。"""
     ws = _make_ws()
     sink = WSEventSink(ws)
     await sink.emit(Event(kind="usage", run_id="r", turn=1, payload={}))
     sent = ws.send_json.await_args.args[0]
-    assert sent["prompt_tokens"] == 0
-    assert sent["completion_tokens"] == 0
-    assert sent["total_tokens"] == 0
+    usage = sent["usage"]
+    assert usage["provider"] == "openai"
+    assert usage["last"]["input_tokens"] == 0
+    assert usage["last"]["output_tokens"] == 0
+    assert usage["last"]["total_tokens"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -773,3 +791,57 @@ async def test_run_id_falls_back_to_empty_string_when_event_run_id_is_none() -> 
     )
     sent = ws.send_json.await_args.args[0]
     assert sent["run_id"] == ""
+
+
+# ---------------------------------------------------------------------------
+# interrupt-run-v0.1：run.cancelled → RunInterruptedFrame
+# ---------------------------------------------------------------------------
+
+
+async def test_emit_run_cancelled_translates_to_run_interrupted_frame() -> None:
+    """runner emit ``run.cancelled`` event → 推 :class:`RunInterruptedFrame` 给浏览器。
+
+    payload 字段（cancelled_at_turn / cancelled_tool_call_id / cancel_reason）
+    全部透传到 frame；run_id 走通用 ``event.run_id`` 路径。
+    """
+    ws = _make_ws()
+    sink = WSEventSink(ws)
+    await sink.emit(
+        Event(
+            kind="run.cancelled",
+            run_id="run-thread-aaa-5",
+            turn=3,
+            payload={
+                "cancelled_at_turn": 3,
+                "cancelled_tool_call_id": "call-xyz",
+                "cancel_reason": "user_interrupt",
+            },
+        )
+    )
+    sent = ws.send_json.await_args.args[0]
+    assert sent["kind"] == "run.interrupted"
+    assert sent["run_id"] == "run-thread-aaa-5"
+    assert sent["cancelled_at_turn"] == 3
+    assert sent["cancelled_tool_call_id"] == "call-xyz"
+    assert sent["cancel_reason"] == "user_interrupt"
+
+
+async def test_emit_run_cancelled_with_no_tool_call_id_keeps_none() -> None:
+    """打断在 LLM / approval 阶段时 cancelled_tool_call_id 为 None，需正确传成 null。"""
+    ws = _make_ws()
+    sink = WSEventSink(ws)
+    await sink.emit(
+        Event(
+            kind="run.cancelled",
+            run_id="run-x-1",
+            turn=2,
+            payload={
+                "cancelled_at_turn": 2,
+                "cancelled_tool_call_id": None,
+                "cancel_reason": "user_interrupt",
+            },
+        )
+    )
+    sent = ws.send_json.await_args.args[0]
+    assert sent["kind"] == "run.interrupted"
+    assert sent["cancelled_tool_call_id"] is None

@@ -135,7 +135,7 @@ async def reset_password(
     body: ResetPasswordRequest,
     request: Request,
 ) -> dict[str, bool]:
-    """重置密码端点（无需登录）。本地单用户工具，直接重置。"""
+    """重置密码端点。无需登录，本地单用户工具，直接重置。"""
     new_hash = hash_password(body.new_password)
 
     # 更新内存中的 hash

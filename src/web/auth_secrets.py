@@ -60,8 +60,8 @@ PASSWORD_HASH_FILENAME = "password.hash"
 class WebAuthNotConfiguredError(RuntimeError):
     """缺少必要的鉴权配置（password.hash 文件 + env 都没有）。
 
-    抛出时机：``load_or_init_password_hash`` 没有 env，盘上也没有 hash 文件。
-    用户首次启动时应当设置 :data:`ENV_WEB_PASSWORD`。
+    抛出时机：``load_or_init_password_hash`` 没有初始密码配置，盘上也没有 hash 文件。
+    用户首次启动时应当设置 ``web.initial_password`` 或 :data:`ENV_WEB_PASSWORD`。
     """
 
 
@@ -234,15 +234,27 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def load_or_init_password_hash(home_dir: Path) -> str:
+def _normalize_password_source(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    plain = raw.strip()
+    return plain or None
+
+
+def load_or_init_password_hash(
+    home_dir: Path,
+    *,
+    initial_password: str | None = None,
+) -> str:
     """解析或初始化登录密码 hash。
 
     优先级：
 
     1. 盘上 ``<home>/web/password.hash`` 存在 → 读返回。
-    2. env :data:`ENV_WEB_PASSWORD`（明文）→ ``hash_password`` 后写盘 0600，
+    2. ``initial_password``（明文配置）→ ``hash_password`` 后写盘 0600。
+    3. env :data:`ENV_WEB_PASSWORD`（明文）→ ``hash_password`` 后写盘 0600，
        并 ``os.environ.pop`` 清空 env。**不**回读文件，直接返回新算的 hash。
-    3. 都没有 → 抛 :class:`WebAuthNotConfiguredError`。
+    4. 都没有 → 抛 :class:`WebAuthNotConfiguredError`。
 
     Args:
         home_dir: ``.kongming/`` 根目录。
@@ -264,20 +276,25 @@ def load_or_init_password_hash(home_dir: Path) -> str:
         if existing:
             return existing
 
-    env_val = os.environ.get(ENV_WEB_PASSWORD)
+    configured_password = _normalize_password_source(initial_password)
+    if configured_password:
+        new_hash = hash_password(configured_password)
+        _ensure_web_dir(home_dir)
+        _write_secret_text(path, new_hash)
+        return new_hash
+
+    env_val = _normalize_password_source(os.environ.get(ENV_WEB_PASSWORD))
     if env_val:
-        # env 可能是 ""；strip 后为空也视作未设置（避免误把空字符串当合法密码）
-        plain = env_val.strip()
-        if plain:
-            new_hash = hash_password(plain)
-            _ensure_web_dir(home_dir)
-            _write_secret_text(path, new_hash)
-            # 清掉 env，防止子进程 / 错误日志泄露
-            os.environ.pop(ENV_WEB_PASSWORD, None)
-            return new_hash
+        new_hash = hash_password(env_val)
+        _ensure_web_dir(home_dir)
+        _write_secret_text(path, new_hash)
+        # 清掉 env，防止子进程 / 错误日志泄露
+        os.environ.pop(ENV_WEB_PASSWORD, None)
+        return new_hash
 
     raise WebAuthNotConfiguredError(
-        f"web auth not configured: set {ENV_WEB_PASSWORD} env on first run (checked file at {path})"
+        "web auth not configured: set web.initial_password or "
+        f"{ENV_WEB_PASSWORD} on first run (checked file at {path})"
     )
 
 

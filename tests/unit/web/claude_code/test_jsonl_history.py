@@ -78,6 +78,85 @@ def test_parse_user_text_message(tmp_path: Path) -> None:
     assert out[0]["sessionId"] == sid
 
 
+def test_parse_user_string_task_notification_dropped(tmp_path: Path) -> None:
+    """CLI 注入的 ``<task-notification>`` UserMessage 必须被丢弃——
+    否则前端历史回放渲染成右侧用户气泡（"用户没说却出现"bug）。
+
+    live 流由 normalizer ``_handle_user`` 直接 ``return []`` 隔离；本测试守住
+    history 路径的对齐行为（共用 ``_content_filter`` 模块）。
+    """
+    sid = "sid-task-notif"
+    path = tmp_path / "f.jsonl"
+    content = (
+        "<task-notification>\n"
+        "  <task-id>a61683b77a198a224</task-id>\n"
+        "  <tool-use-id>toolu_01GnGirqTjMZ9J4B1DANb1ou</tool-use-id>\n"
+        "  <status>completed</status>\n"
+        "  <summary>Agent x-dev #5+#6 completed</summary>\n"
+        "</task-notification>"
+    )
+    _write_jsonl(
+        path,
+        [
+            {
+                "type": "user",
+                "uuid": "u-tn-1",
+                "sessionId": sid,
+                "timestamp": "2026-05-17T10:00:00Z",
+                "message": {"role": "user", "content": content},
+            }
+        ],
+    )
+    out = parse_jsonl_history(path, sid)
+    assert out == []
+
+
+def test_parse_user_string_system_reminder_dropped(tmp_path: Path) -> None:
+    """同一过滤机制覆盖 ``<system-reminder>``——证明过滤是基于共享 prefix 列表，
+    不是只对 ``<task-notification>`` 硬编码。"""
+    sid = "sid-sysrem"
+    path = tmp_path / "f.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "type": "user",
+                "uuid": "u-sr-1",
+                "sessionId": sid,
+                "timestamp": "2026-05-17T10:00:01Z",
+                "message": {
+                    "role": "user",
+                    "content": "<system-reminder>auto-injected guidance</system-reminder>",
+                },
+            }
+        ],
+    )
+    assert parse_jsonl_history(path, sid) == []
+
+
+def test_parse_user_string_plain_text_still_passes(tmp_path: Path) -> None:
+    """对照：普通用户文本（不命中前缀）仍正常吐出 ``text role=user`` — 不退化。"""
+    sid = "sid-plain"
+    path = tmp_path / "f.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "type": "user",
+                "uuid": "u-pln-1",
+                "sessionId": sid,
+                "timestamp": "2026-05-17T10:00:02Z",
+                "message": {"role": "user", "content": "你好，帮我搜一下白板代码"},
+            }
+        ],
+    )
+    out = parse_jsonl_history(path, sid)
+    assert len(out) == 1
+    assert out[0]["kind"] == "text"
+    assert out[0]["role"] == "user"
+    assert out[0]["content"] == "你好，帮我搜一下白板代码"
+
+
 def test_parse_user_tool_result_block(tmp_path: Path) -> None:
     sid = "sid-1"
     path = tmp_path / "f.jsonl"
@@ -315,7 +394,13 @@ def test_sort_by_timestamp_ascending(tmp_path: Path) -> None:
 
 
 def test_real_fixture_smoke() -> None:
-    """真实 fixture 端到端："""
+    """真实 fixture 端到端 smoke。
+
+    阈值历史：旧值 ``>= 4`` 时，fixture 里 2 条 ``<task-notification>`` 伪装
+    UserMessage 被错误透传成 user-role text；2026-05-17 引入 ``_content_filter``
+    后这 2 条被正确丢弃，预期输出降到 ``>= 2``（至少 1 个真实用户文本 + 1 个
+    assistant 回复）。
+    """
     fixture = Path(
         "/Users/kid/.claude/projects/"
         "-Volumes-machub-app-proj-test/"
@@ -326,9 +411,15 @@ def test_real_fixture_smoke() -> None:
         return
     sid = "2c3c0aeb-f154-4f28-88a9-cd0fc20e6a14"
     out = parse_jsonl_history(fixture, sid)
-    # fixture 含 4 user + 1 assistant + system(init/其他)
-    assert len(out) >= 4
+    assert len(out) >= 2
     for r in out:
         assert r["sessionId"] == sid
         assert r["provider"] == "claude"
         assert r["kind"] in {"text", "thinking", "tool_use", "tool_result", "session_created"}
+        # 核心回归：内部前缀不应再出现在 history 输出（与 normalizer live 流对齐）
+        if r["kind"] == "text" and r.get("role") == "user":
+            content = r.get("content")
+            assert isinstance(content, str)
+            assert not content.startswith("<task-notification>"), (
+                "fixture 残留的 <task-notification> 必须被 _content_filter 过滤"
+            )

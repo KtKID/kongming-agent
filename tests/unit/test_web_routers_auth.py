@@ -193,6 +193,13 @@ def test_reset_password_survives_restart_with_stale_env(monkeypatch, tmp_path: P
     app = create_app(cfg, tm, home_dir=tmp_path)
 
     with TestClient(app) as client:
+        login_resp = client.post(
+            "/api/auth/login",
+            json={"password": "old-bootstrap-password"},
+            headers=CSRF_HEADERS,
+        )
+        assert login_resp.status_code == 200
+
         reset_resp = client.post(
             "/api/auth/reset-password",
             json={"new_password": "new-password-456"},
@@ -207,6 +214,30 @@ def test_reset_password_survives_restart_with_stale_env(monkeypatch, tmp_path: P
         old_login = client.post(
             "/api/auth/login",
             json={"password": "old-bootstrap-password"},
+            headers=CSRF_HEADERS,
+        )
+        assert old_login.status_code == 401
+
+        new_login = client.post(
+            "/api/auth/login",
+            json={"password": "new-password-456"},
+            headers=CSRF_HEADERS,
+        )
+        assert new_login.status_code == 200
+
+
+def test_reset_password_anonymous_flow_updates_login_password(tmp_path: Path) -> None:
+    with _build_app_with_password(tmp_path) as client:
+        reset_resp = client.post(
+            "/api/auth/reset-password",
+            json={"new_password": "new-password-456"},
+            headers=CSRF_HEADERS,
+        )
+        assert reset_resp.status_code == 200
+
+        old_login = client.post(
+            "/api/auth/login",
+            json={"password": "test-pwd-123"},
             headers=CSRF_HEADERS,
         )
         assert old_login.status_code == 401

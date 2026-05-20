@@ -1,21 +1,29 @@
-# pre-commit hooks —— 在每次 `git commit` 前强制跑软编译。
+# pre-commit / pre-push hooks —— 分两层拦截。
 #
-# 启用：一次性跑 `make install-hooks`（或 `uv run pre-commit install`）。
-# 手工全仓扫描：`make precommit`（或 `uv run pre-commit run --all-files`）。
-# 临时跳过（仅紧急情况）：`git commit --no-verify`。
+# 启用：
+#   make install-hooks        # 装 pre-commit + pre-push 两层
+#   uv run pre-commit install --hook-type pre-commit --hook-type pre-push
 #
-# 设计：
-# - ruff 用官方 pre-commit repo（独立隔离 venv，速度快）
-# - lint-imports / mypy / pytest-unit 必须看项目完整依赖闭包，用 local hook
-#   通过 `uv run` 调用，统一复用 .venv
-# - e2e 不进 pre-commit（含 opt-in 真模型测试，慢且环境依赖高）—— 留 CI 跑
+# 手工全仓扫描：
+#   make precommit            # 跑 pre-commit 阶段（秒级）
+#   uv run pre-commit run --all-files --hook-stage pre-push
+#
+# 临时跳过（仅紧急情况）：git commit --no-verify / git push --no-verify
+#
+# 分层设计：
+# - pre-commit 阶段（秒级，每次 commit 跑）：ruff + commit-separation + lint-imports
+# - pre-push 阶段（分钟级，push 前跑一次）：mypy + pytest（受影响测试 + 并行）
+# - CI（GitHub Actions）：全量 fmt/lint/typecheck/unit tests，终极兜底
+# - e2e 不进任何本地 hook（含 opt-in 真模型测试），只留 CI
 
 default_language_version:
   python: python3.11
 
+default_stages: [pre-commit]
+
 repos:
   # ---------------------------------------------------------------------------
-  # ruff —— lint + format（自动修 9 类常见问题）
+  # ruff —— lint + format（pre-commit 阶段，独立隔离 venv，速度快）
   # ---------------------------------------------------------------------------
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.11
@@ -27,7 +35,7 @@ repos:
         name: ruff format
 
   # ---------------------------------------------------------------------------
-  # commit 分离 —— 代码和文档不能混在同一个 commit
+  # commit 分离 —— 代码和文档不能混在同一个 commit（pre-commit 阶段）
   # ---------------------------------------------------------------------------
   - repo: local
     hooks:
@@ -43,25 +51,30 @@ repos:
   # ---------------------------------------------------------------------------
   - repo: local
     hooks:
+      # ----- pre-commit 阶段：架构边界（轻，必须每次 commit 守门） -----
       - id: lint-imports
         name: lint-imports (架构边界合约)
         entry: uv run lint-imports --config .importlinter
         language: system
         pass_filenames: false
-        # 合约基于包级依赖图，任何 .py 改动都可能影响图
         files: \.py$
 
+      # ----- pre-push 阶段：mypy（慢，挪到 push 前跑一次） -----
       - id: mypy
         name: mypy (类型检查)
         entry: uv run mypy src
         language: system
         pass_filenames: false
         files: ^src/.*\.py$
+        stages: [pre-push]
 
-      - id: pytest-unit
-        name: pytest tests/unit (单元测试)
-        entry: uv run pytest tests/unit -q
+      # ----- pre-push 阶段：pytest 受影响测试（--picked 只跑 git 改动相关） -----
+      # -n 4 并行（限 4 worker 避免资源爆炸），--picked 只跑改动文件相关测试
+      # 全量回归在 GitHub Actions CI 里跑（.github/workflows/ci.yml）
+      - id: pytest-picked
+        name: pytest --picked (受影响 unit 测试，并行)
+        entry: uv run pytest tests/unit --picked --mode=branch -n 4 -q -W ignore::pytest.PytestUnraisableExceptionWarning
         language: system
         pass_filenames: false
-        # 任何 src/ 或 tests/unit/ 改动都需要跑
         files: ^(src|tests/unit)/.*\.py$
+        stages: [pre-push]

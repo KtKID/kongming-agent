@@ -135,37 +135,41 @@ async def test_list_threads_merges_disk_and_memory(tmp_path: Path) -> None:
     assert listed[0].name == "memory-only-name"
 
 
-async def test_add_thread_usage_persists_cumulative_totals(tmp_path: Path) -> None:
+async def test_usage_manager_v2_exposed_with_get_thread_usage_only(tmp_path: Path) -> None:
+    """**usage-token-v2-bigbang**：ThreadManager.usage_manager 暴露 v2 无状态门面。
+
+    v2 manager 公共方法**只有** ``get_thread_usage(thread_id)``——v1 时代的
+    ``record_run_usage`` / ``set_last_assistant_usage`` / ``get_thread_summary``
+    等方法全部删除（防回归）。
+    """
     cfg = _make_cfg()
     factory = _make_factory()
     mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
     meta = await mgr.create_thread("usage", "p1")
 
-    updated = await mgr.add_thread_usage(
-        meta.id,
-        prompt_tokens=120,
-        completion_tokens=30,
-        total_tokens=150,
-    )
-    assert updated.cumulative_prompt_tokens == 120
-    assert updated.cumulative_completion_tokens == 30
-    assert updated.cumulative_total_tokens == 150
+    # v2 manager 只有 get_thread_usage 公共方法
+    assert hasattr(mgr.usage_manager, "get_thread_usage")
 
-    updated2 = await mgr.add_thread_usage(
-        meta.id,
-        prompt_tokens=20,
-        completion_tokens=5,
-        total_tokens=25,
-    )
-    assert updated2.cumulative_prompt_tokens == 140
-    assert updated2.cumulative_completion_tokens == 35
-    assert updated2.cumulative_total_tokens == 175
+    # v1 方法全部删除（防回归）
+    assert not hasattr(mgr.usage_manager, "record_run_usage")
+    assert not hasattr(mgr.usage_manager, "set_last_assistant_usage")
+    assert not hasattr(mgr.usage_manager, "get_thread_summary")
+    assert not hasattr(mgr.usage_manager, "to_ws_frame")
+    assert not hasattr(mgr.usage_manager, "context_window")
+    assert not hasattr(mgr.usage_manager, "context_usage_pct")
+    assert not hasattr(mgr.usage_manager, "set_thread_model")
 
+    # 新建 thread 没绑 SDK 真源 → get_thread_usage 返回 None（不抛）
+    result = await mgr.usage_manager.get_thread_usage(meta.id)
+    assert result is None
+
+    # metadata.json 不含任何 token 字段（schema v9 物理删 3 字段）；v10 加 is_archived
     loaded = read_thread_metadata(tmp_path, meta.id)
     assert loaded is not None
-    assert loaded.cumulative_prompt_tokens == 140
-    assert loaded.cumulative_completion_tokens == 35
-    assert loaded.cumulative_total_tokens == 175
+    assert not hasattr(loaded, "cumulative_usage")
+    assert not hasattr(loaded, "last_run_snapshot")
+    assert not hasattr(loaded, "last_model_name")
+    assert loaded.schema_version == 10
 
 
 async def test_list_cells_returns_only_active_cells(tmp_path: Path) -> None:

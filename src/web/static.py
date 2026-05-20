@@ -3,8 +3,9 @@
 行为：
 
 - ``GET /assets/*`` → ``web/dist/assets``（vite 打包产物）
-- ``GET /{path}``    → 任何非 ``/api/`` / ``/ws/`` / ``/assets/`` 的路径都
-  返回 ``web/dist/index.html``（SPA history mode）
+- ``GET /brand/*``  → ``web/dist/brand``（public 静态资源）
+- ``GET /{path}``    → 任何非静态前缀与非 API/WS 的路径都返回
+  ``web/dist/index.html``（SPA history mode）
 
 dist 缺失时：
 
@@ -70,26 +71,40 @@ def install_static(app: FastAPI, cfg: Config) -> None:
         _install_dev_placeholder(app)
         return
 
-    # 生产路径：mount /assets + SPA fallback
+    # 生产路径：mount 顶层静态目录 + SPA fallback
+    mounted_prefixes: set[str] = set()
+
     if assets_dir.is_dir():
         app.mount(
             "/assets",
             StaticFiles(directory=str(assets_dir)),
             name="assets",
         )
+        mounted_prefixes.add("assets")
     else:
         logger.warning(
             "assets dir not found at %s; /assets/* will 404",
             assets_dir,
         )
 
+    for child in dist_dir.iterdir():
+        if not child.is_dir() or child.name in mounted_prefixes:
+            continue
+        app.mount(
+            f"/{child.name}",
+            StaticFiles(directory=str(child)),
+            name=child.name,
+        )
+        mounted_prefixes.add(child.name)
+
     # dist 根目录下的静态文件（favicon 等）
     _dist_root_files = {f.name for f in dist_dir.iterdir() if f.is_file()}
+    _static_prefixes = tuple(f"{prefix}/" for prefix in sorted(mounted_prefixes))
 
     @app.get("/{full_path:path}")
     async def spa_fallback(full_path: str) -> FileResponse:  # type: ignore[unused-ignore]
-        # 抢不到 /api /ws /assets：让前面注册的路由 / mount 先命中
-        if full_path.startswith(("api/", "ws/", "assets/")):
+        # 抢不到 /api /ws /静态目录：让前面注册的路由 / mount 先命中
+        if full_path.startswith(("api/", "ws/", *_static_prefixes)):
             raise HTTPException(status_code=404)
         # dist 根目录的静态文件（如 favicon.png）直接返回
         if full_path in _dist_root_files:

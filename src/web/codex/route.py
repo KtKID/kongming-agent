@@ -49,6 +49,7 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from web._shared.session_manager import SessionManager
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 from web.codex.service import CodexService
+from web.protocol.rest_models import UserInputAttachment
 
 if TYPE_CHECKING:
     from itsdangerous import URLSafeTimedSerializer
@@ -238,6 +239,24 @@ async def _handle_codex_command(
         await _send_error(writer, "codex-command.command must be string")
         return
 
+    # codex-channel-image-paste §3：解 attachments 字段（前端 CodexView 粘贴图片
+    # 后发上来）。容错：
+    # - 字段缺失 / None / 非 list / 空 list → attachments=None 走原纯文本路径
+    # - 单条 dict 校验失败由 pydantic 抛 ValidationError，捕获后 fallback 到 None
+    raw_attachments = data.get("attachments")
+    parsed_attachments: list[UserInputAttachment] | None = None
+    if isinstance(raw_attachments, list) and raw_attachments:
+        try:
+            parsed_attachments = [
+                UserInputAttachment.model_validate(item) for item in raw_attachments
+            ]
+        except Exception:
+            logger.warning(
+                "codex-command attachments parse failed; falling back to text-only",
+                exc_info=True,
+            )
+            parsed_attachments = None
+
     raw_options = data.get("options")
     options: dict[str, Any] = raw_options if isinstance(raw_options, dict) else {}
 
@@ -272,6 +291,7 @@ async def _handle_codex_command(
             resume=resume,
             kongming_thread_id=thread_id,
             writer=writer,
+            attachments=parsed_attachments,
         ),
     )
     bg_tasks.add(task)

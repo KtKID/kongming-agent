@@ -139,10 +139,14 @@ def mock_deps():
         patch(
             "context.instruction_loader.assemble_instructions", new_callable=AsyncMock
         ) as mock_asm,
+        patch("context.skill_loader.load_skill_specs", new_callable=AsyncMock) as mock_skills,
         patch("tools.build_default_approval") as mock_approval,
         patch("tools.build_default_registry") as mock_registry,
+        patch("tools.register_schedule_tool_if_enabled") as mock_register_schedule,
+        patch("tools.register_evolution_write_tool_if_enabled") as mock_register_evolution,
     ):
         mock_asm.return_value = ("test instructions", ["prompts", "env", "runtime"])
+        mock_skills.return_value = []
         mock_runtime_instance = MagicMock()
         MockRuntime.build.return_value = mock_runtime_instance
         MockBridge.return_value = MagicMock()
@@ -150,13 +154,17 @@ def mock_deps():
         mock_reg_instance = MagicMock()
         mock_reg_instance.names.return_value = ["read_file", "shell"]
         mock_registry.return_value = mock_reg_instance
+        mock_register_schedule.return_value = None
+        mock_register_evolution.return_value = None
 
         yield {
             "NativeRuntime": MockRuntime,
             "SessionBridge": MockBridge,
             "assemble_instructions": mock_asm,
+            "load_skill_specs": mock_skills,
             "build_default_approval": mock_approval,
             "registry": mock_reg_instance,
+            "register_schedule_tool_if_enabled": mock_register_schedule,
         }
 
 
@@ -234,18 +242,31 @@ class TestModelConfigOverride:
 
 
 class TestApprovalWiring:
-    """Verify adapter.prompt_approval is passed to build_default_approval."""
+    """smart-approval-manager-stage1：generic_chat web 装配点 prompt_fn 由
+    ``make_manager_prompt_fn(manager, thread_id)`` 提供（不再是 adapter.prompt_approval）。
+
+    阶段 1 改造点：把 generic_chat 通道审批从 WebHostAdapter 旧模态切到 ApprovalManager
+    单例 + InboxEventSink → 浮窗。详见 docs/safety-approval-manager-v0.5/。
+    """
 
     @pytest.mark.asyncio
-    async def test_interactive_mode_passes_prompt_fn(self, test_cfg, mock_adapter, mock_deps):
+    async def test_interactive_mode_passes_manager_prompt_fn(
+        self, test_cfg, mock_adapter, mock_deps
+    ):
+        """验证 build_default_approval 收到的是 make_manager_prompt_fn 工厂返回的闭包。"""
         from web.run import _make_runtime_factory
 
         factory = _make_runtime_factory(test_cfg)
         await factory("thread-1", "test-local", mock_adapter, [])
 
-        mock_deps["build_default_approval"].assert_called_once_with(
-            "interactive", prompt_fn=mock_adapter.prompt_approval
-        )
+        # 不再断言具体 prompt_fn 引用（manager 工厂返回闭包每次新建）；
+        # 只断言：调用过一次 + mode='interactive' + 传了某个 callable 作 prompt_fn
+        mock_deps["build_default_approval"].assert_called_once()
+        call = mock_deps["build_default_approval"].call_args
+        assert call.args == ("interactive",)
+        assert callable(call.kwargs.get("prompt_fn"))
+        # 关键回归：装配后 prompt_fn 必须存在（不能 None；interactive 模式下必须有人接审批）
+        assert call.kwargs["prompt_fn"] is not None
 
 
 class TestSessionBridge:
@@ -283,6 +304,33 @@ class TestInstructionsCaching:
 
         mock_deps["assemble_instructions"].assert_called_once()
         assert mock_deps["NativeRuntime"].build.call_count == 2
+
+
+class TestSchedulerRuntimeFactory:
+    """Verify shared scheduler runtime factory inherits the same tool wiring."""
+
+    @pytest.mark.asyncio
+    async def test_scheduler_runtime_factory_forwards_tools_and_enabled_names(
+        self, test_cfg, mock_adapter, mock_deps
+    ):
+        from web.run import _make_runtime_factory
+
+        test_cfg.scheduler.enabled = True
+        factory = _make_runtime_factory(test_cfg)
+        await factory("thread-1", "test-local", mock_adapter, [])
+
+        scheduler_factory = getattr(factory, "_scheduler_runtime_factory", None)
+        assert scheduler_factory is not None
+
+        with patch("scheduler.runtime_factory.build_cron_execution_bridge") as mock_bridge:
+            dummy_store = object()
+            scheduler_factory(dummy_store)
+
+        mock_bridge.assert_called_once()
+        _, kwargs = mock_bridge.call_args
+        assert kwargs["tools"] is mock_deps["registry"]
+        assert kwargs["enabled_tool_names"] == ["read_file", "shell"]
+        assert kwargs["instructions"] == "test instructions"
 
 
 class TestEventSinks:

@@ -15,6 +15,7 @@ backend 必须跟随 ``config.session.backend`` —— 不能始终回退 InMemo
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -172,5 +173,55 @@ async def test_cron_runtime_dispatcher_default_none_keeps_v02_behavior(
     runtime, bridge = build_cron_execution_bridge(cfg, store)
     try:
         assert bridge._dispatcher is None
+    finally:
+        await runtime.aclose()
+
+
+def test_cron_runtime_forwards_tools_and_enabled_names(tmp_path: Path) -> None:
+    """Explicit tools wiring should be forwarded into NativeRuntime.build."""
+    cfg = _make_config_with_file_backend(tmp_path)
+    store = Store(tmp_path / "cron")
+    fake_runtime = type(
+        "FakeRuntime",
+        (),
+        {
+            "runner": object(),
+            "llm": object(),
+            "tools": object(),
+            "enabled_tool_names": ["read_file"],
+            "approval": object(),
+            "session_factory": object(),
+            "agent_spec": object(),
+        },
+    )()
+    tools = {"read_file": object()}
+
+    with patch(
+        "executors.agent_runtime.native_runtime.NativeRuntime.build",
+        return_value=fake_runtime,
+    ) as mock_build:
+        _runtime, _bridge = build_cron_execution_bridge(
+            cfg,
+            store,
+            tools=tools,
+            enabled_tool_names=["read_file"],
+        )
+
+    _, kwargs = mock_build.call_args
+    assert kwargs["tools"] is tools
+    assert kwargs["enabled_tool_names"] == ["read_file"]
+
+
+@pytest.mark.asyncio
+async def test_cron_runtime_bridge_retains_scheduler_approval_config(tmp_path: Path) -> None:
+    """ExecutionBridge should retain scheduler approval config from Config."""
+    cfg = _make_config_with_file_backend(tmp_path)
+    cfg.scheduler.approval.allow_write_file_create_in_cwd = False
+    store = Store(tmp_path / "cron")
+
+    runtime, bridge = build_cron_execution_bridge(cfg, store)
+    try:
+        assert bridge._base_config is cfg
+        assert bridge._base_config.scheduler.approval.allow_write_file_create_in_cwd is False
     finally:
         await runtime.aclose()

@@ -78,6 +78,7 @@ class _StubRuntime:
         *,
         session_id: str | None = None,
         reasoning_effort: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> Result:
         self.calls.append((user_input, session_id or ""))
         if self._run_error is not None:
@@ -108,7 +109,13 @@ class _StubCommandService:
         self._result = result
         self.calls: list[str] = []
 
-    async def handle_input(self, raw_input: str, *, context: Any) -> CommandResult:
+    async def handle_input(
+        self,
+        raw_input: str,
+        *,
+        context: Any,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> CommandResult:
         self.calls.append(raw_input)
         assert context.session_id == "sid-1"
         return self._result

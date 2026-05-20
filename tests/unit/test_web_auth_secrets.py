@@ -129,6 +129,18 @@ def test_password_hash_env_writes_file_and_clears_env(monkeypatch, tmp_path: Pat
         assert mode == 0o600
 
 
+def test_password_hash_initial_password_writes_file(monkeypatch, tmp_path: Path) -> None:
+    """配置初始密码可完成首启 bootstrap。"""
+    monkeypatch.delenv(ENV_WEB_PASSWORD, raising=False)
+
+    h = load_or_init_password_hash(tmp_path, initial_password="bootstrap-password")
+
+    assert h.startswith("$2")
+    assert verify_password("bootstrap-password", h) is True
+    path = tmp_path / "web" / PASSWORD_HASH_FILENAME
+    assert path.is_file()
+
+
 def test_password_hash_file_only(monkeypatch, tmp_path: Path) -> None:
     """env 不在但文件已落 → 直接读。"""
     monkeypatch.delenv(ENV_WEB_PASSWORD, raising=False)

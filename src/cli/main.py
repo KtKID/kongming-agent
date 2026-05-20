@@ -581,6 +581,21 @@ async def _run(
         await runtime.aclose()
 
 
+def _resolve_sitian_prompt_root(cfg: Config) -> Path | None:
+    """解析 sitian prompt 注入所需的根目录。
+
+    优先读 ``SITIAN_PROMPT_ROOT`` 环境变量；未设置时返回 None（不注入）。
+    返回的是频道父目录（如 ``/Users/kid/.SiTian``），
+    ``build_sitian_context_text`` 会遍历子目录按频道聚合。
+    """
+    import os
+
+    raw = os.environ.get("SITIAN_PROMPT_ROOT", "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser().resolve()
+
+
 def _resolve_memory_dir(raw: str) -> Path:
     """把 `cfg.evolution.memory.root_path` 解析成绝对 memory 目录。
 
@@ -618,11 +633,13 @@ async def _assemble_instructions(
           但不 append ``InstructionSource(origin="memory")``
     """
     kongming_home = get_kongming_home()
+    sitian_root = _resolve_sitian_prompt_root(cfg)
 
     # 公共指令装配：prompts 物化 + InstructionLoader + runtime context
     rendered, origins = await assemble_instructions(
         kongming_home=kongming_home,
         extra_files=instructions_files,
+        sitian_root=sitian_root,
     )
 
     # v0.1.6 skill listing 通道（在 memory 之前；listing 描述能力，memory 描述事实）

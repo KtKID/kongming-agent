@@ -156,6 +156,7 @@ async def assemble_instructions(
     kongming_home: Path,
     extra_files: Sequence[str | Path] = (),
     cwd: Path | None = None,
+    sitian_root: Path | None = None,
 ) -> tuple[str, list[str]]:
     """Assemble base agent instructions from prompts + extra files + env + runtime context.
 
@@ -167,6 +168,8 @@ async def assemble_instructions(
         kongming_home: Path to the ``.kongming/`` directory.
         extra_files: Additional instruction file paths (e.g. from CLI ``--instructions-file``).
         cwd: Working directory for runtime context. Defaults to ``Path.cwd()``.
+        sitian_root: Optional sitian project root. When set, appends sitian context
+            (core-flow, suggestions, etc.) as an ``"sitian"`` origin instruction source.
 
     Returns:
         ``(rendered_text, origins)`` — merged system prompt text and origin label list.
@@ -184,6 +187,13 @@ async def assemble_instructions(
         kongming_home=kongming_home,
     )
     sources.insert(0, InstructionSource(origin="runtime", content=runtime_text))
+
+    if sitian_root is not None:
+        from .sitian_context import build_sitian_context_text
+
+        sitian_text = build_sitian_context_text(sitian_root)
+        if sitian_text:
+            sources.append(InstructionSource(origin="sitian", content=sitian_text))
 
     rendered = loader.render(sources)
     origins = [s.origin for s in sources]

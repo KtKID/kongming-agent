@@ -46,6 +46,8 @@ export interface UsageSnapshot {
   cumulativePrompt: number;
   cumulativeCompletion: number;
   cumulativeTotal: number;
+  cumulativeCacheRead: number | null;
+  cumulativeCacheCreation: number | null;
 }
 
 export interface AssistantUsage {
@@ -843,6 +845,12 @@ export const useChatStore = create<ChatState>((set) => ({
             cumulativePrompt: (prev?.cumulativePrompt ?? 0) + frame.prompt_tokens,
             cumulativeCompletion: (prev?.cumulativeCompletion ?? 0) + frame.completion_tokens,
             cumulativeTotal: (prev?.cumulativeTotal ?? 0) + frame.total_tokens,
+            cumulativeCacheRead: frame.cache_read_tokens != null
+              ? (prev?.cumulativeCacheRead ?? 0) + frame.cache_read_tokens
+              : (prev?.cumulativeCacheRead ?? null),
+            cumulativeCacheCreation: frame.cache_creation_tokens != null
+              ? (prev?.cumulativeCacheCreation ?? 0) + frame.cache_creation_tokens
+              : (prev?.cumulativeCacheCreation ?? null),
           },
         },
       };
@@ -870,6 +878,14 @@ export const useChatStore = create<ChatState>((set) => ({
             prev?.cumulativeTotal ?? 0,
             thread.cumulative_total_tokens ?? 0,
           ),
+          cumulativeCacheRead:
+            thread.cumulative_cache_read_tokens != null
+              ? Math.max(prev?.cumulativeCacheRead ?? 0, thread.cumulative_cache_read_tokens)
+              : (prev?.cumulativeCacheRead ?? null),
+          cumulativeCacheCreation:
+            thread.cumulative_cache_creation_tokens != null
+              ? Math.max(prev?.cumulativeCacheCreation ?? 0, thread.cumulative_cache_creation_tokens)
+              : (prev?.cumulativeCacheCreation ?? null),
         };
       }
       return { usageByThread: nextUsage };

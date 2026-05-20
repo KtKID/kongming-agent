@@ -79,6 +79,8 @@ class EvolutionWriteTool(BaseBuiltinTool):
             "nutrients_written": outcome.nutrients_written,
             "nutrients_skipped": outcome.nutrients_skipped,
             "written_nutrient_ids": list(outcome.written_nutrient_ids),
+            "review_summary": filtered.review_summary,
+            "nutrient_summaries": [n.title for n in written],
         }
 
     def _filter_review_result(self, result: ReviewResult) -> ReviewResult:

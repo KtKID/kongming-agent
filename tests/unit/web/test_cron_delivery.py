@@ -123,6 +123,10 @@ async def test_websink_deliver_calls_broker_broadcast():
     assert payload["final_message"] == "早安"
     assert payload["delivered_at_iso"] == run.finished_at
     assert payload["scheduled_for"] == run.scheduled_for
+    # v0.5 web-cron-router 扩展字段
+    assert "next_run_at" in payload
+    assert payload["next_run_at"] == task.next_run_at
+    assert payload["status"] == run.status.value
 
 
 @pytest.mark.asyncio

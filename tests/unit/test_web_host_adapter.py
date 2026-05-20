@@ -182,6 +182,39 @@ async def test_prompt_approval_cancel_via_close_returns_reject() -> None:
     await close_task
 
 
+async def test_prompt_approval_external_task_cancel_propagates() -> None:
+    """interrupt 路径（外部 task.cancel()）必须把 CancelledError 透传给 runner，
+    **不能**翻译成 REJECT，否则 runner 会以为"用户拒绝了 1 个工具"继续跑下一轮，
+    与 interrupt 语义冲突。
+
+    场景：runner 在 await prompt_approval(...) 阻塞时，外部（如 ws.py 收到
+    InterruptFrame）调 ``task.cancel()``。此时 future 未 done，wait_for
+    抛 CancelledError，本测试验证它**不**被吞成 REJECT。
+    """
+    ws = _make_ws()
+    adapter = WebHostAdapter(ws, pending_approval_timeout_seconds=5.0)
+    request = _make_request("call-external-cancel")
+
+    async def _runner_call() -> ApprovalAction:
+        return await adapter.prompt_approval(request)
+
+    task = asyncio.create_task(_runner_call())
+    # 让 prompt_approval 走到 wait_for（注册 pending future + 推 ws）
+    await asyncio.sleep(0.05)
+    assert adapter.pending_approval_count == 1
+
+    # 外部 cancel（模拟 ws.py 收到 InterruptFrame → cell.current_run_task.cancel()）
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # finally 块仍要清掉 pending 字典（避免泄漏）
+    assert adapter.pending_approval_count == 0
+    # adapter 不应被 cancel 标 closed（cancel 不等于断连）
+    assert adapter.closed is False
+
+
 async def test_prompt_approval_when_already_closed_returns_reject() -> None:
     ws = _make_ws()
     adapter = WebHostAdapter(ws)
@@ -247,6 +280,57 @@ async def test_close_is_idempotent() -> None:
     assert adapter.closed is True
     await adapter.close()
     assert adapter.closed is True
+
+
+# ---------------------------------------------------------------------------
+# close → ApprovalManager.cancel_by_thread wiring（stage1 reviewer 必修 #4）
+# ---------------------------------------------------------------------------
+
+
+async def test_close_with_thread_id_calls_manager_cancel_by_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """thread_id 传入时，close() 调 manager.cancel_by_thread(thread_id, reason='cell_evict')。
+
+    防止 reviewer 必修 #4 wiring 漂移：用户关 tab → WebHostAdapter.close →
+    ApprovalManager 清该 thread 名下所有 pending（否则卡 60s timeout，R10 内存泄漏诱因）。
+    """
+    from unittest.mock import MagicMock
+
+    manager_spy = MagicMock()
+    manager_spy.cancel_by_thread = MagicMock(return_value=2)  # 假装清掉 2 条 pending
+
+    # 注：源码内是 `from safety.approval_manager import get_approval_manager`（局部 import）
+    import safety.approval_manager as approval_manager_mod
+
+    monkeypatch.setattr(approval_manager_mod, "get_approval_manager", lambda: manager_spy)
+
+    adapter = WebHostAdapter(_make_ws(), thread_id="t-real")
+    await adapter.close()
+
+    manager_spy.cancel_by_thread.assert_called_once_with("t-real", reason="cell_evict")
+
+
+async def test_close_without_thread_id_skips_manager_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """thread_id 未传时（向后兼容老调用），close() 不调 manager.cancel_by_thread。
+
+    避免破坏旧测试 / CLI 装配点 / 任何不需要 inbox 路径的场景。
+    """
+    from unittest.mock import MagicMock
+
+    manager_spy = MagicMock()
+    manager_spy.cancel_by_thread = MagicMock()
+
+    import safety.approval_manager as approval_manager_mod
+
+    monkeypatch.setattr(approval_manager_mod, "get_approval_manager", lambda: manager_spy)
+
+    adapter = WebHostAdapter(_make_ws())  # 不传 thread_id
+    await adapter.close()
+
+    manager_spy.cancel_by_thread.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

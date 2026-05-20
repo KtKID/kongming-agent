@@ -34,6 +34,7 @@ from config_loader.models import (
     ShellToolConfig,
     ToolConfig,
     TraceConfig,
+    WorkflowConfig,
 )
 from config_loader.paths import get_kongming_home
 
@@ -54,6 +55,7 @@ __all__ = [
     "ShellToolConfig",
     "ToolConfig",
     "TraceConfig",
+    "WorkflowConfig",
     "get_kongming_home",
     "load_config",
 ]

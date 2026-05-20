@@ -357,11 +357,26 @@ class OpenAICompatStreamParser:
         return provider_metadata
 
     def _build_usage(self) -> dict[str, Any]:
+        # task#3.1：透传 SDK 原生字段 + provider_kind，让 web.usage_token 按 channel 解析
         usage = self._usage_obj or {}
-        normalized: dict[str, Any] = {}
+        normalized: dict[str, Any] = {
+            "provider_kind": "openai_compatible",
+        }
         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
             if key in usage:
                 normalized[key] = usage[key]
+        # 派生 input_tokens / output_tokens 跟 web.usage_token._channel_openai 对齐
+        if "prompt_tokens" in usage:
+            normalized["input_tokens"] = usage["prompt_tokens"]
+        if "completion_tokens" in usage:
+            normalized["output_tokens"] = usage["completion_tokens"]
+        # cached_tokens / reasoning_tokens 从 details 提到 usage 主体
+        completion_details = usage.get("completion_tokens_details") or {}
+        if isinstance(completion_details, dict) and "reasoning_tokens" in completion_details:
+            normalized["reasoning_output_tokens"] = completion_details["reasoning_tokens"]
+        prompt_details = usage.get("prompt_tokens_details") or {}
+        if isinstance(prompt_details, dict) and "cached_tokens" in prompt_details:
+            normalized["cached_input_tokens"] = prompt_details["cached_tokens"]
         return normalized
 
     @staticmethod

@@ -30,7 +30,7 @@ from web.protocol._base import (
     _C2SFrameBase,
     _S2CFrameBase,
 )
-from web.protocol.rest_models import HistoryMessageDTO
+from web.protocol.rest_models import HistoryMessageDTO, UserInputAttachment
 
 # ---------------------------------------------------------------------------
 # C2S 帧（浏览器 → 后端，3 个）
@@ -60,15 +60,47 @@ class PingFrame(_C2SFrameBase):
     """浏览器侧 keep-alive 心跳；后端以 ``pong`` 回应。"""
 
     kind: Literal["ping"] = "ping"
+    ts: int | None = None  # 客户端发送时的 epoch ms，用于 RTT 计算
+
+
+class InterruptFrame(_C2SFrameBase):
+    """浏览器请求打断当前 thread 上正在进行的 run（interrupt-run-v0.1）。
+
+    UX 入口：前端在 ``cell.status in ("running","awaiting_approval")`` 时显示
+    "Stop" 按钮，点击后发本帧。
+
+    后端 ws 路由层（``src/web/ws.py``）收到本帧 → 检查
+    ``cell.current_run_task``：
+    - ``None`` / 已 ``done()`` → 推 ``SystemNoticeFrame`` 提示 "no active run"
+    - 否则调 ``task.cancel()`` → runner 顶层 except 收尾 → emit ``run.cancelled``
+      event → WSEventSink fanout 转 :class:`RunInterruptedFrame` 给所有 attach
+      的 ws（多 tab 自动同步）
+
+    ``run_id`` 可选：``None`` = 打断当前正在跑的 run（最常见）；不为 None 时
+    可以让后端校验"我要打断的就是这个 run"，避免 race（用户点 stop 那一刹那
+    旧 run 刚好完成、新 run 又起来了）。本期前端不强制带，后端拿到也仅做
+    诊断日志，不依赖它做正确性。
+    """
+
+    kind: Literal["interrupt"] = "interrupt"
+    run_id: str | None = None
 
 
 class UserInputFrame(_C2SFrameBase):
-    """浏览器提交一轮用户输入；后端按 ``request_id`` 关联回执。"""
+    """浏览器提交一轮用户输入；后端按 ``request_id`` 关联回执。
+
+    claude-image-paste-e2e v0.1（contract layer）加 ``attachments`` 字段：
+    用户在 Composer 粘贴图片后，前端先走 ``POST /api/uploads/images`` 拿到
+    :class:`UserInputAttachment` 列表，再随本帧一并提交。后端按 ``asset_id``
+    在 ``Message.metadata["attachments"]`` 留 ref，由 InputAssembler 组装
+    成 provider 多模态消息。``None`` 表示纯文本输入（绝大多数轮次）。
+    """
 
     kind: Literal["user.input"] = "user.input"
     text: str
     request_id: str
     reasoning_effort: Literal["low", "medium", "high"] | None = None
+    attachments: list[UserInputAttachment] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +127,13 @@ class ApprovalDecisionFrame(_S2CFrameBase):
 
 
 class ApprovalRequestFrame(_S2CFrameBase):
-    """工具执行前向用户请求审批，浏览器需回 ``approval.ack``。"""
+    """工具执行前向用户请求审批，浏览器需回 ``approval.ack``。
+
+    v0.1.6+ elevated 审批：``policy_hint="elevated"`` 时前端应：
+    - 隐藏「本 session 同意」按钮
+    - 显示 ``confirm_token``（8 hex），用户需输入后才能点「同意」
+    - 红色边框 / 警告图标视觉区分
+    """
 
     kind: Literal["approval.request"] = "approval.request"
     call_id: str
@@ -103,6 +141,8 @@ class ApprovalRequestFrame(_S2CFrameBase):
     arguments: dict[str, Any]
     reason: str | None = None
     turn: int
+    policy_hint: str | None = None
+    confirm_token: str | None = None
 
 
 class CellEvictedFrame(_S2CFrameBase):
@@ -133,10 +173,33 @@ class ErrorFrame(_S2CFrameBase):
     turn: int | None = None
 
 
+class RunInterruptedFrame(_S2CFrameBase):
+    """run 被用户 interrupt 后的收尾通知（interrupt-run-v0.1）。
+
+    触发路径：runner 顶层 ``except asyncio.CancelledError`` → emit
+    ``run.cancelled`` event → WSEventSink fanout 转本帧给该 thread 名下
+    所有 attach 的 ws（A tab 点 Stop → B tab 也收到）。
+
+    后续 runner 还会 emit 一条 ``run.end``（status="cancelled"），上层
+    cell.status 切回 idle；前端可隐藏 Stop 按钮、显示"已中断"提示。
+
+    payload 字段语义见 :class:`core.contracts.EventKind` ``run.cancelled``
+    段；``interrupted_tool_call_id`` 为 None 表示打断在 LLM / approval 阶段
+    （pending tool 已被 runner 写占位 tool_result）。
+    """
+
+    kind: Literal["run.interrupted"] = "run.interrupted"
+    run_id: str
+    cancelled_at_turn: int
+    cancelled_tool_call_id: str | None = None
+    cancel_reason: str = "user_interrupt"
+
+
 class PongFrame(_S2CFrameBase):
-    """对 ``ping`` 的应答；仅含 ``timestamp_ms``。"""
+    """对 ``ping`` 的应答；含服务端 ``timestamp_ms`` + 客户端原始 ``ts``。"""
 
     kind: Literal["pong"] = "pong"
+    ts: int | None = None  # 原样回传客户端的 ts
 
 
 class SystemNoticeFrame(_S2CFrameBase):
@@ -221,14 +284,43 @@ class TurnStartFrame(_S2CFrameBase):
 
 
 class UsageFrame(_S2CFrameBase):
-    """一轮 token 用量回报（prompt / completion / total）。"""
+    """一轮 token 用量回报。
+
+    **usage-token-v2-bigbang**：``usage`` 字段是分通道 DTO dict
+    （``ClaudeUsage`` / ``CodexUsage`` / ``GenericChatAnthropicUsage``
+    / ``GenericChatOpenAIUsage`` 之一的 ``model_dump()`` 输出），自带
+    ``provider`` discriminator 字段。前端按 ``usage.provider`` narrowing。
+
+    ``web.protocol`` 不允许 import ``web.usage_token_v2`` 内部类型
+    （Contract 5 / web-protocol-no-deps），所以这一层用透明 ``dict`` 透传，
+    前端 ``protocol.ts`` 用 strict union interface 描述。
+
+    usage dict 形态（Claude 系，``provider="claude"``）::
+
+        {
+          "provider": "claude",
+          "input_tokens": 6,
+          "output_tokens": 881,
+          "cache_read_input_tokens": 341086,
+          "cache_creation_input_tokens": 431,
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 431,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "context_usage": 341523,
+          "model": "claude-opus-4",
+          "context_window": 1000000
+        }
+
+    Codex 系 ``provider="openai"``，含 ``total`` / ``last`` / ``model_context_window``
+    / ``rate_limits``；详见 ``docs/usage-token-v2/04-data-and-state.md``。
+    """
 
     kind: Literal["usage"] = "usage"
-    prompt_tokens: int
-    completion_tokens: int
-    total_tokens: int
     turn: int
     run_id: str = ""
+    usage: dict[str, Any]
+    """嵌套 channel-specific DTO dict（含 ``provider`` discriminator）。"""
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +340,7 @@ class UsageFrame(_S2CFrameBase):
 
 
 WSFrameC2S = Annotated[
-    UserInputFrame | ApprovalAckFrame | PingFrame,
+    UserInputFrame | ApprovalAckFrame | PingFrame | InterruptFrame,
     Field(discriminator="kind"),
 ]
 """C2S 帧 union（discriminated by ``kind``）。"""
@@ -269,7 +361,8 @@ WSFrameS2C = Annotated[
     | TurnEndFrame
     | PongFrame
     | SystemNoticeFrame
-    | CellEvictedFrame,
+    | CellEvictedFrame
+    | RunInterruptedFrame,
     Field(discriminator="kind"),
 ]
 """S2C 帧 union（discriminated by ``kind``）。"""
@@ -292,9 +385,11 @@ __all__: list[str] = [
     "CellEvictedFrame",
     "ContentDeltaFrame",
     "ErrorFrame",
+    "InterruptFrame",
     "PingFrame",
     "PongFrame",
     "ReasoningDeltaFrame",
+    "RunInterruptedFrame",
     "SystemNoticeFrame",
     "ThreadHistoryFrame",
     "ToolCallEndFrame",

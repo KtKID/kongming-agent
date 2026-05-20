@@ -91,8 +91,8 @@ class FakeTM:
         )
         return self._meta
 
-    async def add_thread_usage(self, *args, **kwargs) -> ThreadMetadata:
-        raise NotImplementedError
+    # task#3.3：``add_thread_usage`` 已删除；mock 改提供 ``usage_manager`` property。
+    usage_manager = None  # type: ignore[assignment]
 
     def resolve_approval(self, *args, **kwargs) -> None:
         return None

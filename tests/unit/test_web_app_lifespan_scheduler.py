@@ -16,6 +16,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from config_loader.models import Config
@@ -245,3 +246,67 @@ def test_lifespan_ticker_startup_failure_does_not_block_app(monkeypatch, tmp_pat
         pass
     # thread_manager 仍正常收尾
     assert tm.aclose_called == 1
+
+
+def test_lifespan_prefers_injected_scheduler_runtime_factory(tmp_path: Path) -> None:
+    """Injected scheduler runtime factory should drive lifespan ticker wiring."""
+    captured: dict[str, Any] = {
+        "factory_calls": 0,
+        "ticker_calls": 0,
+        "aclose_calls": 0,
+    }
+
+    cfg = _make_cfg(scheduler_enabled=True)
+    tm = FakeThreadManager()
+    _seed_password(tmp_path)
+
+    class _FakeTickerRuntime:
+        async def aclose(self) -> None:
+            captured["aclose_calls"] += 1
+
+    class _FakeBridge:
+        def __init__(self) -> None:
+            self._dispatcher = None
+            self._preset_map = None
+            self._trace_dir = None
+
+    def _scheduler_runtime_factory(_store):
+        captured["factory_calls"] += 1
+        bridge = _FakeBridge()
+        captured["bridge"] = bridge
+        return _FakeTickerRuntime(), bridge
+
+    async def _fake_run_ticker_loop(_store, _bridge, stop_event: asyncio.Event, **_kwargs) -> None:
+        captured["ticker_calls"] += 1
+        await stop_event.wait()
+
+    import scheduler.runtime_factory as rf
+    import scheduler.ticker as tk
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        rf,
+        "build_cron_execution_bridge",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("injected scheduler runtime factory should be used")
+        ),
+    )
+    monkeypatch.setattr(tk, "run_ticker_loop", _fake_run_ticker_loop)
+    try:
+        app = create_app(
+            cfg,
+            tm,
+            home_dir=tmp_path,
+            scheduler_runtime_factory=_scheduler_runtime_factory,
+        )
+        with TestClient(app):
+            pass
+    finally:
+        monkeypatch.undo()
+
+    bridge = captured["bridge"]
+    assert captured["factory_calls"] == 1
+    assert captured["ticker_calls"] == 1
+    assert captured["aclose_calls"] == 1
+    assert bridge._dispatcher is not None
+    assert bridge._trace_dir == tmp_path / "cron" / "traces"

@@ -45,12 +45,15 @@ def _write_v4_metadata(home: Path) -> Path:
 class TestSchemaV4ToV6Upgrade:
     """用例 25: v4 → v6 懒升级。"""
 
-    def test_v4_file_upgraded_to_v6(self, tmp_path: Path) -> None:
+    def test_v4_file_upgraded_to_v10(self, tmp_path: Path) -> None:
         _write_v4_metadata(tmp_path)
         meta = read_thread_metadata(tmp_path, _THREAD_ID)
         assert meta is not None
-        assert meta.schema_version == 6
+        # v4 → v5 → v6 → v7 → v8 → v9 → v10（claude-session-rename-archive 加链末）
+        assert meta.schema_version == 10
         assert meta.codex_thread_id == ""
+        # v10: 默认未归档
+        assert meta.is_archived is False
 
     def test_v4_fields_preserved(self, tmp_path: Path) -> None:
         _write_v4_metadata(tmp_path)
@@ -64,9 +67,9 @@ class TestSchemaV4ToV6Upgrade:
         assert meta.created_at == 1000.0
         assert meta.updated_at == 2000.0
         assert meta.message_count == 5
-        assert meta.cumulative_prompt_tokens == 100
-        assert meta.cumulative_completion_tokens == 50
-        assert meta.cumulative_total_tokens == 150
+        # v9 (usage-token-v2-bigbang): token 字段已物理删除（cumulative_usage 等
+        # 都从 ThreadMetadata 移除；token 真源回归 SDK jsonl）
+        assert not hasattr(meta, "cumulative_usage")
 
 
 # ── codex backend_kind + codex_thread_id 字段 ───────────────
@@ -98,5 +101,5 @@ class TestCodexBackendKind:
 
 
 class TestSchemaVersion:
-    def test_current_version_is_6(self) -> None:
-        assert THREAD_METADATA_SCHEMA_VERSION == 6
+    def test_current_version_is_10(self) -> None:
+        assert THREAD_METADATA_SCHEMA_VERSION == 10

@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from commands.models import CommandResult
 from commands.service import CommandService, build_default_command_service, build_execution_context
 from core.result import Result
@@ -83,26 +85,39 @@ class SessionBridge:
         user_input: str,
         *,
         reasoning_effort: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> Result | CommandResult:
-        return await self.handle_input(user_input, reasoning_effort=reasoning_effort)
+        return await self.handle_input(
+            user_input,
+            reasoning_effort=reasoning_effort,
+            attachments=attachments,
+        )
 
     async def handle_input(
         self,
         user_input: str,
         *,
         reasoning_effort: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> Result | CommandResult:
         """执行一次输入，把结果写回 adapter。
 
         不抛异常——runner 会把所有异常收口到 :class:`core.result.Result`
         的 ``error`` 字段，这里只做结果 → 文本的翻译。
+
+        ``attachments`` 仅 web 路径透传用户附件 dict 列表；CLI 路径默认 None
+        不传，不影响 textbook input 行为。
         """
         context = build_execution_context(
             session_id=self._session_id,
             adapter=self._adapter,
             reasoning_effort=reasoning_effort,
         )
-        result = await self._command_service.handle_input(user_input, context=context)
+        result = await self._command_service.handle_input(
+            user_input,
+            context=context,
+            attachments=attachments,
+        )
         if isinstance(result, Result):
             await self._write_runtime_result(result)
             return result
@@ -114,11 +129,13 @@ class SessionBridge:
         self,
         user_input: str,
         reasoning_effort: str | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> Result:
         return await self._runtime.run(
             user_input,
             session_id=self._session_id,
             reasoning_effort=reasoning_effort,
+            attachments=attachments,
         )
 
     async def _write_runtime_result(self, result: Result) -> None:

@@ -11,12 +11,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from context.instruction_loader import InstructionLoader, InstructionSource
+from context.instruction_loader import InstructionLoader, InstructionSource, assemble_instructions
 
 # ---------------------------------------------------------------------------
 # 辅助工具
@@ -24,8 +25,17 @@ from context.instruction_loader import InstructionLoader, InstructionSource
 
 
 def _run(coro):  # type: ignore[no-untyped-def]
-    """在测试中同步运行 async 函数。"""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """在测试中同步运行 async 函数。
+
+    用 ``asyncio.run`` 替代 deprecated 的 ``get_event_loop().run_until_complete``：
+    后者在 Python 3.11+ 下，若当前线程没有 running loop（如前面跑过
+    ``@pytest.mark.asyncio`` 测试关闭了 loop），会抛 RuntimeError。
+    ``asyncio.run`` 始终新建独立 loop，跨测隔离。
+
+    (smart-approval-manager-stage1 加 42 个 async 测后，pytest --picked -n 4
+    分组让 instruction_loader 测试跑在 async 测试之后，pre-push 暴露此 deprecated 问题)
+    """
+    return asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------
@@ -312,3 +322,247 @@ def test_same_filename_different_paths_both_kept(tmp_path: Path) -> None:
     contents = {s.content for s in file_sources}
     assert "Rules from dir_a" in contents
     assert "Rules from dir_b" in contents
+
+
+# ---------------------------------------------------------------------------
+# #6 assemble_instructions — sitian_root 回归 & 注入
+# ---------------------------------------------------------------------------
+
+
+def _patch_assemble_deps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mock materialize_and_load_prompts 和 build_runtime_context_text，
+    隔离 assemble_instructions 对文件系统的依赖。
+
+    两个函数是在 assemble_instructions 内部 lazy import 的，
+    因此 patch 目标是各自源模块。
+    """
+    monkeypatch.setattr(
+        "context.prompts_loader.materialize_and_load_prompts",
+        AsyncMock(return_value="base prompt"),
+    )
+    monkeypatch.setattr(
+        "context.runtime_context.build_runtime_context_text",
+        lambda **_kw: "runtime ctx",
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_assemble_sitian_root_none_no_sitian_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回归：sitian_root=None 时，origins 不含 'sitian'。"""
+    _patch_assemble_deps(monkeypatch)
+    monkeypatch.delenv("KONGMING_EXTRA_INSTRUCTIONS", raising=False)
+
+    _rendered, origins = await assemble_instructions(
+        kongming_home=tmp_path,
+        sitian_root=None,
+    )
+    assert "sitian" not in origins
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_assemble_sitian_root_valid_injects_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """注入：sitian_root 包含有效 workspace_state.json 时，origins 含 'sitian'，
+    rendered 文本包含 '工作区态势'。"""
+    _patch_assemble_deps(monkeypatch)
+    monkeypatch.delenv("KONGMING_EXTRA_INSTRUCTIONS", raising=False)
+
+    sitian_dir = tmp_path / "sitian"
+    channel_dir = sitian_dir / "claude"
+    channel_dir.mkdir(parents=True)
+    state = {
+        "updatedAt": "2026-05-10T08:00:00+00:00",
+        "sources": {"total": 3, "active": 2},
+        "workItems": [
+            {
+                "id": "item-1",
+                "title": "测试任务",
+                "status": "active",
+                "priority": "high",
+                "updatedAt": "2026-05-10T07:55:00+00:00",
+                "nextActions": ["完成测试"],
+            },
+        ],
+    }
+    (channel_dir / "workspace_state.json").write_text(
+        json.dumps(state, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    rendered, origins = await assemble_instructions(
+        kongming_home=tmp_path,
+        sitian_root=sitian_dir,
+    )
+    assert "sitian" in origins
+    assert "工作区态势" in rendered
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_assemble_sitian_rendered_prompt_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """快照：验证多频道 sitian 注入后完整 rendered prompt 的结构和内容。
+
+    构造 sitian_root/claude/ 频道（3 个项目 + blocker + risk + summary），
+    断言 rendered 文本中 # sitian 段包含频道标题、表格、阻塞项、风险项、摘要。
+    """
+    _patch_assemble_deps(monkeypatch)
+    monkeypatch.delenv("KONGMING_EXTRA_INSTRUCTIONS", raising=False)
+
+    sitian_root = tmp_path / "sitian"
+    sitian_root.mkdir()
+    claude_dir = sitian_root / "claude"
+    claude_dir.mkdir()
+    state = {
+        "updatedAt": "2026-05-10T08:00:00+00:00",
+        "sources": {"total": 3, "active": 2},
+        "workItems": [
+            {
+                "id": "proj-a",
+                "title": "kongming-agent",
+                "status": "active",
+                "priority": "low",
+                "updatedAt": "2026-05-10T07:55:00+00:00",
+                "nextActions": ["查看最新线程"],
+            },
+            {
+                "id": "proj-b",
+                "title": "x-memo",
+                "status": "waiting",
+                "priority": "medium",
+                "updatedAt": "2026-05-09T10:00:00+00:00",
+                "nextActions": ["补充进展"],
+            },
+            {
+                "id": "proj-c",
+                "title": "ralph",
+                "status": "blocked",
+                "priority": "high",
+                "updatedAt": "2026-05-05T06:00:00+00:00",
+                "nextActions": [],
+            },
+        ],
+        "blockers": [
+            {"workItemId": "proj-c", "summary": "扫描路径不存在", "severity": "high"},
+        ],
+        "risks": [
+            {"category": "stale_activity", "summary": "ralph 5 天无进展"},
+        ],
+    }
+    (claude_dir / "workspace_state.json").write_text(
+        json.dumps(state, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (claude_dir / "latest_summary.md").write_text(
+        "# SiTian Summary\n\n- Sources: 2/3 active\n",
+        encoding="utf-8",
+    )
+
+    rendered, origins = await assemble_instructions(
+        kongming_home=tmp_path,
+        sitian_root=sitian_root,
+    )
+    assert "sitian" in origins
+
+    sitian_section = rendered.split("# sitian\n", 1)[1]
+
+    assert "工作区态势（司天观察）" in sitian_section
+    assert "频道数：1" in sitian_section
+    assert "### 频道：claude" in sitian_section
+    assert "数据采集于 2026-05-10T08:00:00+00:00" in sitian_section
+    assert "2/3 活跃，3 个项目" in sitian_section
+
+    assert "| 1 | kongming-agent | 活跃 | low |" in sitian_section
+    assert "| 2 | x-memo | 等待中 | medium |" in sitian_section
+    assert "| 3 | ralph | 阻塞 | high |" in sitian_section
+    assert "查看最新线程" in sitian_section
+    assert "补充进展" in sitian_section
+    assert "同步最新状态" in sitian_section
+
+    assert "#### 阻塞项" in sitian_section
+    assert "proj-c: 扫描路径不存在" in sitian_section
+
+    assert "#### 风险项" in sitian_section
+    assert "stale_activity: ralph 5 天无进展" in sitian_section
+
+    assert "#### 最近摘要" in sitian_section
+    assert "SiTian Summary" in sitian_section
+
+    assert "询问用户手动触发扫描" in sitian_section
+
+
+@pytest.mark.asyncio
+async def test_assemble_sitian_real_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """用真实 sitian 产物目录验证多频道注入效果。
+
+    通过 SITIAN_TEST_ROOT 环境变量指定频道父目录（如 /Users/kid/.SiTian）。
+    未设置时跳过。只做结构性断言，不写死具体项目名。
+    """
+    import os
+
+    sitian_dir_str = os.environ.get("SITIAN_TEST_ROOT")
+    if not sitian_dir_str:
+        pytest.skip("SITIAN_TEST_ROOT not set")
+    sitian_dir = Path(sitian_dir_str)
+    if not sitian_dir.is_dir():
+        pytest.skip(f"directory not found: {sitian_dir}")
+    has_channel = any(
+        (d / "workspace_state.json").exists() for d in sitian_dir.iterdir() if d.is_dir()
+    )
+    if not has_channel:
+        pytest.skip(f"no channel with workspace_state.json under {sitian_dir}")
+
+    _patch_assemble_deps(monkeypatch)
+    monkeypatch.delenv("KONGMING_EXTRA_INSTRUCTIONS", raising=False)
+
+    rendered, origins = await assemble_instructions(
+        kongming_home=tmp_path,
+        sitian_root=sitian_dir,
+    )
+    assert "sitian" in origins
+
+    assert "# sitian\n" in rendered
+    sitian_section = rendered.split("# sitian\n", 1)[1]
+
+    assert "工作区态势（司天观察）" in sitian_section
+    assert "频道数：" in sitian_section
+    assert "### 频道：" in sitian_section
+    assert "| # | 项目 | 状态 | 优先级 | 最近活跃 | 下一步 |" in sitian_section
+    assert "| 1 |" in sitian_section
+    assert "询问用户手动触发扫描" in sitian_section
+
+    print("\n===== sitian prompt section =====")
+    print(sitian_section)
+    print("===== end =====")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_assemble_sitian_root_empty_dir_no_sitian_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """降级：sitian_root 存在但无 workspace_state.json 时，origins 不含 'sitian'。"""
+    _patch_assemble_deps(monkeypatch)
+    monkeypatch.delenv("KONGMING_EXTRA_INSTRUCTIONS", raising=False)
+
+    sitian_dir = tmp_path / "sitian_empty"
+    sitian_dir.mkdir()
+
+    _rendered, origins = await assemble_instructions(
+        kongming_home=tmp_path,
+        sitian_root=sitian_dir,
+    )
+    assert "sitian" not in origins
