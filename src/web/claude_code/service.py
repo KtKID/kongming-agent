@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 from collections.abc import Sequence
@@ -26,7 +27,6 @@ from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
-from network.network_log import log_network_exception
 from web._shared.session_manager import SessionManager
 from web.claude_code._attachment_prefix import AttachmentPrefixBuilder
 from web.claude_code.approval import ApprovalBridge
@@ -133,7 +133,7 @@ class ClaudeCodeService:
         # v0.2 自动 resume：thread-bound 路径 + thread metadata 已绑定 claude_thread_id →
         # 注入 resume + cwd（用户显式 resume 不被覆盖）
         if register_id_override and self._thread_manager is not None:
-            try:
+            with contextlib.suppress(Exception):
                 metas = self._thread_manager.list_threads()
                 meta = next((m for m in metas if m.id == register_id_override), None)
                 if meta is not None:
@@ -146,13 +146,6 @@ class ClaudeCodeService:
                             **(options if isinstance(options, dict) else {}),
                             "resume": claude_tid,
                         }
-            except Exception as exc:
-                log_network_exception(
-                    "web.claude_code.service",
-                    "autoresume_lookup_failed",
-                    exc,
-                    register_id_override=register_id_override,
-                )
 
         # 1. 装配 options
         opts = self._build_options(options)
@@ -196,40 +189,26 @@ class ClaudeCodeService:
         except asyncio.CancelledError:
             logger.info("claude-code service.query cancelled (session=%s)", register_id)
             # 通知前端 aborted
-            try:
+            with contextlib.suppress(Exception):
                 await writer.send_json(
                     {
-                        "frame_type": "complete",
+                        "kind": "complete",
                         "provider": "claude",
                         "sessionId": register_id,
                         "aborted": True,
                         "exitCode": 1,
                     },
                 )
-            except Exception as exc:
-                log_network_exception(
-                    "web.claude_code.service",
-                    "send_aborted_complete_failed",
-                    exc,
-                    session_id=register_id,
-                )
         except Exception as exc:
             logger.exception("claude-code service.query failed")
-            try:
+            with contextlib.suppress(Exception):
                 await writer.send_json(
                     {
-                        "frame_type": "error",
+                        "kind": "error",
                         "provider": "claude",
                         "sessionId": register_id,
                         "error": str(exc),
                     },
-                )
-            except Exception as send_exc:
-                log_network_exception(
-                    "web.claude_code.service",
-                    "send_query_error_failed",
-                    send_exc,
-                    session_id=register_id,
                 )
             # 失败时清掉缓存的 client，下次 query 重建
             if (
@@ -238,15 +217,8 @@ class ClaudeCodeService:
                 and session_id
                 and self._clients.get(session_id) is client
             ):
-                try:
+                with contextlib.suppress(Exception):
                     await client.disconnect()
-                except Exception as disconnect_exc:
-                    log_network_exception(
-                        "web.claude_code.service",
-                        "client_disconnect_failed",
-                        disconnect_exc,
-                        session_id=session_id,
-                    )
                 self._clients.pop(session_id, None)
         finally:
             # 6. 清 active writer + unregister
@@ -345,15 +317,8 @@ class ClaudeCodeService:
     async def shutdown_all(self) -> None:
         """进程关停：释放所有缓存的 ``ClaudeSDKClient``。"""
         for sid, client in list(self._clients.items()):
-            try:
+            with contextlib.suppress(Exception):
                 await client.disconnect()
-            except Exception as exc:
-                log_network_exception(
-                    "web.claude_code.service",
-                    "shutdown_disconnect_failed",
-                    exc,
-                    session_id=sid,
-                )
             self._clients.pop(sid, None)
 
     # ----- 私有辅助 -----
@@ -393,7 +358,7 @@ class ClaudeCodeService:
             ):
                 raw_assistant_usage = getattr(msg, "usage", None)
                 if isinstance(raw_assistant_usage, dict) and raw_assistant_usage:
-                    try:
+                    with contextlib.suppress(Exception):
                         usage_dto = await self._thread_manager.usage_manager.get_thread_usage(
                             register_id
                         )
@@ -405,18 +370,11 @@ class ClaudeCodeService:
                                     "usage": usage_dto.model_dump(),
                                 }
                             )
-                    except Exception as exc:
-                        log_network_exception(
-                            "web.claude_code.service",
-                            "assistant_usage_broadcast_failed",
-                            exc,
-                            session_id=register_id,
-                        )
 
             normalized = self._normalizer.normalize(msg, active_sid)
             for n in normalized:
                 # 第一次见到 session_created → 把 placeholder 改名成真实 SDK id
-                if n.get("frame_type") == "session_created":
+                if n.get("kind") == "session_created":
                     new_id = n.get("newSessionId")
                     if isinstance(new_id, str) and new_id and active_sid != new_id:
                         renamed = await self._sessions.rename(active_sid, new_id)
@@ -448,11 +406,11 @@ class ClaudeCodeService:
                 # ResultMessage（complete）到达时：从 SDK 真源 jsonl 派生最新 usage
                 # 推前端刷新。**v2**：用 manager.get_thread_usage（无状态门面）。
                 if (
-                    n.get("frame_type") == "complete"
+                    n.get("kind") == "complete"
                     and self._thread_manager is not None
                     and self._is_thread_id(register_id)
                 ):
-                    try:
+                    with contextlib.suppress(Exception):
                         usage_dto = await self._thread_manager.usage_manager.get_thread_usage(
                             register_id
                         )
@@ -464,26 +422,11 @@ class ClaudeCodeService:
                                     "usage": usage_dto.model_dump(),
                                 }
                             )
-                    except Exception as exc:
-                        log_network_exception(
-                            "web.claude_code.service",
-                            "complete_usage_broadcast_failed",
-                            exc,
-                            session_id=register_id,
-                        )
                 # 把出站消息的 sessionId 字段同步成真实 id
                 if n.get("sessionId") != active_sid:
                     n["sessionId"] = active_sid
-                try:
+                with contextlib.suppress(Exception):
                     await writer.send_json(dict(n))
-                except Exception as exc:
-                    log_network_exception(
-                        "web.claude_code.service",
-                        "stream_send_failed",
-                        exc,
-                        session_id=active_sid,
-                        frame_kind=n.get("kind"),
-                    )
                 await broadcaster.emit(register_id, dict(n))
 
     @staticmethod
