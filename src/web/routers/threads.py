@@ -35,7 +35,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from evolution.apply_executor import build_apply_job, execute_apply_job
 from evolution.models import (
@@ -49,6 +49,7 @@ from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore, resolve_evolution_root
 from web.claude_code.jsonl_history import jsonl_path_for, parse_jsonl_history
 from web.errors import InvalidThreadIdError, ThreadNotFoundError
+from web.path_utils import is_absolute_workspace_path
 from web.protocol import (
     CreateThreadRequest,
     EvolutionDecisionItemDTO,
@@ -88,6 +89,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["threads"])
 
 THREAD_ID_RE: re.Pattern[str] = re.compile(r"^thread-[a-f0-9]{12}$")
+CLAUDE_HISTORY_MAX_MESSAGES = 300
 
 
 def _validate_thread_id(thread_id: str) -> None:
@@ -293,7 +295,7 @@ async def create_thread(
             detail="preset_id required for generic_chat backend",
         )
     normalized_cwd = body.cwd.strip()
-    if normalized_cwd and not normalized_cwd.startswith("/"):
+    if normalized_cwd and not is_absolute_workspace_path(normalized_cwd):
         raise HTTPException(
             status_code=400,
             detail="cwd must be an absolute path",
@@ -459,6 +461,7 @@ async def delete_thread(thread_id: str, request: Request) -> None:
 async def get_claude_history(
     thread_id: str,
     request: Request,
+    include_tools: bool = Query(default=False),
 ) -> dict[str, list[dict[str, object]]]:
     """拉取 ``claude_code`` 后端 thread 的 SDK 持久化历史（v0.2.0）。
 
@@ -467,6 +470,9 @@ async def get_claude_history(
     2. 校验 ``backend_kind == "claude_code"`` 且已绑定非空 ``claude_thread_id``。
     3. 用 ``cwd`` + ``claude_thread_id`` 拼出 JSONL 路径，存在性独立 404。
     4. :func:`parse_jsonl_history` 同步 IO，用 :func:`asyncio.to_thread` 隔离。
+       Web 回放只返回最近 ``CLAUDE_HISTORY_MAX_MESSAGES`` 条，控制超大 session
+       的浏览器载荷；默认 ``include_tools=false``，只给历史阅读视图返回自然语言
+       与 thinking 内容。
 
     返回 ``{"messages": [<NormalizedMessage dict>, ...]}``——v0.2.0 暂不为
     history 引入 DTO，前端用 ``protocol.ts`` 已有的 ``NormalizedMessage`` 类型
@@ -496,7 +502,13 @@ async def get_claude_history(
     path = jsonl_path_for(meta.cwd, meta.claude_thread_id)
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"jsonl file not found: {path}")
-    messages = await asyncio.to_thread(parse_jsonl_history, path, meta.claude_thread_id)
+    messages = await asyncio.to_thread(
+        parse_jsonl_history,
+        path,
+        meta.claude_thread_id,
+        max_messages=CLAUDE_HISTORY_MAX_MESSAGES,
+        include_tools=include_tools,
+    )
     return {"messages": messages}
 
 
