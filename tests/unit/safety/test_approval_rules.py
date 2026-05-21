@@ -357,3 +357,267 @@ def test_classify_is_elevated_always_false(common_input: dict[str, Any]) -> None
     assert policy.classify_calls[0]["cwd"] == "/proj/foo"
     assert policy.classify_calls[0]["tool_name"] == "Bash"
     assert policy.classify_calls[0]["tool_input"] == {"command": "ls"}
+
+
+# ---------------------------------------------------------------------------
+# generic-chat-session-grant：thread 级 session 同意
+# ---------------------------------------------------------------------------
+
+
+def test_add_session_grant_writes_thread_overrides() -> None:
+    """``add_session_grant(generic_chat, ...)`` → 写入 ``_thread_overrides``。
+
+    覆盖 fix-report-20260520-generic-chat-session-grant 核心写入路径：
+    用户点弹卡「本 session 都同意」→ ApprovalManager.resolve → 本方法 →
+    下次同 thread + cwd + tool classify 命中 immediate allow。
+    """
+    rules = ApprovalRules()  # 无需 policy（grant 写入与 policy 无关）
+
+    rules.add_session_grant(
+        channel="generic_chat",
+        thread_id="thread-grant-001",
+        cwd="/proj/foo",
+        tool_name="Bash",
+    )
+
+    assert ("/proj/foo", "Bash") in rules._thread_overrides["thread-grant-001"]
+    assert len(rules._thread_overrides["thread-grant-001"]) == 1
+
+
+def test_add_session_grant_noop_for_non_generic_chat() -> None:
+    """非 generic_chat 通道调 ``add_session_grant`` 静默 no-op（防御性边界）。
+
+    claude_code 走 v2-inbox 老 grant store；cron / evolution / cli 阶段 3-4
+    才接入。其他通道误写入会污染本通道的覆盖集，必须挡住。
+    """
+    rules = ApprovalRules()
+    for channel in ("claude_code", "cron", "evolution", "cli", "unknown"):
+        rules.add_session_grant(
+            channel=channel,
+            thread_id="thread-x",
+            cwd="/any",
+            tool_name="Bash",
+        )
+    assert rules._thread_overrides == {}
+
+
+def test_add_session_grant_noop_on_empty_keys() -> None:
+    """空 thread_id / cwd / tool_name 都不写入（防御性，避免误反查命中）。"""
+    rules = ApprovalRules()
+    rules.add_session_grant(channel="generic_chat", thread_id="", cwd="/a", tool_name="B")
+    rules.add_session_grant(channel="generic_chat", thread_id="t", cwd="", tool_name="B")
+    rules.add_session_grant(channel="generic_chat", thread_id="t", cwd="/a", tool_name="")
+    assert rules._thread_overrides == {}
+
+
+def test_classify_hits_thread_grant_returns_immediate_allow() -> None:
+    """thread grant 命中 + policy 允许 → ``is_immediate=True`` + ``immediate_outcome='allowed'``。
+
+    生产场景：用户上次审批 Bash 时点了「本 session 都同意」→ 本 thread 下次
+    再 Bash → ApprovalRules.classify 命中 ``_thread_overrides`` → manager
+    直接走 ``is_immediate`` 分支返 approved，不创建 pending。
+    """
+    # 这里 policy 允许（非 blocked，auto_eligible 不影响 grant 命中分支）
+    policy = _FakePolicy(
+        next_decision=_FakeDecision(auto_eligible=False, blocked_by_rule=None, timeout_ms=10_000),
+        enabled_cwds=set(),
+    )
+    rules = ApprovalRules(policy=policy)
+    rules.add_session_grant(
+        channel="generic_chat",
+        thread_id="thread-allow",
+        cwd="/proj/foo",
+        tool_name="Bash",
+    )
+
+    dec = rules.classify(
+        channel="generic_chat",
+        thread_id="thread-allow",
+        cwd="/proj/foo",
+        tool_name="Bash",
+        tool_input={"command": "ls"},
+    )
+
+    assert dec.is_immediate is True
+    assert dec.immediate_outcome == "approved"
+    assert dec.matched_rule is None
+
+
+def test_classify_thread_grant_isolation_per_thread() -> None:
+    """thread A 的 grant 不影响 thread B（多 tab / 多 session 隔离保证）。"""
+    rules = ApprovalRules()
+    rules.add_session_grant(
+        channel="generic_chat",
+        thread_id="thread-A",
+        cwd="/proj/foo",
+        tool_name="Bash",
+    )
+
+    # thread A 命中
+    dec_a = rules.classify(
+        channel="generic_chat",
+        thread_id="thread-A",
+        cwd="/proj/foo",
+        tool_name="Bash",
+        tool_input={"command": "ls"},
+    )
+    assert dec_a.is_immediate is True
+
+    # thread B 同样 cwd + tool 不应命中（隔离）
+    dec_b = rules.classify(
+        channel="generic_chat",
+        thread_id="thread-B",
+        cwd="/proj/foo",
+        tool_name="Bash",
+        tool_input={"command": "ls"},
+    )
+    assert dec_b.is_immediate is False
+    assert dec_b.immediate_outcome is None
+
+
+def test_classify_thread_grant_isolation_per_cwd_and_tool() -> None:
+    """(cwd, tool_name) 元组完全匹配才命中；改任一字段不命中。"""
+    rules = ApprovalRules()
+    rules.add_session_grant(
+        channel="generic_chat",
+        thread_id="thread-x",
+        cwd="/proj/foo",
+        tool_name="Bash",
+    )
+
+    # 改 cwd 不命中
+    dec_cwd = rules.classify(
+        channel="generic_chat",
+        thread_id="thread-x",
+        cwd="/proj/bar",
+        tool_name="Bash",
+        tool_input={"command": "ls"},
+    )
+    assert dec_cwd.is_immediate is False
+
+    # 改 tool 不命中
+    dec_tool = rules.classify(
+        channel="generic_chat",
+        thread_id="thread-x",
+        cwd="/proj/foo",
+        tool_name="Edit",
+        tool_input={"path": "/proj/foo/a"},
+    )
+    assert dec_tool.is_immediate is False
+
+
+def test_classify_thread_grant_blocked_by_rule_overrides_grant() -> None:
+    """**关键安全证据**：thread grant 命中 + policy.blocked_by_rule → 强制人审。
+
+    防御 rm 等危险规则被 session grant 绕过——用户即使对 Bash 点了
+    「本 session 都同意」，下次跑 ``rm -rf`` 仍命中 ``bash_rm_any``
+    必须人审，不能走 immediate allow。
+    """
+    policy = _FakePolicy(
+        next_decision=_FakeDecision(
+            auto_eligible=False,
+            blocked_by_rule="bash_rm_any",
+            timeout_ms=15_000,
+        ),
+        enabled_cwds={"/proj/danger"},
+    )
+    rules = ApprovalRules(policy=policy)
+    rules.add_session_grant(
+        channel="generic_chat",
+        thread_id="thread-danger",
+        cwd="/proj/danger",
+        tool_name="Bash",
+    )
+
+    dec = rules.classify(
+        channel="generic_chat",
+        thread_id="thread-danger",
+        cwd="/proj/danger",
+        tool_name="Bash",
+        tool_input={"command": "rm -rf /tmp/some"},
+    )
+
+    # 关键断言：危险规则优先级最高，session grant 不放行
+    assert dec.is_immediate is False, (
+        "session grant 命中后，命中 blocked_by_rule 必须强制人审；"
+        "否则 rm 之类危险命令会被 session grant 绕过 → 严重安全 hole"
+    )
+    assert dec.immediate_outcome is None
+    assert dec.matched_rule == "bash_rm_any"
+    assert dec.auto_approve_at_ms is None
+    assert dec.timeout_ms == 15_000  # 用 policy 返回的 timeout
+
+
+def test_classify_thread_grant_works_when_policy_none() -> None:
+    """policy=None（fail-closed 配置缺失）+ grant 命中 → immediate allow。
+
+    session grant 是用户显式授予，policy 缺失不该阻止已授予的覆盖生效；
+    blocked_by_rule 守护只在 policy 可用时触发（policy 不在等同没规则可命中）。
+    """
+    rules = ApprovalRules()  # policy=None
+    rules.add_session_grant(
+        channel="generic_chat",
+        thread_id="thread-noop",
+        cwd="/proj/foo",
+        tool_name="Bash",
+    )
+
+    dec = rules.classify(
+        channel="generic_chat",
+        thread_id="thread-noop",
+        cwd="/proj/foo",
+        tool_name="Bash",
+        tool_input={"command": "ls"},
+    )
+
+    assert dec.is_immediate is True
+    assert dec.immediate_outcome == "approved"
+
+
+def test_classify_thread_grant_does_not_apply_to_non_generic_chat() -> None:
+    """thread grant 写在 _thread_overrides 后，非 generic_chat 通道查不到。
+
+    防御：claude_code / cron / evolution / cli 不接 generic_chat 的 grant；
+    每通道审批路径相互隔离（claude_code 走自己的 grant store）。
+    """
+    rules = ApprovalRules()
+    # 即使绕过 add_session_grant 通道检查直写也只用于 generic_chat 命中
+    rules._thread_overrides.setdefault("thread-x", set()).add(("/proj/foo", "Bash"))
+
+    for channel in ("claude_code", "cron", "evolution", "cli"):
+        dec = rules.classify(
+            channel=channel,
+            thread_id="thread-x",
+            cwd="/proj/foo",
+            tool_name="Bash",
+            tool_input={"command": "ls"},
+        )
+        # 非 generic_chat 不走 grant 分支，恒走默认 ask
+        assert dec.is_immediate is False, f"channel={channel} 不应命中 generic_chat grant"
+        assert dec.immediate_outcome is None
+
+
+def test_clear_thread_grants_removes_all_for_thread() -> None:
+    """``clear_thread_grants(thread_id)`` 清掉该 thread 全部 (cwd, tool) 条目，返计数。"""
+    rules = ApprovalRules()
+    rules.add_session_grant(
+        channel="generic_chat", thread_id="thread-A", cwd="/a", tool_name="Bash"
+    )
+    rules.add_session_grant(
+        channel="generic_chat", thread_id="thread-A", cwd="/b", tool_name="Edit"
+    )
+    rules.add_session_grant(
+        channel="generic_chat", thread_id="thread-B", cwd="/c", tool_name="Bash"
+    )
+
+    n = rules.clear_thread_grants("thread-A")
+    assert n == 2
+    assert "thread-A" not in rules._thread_overrides
+    # 其他 thread 不受影响
+    assert ("/c", "Bash") in rules._thread_overrides["thread-B"]
+
+
+def test_clear_thread_grants_returns_zero_when_thread_unknown() -> None:
+    """thread_id 不在 overrides 中 → 返 0（幂等）。"""
+    rules = ApprovalRules()
+    assert rules.clear_thread_grants("unknown-thread") == 0
