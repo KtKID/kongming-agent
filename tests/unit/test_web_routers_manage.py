@@ -25,8 +25,23 @@ CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 
 
 class FakeCell:
-    def __init__(self, thread_id: str) -> None:
+    def __init__(self, thread_id: str, *, chat_ws_connections: int = 0) -> None:
         self.thread_id = thread_id
+        self.metadata = type(
+            "Meta",
+            (),
+            {
+                "backend_kind": "generic_chat",
+                "cwd": "/tmp/demo",
+            },
+        )()
+        self.adapter = type(
+            "Adapter",
+            (),
+            {
+                "_ws": type("Fanout", (), {"client_count": chat_ws_connections})(),
+            },
+        )()
 
 
 class ManageFakeTM:
@@ -102,8 +117,11 @@ class ManageFakeTM:
         del thread_id, call_id, approved
         return None
 
-    def add_cell(self, thread_id: str) -> None:
-        self._cells[thread_id] = FakeCell(thread_id)
+    def add_cell(self, thread_id: str, *, chat_ws_connections: int = 0) -> None:
+        self._cells[thread_id] = FakeCell(
+            thread_id,
+            chat_ws_connections=chat_ws_connections,
+        )
 
 
 def _make_cfg() -> Config:
@@ -171,6 +189,26 @@ def test_stop_cell_existing_returns_204(tmp_path: Path) -> None:
         )
         assert resp.status_code == 204
         assert ("thread-bbbbbbbbbbbb", "manual_stop") in tm.evict_calls
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_runtime_status_returns_unified_snapshot(tmp_path: Path) -> None:
+    tm = ManageFakeTM()
+    tm.add_cell("thread-cccccccccccc", chat_ws_connections=2)
+    client = _login(tmp_path, tm)
+    try:
+        resp = client.get("/api/manage/runtime-status")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["polling"]["interval_seconds"] == 5
+        assert body["cells_total"] == 1
+        assert body["chat_ws_connections_total"] == 2
+        assert body["global_ws"]["thread_status_connections"] == 0
+        assert body["provider_sessions"]["claude_active_sessions"] == 0
+        assert body["cells"][0]["thread_id"] == "thread-cccccccccccc"
+        assert body["cells"][0]["chat_ws_connections"] == 2
+        assert body["cells"][0]["backend_kind"] == "generic_chat"
     finally:
         client.__exit__(None, None, None)
 

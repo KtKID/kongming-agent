@@ -26,6 +26,7 @@ class ClientConfigDTO(BaseModel):
     ws_heartbeat_interval_ms: int
     ws_heartbeat_timeout_ms: int
     ws_heartbeat_max_missed: int
+    dashboard_poll_interval_seconds: int
 
 
 @router.get("/client")
@@ -37,6 +38,7 @@ async def get_client_config(request: Request) -> ClientConfigDTO:
         ws_heartbeat_interval_ms=web.ws_heartbeat_interval_ms,
         ws_heartbeat_timeout_ms=web.ws_heartbeat_timeout_ms,
         ws_heartbeat_max_missed=web.ws_heartbeat_max_missed,
+        dashboard_poll_interval_seconds=web.normalized_dashboard_poll_interval_seconds,
     )
 
 

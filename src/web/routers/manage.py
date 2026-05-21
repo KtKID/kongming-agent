@@ -16,8 +16,9 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Request
 
+from web.dashboard import RuntimeStatusService
 from web.errors import InvalidThreadIdError, ThreadNotFoundError
-from web.protocol import CellSummaryDTO
+from web.protocol import CellSummaryDTO, RuntimeStatusSnapshotDTO
 
 if TYPE_CHECKING:
     from web.types import ThreadManagerProtocol
@@ -41,6 +42,19 @@ async def list_cells(request: Request) -> list[CellSummaryDTO]:
     """列出所有活的 cell。"""
     tm: ThreadManagerProtocol = request.app.state.thread_manager
     return tm.list_cells()
+
+
+@router.get("/runtime-status", response_model=RuntimeStatusSnapshotDTO)
+async def get_runtime_status(request: Request) -> RuntimeStatusSnapshotDTO:
+    svc = RuntimeStatusService(
+        request.app.state.config,
+        request.app.state.thread_manager,
+        claude_session_manager=request.app.state.claude_session_manager,
+        codex_session_manager=request.app.state.codex_session_manager,
+        approval_inbox_broadcaster=request.app.state.approval_inbox_broadcaster,
+        kongming_home=request.app.state.kongming_home,
+    )
+    return svc.build_snapshot_dto()
 
 
 @router.post("/cells/{thread_id}/stop", status_code=204)
