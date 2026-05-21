@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import json
 import os
 import shutil
 import signal
@@ -13,8 +12,6 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 import click
 from dotenv import load_dotenv
@@ -23,9 +20,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(_REPO_ROOT / ".env")
 
 from config_loader import load_config  # noqa: E402
-from config_loader.paths import get_kongming_home  # noqa: E402
-from web.auth import SESSION_COOKIE_NAME, SessionTokenPayload, make_serializer  # noqa: E402
-from web.auth_secrets import load_or_init_session_secret  # noqa: E402
 from web.startup_progress import StartupProgress  # noqa: E402
 
 _PID_FILE = _REPO_ROOT / ".kongming" / "web" / "server.pid"
@@ -44,33 +38,6 @@ def _read_port() -> int:
 
 def _read_host() -> str:
     return str(load_config().web.host)
-
-
-def _issue_local_status_cookie() -> str:
-    secret = load_or_init_session_secret(get_kongming_home())
-    serializer = make_serializer(secret)
-    payload = SessionTokenPayload(iat=int(time.time()))
-    return serializer.dumps(payload.model_dump())
-
-
-def _fetch_runtime_status(port: int) -> dict[str, Any] | None:
-    request = Request(
-        f"http://127.0.0.1:{port}/api/manage/runtime-status",
-        headers={
-            "Cookie": f"{SESSION_COOKIE_NAME}={_issue_local_status_cookie()}",
-        },
-        method="GET",
-    )
-    try:
-        with urlopen(request, timeout=2.0) as response:
-            body = response.read().decode("utf-8")
-    except (HTTPError, URLError, OSError, ValueError):
-        return None
-    try:
-        result = json.loads(body)
-    except json.JSONDecodeError:
-        return None
-    return result if isinstance(result, dict) else None
 
 
 def _is_port_listening(port: int, host: str = "127.0.0.1") -> bool:
@@ -379,52 +346,6 @@ def status() -> None:
         click.echo(f"Starting (PID {pid}, port {port})")
         click.echo("  Port is not listening yet")
     click.echo(f"  Log: {_LOG_FILE}")
-
-    if not _is_port_listening(port):
-        return
-
-    snapshot = _fetch_runtime_status(port)
-    if snapshot is None:
-        return
-
-    polling = snapshot.get("polling", {})
-    global_ws = snapshot.get("global_ws", {})
-    provider_sessions = snapshot.get("provider_sessions", {})
-    click.echo("  Runtime:")
-    click.echo(f"    dashboard_poll={polling.get('interval_seconds', '?')}s")
-    click.echo(
-        "    cells={cells} chat_ws={chat_ws} approvals={approvals}".format(
-            cells=snapshot.get("cells_total", 0),
-            chat_ws=snapshot.get("chat_ws_connections_total", 0),
-            approvals=snapshot.get("approval_pending_total", 0),
-        )
-    )
-    click.echo(
-        "    thread_status_ws={thread_status} cron_ws={cron} approval_subscribers={subs}".format(
-            thread_status=global_ws.get("thread_status_connections", 0),
-            cron=global_ws.get("cron_connections", 0),
-            subs=global_ws.get("approval_subscribers", 0),
-        )
-    )
-    click.echo(
-        "    claude_sessions={claude} codex_sessions={codex}".format(
-            claude=provider_sessions.get("claude_active_sessions", 0),
-            codex=provider_sessions.get("codex_active_sessions", 0),
-        )
-    )
-    cells = snapshot.get("cells", [])
-    if cells:
-        click.echo("    active_cells:")
-        for cell in cells:
-            click.echo(
-                "      - {thread_id} [{status}] ws={chat_ws} pending={pending} name={name}".format(
-                    thread_id=cell.get("thread_id", "-"),
-                    status=cell.get("status", "-"),
-                    chat_ws=cell.get("chat_ws_connections", 0),
-                    pending=cell.get("pending_approval_count", 0),
-                    name=cell.get("thread_name", "-"),
-                )
-            )
 
 
 @cli.command()

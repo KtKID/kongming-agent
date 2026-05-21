@@ -49,6 +49,7 @@ from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore, resolve_evolution_root
 from web.claude_code.jsonl_history import jsonl_path_for, parse_jsonl_history
 from web.errors import InvalidThreadIdError, ThreadNotFoundError
+from web.path_utils import is_absolute_workspace_path
 from web.protocol import (
     CreateThreadRequest,
     EvolutionDecisionItemDTO,
@@ -294,7 +295,7 @@ async def create_thread(
             detail="preset_id required for generic_chat backend",
         )
     normalized_cwd = body.cwd.strip()
-    if normalized_cwd and not normalized_cwd.startswith("/"):
+    if normalized_cwd and not is_absolute_workspace_path(normalized_cwd):
         raise HTTPException(
             status_code=400,
             detail="cwd must be an absolute path",

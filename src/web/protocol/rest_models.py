@@ -28,8 +28,9 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
+from web.path_utils import is_absolute_workspace_path
 from web.protocol._base import (
     ErrorCode,
     HistoryMessageRole,
@@ -206,6 +207,14 @@ class CreateThreadRequest(_FrameBase):
     preset_id: str = ""
     backend_kind: Literal["generic_chat", "claude_code", "codex"] = "generic_chat"
     cwd: str = ""
+
+    @field_validator("cwd")
+    @classmethod
+    def _validate_cwd(cls, value: str) -> str:
+        trimmed = value.strip()
+        if trimmed and not is_absolute_workspace_path(trimmed):
+            raise ValueError("cwd must be an absolute path")
+        return trimmed
 
 
 class ErrorResponseDTO(_FrameBase):
@@ -539,8 +548,16 @@ class AddProjectRequest(_FrameBase):
     则返 400。``alias`` 可选，缺省空串表示无别名。
     """
 
-    cwd: Annotated[str, Field(min_length=1, pattern=r"^/")]
+    cwd: Annotated[str, Field(min_length=1)]
     alias: str = ""
+
+    @field_validator("cwd")
+    @classmethod
+    def _validate_cwd(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not is_absolute_workspace_path(trimmed):
+            raise ValueError("cwd must be an absolute path")
+        return trimmed
 
 
 class ServerInfoResponse(_FrameBase):
@@ -569,8 +586,16 @@ class ImportClaudeSessionRequest(_FrameBase):
     """
 
     claude_thread_id: Annotated[str, Field(min_length=1, max_length=100)]
-    cwd: Annotated[str, Field(pattern=r"^/")]
+    cwd: str
     name: Annotated[str, Field(min_length=1, max_length=200)]
+
+    @field_validator("cwd")
+    @classmethod
+    def _validate_cwd(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not is_absolute_workspace_path(trimmed):
+            raise ValueError("cwd must be an absolute path")
+        return trimmed
 
 
 class ImportClaudeSessionResponse(_FrameBase):
@@ -597,8 +622,16 @@ class ImportCodexSessionRequest(_FrameBase):
     """
 
     codex_thread_id: Annotated[str, Field(min_length=1, max_length=100)]
-    cwd: Annotated[str, Field(pattern=r"^/")]
+    cwd: str
     name: Annotated[str, Field(min_length=1, max_length=200)]
+
+    @field_validator("cwd")
+    @classmethod
+    def _validate_cwd(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not is_absolute_workspace_path(trimmed):
+            raise ValueError("cwd must be an absolute path")
+        return trimmed
 
 
 class ImportCodexSessionResponse(_FrameBase):
