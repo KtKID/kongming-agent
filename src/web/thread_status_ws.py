@@ -297,11 +297,20 @@ async def _thread_status_ws_handler(websocket: WebSocket) -> None:
                 request_id = data.get("requestId")
                 if not isinstance(thread_id, str) or not isinstance(request_id, str):
                     continue
-                decision = {
+                # rememberScope（generic-chat-session-grant）：仅在非 None 时
+                # 加入 dict，避免污染 claude_code v2-inbox 老 bridge 路径的
+                # decision 字面值（老 bridge 完全不感知此字段；下游测试用
+                # assert_called_once_with 严格匹配 dict 形状，多余字段会挂）。
+                # 用于 ``ApprovalManager.resolve`` 检测 == "session" 时调
+                # ``ApprovalRules.add_session_grant`` 写 thread 级 overrides。
+                decision: dict[str, Any] = {
                     "allow": bool(data.get("allow", False)),
                     "message": data.get("message"),
                     "rememberEntry": data.get("rememberEntry"),
                 }
+                remember_scope = data.get("rememberScope")
+                if remember_scope is not None:
+                    decision["rememberScope"] = remember_scope
                 inbox.resolve(thread_id, request_id, decision)
             # 其他 kind 静默
     except Exception:
