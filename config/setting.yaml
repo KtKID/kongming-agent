@@ -554,7 +554,7 @@ web:
       base_url: https://api.minimaxi.com/anthropic
       model: MiniMax-M2.7
       api_key_env: MINIMAX_API_KEY
-      reasoning_effort: medium
+      reasoning_effort: high
     - id: deepseek
       display_name: "deepseek-v4-flash"
       base_url: https://api.deepseek.com/anthropic
