@@ -152,6 +152,16 @@ class ApprovalRules:
                 的安全网）。
         """
         self._policy = policy
+        # generic-chat-session-grant：thread 级 session 同意 overrides；
+        # key = thread_id；value = set of (cwd, tool_name) 元组。
+        # - 用户点弹卡「本 session 都同意」→ ApprovalManager.resolve 调
+        #   add_session_grant 写入；
+        # - 下次同 thread + cwd + tool 的 classify 命中此集 → immediate allow
+        #   （但仍要查 policy.blocked_by_rule，危险规则优先级最高）；
+        # - thread 销毁（cancel_by_thread）时调 clear_thread_grants 清空，
+        #   避免内存泄漏（R10 同款）；
+        # - **不持久化**：重启进程即清空（spec 阶段 5 才上 rules.yaml 持久化）。
+        self._thread_overrides: dict[str, set[tuple[str, str]]] = {}
 
     def classify(
         self,
@@ -189,8 +199,58 @@ class ApprovalRules:
         Returns:
             ``_RuleDecision``；severity 恒 ``"standard"``（阶段 5 才区分 elevated）。
         """
-        # thread_id 阶段 1 不参与判定（阶段 5 才用）
-        _ = thread_id
+        # 0. thread 级 session grant（generic-chat-session-grant）：
+        #    用户在此 thread 之前点过「本 session 都同意」→ 命中后**仍要查
+        #    policy 的 blocked_by_rule**，危险规则（rm 等）优先级最高，绝不允许
+        #    session grant 绕过守护；policy 允许 / policy 缺失 → immediate allow。
+        if channel == "generic_chat" and (cwd, tool_name) in self._thread_overrides.get(
+            thread_id, set()
+        ):
+            # 仍要查 policy 是否命中 blocked_by_rule（防止 session grant 绕过 rm 守护）
+            if self._policy is not None:
+                try:
+                    pdec_guard = self._policy.classify(
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        cwd=cwd,
+                        is_elevated=False,
+                    )
+                except Exception:
+                    logger.exception(
+                        "policy.classify(cwd=%r, tool=%r) raised during session-grant"
+                        " guard; falling back to default ask",
+                        cwd,
+                        tool_name,
+                    )
+                    return self._default_decision()
+                if pdec_guard.blocked_by_rule:
+                    # 危险规则命中 → 强制人审（即使 session grant 也不放行）
+                    timeout_ms_guard = (
+                        pdec_guard.timeout_ms if pdec_guard.timeout_ms > 0 else 60_000
+                    )
+                    return _RuleDecision(
+                        is_immediate=False,
+                        immediate_outcome=None,
+                        matched_rule=pdec_guard.blocked_by_rule,
+                        severity="standard",
+                        auto_approve_at_ms=None,
+                        auto_reject_at_ms=None,
+                        timeout_ms=timeout_ms_guard,
+                    )
+            # policy 允许 / policy 缺失 → immediate allow（session grant 命中）；
+            # immediate_outcome 用 contract Literal 真源 "approved"
+            # （manager.request 把 immediate_outcome 直接当 ApprovalDecision.outcome 用，
+            # 必须对齐 :data:`core.contracts.ApprovalOutcome` 而不是 spec 文档漂移的
+            # "allowed"——见 approval_manager.py 顶部字面值约定说明）。
+            return _RuleDecision(
+                is_immediate=True,
+                immediate_outcome="approved",
+                matched_rule=None,
+                severity="standard",
+                auto_approve_at_ms=None,
+                auto_reject_at_ms=None,
+                timeout_ms=60_000,
+            )
 
         # 1. fail-closed：policy 缺失走默认 ask
         if self._policy is None:
@@ -265,13 +325,44 @@ class ApprovalRules:
         cwd: str,
         tool_name: str,
     ) -> None:
-        """用户选了「本 session 都同意」后调用，向 thread 级 overrides 加规则。
+        """用户点弹卡「本 session 都同意」后调用，向 thread 级 overrides 加规则。
 
-        阶段 1：no-op（generic_chat 卡片已隐藏「本 session」按钮，不会调到这）。
-        阶段 5：写 ``_thread_overrides``，thread 销毁时清空。
+        当前仅 generic_chat 通道用——claude_code 走 WebHostAdapter 直调 policy，
+        v2-inbox 老路径有自己的 grant store；其他通道（cron / evolution / cli）
+        阶段 3-4 接入时按需扩展。
+
+        语义：``(cwd, tool_name)`` 写入 ``_thread_overrides[thread_id]``；下次
+        同 thread + cwd + tool 的 :meth:`classify` 命中此集 → immediate allow
+        （但仍查 ``policy.blocked_by_rule``，危险规则优先级最高）。
+
+        Args:
+            channel: 通道名；非 generic_chat 时静默 no-op（防御性边界）
+            thread_id: 通道内 thread 标识
+            cwd: 触发审批的工作目录
+            tool_name: 工具名（如 ``"Bash"`` / ``"Edit"``）
         """
-        _ = (channel, thread_id, cwd, tool_name)
-        # 阶段 1 no-op
+        if channel != "generic_chat":
+            # 防御性：其他通道暂不支持 session grant，避免误写污染
+            return
+        if not thread_id or not cwd or not tool_name:
+            # 防御性：空 key 不写入（不可能反查命中也是污染）
+            return
+        self._thread_overrides.setdefault(thread_id, set()).add((cwd, tool_name))
+
+    def clear_thread_grants(self, thread_id: str) -> int:
+        """thread 销毁（cancel_by_thread / cell evict）时清该 thread 所有 grant。
+
+        与 :meth:`ApprovalManager.cancel_by_thread` 同款生命周期，防止
+        thread 关闭后 grant 残留在 ``_thread_overrides`` 造成内存泄漏
+        （R10 同款风险）。
+
+        Args:
+            thread_id: 要清理的 thread
+
+        Returns:
+            清掉的 (cwd, tool_name) 条目数；thread_id 不在 overrides 时返 0
+        """
+        return len(self._thread_overrides.pop(thread_id, set()))
 
     # ----- 内部 -----
 
