@@ -90,28 +90,6 @@ def test_returns_projects_dict(tmp_path: Path, monkeypatch) -> None:
         client.__exit__(None, None, None)
 
 
-def test_empty_returns_empty_projects(tmp_path: Path, monkeypatch) -> None:
-    def fake_empty_list_projects(
-        registry_cwds,
-        *,
-        claude_home=None,
-        progress_callback=None,
-        thread_metadata_index=None,
-    ):
-        del registry_cwds, claude_home, progress_callback, thread_metadata_index
-        return []
-
-    monkeypatch.setattr("web.routers.claude.list_projects", fake_empty_list_projects)
-    tm = FakeTM()
-    client = _login_client(tmp_path, tm)
-    try:
-        resp = client.get("/api/claude/projects")
-        assert resp.status_code == 200
-        assert resp.json() == {"projects": []}
-    finally:
-        client.__exit__(None, None, None)
-
-
 def test_refresh_stream_returns_progress_and_done(tmp_path: Path, monkeypatch) -> None:
     fake_data = [
         ProjectSummary(

@@ -28,6 +28,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from scheduler.domain import TaskState, TriggerType
@@ -162,13 +163,11 @@ def test_create_once_task_past_time_still_accepted(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_create_daily_task_happy(tmp_path: Path) -> None:
-    """POST /api/cron/tasks — 每天任务，验证 cron 表达式和 next_run_at。"""
-    client, store = _login_client_with_store(tmp_path)
-    try:
-        resp = client.post(
-            "/api/cron/tasks",
-            json={
+@pytest.mark.parametrize(
+    ("payload", "expected_expr"),
+    [
+        (
+            {
                 "name": "创建 scheduler-test-daily.txt",
                 "agent_name": "default",
                 "input_text": "在当前目录创建一个名为 scheduler-test-daily.txt 的文件，内容写入当前日期",
@@ -176,37 +175,10 @@ def test_create_daily_task_happy(tmp_path: Path) -> None:
                 "cron_expr": "0 9 * * *",
                 "timezone": "Asia/Shanghai",
             },
-            headers=CSRF_HEADERS,
-        )
-        assert resp.status_code == 201, resp.text
-        body = resp.json()
-        assert body["name"] == "创建 scheduler-test-daily.txt"
-        assert body["state"] == "scheduled"
-        assert body["trigger_type"] == "cron"
-        assert body["trigger_expr"] == "0 9 * * *"
-        assert body["next_run_at"] is not None
-
-        # store 确认
-        task = store.get_task(body["task_id"])
-        assert task is not None
-        assert task.trigger.trigger_type is TriggerType.CRON
-        assert task.trigger.expr == "0 9 * * *"
-    finally:
-        client.__exit__(None, None, None)
-
-
-# ---------------------------------------------------------------------------
-# 5. 每周 — happy path
-# ---------------------------------------------------------------------------
-
-
-def test_create_weekly_task_happy(tmp_path: Path) -> None:
-    """POST /api/cron/tasks — 每周三 09:00 任务。"""
-    client, store = _login_client_with_store(tmp_path)
-    try:
-        resp = client.post(
-            "/api/cron/tasks",
-            json={
+            "0 9 * * *",
+        ),
+        (
+            {
                 "name": "创建 scheduler-test-weekly.txt",
                 "agent_name": "default",
                 "input_text": "在当前目录创建一个名为 scheduler-test-weekly.txt 的文件，内容写入当前周数",
@@ -214,35 +186,10 @@ def test_create_weekly_task_happy(tmp_path: Path) -> None:
                 "cron_expr": "0 9 * * 3",
                 "timezone": "Asia/Shanghai",
             },
-            headers=CSRF_HEADERS,
-        )
-        assert resp.status_code == 201, resp.text
-        body = resp.json()
-        assert body["name"] == "创建 scheduler-test-weekly.txt"
-        assert body["trigger_type"] == "cron"
-        assert body["trigger_expr"] == "0 9 * * 3"
-        assert body["next_run_at"] is not None
-
-        # store 确认
-        task = store.get_task(body["task_id"])
-        assert task is not None
-        assert task.trigger.expr == "0 9 * * 3"
-    finally:
-        client.__exit__(None, None, None)
-
-
-# ---------------------------------------------------------------------------
-# 6. Cron 高级 — happy path（5 字段 + 6 字段）
-# ---------------------------------------------------------------------------
-
-
-def test_create_cron_advanced_5field(tmp_path: Path) -> None:
-    """POST /api/cron/tasks — 标准 5 字段 cron。"""
-    client, _ = _login_client_with_store(tmp_path)
-    try:
-        resp = client.post(
-            "/api/cron/tasks",
-            json={
+            "0 9 * * 3",
+        ),
+        (
+            {
                 "name": "每 5 分钟",
                 "agent_name": "default",
                 "input_text": "test",
@@ -250,21 +197,10 @@ def test_create_cron_advanced_5field(tmp_path: Path) -> None:
                 "cron_expr": "*/5 * * * *",
                 "timezone": "UTC",
             },
-            headers=CSRF_HEADERS,
-        )
-        assert resp.status_code == 201, resp.text
-        assert resp.json()["trigger_expr"] == "*/5 * * * *"
-    finally:
-        client.__exit__(None, None, None)
-
-
-def test_create_cron_advanced_6field(tmp_path: Path) -> None:
-    """POST /api/cron/tasks — 6 字段 cron（含秒）。"""
-    client, _ = _login_client_with_store(tmp_path)
-    try:
-        resp = client.post(
-            "/api/cron/tasks",
-            json={
+            "*/5 * * * *",
+        ),
+        (
+            {
                 "name": "每 10 秒",
                 "agent_name": "default",
                 "input_text": "test",
@@ -272,10 +208,31 @@ def test_create_cron_advanced_6field(tmp_path: Path) -> None:
                 "cron_expr": "*/10 * * * * *",
                 "timezone": "UTC",
             },
-            headers=CSRF_HEADERS,
-        )
+            "*/10 * * * * *",
+        ),
+    ],
+)
+def test_create_cron_task_happy_path(
+    tmp_path: Path,
+    payload: dict[str, str],
+    expected_expr: str,
+) -> None:
+    """POST /api/cron/tasks — 压缩 cron happy path 矩阵。"""
+    client, store = _login_client_with_store(tmp_path)
+    try:
+        resp = client.post("/api/cron/tasks", json=payload, headers=CSRF_HEADERS)
         assert resp.status_code == 201, resp.text
-        assert resp.json()["trigger_expr"] == "*/10 * * * * *"
+        body = resp.json()
+        assert body["name"] == payload["name"]
+        assert body["state"] == "scheduled"
+        assert body["trigger_type"] == "cron"
+        assert body["trigger_expr"] == expected_expr
+        assert body["next_run_at"] is not None
+
+        task = store.get_task(body["task_id"])
+        assert task is not None
+        assert task.trigger.trigger_type is TriggerType.CRON
+        assert task.trigger.expr == expected_expr
     finally:
         client.__exit__(None, None, None)
 
