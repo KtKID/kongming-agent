@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
 __all__ = ["encode_cwd", "jsonl_path_for", "parse_jsonl_history"]
 
 _logger = logging.getLogger(__name__)
+_CWD_ENCODE_RE = re.compile(r"[\\/_.:]")
 
 
 def jsonl_path_for(
@@ -89,7 +91,7 @@ def encode_cwd(cwd: str) -> str:
     实测 SDK 规则（从已落盘目录名反推）：``/`` / ``_`` / ``.`` 都换成 ``-``，
     其余字符（字母数字 + ``-``）保留。
     """
-    return cwd.replace("/", "-").replace("_", "-").replace(".", "-")
+    return _CWD_ENCODE_RE.sub("-", cwd)
 
 
 def parse_jsonl_history(

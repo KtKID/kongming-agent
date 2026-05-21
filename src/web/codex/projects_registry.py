@@ -64,6 +64,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from web.path_utils import is_absolute_workspace_path
 from web.thread_metadata import list_thread_metadata
 
 logger = logging.getLogger(__name__)
@@ -120,7 +121,7 @@ def _entry_from_dict(raw: object) -> ProjectRegistryEntry | None:
         logger.warning("project registry entry not a dict: %r", raw)
         return None
     cwd = raw.get("cwd")
-    if not isinstance(cwd, str) or not cwd.startswith("/"):
+    if not isinstance(cwd, str) or not is_absolute_workspace_path(cwd):
         logger.warning("project registry entry has invalid cwd: %r", raw)
         return None
     alias_raw = raw.get("alias", "")
