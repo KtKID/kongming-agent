@@ -372,6 +372,29 @@ class ApprovalManager:
         pending.future.set_result(
             ApprovalDecision(outcome=outcome, metadata=meta)  # type: ignore[arg-type]
         )
+
+        # generic-chat-session-grant：用户点「本 session 都同意」+ allow=True
+        # → 触发 thread 级 grant 写入；下次同 thread + cwd + tool 的
+        # classify 命中 _thread_overrides → immediate allow。
+        # 仅 allow=True + rememberScope="session" 时写入（拒绝时即使带
+        # rememberScope 也不写——拒绝没有 remember 语义）。
+        if allow and remember_scope == "session":
+            try:
+                self._rules.add_session_grant(
+                    channel=pending.channel,
+                    thread_id=pending.thread_id,
+                    cwd=pending.cwd,
+                    tool_name=pending.tool_name,
+                )
+            except Exception:
+                # fail-open：grant 写入失败不影响本次 resolve 的成功结果
+                # （下次仍弹卡，等同没记住——可接受降级）
+                logger.exception(
+                    "add_session_grant failed: thread=%s cwd=%s tool=%s",
+                    pending.thread_id,
+                    pending.cwd,
+                    pending.tool_name,
+                )
         return True
 
     def cancel(self, request_id: str, reason: str = "cancelled") -> bool:
@@ -401,6 +424,10 @@ class ApprovalManager:
         reviewer 必修 #4：避免用户关 tab 后 pending 卡 60s timeout
         （spec 60-risk R10 内存泄漏现实诱因）。
 
+        generic-chat-session-grant：同时清掉该 thread 的 session grant
+        （:meth:`ApprovalRules.clear_thread_grants`）；与 pending cancel 同款
+        生命周期，防止 thread 关闭后 grant 残留造成内存泄漏。
+
         Args:
             thread_id: 要清理的 thread
             reason: 写到每条 pending 的 metadata.reason
@@ -418,6 +445,11 @@ class ApprovalManager:
         for req_id in targets:
             if self.cancel(req_id, reason=reason):
                 count += 1
+        # 清 thread 级 session grants（R10 同款防内存泄漏）；失败不抛
+        try:
+            self._rules.clear_thread_grants(thread_id)
+        except Exception:
+            logger.exception("clear_thread_grants failed: thread=%s", thread_id)
         return count
 
     async def _handle_timeout(self, request_id: str, timeout_seconds: float) -> None:
