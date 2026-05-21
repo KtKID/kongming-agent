@@ -28,8 +28,9 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
+from web.path_utils import is_absolute_workspace_path
 from web.protocol._base import (
     ErrorCode,
     HistoryMessageRole,
@@ -130,6 +131,68 @@ class CellSummaryDTO(_FrameBase):
     status: Literal["idle", "running", "awaiting_approval"]
 
 
+class RuntimeStatusPollingDTO(_FrameBase):
+    """dashboard 轮询配置真值。"""
+
+    interval_seconds: Annotated[int, Field(ge=3)]
+
+
+class RuntimeStatusProcessDTO(_FrameBase):
+    """运行中 web 进程摘要。"""
+
+    running: bool
+    pid: Annotated[int, Field(ge=1)]
+    host: str
+    port: Annotated[int, Field(ge=1, le=65535)]
+    url: str
+    log_path: str
+
+
+class RuntimeStatusGlobalWSDTO(_FrameBase):
+    """全局 WS / 广播订阅计数。"""
+
+    thread_status_connections: Annotated[int, Field(ge=0)]
+    cron_connections: Annotated[int, Field(ge=0)]
+    approval_subscribers: Annotated[int, Field(ge=0)]
+
+
+class RuntimeStatusProviderSessionsDTO(_FrameBase):
+    """provider 活跃 session 计数。"""
+
+    claude_active_sessions: Annotated[int, Field(ge=0)]
+    codex_active_sessions: Annotated[int, Field(ge=0)]
+
+
+class ActiveCellStatusDTO(_FrameBase):
+    """runtime-status 中的活跃 cell 明细。"""
+
+    thread_id: Annotated[str, Field(pattern=r"^thread-[a-f0-9]{12}$")]
+    thread_name: str
+    backend_kind: Literal["generic_chat", "claude_code", "codex"] = "generic_chat"
+    preset_id: str
+    cwd: str = ""
+    created_at: float
+    last_active_at: float
+    pending_approval_count: Annotated[int, Field(ge=0)]
+    status: Literal["idle", "running", "awaiting_approval"]
+    chat_ws_connections: Annotated[int, Field(ge=0)]
+
+
+class RuntimeStatusSnapshotDTO(_FrameBase):
+    """统一 runtime 快照。"""
+
+    process: RuntimeStatusProcessDTO
+    polling: RuntimeStatusPollingDTO
+    global_ws: RuntimeStatusGlobalWSDTO
+    provider_sessions: RuntimeStatusProviderSessionsDTO
+    cells_total: Annotated[int, Field(ge=0)]
+    chat_ws_connections_total: Annotated[int, Field(ge=0)]
+    approval_pending_total: Annotated[int, Field(ge=0)]
+    workspace_shell_connections: Annotated[int, Field(ge=0)] | None = None
+    cells: list[ActiveCellStatusDTO]
+    generated_at_ms: Annotated[int, Field(ge=0)]
+
+
 class CreateThreadRequest(_FrameBase):
     """创建 thread 请求体（``POST /api/threads``）。
 
@@ -144,6 +207,14 @@ class CreateThreadRequest(_FrameBase):
     preset_id: str = ""
     backend_kind: Literal["generic_chat", "claude_code", "codex"] = "generic_chat"
     cwd: str = ""
+
+    @field_validator("cwd")
+    @classmethod
+    def _validate_cwd(cls, value: str) -> str:
+        trimmed = value.strip()
+        if trimmed and not is_absolute_workspace_path(trimmed):
+            raise ValueError("cwd must be an absolute path")
+        return trimmed
 
 
 class ErrorResponseDTO(_FrameBase):
@@ -477,8 +548,16 @@ class AddProjectRequest(_FrameBase):
     则返 400。``alias`` 可选，缺省空串表示无别名。
     """
 
-    cwd: Annotated[str, Field(min_length=1, pattern=r"^/")]
+    cwd: Annotated[str, Field(min_length=1)]
     alias: str = ""
+
+    @field_validator("cwd")
+    @classmethod
+    def _validate_cwd(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not is_absolute_workspace_path(trimmed):
+            raise ValueError("cwd must be an absolute path")
+        return trimmed
 
 
 class ServerInfoResponse(_FrameBase):
@@ -507,8 +586,16 @@ class ImportClaudeSessionRequest(_FrameBase):
     """
 
     claude_thread_id: Annotated[str, Field(min_length=1, max_length=100)]
-    cwd: Annotated[str, Field(pattern=r"^/")]
+    cwd: str
     name: Annotated[str, Field(min_length=1, max_length=200)]
+
+    @field_validator("cwd")
+    @classmethod
+    def _validate_cwd(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not is_absolute_workspace_path(trimmed):
+            raise ValueError("cwd must be an absolute path")
+        return trimmed
 
 
 class ImportClaudeSessionResponse(_FrameBase):
@@ -535,8 +622,16 @@ class ImportCodexSessionRequest(_FrameBase):
     """
 
     codex_thread_id: Annotated[str, Field(min_length=1, max_length=100)]
-    cwd: Annotated[str, Field(pattern=r"^/")]
+    cwd: str
     name: Annotated[str, Field(min_length=1, max_length=200)]
+
+    @field_validator("cwd")
+    @classmethod
+    def _validate_cwd(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not is_absolute_workspace_path(trimmed):
+            raise ValueError("cwd must be an absolute path")
+        return trimmed
 
 
 class ImportCodexSessionResponse(_FrameBase):

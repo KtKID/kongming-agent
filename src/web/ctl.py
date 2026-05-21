@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -100,11 +101,16 @@ def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
-    except (ProcessLookupError, PermissionError):
+    except (ProcessLookupError, PermissionError, OSError, SystemError):
         return False
 
 
 def _resolve_running_pid(port: int) -> int | None:
+    if sys.platform == "win32":
+        port_pid = _find_pid_by_port(port)
+        if port_pid is not None:
+            return port_pid
+
     if _PID_FILE.exists():
         try:
             pid = int(_PID_FILE.read_text(encoding="utf-8").strip())
@@ -113,6 +119,19 @@ def _resolve_running_pid(port: int) -> int | None:
         if pid is not None and _pid_alive(pid):
             return pid
     return _find_pid_by_port(port)
+
+
+def _persist_running_pid(started_pid: int, port: int) -> int:
+    """Persist the real listener pid when it differs from the shell pid.
+
+    Windows may report a bootstrap shell pid from ``Popen`` while the actual
+    listening socket belongs to a child ``python -m web.run`` process. Persist
+    the listener pid once the port is up so later status/restart operations
+    observe the same process id users see from the listening port.
+    """
+    pid = _find_pid_by_port(port) or started_pid
+    _PID_FILE.write_text(str(pid), encoding="utf-8")
+    return pid
 
 
 def _tail_log(n: int) -> None:
@@ -175,6 +194,14 @@ def _spawn_creationflags() -> int:
     return subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
 
 
+def _frontend_build_command() -> list[str]:
+    if sys.platform == "win32":
+        npm_cmd = shutil.which("npm.cmd")
+        if npm_cmd:
+            return [npm_cmd, "run", "build"]
+    return ["npm", "run", "build"]
+
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def cli() -> None:
     """Manage the web service process."""
@@ -202,7 +229,7 @@ def start(rebuild: bool) -> None:
     progress.report("frontend")
     if _should_rebuild_dist(force=rebuild):
         try:
-            subprocess.run(["npm", "run", "build"], cwd=_REPO_ROOT / "web", check=True)
+            subprocess.run(_frontend_build_command(), cwd=_REPO_ROOT / "web", check=True)
         except (subprocess.CalledProcessError, FileNotFoundError) as exc:
             progress.fail(f"Frontend build failed: {exc}")
             click.echo(f"Frontend build failed: {exc}", err=True)
@@ -233,7 +260,8 @@ def start(rebuild: bool) -> None:
             _PID_FILE.unlink(missing_ok=True)
             raise SystemExit(1)
         if _is_port_listening(port):
-            click.echo(f"Started (PID {proc.pid})")
+            running_pid = _persist_running_pid(proc.pid, port)
+            click.echo(f"Started (PID {running_pid})")
             click.echo(f"  URL: http://localhost:{port}")
             click.echo(f"  Log: {_LOG_FILE}")
             return

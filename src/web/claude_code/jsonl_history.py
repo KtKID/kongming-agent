@@ -42,6 +42,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -54,6 +56,7 @@ if TYPE_CHECKING:
 __all__ = ["encode_cwd", "jsonl_path_for", "parse_jsonl_history"]
 
 _logger = logging.getLogger(__name__)
+_CWD_ENCODE_RE = re.compile(r"[\\/_.:]")
 
 
 def jsonl_path_for(
@@ -88,12 +91,15 @@ def encode_cwd(cwd: str) -> str:
     实测 SDK 规则（从已落盘目录名反推）：``/`` / ``_`` / ``.`` 都换成 ``-``，
     其余字符（字母数字 + ``-``）保留。
     """
-    return cwd.replace("/", "-").replace("_", "-").replace(".", "-")
+    return _CWD_ENCODE_RE.sub("-", cwd)
 
 
 def parse_jsonl_history(
     path: Path,
     claude_thread_id: str,
+    *,
+    max_messages: int | None = None,
+    include_tools: bool = True,
 ) -> list[dict[str, Any]]:
     """读取 jsonl 文件，过滤 sessionId 匹配的行，翻译成 NormalizedMessage 列表。
 
@@ -101,18 +107,25 @@ def parse_jsonl_history(
         path: jsonl 文件路径。文件不存在 / 无权限 → 返回空列表。
         claude_thread_id: 期望的 SDK session id。``entry.sessionId`` 不匹配
             的行直接 skip。
+        max_messages: 仅保留最近 N 条翻译后的消息；``None`` 表示不裁剪。
+            用于 web 历史回放限制前端载荷，避免超大 session 一次性展开成巨量
+            React 节点。
+        include_tools: 是否保留 ``tool_use`` / ``tool_result``。``False`` 时只
+            返回自然语言与 thinking 相关消息，适合历史阅读视图。
 
     Returns:
         :class:`NormalizedMessage` 形态的 dict 列表，按 ``timestamp`` 升序
         排序（ISO 字符串字典序天然就是时间序）。
     """
-    messages: list[dict[str, Any]] = []
+    messages: list[dict[str, Any]] | deque[dict[str, Any]] = (
+        deque(maxlen=max_messages) if max_messages is not None and max_messages > 0 else []
+    )
 
     try:
         fh = path.open("r", encoding="utf-8")
     except OSError as exc:
         _logger.warning("jsonl_history: cannot open %s: %s", path, exc)
-        return messages
+        return list(messages)
 
     try:
         with fh:
@@ -130,14 +143,19 @@ def parse_jsonl_history(
                 if entry.get("sessionId") != claude_thread_id:
                     continue
 
-                translated = _translate_entry(entry, claude_thread_id)
+                translated = _translate_entry(
+                    entry,
+                    claude_thread_id,
+                    include_tools=include_tools,
+                )
                 messages.extend(translated)
     except OSError as exc:
         _logger.warning("jsonl_history: read error on %s: %s", path, exc)
-        return messages
+        return list(messages)
 
-    messages.sort(key=lambda m: m.get("timestamp") or "")
-    return messages
+    out = list(messages)
+    out.sort(key=lambda m: m.get("timestamp") or "")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +166,8 @@ def parse_jsonl_history(
 def _translate_entry(
     entry: dict[str, Any],
     claude_thread_id: str,
+    *,
+    include_tools: bool,
 ) -> list[dict[str, Any]]:
     """把单条 entry 翻译成 0..N 条 NormalizedMessage dict。
 
@@ -166,10 +186,18 @@ def _translate_entry(
         return [out]
 
     if entry_type == "user":
-        return _translate_user(entry, claude_thread_id)
+        return _translate_user(
+            entry,
+            claude_thread_id,
+            include_tools=include_tools,
+        )
 
     if entry_type == "assistant":
-        return _translate_assistant(entry, claude_thread_id)
+        return _translate_assistant(
+            entry,
+            claude_thread_id,
+            include_tools=include_tools,
+        )
 
     return []
 
@@ -177,6 +205,8 @@ def _translate_entry(
 def _translate_user(
     entry: dict[str, Any],
     claude_thread_id: str,
+    *,
+    include_tools: bool,
 ) -> list[dict[str, Any]]:
     """``type=user`` → ``text`` (str) 或 ``tool_result``（list of blocks）。"""
     message = entry.get("message")
@@ -197,6 +227,8 @@ def _translate_user(
         return [out]
 
     if isinstance(content, list):
+        if not include_tools:
+            return []
         results: list[dict[str, Any]] = []
         for block in content:
             if not isinstance(block, dict):
@@ -223,6 +255,8 @@ def _translate_user(
 def _translate_assistant(
     entry: dict[str, Any],
     claude_thread_id: str,
+    *,
+    include_tools: bool,
 ) -> list[dict[str, Any]]:
     """``type=assistant`` → 遍历 ``message.content`` blocks，按 block.type 翻译。"""
     message = entry.get("message")
@@ -258,6 +292,8 @@ def _translate_assistant(
             results.append(out)
 
         elif block_type == "tool_use":
+            if not include_tools:
+                continue
             tool_id = block.get("id")
             tool_name = block.get("name")
             if not isinstance(tool_id, str) or not isinstance(tool_name, str):
