@@ -48,6 +48,14 @@ uv sync --all-extras
 ./start.sh install
 ```
 
+PowerShell on Windows:
+```powershell
+.\start.cmd install
+.\start.cmd web restart
+.\start.ps1 install
+.\start.ps1 web restart
+```
+
 ### 2. 启动本地模型服务（任选其一）
 
 CLI 默认连 `http://127.0.0.1:1234`，模型名 `gemma-4-e4b-it`。

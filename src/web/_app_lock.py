@@ -28,7 +28,6 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import os
 import sys
 import time
@@ -36,6 +35,10 @@ from pathlib import Path
 
 _LOCK_FILENAME = ".app.lock"
 _LOCK_SUBDIR = "web"
+_IS_WIN = sys.platform == "win32"
+
+if not _IS_WIN:
+    import fcntl
 
 
 def acquire_app_instance_lock(home: Path) -> int:
@@ -48,6 +51,9 @@ def acquire_app_instance_lock(home: Path) -> int:
        - **活进程** → 打印诊断 + ``sys.exit(1)``（不让 ticker 死循环）
        - **孤儿/无效 PID** → 删 lock 重抢一次；重抢仍失败 ``sys.exit(1)``
          （防双启动 race）
+
+    Windows 平台无 ``fcntl``，退化为 PID 文件 + 探活（无文件锁互斥，
+    但 dev 环境单进程场景足够）。
 
     Args:
         home: :func:`config_loader.paths.get_kongming_home` 返回的 home 目录
@@ -64,13 +70,15 @@ def acquire_app_instance_lock(home: Path) -> int:
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / _LOCK_FILENAME
 
-    # 1. 先试抢一次
+    if _IS_WIN:
+        return _acquire_win(lock_path)
+
+    # POSIX: fcntl.flock
     fd = _try_lock_path(lock_path)
     if fd is not None:
         _write_owner(fd)
         return fd
 
-    # 2. 抢不到 → 读 PID 探活
     holder_pid = _read_holder_pid(lock_path)
     if not _is_orphan(holder_pid):
         sys.stderr.write(
@@ -82,7 +90,6 @@ def acquire_app_instance_lock(home: Path) -> int:
         )
         sys.exit(1)
 
-    # 3. 孤儿锁：删 + 重抢一次（防与另一新进程的 race）
     sys.stderr.write(
         f"[web] WARN: 检测到孤儿锁（PID={holder_pid} 已死），清理后重抢\n  锁路径: {lock_path}\n"
     )
@@ -99,6 +106,27 @@ def acquire_app_instance_lock(home: Path) -> int:
     return fd
 
 
+def _acquire_win(lock_path: Path) -> int:
+    """Windows 退化实现：PID 文件 + 探活，无文件锁。"""
+    holder_pid = _read_holder_pid(lock_path)
+    if holder_pid is not None and not _is_orphan(holder_pid):
+        sys.stderr.write(
+            f"[web] FATAL: web app 实例已在运行，PID={holder_pid}\n"
+            f"  锁路径: {lock_path}\n"
+            f"  若旧进程已不响应，删除锁文件后重试：del {lock_path}\n"
+        )
+        sys.exit(1)
+
+    if holder_pid is not None:
+        sys.stderr.write(
+            f"[web] WARN: 检测到孤儿锁（PID={holder_pid} 已死），清理后重写\n"
+        )
+
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+    _write_owner(fd)
+    return fd
+
+
 def release_app_instance_lock(fd: int | None) -> None:
     """释放锁 + 关 fd；``main()`` finally 兜底用。
 
@@ -107,8 +135,9 @@ def release_app_instance_lock(fd: int | None) -> None:
     """
     if fd is None:
         return
-    with contextlib.suppress(Exception):
-        fcntl.flock(fd, fcntl.LOCK_UN)
+    if not _IS_WIN:
+        with contextlib.suppress(Exception):
+            fcntl.flock(fd, fcntl.LOCK_UN)
     with contextlib.suppress(Exception):
         os.close(fd)
 
@@ -172,6 +201,9 @@ def _is_orphan(pid: int | None) -> bool:
         return True
     except PermissionError:
         return False
+    except OSError:
+        # Windows 对无效 PID 抛 OSError(WinError 87) 而非 ProcessLookupError
+        return True
     return False
 
 
