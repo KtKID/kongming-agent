@@ -123,7 +123,7 @@ def parse_jsonl_history(
         fh = path.open("r", encoding="utf-8")
     except OSError as exc:
         _logger.warning("jsonl_history: cannot open %s: %s", path, exc)
-        return messages
+        return list(messages)
 
     try:
         with fh:
