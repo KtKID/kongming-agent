@@ -190,6 +190,34 @@ def test_parse_user_tool_result_block(tmp_path: Path) -> None:
     assert out[0]["isError"] is False
 
 
+def test_parse_user_tool_result_block_skipped_when_include_tools_false(tmp_path: Path) -> None:
+    sid = "sid-1"
+    path = tmp_path / "f.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "type": "user",
+                "uuid": "u1",
+                "sessionId": sid,
+                "timestamp": "2026-05-02T10:00:00Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-1",
+                            "content": "result text",
+                            "is_error": False,
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+    assert parse_jsonl_history(path, sid, include_tools=False) == []
+
+
 def test_parse_assistant_text_block(tmp_path: Path) -> None:
     sid = "sid-1"
     path = tmp_path / "f.jsonl"
@@ -272,6 +300,36 @@ def test_parse_assistant_tool_use_block(tmp_path: Path) -> None:
     assert out[0]["toolName"] == "Bash"
     assert out[0]["toolInput"] == {"command": "ls"}
     assert out[0]["toolId"] == "tu-1"
+
+
+def test_parse_assistant_tool_use_block_skipped_when_include_tools_false(
+    tmp_path: Path,
+) -> None:
+    sid = "sid-1"
+    path = tmp_path / "f.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "sessionId": sid,
+                "timestamp": "2026-05-02T10:00:00Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tu-1",
+                            "name": "Bash",
+                            "input": {"command": "ls"},
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+    assert parse_jsonl_history(path, sid, include_tools=False) == []
 
 
 def test_parse_system_init(tmp_path: Path) -> None:
@@ -391,6 +449,25 @@ def test_sort_by_timestamp_ascending(tmp_path: Path) -> None:
     )
     out = parse_jsonl_history(path, sid)
     assert [o["content"] for o in out] == ["first", "middle", "second"]
+
+
+def test_max_messages_keeps_recent_tail(tmp_path: Path) -> None:
+    sid = "sid-tail"
+    path = tmp_path / "f.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "type": "user",
+                "sessionId": sid,
+                "timestamp": f"2026-05-02T10:0{i}:00Z",
+                "message": {"role": "user", "content": f"msg-{i}"},
+            }
+            for i in range(5)
+        ],
+    )
+    out = parse_jsonl_history(path, sid, max_messages=2)
+    assert [o["content"] for o in out] == ["msg-3", "msg-4"]
 
 
 def test_real_fixture_smoke() -> None:

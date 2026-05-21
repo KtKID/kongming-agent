@@ -166,3 +166,217 @@ def test_happy_path_returns_messages(tmp_path: Path, monkeypatch) -> None:
         assert msgs[1]["content"] == "Hi!"
     finally:
         client.__exit__(None, None, None)
+
+
+def test_history_endpoint_returns_recent_tail_only(tmp_path: Path, monkeypatch) -> None:
+    tm = FakeTM()
+    sid = "sid-tail"
+    _add_thread(
+        tm,
+        backend_kind="claude_code",
+        claude_thread_id=sid,
+        cwd="/tmp/work",
+    )
+    jsonl = tmp_path / "history-tail.jsonl"
+    with jsonl.open("w", encoding="utf-8") as f:
+        for i in range(5):
+            f.write(
+                json.dumps(
+                    {
+                        "type": "user",
+                        "uuid": f"u{i}",
+                        "sessionId": sid,
+                        "timestamp": f"2026-05-02T10:0{i}:00Z",
+                        "message": {"role": "user", "content": f"msg-{i}"},
+                    }
+                )
+                + "\n"
+            )
+    monkeypatch.setattr(
+        "web.routers.threads.jsonl_path_for",
+        lambda cwd, sid_: jsonl,
+    )
+    monkeypatch.setattr("web.routers.threads.CLAUDE_HISTORY_MAX_MESSAGES", 2)
+    client = _login_client(tmp_path, tm)
+    try:
+        resp = client.get("/api/threads/thread-aaaaaaaaaaaa/claude_history")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert [m["content"] for m in body["messages"]] == ["msg-3", "msg-4"]
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_history_endpoint_filters_tool_entries_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    tm = FakeTM()
+    sid = "sid-tools"
+    _add_thread(
+        tm,
+        backend_kind="claude_code",
+        claude_thread_id=sid,
+        cwd="/tmp/work",
+    )
+    jsonl = tmp_path / "history-tools.jsonl"
+    with jsonl.open("w", encoding="utf-8") as f:
+        f.write(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "uuid": "a0",
+                    "sessionId": sid,
+                    "timestamp": "2026-05-02T10:00:00Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "before tool"}],
+                    },
+                }
+            )
+            + "\n"
+        )
+        f.write(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "uuid": "a1",
+                    "sessionId": sid,
+                    "timestamp": "2026-05-02T10:01:00Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "tu-1",
+                                "name": "Bash",
+                                "input": {"command": "ls"},
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+        f.write(
+            json.dumps(
+                {
+                    "type": "user",
+                    "uuid": "u1",
+                    "sessionId": sid,
+                    "timestamp": "2026-05-02T10:02:00Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "tu-1",
+                                "content": "result text",
+                                "is_error": False,
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+        f.write(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "uuid": "a2",
+                    "sessionId": sid,
+                    "timestamp": "2026-05-02T10:03:00Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "after tool"}],
+                    },
+                }
+            )
+            + "\n"
+        )
+    monkeypatch.setattr(
+        "web.routers.threads.jsonl_path_for",
+        lambda cwd, sid_: jsonl,
+    )
+    client = _login_client(tmp_path, tm)
+    try:
+        resp = client.get("/api/threads/thread-aaaaaaaaaaaa/claude_history")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert [m["kind"] for m in body["messages"]] == ["text", "text"]
+        assert [m["content"] for m in body["messages"]] == ["before tool", "after tool"]
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_history_endpoint_include_tools_true_restores_tool_entries(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    tm = FakeTM()
+    sid = "sid-tools-full"
+    _add_thread(
+        tm,
+        backend_kind="claude_code",
+        claude_thread_id=sid,
+        cwd="/tmp/work",
+    )
+    jsonl = tmp_path / "history-tools-full.jsonl"
+    with jsonl.open("w", encoding="utf-8") as f:
+        f.write(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "uuid": "a1",
+                    "sessionId": sid,
+                    "timestamp": "2026-05-02T10:01:00Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "tu-1",
+                                "name": "Bash",
+                                "input": {"command": "ls"},
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+        f.write(
+            json.dumps(
+                {
+                    "type": "user",
+                    "uuid": "u1",
+                    "sessionId": sid,
+                    "timestamp": "2026-05-02T10:02:00Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "tu-1",
+                                "content": "result text",
+                                "is_error": False,
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+    monkeypatch.setattr(
+        "web.routers.threads.jsonl_path_for",
+        lambda cwd, sid_: jsonl,
+    )
+    client = _login_client(tmp_path, tm)
+    try:
+        resp = client.get("/api/threads/thread-aaaaaaaaaaaa/claude_history?include_tools=true")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert [m["kind"] for m in body["messages"]] == ["tool_use", "tool_result"]
+    finally:
+        client.__exit__(None, None, None)
