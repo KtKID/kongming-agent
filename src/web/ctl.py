@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -11,6 +13,8 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import click
 from dotenv import load_dotenv
@@ -19,6 +23,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(_REPO_ROOT / ".env")
 
 from config_loader import load_config  # noqa: E402
+from config_loader.paths import get_kongming_home  # noqa: E402
+from web.auth import SESSION_COOKIE_NAME, SessionTokenPayload, make_serializer  # noqa: E402
+from web.auth_secrets import load_or_init_session_secret  # noqa: E402
 from web.startup_progress import StartupProgress  # noqa: E402
 
 _PID_FILE = _REPO_ROOT / ".kongming" / "web" / "server.pid"
@@ -37,6 +44,32 @@ def _read_port() -> int:
 
 def _read_host() -> str:
     return str(load_config().web.host)
+
+
+def _issue_local_status_cookie() -> str:
+    secret = load_or_init_session_secret(get_kongming_home())
+    serializer = make_serializer(secret)
+    payload = SessionTokenPayload(iat=int(time.time()))
+    return serializer.dumps(payload.model_dump())
+
+
+def _fetch_runtime_status(port: int) -> dict[str, Any] | None:
+    request = Request(
+        f"http://127.0.0.1:{port}/api/manage/runtime-status",
+        headers={
+            "Cookie": f"{SESSION_COOKIE_NAME}={_issue_local_status_cookie()}",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=2.0) as response:
+            body = response.read().decode("utf-8")
+    except (HTTPError, URLError, OSError, ValueError):
+        return None
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        return None
 
 
 def _is_port_listening(port: int, host: str = "127.0.0.1") -> bool:
@@ -100,11 +133,16 @@ def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
-    except (ProcessLookupError, PermissionError):
+    except (ProcessLookupError, PermissionError, OSError, SystemError):
         return False
 
 
 def _resolve_running_pid(port: int) -> int | None:
+    if sys.platform == "win32":
+        port_pid = _find_pid_by_port(port)
+        if port_pid is not None:
+            return port_pid
+
     if _PID_FILE.exists():
         try:
             pid = int(_PID_FILE.read_text(encoding="utf-8").strip())
@@ -113,6 +151,19 @@ def _resolve_running_pid(port: int) -> int | None:
         if pid is not None and _pid_alive(pid):
             return pid
     return _find_pid_by_port(port)
+
+
+def _persist_running_pid(started_pid: int, port: int) -> int:
+    """Persist the real listener pid when it differs from the shell pid.
+
+    Windows may report a bootstrap shell pid from ``Popen`` while the actual
+    listening socket belongs to a child ``python -m web.run`` process. Persist
+    the listener pid once the port is up so later status/restart operations
+    observe the same process id users see from the listening port.
+    """
+    pid = _find_pid_by_port(port) or started_pid
+    _PID_FILE.write_text(str(pid), encoding="utf-8")
+    return pid
 
 
 def _tail_log(n: int) -> None:
@@ -175,6 +226,14 @@ def _spawn_creationflags() -> int:
     return subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
 
 
+def _frontend_build_command() -> list[str]:
+    if sys.platform == "win32":
+        npm_cmd = shutil.which("npm.cmd")
+        if npm_cmd:
+            return [npm_cmd, "run", "build"]
+    return ["npm", "run", "build"]
+
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def cli() -> None:
     """Manage the web service process."""
@@ -202,7 +261,7 @@ def start(rebuild: bool) -> None:
     progress.report("frontend")
     if _should_rebuild_dist(force=rebuild):
         try:
-            subprocess.run(["npm", "run", "build"], cwd=_REPO_ROOT / "web", check=True)
+            subprocess.run(_frontend_build_command(), cwd=_REPO_ROOT / "web", check=True)
         except (subprocess.CalledProcessError, FileNotFoundError) as exc:
             progress.fail(f"Frontend build failed: {exc}")
             click.echo(f"Frontend build failed: {exc}", err=True)
@@ -233,7 +292,8 @@ def start(rebuild: bool) -> None:
             _PID_FILE.unlink(missing_ok=True)
             raise SystemExit(1)
         if _is_port_listening(port):
-            click.echo(f"Started (PID {proc.pid})")
+            running_pid = _persist_running_pid(proc.pid, port)
+            click.echo(f"Started (PID {running_pid})")
             click.echo(f"  URL: http://localhost:{port}")
             click.echo(f"  Log: {_LOG_FILE}")
             return
@@ -318,6 +378,52 @@ def status() -> None:
         click.echo(f"Starting (PID {pid}, port {port})")
         click.echo("  Port is not listening yet")
     click.echo(f"  Log: {_LOG_FILE}")
+
+    if not _is_port_listening(port):
+        return
+
+    snapshot = _fetch_runtime_status(port)
+    if snapshot is None:
+        return
+
+    polling = snapshot.get("polling", {})
+    global_ws = snapshot.get("global_ws", {})
+    provider_sessions = snapshot.get("provider_sessions", {})
+    click.echo("  Runtime:")
+    click.echo(f"    dashboard_poll={polling.get('interval_seconds', '?')}s")
+    click.echo(
+        "    cells={cells} chat_ws={chat_ws} approvals={approvals}".format(
+            cells=snapshot.get("cells_total", 0),
+            chat_ws=snapshot.get("chat_ws_connections_total", 0),
+            approvals=snapshot.get("approval_pending_total", 0),
+        )
+    )
+    click.echo(
+        "    thread_status_ws={thread_status} cron_ws={cron} approval_subscribers={subs}".format(
+            thread_status=global_ws.get("thread_status_connections", 0),
+            cron=global_ws.get("cron_connections", 0),
+            subs=global_ws.get("approval_subscribers", 0),
+        )
+    )
+    click.echo(
+        "    claude_sessions={claude} codex_sessions={codex}".format(
+            claude=provider_sessions.get("claude_active_sessions", 0),
+            codex=provider_sessions.get("codex_active_sessions", 0),
+        )
+    )
+    cells = snapshot.get("cells", [])
+    if cells:
+        click.echo("    active_cells:")
+        for cell in cells:
+            click.echo(
+                "      - {thread_id} [{status}] ws={chat_ws} pending={pending} name={name}".format(
+                    thread_id=cell.get("thread_id", "-"),
+                    status=cell.get("status", "-"),
+                    chat_ws=cell.get("chat_ws_connections", 0),
+                    pending=cell.get("pending_approval_count", 0),
+                    name=cell.get("thread_name", "-"),
+                )
+            )
 
 
 @cli.command()
