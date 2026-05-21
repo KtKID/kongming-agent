@@ -117,7 +117,12 @@ def build_cron_execution_bridge(
             web / cli sink。
         preset_map: v0.4 cron-thread-preset：per-task LLM preset 映射表。
             ``task.preset_id`` 命中 key 时 bridge 按 preset 构建独立 provider；
-            ``None`` 时所有 task 用同一个默认 provider。
+            ``None`` 表示未启用 preset 体系，所有 task 走 ``cfg.model.*``
+            构造的同一个默认 provider（env ``KONGMING_MODEL_*`` 覆盖）。
+            v0.5.3 起：装配方传了 ``preset_map`` 但 ``task.preset_id`` 不在
+            map 里时，bridge 不再静默 fallback 到默认 provider，直接把该次
+            run 标 FAILED 并写日志（见
+            :meth:`ExecutionBridge._build_provider`）。
 
     Returns:
         ``(runtime, bridge)`` 二元组：
