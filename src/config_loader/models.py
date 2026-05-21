@@ -955,6 +955,8 @@ class WebConfig(BaseModel):
         idle_timeout_seconds: cell 空闲多久后被 ``_idle_eviction_loop`` 自动
             evict（默认 30 分钟）。下限 60s 防误配。
         idle_check_interval_seconds: 后台扫盘周期（默认 60s）。下限 10s。
+        dashboard_poll_interval_seconds: dashboard 状态页轮询周期（秒）。
+            默认 5s；运行时最小按 3s 归一化。
         pending_approval_timeout_seconds: 单次审批等待上限（默认 60s）。下限 10s。
         ws_heartbeat_interval_ms: 前端发 ping 的间隔（毫秒）。默认 30s。
             下限 5s 防过频。
@@ -975,6 +977,7 @@ class WebConfig(BaseModel):
     cors_origins: list[str] = Field(default_factory=list)
     idle_timeout_seconds: Annotated[int, Field(ge=60)] = 1800
     idle_check_interval_seconds: Annotated[int, Field(ge=10)] = 60
+    dashboard_poll_interval_seconds: Annotated[int, Field(ge=1)] = 5
     pending_approval_timeout_seconds: Annotated[int, Field(ge=10)] = 60
 
     # 心跳配置（前端读取，不硬编码）
@@ -998,6 +1001,11 @@ class WebConfig(BaseModel):
                 )
             seen.add(preset.id)
         return self
+
+    @property
+    def normalized_dashboard_poll_interval_seconds(self) -> int:
+        """dashboard 轮询周期的运行时真值。"""
+        return max(self.dashboard_poll_interval_seconds, 3)
 
 
 # ---------------------------------------------------------------------------
