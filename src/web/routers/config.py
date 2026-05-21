@@ -24,7 +24,6 @@ class ClientConfigDTO(BaseModel):
     """下发给前端的客户端配置。"""
 
     ws_heartbeat_interval_ms: int
-    ws_heartbeat_background_interval_ms: int
     ws_heartbeat_timeout_ms: int
     ws_heartbeat_max_missed: int
     dashboard_poll_interval_seconds: int
@@ -37,7 +36,6 @@ async def get_client_config(request: Request) -> ClientConfigDTO:
     web = cfg.web
     return ClientConfigDTO(
         ws_heartbeat_interval_ms=web.ws_heartbeat_interval_ms,
-        ws_heartbeat_background_interval_ms=web.ws_heartbeat_background_interval_ms,
         ws_heartbeat_timeout_ms=web.ws_heartbeat_timeout_ms,
         ws_heartbeat_max_missed=web.ws_heartbeat_max_missed,
         dashboard_poll_interval_seconds=web.normalized_dashboard_poll_interval_seconds,

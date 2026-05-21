@@ -935,43 +935,6 @@ class LLMPresetConfig(BaseModel):
     reasoning_effort: Literal["low", "medium", "high"] | None = None
 
 
-class WebFullLogConfig(BaseModel):
-    """前后端通信全量日志配置（full-log-v0.1）。
-
-    为开发期可观测性提供"组装后的最终格式"全链路日志：WS 三条通道 C2S/S2C
-    帧 + REST 元数据写到 ``.kongming/logs/full_log.jsonl``（跟 ``trace.jsonl``
-    同 ``.kongming/`` home 体系），用于离线分析、bug 回溯、链路审计。
-
-    **默认关闭**——只有显式 ``enabled=true`` 或 env ``KONGMING_WEB_FULL_LOG_ENABLED=1``
-    才装配 :class:`devtools.full_logger.FullLogger`；关闭时所有 ``log()`` 调用
-    走 no-op 早返，对 event loop 零影响。
-
-    Attributes:
-        enabled: 是否启用全量日志。默认 ``False``，开发期通过 env 临时开启。
-        path: 日志文件路径（相对当前工作目录）。默认走 ``.kongming/logs/`` 与
-            ``trace.jsonl`` 同 home；父目录不存在时由 FullLogger 装配阶段
-            ``mkdir -p``；无写权限时降级为 ``enabled=False`` + warning。
-        rotate_daily: 是否按 UTC+8 自然日切分日志文件（追加日期后缀）。默认
-            ``True``——长期开启时避免单文件无限增长。
-        include_http_body: 是否在 REST middleware 记录请求/响应 body。
-            **预留字段，阶段 1 不实现，硬编码默认 ``False``**。阶段 2 引入
-            middleware 后由其消费此字段；即便用户显式开启，middleware 实现
-            层仍可能整体拒绝（敏感字段泄漏防御）。
-        queue_size: 异步 queue 容量。满则丢最旧 + 一次性 warning（防刷屏）。
-            下限 ``100`` 防误配把队列调成无意义的小值；上限 ``1_000_000`` 防
-            手抖配成 ``10**10`` 这种值导致 ``asyncio.Queue`` 占用无限内存
-            （把"丢最旧"防爆设计变成 OOM）。
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    enabled: bool = False
-    path: str = ".kongming/logs/full_log.jsonl"
-    rotate_daily: bool = True
-    include_http_body: bool = False
-    queue_size: Annotated[int, Field(ge=100, le=1_000_000)] = 10000
-
-
 class WebConfig(BaseModel):
     """v0.1.5 web 宿主壳配置段。
 
@@ -997,19 +960,11 @@ class WebConfig(BaseModel):
         pending_approval_timeout_seconds: 单次审批等待上限（默认 60s）。下限 10s。
         ws_heartbeat_interval_ms: 前端发 ping 的间隔（毫秒）。默认 30s。
             下限 5s 防过频。
-        ws_heartbeat_background_interval_ms: 浏览器 tab 切到后台时
-            前端发 ping 的间隔（毫秒）。默认 60s。下限 10s。
-            原因：Chrome 后台 tab 把 setInterval 节流到 ≥1min/次，
-            前台 30s 心跳在后台变成噪音 + 测出来 latency 是节流延迟不是真 RTT。
-            后台用更稀疏的间隔（60s）减少误导。
         ws_heartbeat_timeout_ms: 单次 pong 等待超时（毫秒）。默认 10s。
             下限 3s。
         ws_heartbeat_max_missed: 连续丢失几次 pong 判定连接死亡。默认 3 次。
         llm_presets: 可用的 LLM preset 列表；浏览器创建 thread 时下拉选其一。
             v0.1.5 schema 留空，由 web-app-shell 任务实际填默认 preset。
-        full_log: 前后端通信全量日志子配置（full-log-v0.1）。默认 ``enabled=False``，
-            开发期通过 env ``KONGMING_WEB_FULL_LOG_ENABLED=1`` 启用；详见
-            :class:`WebFullLogConfig`。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -1028,20 +983,12 @@ class WebConfig(BaseModel):
     # 心跳配置（前端读取，不硬编码）
     ws_heartbeat_interval_ms: Annotated[int, Field(ge=5000)] = 30000
     """前端发 ping 的间隔（毫秒）。默认 30s。下限 5s 防过频。"""
-    ws_heartbeat_background_interval_ms: Annotated[int, Field(ge=10000)] = 60000
-    """浏览器 tab 切到后台时 ping 间隔（毫秒）。默认 60s，下限 10s。
-
-    Chrome 后台 tab 节流 setInterval 到 ≥1min，前台 30s 在后台被压缩
-    成噪音，且 latency 测出来是节流延迟而非真 RTT。后台用更稀疏间隔
-    减少误导（visibilitychange 时切换）。
-    """
     ws_heartbeat_timeout_ms: Annotated[int, Field(ge=3000)] = 10000
     """单次 pong 等待超时（毫秒）。默认 10s。"""
     ws_heartbeat_max_missed: Annotated[int, Field(ge=1)] = 3
     """连续丢失几次 pong 判定连接死亡。默认 3 次。"""
 
     llm_presets: list[LLMPresetConfig] = Field(default_factory=list)
-    full_log: WebFullLogConfig = Field(default_factory=WebFullLogConfig)
 
     @model_validator(mode="after")
     def _check_unique_preset_ids(self) -> WebConfig:
@@ -1124,6 +1071,5 @@ __all__ = [
     "ToolConfig",
     "TraceConfig",
     "WebConfig",
-    "WebFullLogConfig",
     "WorkflowConfig",
 ]
