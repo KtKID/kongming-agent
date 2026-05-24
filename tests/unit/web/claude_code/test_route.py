@@ -435,3 +435,29 @@ def test_thread_id_omitted_keeps_legacy_behavior(
         msg = ws.receive_json()
         # 只要能拿到任意 normalize 帧就证明没被 close
         assert msg.get("provider") == "claude" or msg.get("kind") is not None
+
+
+def test_ping_frame_intercepted_by_network_manager_returns_pong(
+    app_client: TestClient,
+) -> None:
+    """network-layer-claude-keepalive-v0.1：``{"kind":"ping"}`` 帧被 NetworkManager
+    拦下，原样 echo ts + 附带 server timestamp_ms，返回 pong 帧。
+
+    端到端验证：
+    1. ws.send_json ping → ws.receive_json 拿到 pong（不经过业务 _dispatch）
+    2. ts 字段原样回传，timestamp_ms 是 int（服务端 wall-clock 毫秒）
+    3. ws 仍存活，可继续发业务帧（验证 ``continue`` 跳过 _dispatch 后主循环
+       继续等下一帧而不是断开）
+    """
+    with app_client.websocket_connect("/ws/claude-code") as ws:
+        ws.send_json({"kind": "ping", "ts": 1700000000000})
+        msg = ws.receive_json()
+        assert msg.get("kind") == "pong", f"expected pong, got {msg!r}"
+        assert msg.get("ts") == 1700000000000
+        assert isinstance(msg.get("timestamp_ms"), int)
+        assert msg["timestamp_ms"] > 0
+
+        # 验证 ws 仍存活：发个 unknown command 拿 error
+        ws.send_json({"type": "totally-unknown"})
+        msg = ws.receive_json()
+        assert msg.get("kind") == "error"

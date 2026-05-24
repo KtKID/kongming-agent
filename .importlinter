@@ -245,15 +245,6 @@ ignore_imports =
     web.app -> web.uploads.storage
     web.app -> web.uploads.registry
     web.app -> web.uploads.validation
-; manage-config-tab #6：web.app + dashboard/config/router 都需要触达 manager / writer
-; / restart / schema 子模块。其中 writer 走 config_loader.{loader,errors} 做
-; pydantic 校验闭环——``config_loader.errors -> core.errors`` 的传递链触发
-; Contract 6。dashboard/config 是 task 单点真源（操作 setting.yaml 的唯一入口），
-; 与 web.uploads 同模式单点白名单放行。
-    web.app -> web.dashboard.config
-    web.dashboard.config.router -> web.dashboard.config.manager
-    web.dashboard.config.router -> web.dashboard.config.writer
-    web.dashboard.config.router -> web.dashboard.config.restart
 
 ; ---------------------------------------------------------------------------
 ; Contract 7: scheduler 不允许 import web 模块

@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 
+from network import get_network_manager
 from web._shared.session_manager import SessionManager
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 from web.auto_approval.ws_handlers import (
@@ -262,6 +263,16 @@ async def claude_code_ws(
 
     await websocket.accept()
 
+    # network-layer-claude-keepalive-v0.1: 注册到 NetworkManager 拿 conn_id，
+    # 主循环里每条 inbound 帧先走 network_manager.handle_inbound() 拦下 ping
+    # 帧回 pong；走完心跳路径后才进业务 _dispatch。
+    network_manager = get_network_manager()
+    conn_id = await network_manager.register(
+        "claude",
+        websocket,
+        thread_id=bound_thread_id,
+    )
+
     # 2.7 evolution hook: register event route
     if evolution_manager is not None and evolution_manager.enabled and bound_thread_id:
         from web.ws_event_sink import WSEventSink
@@ -280,6 +291,14 @@ async def claude_code_ws(
     try:
         while True:
             data = await websocket.receive_json()
+            # network-layer v0.1: 心跳帧由 NetworkManager 拦下回 pong；返回
+            # True 即跳过业务路由。非 dict 帧（如纯字符串）由 _dispatch 自己
+            # 报 error，本路径只对 dict 走 handle_inbound。
+            if isinstance(data, dict) and await network_manager.handle_inbound(
+                conn_id,
+                data,
+            ):
+                continue
             await _dispatch(
                 websocket,
                 data,
@@ -307,6 +326,10 @@ async def claude_code_ws(
         with contextlib.suppress(Exception):
             await websocket.close()
     finally:
+        # network-layer v0.1: 注销连接，停止心跳状态机。幂等：未知 conn_id
+        # 静默返回，多次 disconnect / 异常退出都安全。
+        with contextlib.suppress(Exception):
+            await network_manager.unregister(conn_id)
         # evolution hook: unregister event route on any exit path
         if evolution_manager is not None and evolution_manager.enabled and bound_thread_id:
             evolution_manager.unregister_event_route(bound_thread_id)

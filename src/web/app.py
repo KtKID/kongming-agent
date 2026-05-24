@@ -181,24 +181,6 @@ def create_app(
         # startup
         try:
             progress.report("lifespan")
-
-            # full-log-v0.1 阶段 1：装配 FullLogger 单例（enabled=False 时是 no-op，
-            # 不影响现有链路）。必须放在 thread_manager.start() 之前 —— ws_event_sink
-            # 在 emit() 时 get_full_logger()，没 init 会拿到哑实例（数据丢但不抛）。
-            try:
-                from devtools import init_full_logger
-
-                _full_logger = init_full_logger(cfg.web.full_log)
-                await _full_logger.start()
-                if _full_logger.enabled:
-                    logger.info(
-                        "FullLogger started: path=%s queue_size=%d",
-                        _full_logger.path,
-                        cfg.web.full_log.queue_size,
-                    )
-            except Exception:
-                logger.exception("FullLogger init failed; continuing without full_log")
-
             await thread_manager.start()
             try:
                 from evolution.apply_executor import recover_pending_apply_jobs
@@ -419,15 +401,6 @@ def create_app(
             except Exception:
                 logger.exception("ThreadManager.aclose_all() raised; ignoring during shutdown")
 
-            # full-log-v0.1 阶段 1：放在最后 flush 队列，让前面所有 shutdown 阶段
-            # 产生的最后几帧也能落盘。未 init / 已 closed 时 aclose() 是 no-op。
-            try:
-                from devtools import get_full_logger
-
-                await get_full_logger().aclose()
-            except Exception:
-                logger.exception("FullLogger.aclose failed; ignoring during shutdown")
-
     # 4. FastAPI 实例
     docs_url = "/docs" if cfg.web.dev_mode else None
     redoc_url = "/redoc" if cfg.web.dev_mode else None
@@ -456,22 +429,6 @@ def create_app(
     app.state.workspace_root = Path.cwd()
     app.state.whiteboard_manager = WhiteboardManager(whiteboard_root=home / "whiteboard")
     app.state.claude_session_manager = _SharedSessionManager()
-
-    # manage-config-tab #6：ConfigManager 单例（操作 setting.yaml 的唯一入口）。
-    # yaml_path 优先用 KONGMING_CONFIG env（与 cli.main 一致），否则回落到
-    # repo_root/config/setting.yaml。repo_root 用模块顶部的 _REPO_ROOT 常量
-    # （与 ./start.sh web restart 的物理位置同源）。
-    import os as _os
-
-    from web.dashboard.config import ConfigManager
-
-    _config_yaml_path = Path(
-        _os.environ.get("KONGMING_CONFIG", str(_REPO_ROOT / "config" / "setting.yaml")),
-    )
-    app.state.config_manager = ConfigManager(
-        yaml_path=_config_yaml_path,
-        repo_root=_REPO_ROOT,
-    )
 
     # smart-approval-v1：进程级单例
     # - policy 持 rule_set + config_store；config_store 每次 classify 重读盘，UI toggle 立即生效
@@ -562,14 +519,12 @@ def create_app(
 
     from web.claude_code import router as claude_code_router
     from web.codex import router as codex_router
-    from web.dashboard.config import router as dashboard_config_router
     from web.routers.auth import router as auth_router
     from web.routers.claude import router as claude_router
     from web.routers.codex import router as codex_rest_router
     from web.routers.config import router as config_router
     from web.routers.cron import router as cron_router
     from web.routers.diagrams import router as diagrams_router
-    from web.routers.health import router as health_router
     from web.routers.manage import router as manage_router
     from web.routers.presets import router as presets_router
     from web.routers.server_info import router as server_info_router
@@ -588,8 +543,6 @@ def create_app(
     app.include_router(presets_router)
     app.include_router(config_router)
     app.include_router(manage_router)
-    # manage-config-tab #6：挂 /api/manage/config/* 5 个端点
-    app.include_router(dashboard_config_router)
     app.include_router(whiteboard_router)
     app.include_router(diagrams_router)
     app.include_router(claude_code_router)
@@ -604,7 +557,6 @@ def create_app(
     app.include_router(sitian_router)
     app.include_router(server_info_router)
     app.include_router(uploads_router)
-    app.include_router(health_router)
 
     # workflow dashboard
     if cfg.workflow.enabled:
