@@ -474,6 +474,28 @@ def create_app(
     app.state.asset_registry = AssetRegistry()
     app.state.upload_validator = MediaUploadValidator(thread_manager)
 
+    # network-layer-claude-keepalive-v0.1: 进程级单例，注入心跳配置
+    # （来自 cfg.web.ws_heartbeat_* 真源；所有频道公用一个倒计时配置）。
+    # 当前仅 Claude 频道接入；其他频道在 v0.2 才走 NetworkManager。
+    # 注：get_kongming_home 走 config_loader.paths 子模块直 import，避免
+    # config_loader/__init__.py → config_loader.errors → core.errors 间接链
+    # 触发 Contract 6 (web-app-shell-no-cross-pillar) 违规。
+    from network import HeartbeatConfig, get_network_manager
+    from network.manager import configure_heartbeat_log
+
+    _network_manager = get_network_manager()
+    _network_manager.configure(
+        HeartbeatConfig(
+            interval_ms=cfg.web.ws_heartbeat_interval_ms,
+            timeout_ms=cfg.web.ws_heartbeat_timeout_ms,
+            max_missed=cfg.web.ws_heartbeat_max_missed,
+        ),
+    )
+    # 心跳诊断日志：写 .kongming/logs/heartbeat/heartbeat.log
+    # （旁路设计；删除本调用 + 重启即关闭日志，不影响功能）
+    configure_heartbeat_log(get_kongming_home() / "logs" / "heartbeat")
+    app.state.network_manager = _network_manager
+
     # codex 通道（与 claude_code 平级，独立 SessionManager 单例）
     # codex-channel-image-paste §3：service 构造时注入 asset_storage，让
     # CodexImageCliArgsBuilder 能反推 asset 物理路径生成 --image flag

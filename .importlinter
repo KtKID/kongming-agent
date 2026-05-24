@@ -24,6 +24,7 @@ root_packages =
     evolution
     scheduler
     web
+    network
 source_paths = src
 include_external_packages = True
 
@@ -353,3 +354,47 @@ forbidden_modules =
     web.whiteboard_store
 ; router → manager → store 是合法链路，只禁直接 import
 allow_indirect_imports = True
+
+; ---------------------------------------------------------------------------
+; Contract 11: network 不依赖业务层
+;              network 包是基础设施层，业务模块可以 import 它，反向禁止。
+;              v0.1 web 是业务层全集；v0.2 接入更多频道时按需扩展。
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:network-self-contained]
+name = network must not depend on business modules
+type = forbidden
+source_modules =
+    network
+forbidden_modules =
+    web
+
+; ---------------------------------------------------------------------------
+; Contract 12: network.tools 仅 network 包内部可见
+;              业务模块若需要 network 工具，应通过 network.manager /
+;              network.heartbeat 的公开接口访问；不要直接 import tools。
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:network-tools-private]
+name = network.tools is private to network package
+type = forbidden
+; allow_indirect_imports=True: 业务模块通过 network.manager 公开接口间接触达
+; tools（manager 内部消费私有 helper）合法；只禁直接 ``from network.tools import ...``
+allow_indirect_imports = True
+source_modules =
+    core
+    tools
+    context
+    executors
+    host
+    cli
+    safety
+    observability
+    config_loader
+    memory
+    prompts
+    evolution
+    scheduler
+    web
+forbidden_modules =
+    network.tools

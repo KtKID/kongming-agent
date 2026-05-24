@@ -960,6 +960,11 @@ class WebConfig(BaseModel):
         pending_approval_timeout_seconds: 单次审批等待上限（默认 60s）。下限 10s。
         ws_heartbeat_interval_ms: 前端发 ping 的间隔（毫秒）。默认 30s。
             下限 5s 防过频。
+        ws_heartbeat_background_interval_ms: 浏览器 tab 切到后台时
+            前端发 ping 的间隔（毫秒）。默认 60s。下限 10s。
+            原因：Chrome 后台 tab 把 setInterval 节流到 ≥1min/次，
+            前台 30s 心跳在后台变成噪音 + 测出来 latency 是节流延迟不是真 RTT。
+            后台用更稀疏的间隔（60s）减少误导。
         ws_heartbeat_timeout_ms: 单次 pong 等待超时（毫秒）。默认 10s。
             下限 3s。
         ws_heartbeat_max_missed: 连续丢失几次 pong 判定连接死亡。默认 3 次。
@@ -983,6 +988,13 @@ class WebConfig(BaseModel):
     # 心跳配置（前端读取，不硬编码）
     ws_heartbeat_interval_ms: Annotated[int, Field(ge=5000)] = 30000
     """前端发 ping 的间隔（毫秒）。默认 30s。下限 5s 防过频。"""
+    ws_heartbeat_background_interval_ms: Annotated[int, Field(ge=10000)] = 60000
+    """浏览器 tab 切到后台时 ping 间隔（毫秒）。默认 60s，下限 10s。
+
+    Chrome 后台 tab 节流 setInterval 到 ≥1min，前台 30s 在后台被压缩
+    成噪音，且 latency 测出来是节流延迟而非真 RTT。后台用更稀疏间隔
+    减少误导（visibilitychange 时切换）。
+    """
     ws_heartbeat_timeout_ms: Annotated[int, Field(ge=3000)] = 10000
     """单次 pong 等待超时（毫秒）。默认 10s。"""
     ws_heartbeat_max_missed: Annotated[int, Field(ge=1)] = 3
