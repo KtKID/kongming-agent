@@ -18,7 +18,7 @@
 事件映射表（13 行 + 兜底，详见 02-protocol.md §2.1）：
 
 ============================  =====================  =======================================
-codex event                   item.type              NormalizedMessage.kind
+codex event                   item.type              NormalizedMessage.frame_type
 ----------------------------  ---------------------  ---------------------------------------
 ``thread.started``            —                      ``session_created``
 ``turn.started``              —                      *（不发出，砍）*
@@ -90,14 +90,14 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
-def _base(session_id: str | None, kind: MessageKind) -> NormalizedMessage:
+def _base(session_id: str | None, frame_type: MessageKind) -> NormalizedMessage:
     """所有出站消息共享的 base 字段。"""
     out: NormalizedMessage = {
         "id": _new_id(),
         "sessionId": session_id,
         "timestamp": _now_iso(),
         "provider": "codex",
-        "kind": kind,
+        "frame_type": frame_type,
     }
     return out
 
@@ -333,7 +333,7 @@ def _handle_item_error(item: dict[str, Any], session_id: str | None) -> list[Nor
 
 
 def _unknown_event(event: dict[str, Any], session_id: str | None) -> NormalizedMessage:
-    """unknown 事件：不抛错，返回 error kind 包裹原 event（schema 演进容忍）。"""
+    """unknown 事件：不抛错，返回 frame_type=error 包裹原 event（schema 演进容忍）。"""
     out = _base(session_id, "error")
     out["error"] = f"unknown codex event type: {event.get('type')!r}"
     out["content"] = {"raw": event}

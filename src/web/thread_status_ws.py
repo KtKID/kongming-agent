@@ -23,9 +23,7 @@ import time
 from typing import Any, Literal, cast
 
 from fastapi import FastAPI, WebSocket
-from starlette.websockets import WebSocketDisconnect
 
-from network.network_log import log_network_event, log_network_exception
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 
 logger = logging.getLogger(__name__)
@@ -113,13 +111,7 @@ class ThreadStatusBroadcaster:
         """对单个连接 send；失败则自动 detach。"""
         try:
             await ws.send_json(payload)
-        except Exception as exc:
-            log_network_exception(
-                "web.thread_status_ws",
-                "broadcast_send_failed",
-                exc,
-                websocket_id=id(ws),
-            )
+        except Exception:
             await self.detach(ws)
 
     async def emit(self, thread_id: str, normalized: dict[str, Any]) -> None:
@@ -156,11 +148,8 @@ class ThreadStatusBroadcaster:
         if phase is None:
             return
 
-        # protocol-frame-type-unify-v0.2：出站帧判别字段从 ``type`` 切到
-        # ``frame_type``（与全局 wire 协议对齐）。字面值 ``thread-status``
-        # 保持，前端 selector 也按 ``frame_type === "thread-status"`` 切换。
         frame: dict[str, Any] = {
-            "frame_type": "thread-status",
+            "type": "thread-status",
             "threadId": thread_id,
             "phase": phase,
         }
@@ -196,7 +185,7 @@ class ThreadStatusEventSink:
         self._last_phase = phase
 
         frame: dict[str, Any] = {
-            "frame_type": "thread-status",
+            "type": "thread-status",
             "threadId": self._thread_id,
             "phase": phase,
         }
@@ -250,7 +239,7 @@ async def _thread_status_ws_handler(websocket: WebSocket) -> None:
     ApprovalInboxBroadcaster**——所有 approval.inbox.* 帧也走这条 WS（端点名是
     历史，现在职责更广；URL 不变是为了不动小绿球 connectionStatus / 客户端 hook）。
 
-    入帧支持 3 种 frame_type：
+    入帧支持 3 种 kind：
     - ``ping`` → 回 pong（心跳）
     - ``approval.inbox.resolve`` → 路由到 ApprovalInboxBroadcaster.resolve → bridge
     - 其他 → 静默丢弃
@@ -297,17 +286,15 @@ async def _thread_status_ws_handler(websocket: WebSocket) -> None:
             if not isinstance(data, dict):
                 continue
 
-            # protocol-frame-type-unify-v0.2：入站判别字段从 ``kind`` 切到
-            # ``frame_type``。
-            frame_type = data.get("frame_type")
-            if frame_type == "ping":
+            kind = data.get("kind")
+            if kind == "ping":
                 pong = {
-                    "frame_type": "pong",
+                    "kind": "pong",
                     "timestamp_ms": _now_ms(),
                     "ts": data.get("ts"),
                 }
                 await websocket.send_json(pong)
-            elif frame_type == "approval.inbox.resolve":
+            elif kind == "approval.inbox.resolve":
                 # smart-approval-v2-inbox: 用户点三按钮 → 路由回正确 bridge
                 thread_id = data.get("threadId")
                 request_id = data.get("requestId")
@@ -328,15 +315,9 @@ async def _thread_status_ws_handler(websocket: WebSocket) -> None:
                 if remember_scope is not None:
                     decision["rememberScope"] = remember_scope
                 inbox.resolve(thread_id, request_id, decision)
-            # 其他 frame_type 静默
-    except Exception as exc:
+            # 其他 kind 静默
+    except Exception:
         logger.debug("/ws/thread-status client disconnected or errored")
-        log_network_event(
-            "web.thread_status_ws",
-            "ws_loop_terminated",
-            level="INFO" if isinstance(exc, WebSocketDisconnect) else "WARNING",
-            message=str(exc),
-        )
     finally:
         # 4. detach 两个 broadcaster
         await broadcaster.detach(websocket)

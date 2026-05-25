@@ -100,7 +100,7 @@ async def test_can_use_tool_emits_permission_request_and_resolves_allow() -> Non
     assert isinstance(result, PermissionResultAllow)
     assert result.updated_input == {"new": "input"}
     assert len(writer.sent) == 1
-    assert writer.sent[0]["kind"] == "permission_request"
+    assert writer.sent[0]["frame_type"] == "permission_request"
     assert writer.sent[0]["requestId"] == "toolu_test"
     assert writer.sent[0]["toolName"] == "Bash"
 

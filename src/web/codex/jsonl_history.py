@@ -256,7 +256,7 @@ def _handle_agent_message(
     if not text:
         return []
     out = _base(session_id, timestamp)
-    out["kind"] = "text"
+    out["frame_type"] = "text"
     out["role"] = "assistant"
     out["content"] = text
     return [out]
@@ -272,7 +272,7 @@ def _handle_reasoning(
     if not text:
         return []
     out = _base(session_id, timestamp)
-    out["kind"] = "thinking"
+    out["frame_type"] = "thinking"
     out["role"] = "assistant"
     out["content"] = text
     return [out]
@@ -291,13 +291,13 @@ def _handle_command_execution(
     item_id = str(payload.get("id", "")) or _new_id()
 
     use = _base(session_id, timestamp)
-    use["kind"] = "tool_use"
+    use["frame_type"] = "tool_use"
     use["toolId"] = item_id
     use["toolName"] = "shell"
     use["toolInput"] = {"command": payload.get("command", "")}
 
     result = _base(session_id, timestamp)
-    result["kind"] = "tool_result"
+    result["frame_type"] = "tool_result"
     result["toolId"] = item_id
     result["content"] = payload.get("aggregated_output", "")
     exit_code = payload.get("exit_code")
@@ -317,13 +317,13 @@ def _handle_file_change(
     status = payload.get("status", "")
 
     use = _base(session_id, timestamp)
-    use["kind"] = "tool_use"
+    use["frame_type"] = "tool_use"
     use["toolId"] = item_id
     use["toolName"] = "edit"
     use["toolInput"] = {"changes": changes} if changes is not None else {}
 
     result = _base(session_id, timestamp)
-    result["kind"] = "tool_result"
+    result["frame_type"] = "tool_result"
     result["toolId"] = item_id
     result["content"] = changes if changes is not None else ""
     result["isError"] = status != "completed"
@@ -343,13 +343,13 @@ def _handle_mcp_tool_call(
     tool_name = f"{server}/{tool}" if server or tool else "mcp"
 
     use = _base(session_id, timestamp)
-    use["kind"] = "tool_use"
+    use["frame_type"] = "tool_use"
     use["toolId"] = item_id
     use["toolName"] = tool_name
     use["toolInput"] = payload.get("arguments", {})
 
     result = _base(session_id, timestamp)
-    result["kind"] = "tool_result"
+    result["frame_type"] = "tool_result"
     result["toolId"] = item_id
     if "result" in payload:
         result["content"] = payload.get("result")
@@ -370,7 +370,7 @@ def _handle_web_search(
 ) -> list[dict[str, Any]]:
     item_id = str(payload.get("id", "")) or _new_id()
     out = _base(session_id, timestamp)
-    out["kind"] = "tool_use"
+    out["frame_type"] = "tool_use"
     out["toolId"] = item_id
     out["toolName"] = "web_search"
     out["toolInput"] = {"query": payload.get("query", "")}
@@ -383,7 +383,7 @@ def _handle_todo_list(
     timestamp: str,
 ) -> list[dict[str, Any]]:
     out = _base(session_id, timestamp)
-    out["kind"] = "status"
+    out["frame_type"] = "status"
     out["content"] = payload.get("items", [])
     return [out]
 
@@ -394,7 +394,7 @@ def _handle_error(
     timestamp: str,
 ) -> list[dict[str, Any]]:
     out = _base(session_id, timestamp)
-    out["kind"] = "error"
+    out["frame_type"] = "error"
     out["error"] = str(payload.get("message") or payload.get("error") or "codex rollout error")
     return [out]
 
@@ -410,7 +410,7 @@ def _handle_token_count(
     归一化为 camelCase 对齐前端。
     """
     out = _base(session_id, timestamp)
-    out["kind"] = "complete"
+    out["frame_type"] = "complete"
     out["exitCode"] = 0
     usage = _normalize_usage(payload.get("usage"))
     if usage:

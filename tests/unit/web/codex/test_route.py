@@ -5,7 +5,7 @@
 1. ``codex-command``        → :meth:`CodexService.query` 装配参数验证
 2. ``abort-session``        → :meth:`CodexService.abort` + ``complete(aborted=True)``
 3. ``check-session-status`` → ``session-status`` 帧（active / inactive 两路）
-4. unknown type             → ``kind:error`` + 主循环不退出
+4. unknown frame_type       → ``frame_type:error`` + 主循环不退出
 
 完整边界（resume 缺 sessionId / 字段类型 / WebSocketDisconnect 安全退出）见 T4。
 """
@@ -83,7 +83,7 @@ class TestCodexCommand:
         with client.websocket_connect("/ws/codex") as ws:
             ws.send_json(
                 {
-                    "type": "codex-command",
+                    "frame_type": "codex-command",
                     "command": "hi",
                     "options": {
                         "cwd": "/tmp",
@@ -94,10 +94,10 @@ class TestCodexCommand:
             # 再发一条 unknown 让主循环切片，保证 codex-command 的 bg_task
             # 已被 create_task 调度过（route 在 _handle 完后立即返回，
             # AsyncMock 的 query 即被 await）
-            ws.send_json({"type": "_ping_unknown_"})
+            ws.send_json({"frame_type": "_ping_unknown_"})
             # 拿到 unknown 的 error 帧——证明主循环还活着
             err = ws.receive_json()
-            assert err.get("kind") == "error"
+            assert err.get("frame_type") == "error"
 
         # ws 关闭后 server 端 bg_task 已 await 完
         fake_service.query.assert_called_once()
@@ -120,14 +120,14 @@ class TestCodexCommand:
         with client.websocket_connect("/ws/codex?thread_id=thread-aaaaaaaaaaaa") as ws:
             ws.send_json(
                 {
-                    "type": "codex-command",
+                    "frame_type": "codex-command",
                     "command": "hi",
                     "options": {},
                 },
             )
-            ws.send_json({"type": "_ping_unknown_"})
+            ws.send_json({"frame_type": "_ping_unknown_"})
             err = ws.receive_json()
-            assert err.get("kind") == "error"
+            assert err.get("frame_type") == "error"
 
         fake_service.query.assert_called_once()
         kwargs = fake_service.query.call_args.kwargs
@@ -141,13 +141,13 @@ class TestCodexCommand:
         with client.websocket_connect("/ws/codex") as ws:
             ws.send_json(
                 {
-                    "type": "codex-command",
+                    "frame_type": "codex-command",
                     "command": "hi",
                     "options": {"resume": True},
                 },
             )
             msg = ws.receive_json()
-            assert msg.get("kind") == "error"
+            assert msg.get("frame_type") == "error"
             assert "resume" in msg.get("error", "").lower()
         # 没有真正 spawn
         fake_service.query.assert_not_called()
@@ -164,13 +164,13 @@ class TestAbortSession:
         with client.websocket_connect("/ws/codex") as ws:
             ws.send_json(
                 {
-                    "type": "abort-session",
+                    "frame_type": "abort-session",
                     "sessionId": "019dee",
                     "provider": "codex",
                 },
             )
             msg = ws.receive_json()
-            assert msg.get("kind") == "complete"
+            assert msg.get("frame_type") == "complete"
             assert msg.get("aborted") is True
             assert msg.get("sessionId") == "019dee"
             assert msg.get("provider") == "codex"
@@ -189,12 +189,12 @@ class TestCheckSessionStatus:
         with client.websocket_connect("/ws/codex") as ws:
             ws.send_json(
                 {
-                    "type": "check-session-status",
+                    "frame_type": "check-session-status",
                     "sessionId": "ghost",
                 },
             )
             msg = ws.receive_json()
-            assert msg.get("type") == "session-status"
+            assert msg.get("frame_type") == "session-status"
             assert msg.get("sessionId") == "ghost"
             assert msg.get("isProcessing") is False
 
@@ -214,12 +214,12 @@ class TestCheckSessionStatus:
         with client.websocket_connect("/ws/codex") as ws:
             ws.send_json(
                 {
-                    "type": "check-session-status",
+                    "frame_type": "check-session-status",
                     "sessionId": "real-sid",
                 },
             )
             msg = ws.receive_json()
-            assert msg.get("type") == "session-status"
+            assert msg.get("frame_type") == "session-status"
             assert msg.get("sessionId") == "real-sid"
             assert msg.get("isProcessing") is True
 
@@ -230,7 +230,7 @@ class TestCheckSessionStatus:
 
 
 class TestUnknownType:
-    """未知 type → error 帧 + 主循环不退出。"""
+    """未知 frame_type → error 帧 + 主循环不退出。"""
 
     def test_unknown_type_returns_error_and_keeps_loop(
         self,
@@ -238,15 +238,15 @@ class TestUnknownType:
     ) -> None:
         client, _, _ = app_client
         with client.websocket_connect("/ws/codex") as ws:
-            ws.send_json({"type": "foo-bar"})
+            ws.send_json({"frame_type": "foo-bar"})
             msg1 = ws.receive_json()
-            assert msg1.get("kind") == "error"
+            assert msg1.get("frame_type") == "error"
             assert "unknown" in msg1.get("error", "").lower()
 
             # 再发一条，验证主循环仍活
-            ws.send_json({"type": "still-bogus"})
+            ws.send_json({"frame_type": "still-bogus"})
             msg2 = ws.receive_json()
-            assert msg2.get("kind") == "error"
+            assert msg2.get("frame_type") == "error"
 
 
 class TestWebSocketDisconnect:
