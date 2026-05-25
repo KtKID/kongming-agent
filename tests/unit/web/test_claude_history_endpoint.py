@@ -159,7 +159,7 @@ def test_happy_path_returns_messages(tmp_path: Path, monkeypatch) -> None:
         assert "messages" in body
         msgs = body["messages"]
         assert len(msgs) == 2
-        assert msgs[0]["kind"] == "text"
+        assert msgs[0]["frame_type"] == "text"
         assert msgs[0]["role"] == "user"
         assert msgs[0]["content"] == "hi"
         assert msgs[1]["role"] == "assistant"
@@ -304,7 +304,7 @@ def test_history_endpoint_filters_tool_entries_by_default(
         resp = client.get("/api/threads/thread-aaaaaaaaaaaa/claude_history")
         assert resp.status_code == 200
         body = resp.json()
-        assert [m["kind"] for m in body["messages"]] == ["text", "text"]
+        assert [m["frame_type"] for m in body["messages"]] == ["text", "text"]
         assert [m["content"] for m in body["messages"]] == ["before tool", "after tool"]
     finally:
         client.__exit__(None, None, None)
@@ -377,6 +377,6 @@ def test_history_endpoint_include_tools_true_restores_tool_entries(
         resp = client.get("/api/threads/thread-aaaaaaaaaaaa/claude_history?include_tools=true")
         assert resp.status_code == 200
         body = resp.json()
-        assert [m["kind"] for m in body["messages"]] == ["tool_use", "tool_result"]
+        assert [m["frame_type"] for m in body["messages"]] == ["tool_use", "tool_result"]
     finally:
         client.__exit__(None, None, None)
