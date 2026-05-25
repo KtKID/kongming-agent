@@ -430,6 +430,22 @@ def create_app(
     app.state.whiteboard_manager = WhiteboardManager(whiteboard_root=home / "whiteboard")
     app.state.claude_session_manager = _SharedSessionManager()
 
+    # manage-config-tab #6：ConfigManager 单例（操作 setting.yaml 的唯一入口）。
+    # yaml_path 优先用 KONGMING_CONFIG env（与 cli.main 一致），否则回落到
+    # repo_root/config/setting.yaml。repo_root 用模块顶部的 _REPO_ROOT 常量
+    # （与 ./start.sh web restart 的物理位置同源）。
+    import os as _os
+
+    from web.dashboard.config import ConfigManager
+
+    _config_yaml_path = Path(
+        _os.environ.get("KONGMING_CONFIG", str(_REPO_ROOT / "config" / "setting.yaml")),
+    )
+    app.state.config_manager = ConfigManager(
+        yaml_path=_config_yaml_path,
+        repo_root=_REPO_ROOT,
+    )
+
     # smart-approval-v1：进程级单例
     # - policy 持 rule_set + config_store；config_store 每次 classify 重读盘，UI toggle 立即生效
     # - audit 单文件 JSONL 追加（O_APPEND 并发安全）
@@ -519,12 +535,14 @@ def create_app(
 
     from web.claude_code import router as claude_code_router
     from web.codex import router as codex_router
+    from web.dashboard.config import router as dashboard_config_router
     from web.routers.auth import router as auth_router
     from web.routers.claude import router as claude_router
     from web.routers.codex import router as codex_rest_router
     from web.routers.config import router as config_router
     from web.routers.cron import router as cron_router
     from web.routers.diagrams import router as diagrams_router
+    from web.routers.health import router as health_router
     from web.routers.manage import router as manage_router
     from web.routers.presets import router as presets_router
     from web.routers.server_info import router as server_info_router
@@ -543,6 +561,8 @@ def create_app(
     app.include_router(presets_router)
     app.include_router(config_router)
     app.include_router(manage_router)
+    # manage-config-tab #6：挂 /api/manage/config/* 5 个端点
+    app.include_router(dashboard_config_router)
     app.include_router(whiteboard_router)
     app.include_router(diagrams_router)
     app.include_router(claude_code_router)
@@ -557,6 +577,7 @@ def create_app(
     app.include_router(sitian_router)
     app.include_router(server_info_router)
     app.include_router(uploads_router)
+    app.include_router(health_router)
 
     # workflow dashboard
     if cfg.workflow.enabled:

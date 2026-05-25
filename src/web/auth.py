@@ -196,6 +196,7 @@ def _is_path_allowlisted(path: str, *, allow_docs: bool) -> bool:
 
     - ``/api/auth/login``：登录入口本身不能要求 cookie
     - ``/api/auth/logout``：哪怕 cookie 已过期也允许 client 显式登出（清 cookie）
+    - ``/api/health``：重启探测端点；前端在 lifespan 未完成 / cookie 失效时也要能拿 200
     - 静态 / SPA 路径：``/``、``/assets/...``、``/index.html`` 等所有非 ``/api/`` 非 ``/ws/`` 的
     - WS 路径：HTTP middleware 不处理 WS upgrade 路径，但 starlette 仍会送进来 GET 请求；
       这里挡掉 ``/ws/`` 让 WS endpoint 自己鉴权
@@ -206,6 +207,9 @@ def _is_path_allowlisted(path: str, *, allow_docs: bool) -> bool:
     if path == "/api/auth/logout":
         return True
     if path == "/api/auth/reset-password":
+        return True
+    if path == "/api/health":
+        # 重启探测端点：前端在 lifespan 完成前 / cookie 失效场景下都要能拿 200
         return True
     if path.startswith("/ws/"):
         # WS 自身鉴权；HTTP 路径前缀 /ws/ 也放行（其它非 WS 协议的 GET 落到 404）
