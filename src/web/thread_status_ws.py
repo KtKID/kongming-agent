@@ -10,7 +10,7 @@
 - 鉴权：复用 thread WS 的 cookie-based session
 - 连接管理：单例 :class:`ThreadStatusBroadcaster` 维护 ``set[WebSocket]``
 - broadcast：``asyncio.gather(..., return_exceptions=True)`` 包裹
-- ``emit(thread_id, normalized)``：从 normalized["kind"] 映射到 phase，
+- ``emit(thread_id, normalized)``：从 normalized["frame_type"] 映射到 phase，
   构造帧后调 ``broadcast``
 """
 
@@ -125,22 +125,25 @@ class ThreadStatusBroadcaster:
         - ``permission_cancelled`` → ``idle``
         - ``complete`` → ``complete``
         - ``error`` → ``error``
-        - 其他 kind → 不推送
+        - 其他 frame_type → 不推送
         """
-        kind = normalized.get("kind")
-        if kind is None:
+        # NormalizedMessage 的判别字段已由 protocol-frame-type-unify-v0.1
+        # 从 ``kind`` 改成 ``frame_type``；本路径属内部消费 NormalizedMessage，
+        # 跟随真源字段名同步，与 thread-status 出站 wire 帧（``type``）解耦
+        frame_type = normalized.get("frame_type")
+        if frame_type is None:
             return
 
         phase: Phase | None = None
 
-        if kind == "stream_status":
+        if frame_type == "stream_status":
             raw_phase = normalized.get("phase")
             if isinstance(raw_phase, str) and raw_phase in _STREAM_STATUS_PHASES:
                 phase = cast(Phase, raw_phase)
             else:
                 return
         else:
-            phase = _KIND_TO_PHASE.get(kind)
+            phase = _KIND_TO_PHASE.get(frame_type)
 
         if phase is None:
             return

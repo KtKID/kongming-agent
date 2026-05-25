@@ -39,14 +39,13 @@ import 边界：
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import uuid
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
-from network.network_log import log_network_event, log_network_exception
-from web._shared.reconnectable_writer import ReconnectableWebSocketWriter
 from web._shared.session_manager import SessionManager
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 from web.codex.service import CodexService
@@ -62,7 +61,19 @@ WS_CLOSE_POLICY_VIOLATION = 1008
 router = APIRouter()
 
 
-WebSocketWriter = ReconnectableWebSocketWriter
+class WebSocketWriter:
+    """duck-typed writer 适配器（``async send_json(msg: dict)``）。
+
+    :class:`CodexService` 的内部 ``_safe_send`` 已经吞了发送异常，本类只是
+    把 FastAPI ``WebSocket`` 包一层让接口名字更显式（也方便后续插出站埋点
+    或速率限制 hook 时只改这一处）。
+    """
+
+    def __init__(self, websocket: WebSocket) -> None:
+        self._ws = websocket
+
+    async def send_json(self, msg: dict[str, Any]) -> None:
+        await self._ws.send_json(msg)
 
 
 @router.websocket("/ws/codex")
@@ -130,16 +141,9 @@ async def codex_websocket(
         # 客户端断连：保留活跃 session（不主动 kill 子进程），让用户重连后
         # 通过 check-session-status 重接 writer
         logger.debug("codex ws disconnected")
-        log_network_event(
-            "web.codex.route",
-            "ws_disconnected",
-            level="INFO",
-            message="codex websocket disconnected",
-            thread_id=thread_id,
-        )
     except Exception as exc:
         logger.exception("codex ws unhandled error")
-        try:
+        with contextlib.suppress(Exception):
             await writer.send_json(
                 {
                     "frame_type": "error",
@@ -147,24 +151,8 @@ async def codex_websocket(
                     "error": f"unhandled: {exc!r}",
                 },
             )
-        except Exception as send_exc:
-            log_network_exception(
-                "web.codex.route",
-                "unhandled_error_send_failed",
-                send_exc,
-                thread_id=thread_id,
-            )
-        try:
+        with contextlib.suppress(Exception):
             await websocket.close()
-        except Exception as close_exc:
-            log_network_exception(
-                "web.codex.route",
-                "unhandled_error_close_failed",
-                close_exc,
-                thread_id=thread_id,
-            )
-    finally:
-        writer.detach_ws(websocket)
 
 
 async def _dispatch(
@@ -213,8 +201,8 @@ async def _dispatch(
             return
         active = sessions.is_active(session_id)
         if active:
-            # 重连：把 SessionManager 里旧 writer 绑定到底层新 ws
-            await sessions.replace_writer(session_id, websocket)
+            # 重连：把 SessionManager 里旧 writer 换成当前 ws 的 writer
+            await sessions.replace_writer(session_id, writer)
         await writer.send_json(
             {
                 "frame_type": "session-status",
@@ -319,20 +307,13 @@ def _default_cwd() -> str:
 
 async def _send_error(writer: WebSocketWriter, error_message: str) -> None:
     """发送 ``frame_type:error`` 帧（容错）。"""
-    try:
+    with contextlib.suppress(Exception):
         await writer.send_json(
             {
                 "frame_type": "error",
                 "provider": "codex",
                 "error": error_message,
             },
-        )
-    except Exception as exc:
-        log_network_exception(
-            "web.codex.route",
-            "send_error_frame_failed",
-            exc,
-            error_message=error_message,
         )
 
 

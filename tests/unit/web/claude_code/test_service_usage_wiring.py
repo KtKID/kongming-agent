@@ -228,7 +228,7 @@ async def test_thread_manager_none_no_usage_call() -> None:
         register_id_override="thread-aabbccddeeff",
     )
     # 测试能跑完就说明跳过逻辑正确
-    kinds = [m.get("kind") for m in writer.sent]
+    kinds = [m.get("frame_type") for m in writer.sent]
     assert "complete" in kinds
 
 
@@ -340,5 +340,5 @@ async def test_get_thread_usage_exception_does_not_break_main_flow(
     )
 
     # 主流程正常完成——writer 收到 text + complete
-    kinds = [m.get("kind") for m in writer.sent]
+    kinds = [m.get("frame_type") for m in writer.sent]
     assert "complete" in kinds

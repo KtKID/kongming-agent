@@ -22,7 +22,7 @@ SDK 落盘的原始 entry 流翻译成 :class:`NormalizedMessage` 形态的 dict
 支持的 entry type（其余全 skip）：
 
 ============================  =============================================
-JSONL entry                   NormalizedMessage kind
+JSONL entry                   NormalizedMessage frame_type
 ----------------------------  ---------------------------------------------
 ``type=system, subtype=init`` ``session_created`` + ``newSessionId``
 ``type=user (str content)``   ``text`` (role=user)
@@ -179,7 +179,7 @@ def _translate_entry(
         if entry.get("subtype") != "init":
             return []
         out = _base(entry, claude_thread_id)
-        out["kind"] = "session_created"
+        out["frame_type"] = "session_created"
         new_sid = entry.get("sessionId")
         if isinstance(new_sid, str):
             out["newSessionId"] = new_sid
@@ -221,7 +221,7 @@ def _translate_user(
         if is_internal_content(content):
             return []
         out = _base(entry, claude_thread_id)
-        out["kind"] = "text"
+        out["frame_type"] = "text"
         out["role"] = "user"
         out["content"] = content
         return [out]
@@ -239,7 +239,7 @@ def _translate_user(
             if not isinstance(tool_use_id, str):
                 continue
             out = _base(entry, claude_thread_id)
-            out["kind"] = "tool_result"
+            out["frame_type"] = "tool_result"
             out["toolId"] = tool_use_id
             if "content" in block:
                 out["content"] = block.get("content")
@@ -277,7 +277,7 @@ def _translate_assistant(
             if not isinstance(text, str):
                 continue
             out = _base(entry, claude_thread_id)
-            out["kind"] = "text"
+            out["frame_type"] = "text"
             out["role"] = "assistant"
             out["content"] = text
             results.append(out)
@@ -287,7 +287,7 @@ def _translate_assistant(
             if not isinstance(thinking, str):
                 continue
             out = _base(entry, claude_thread_id)
-            out["kind"] = "thinking"
+            out["frame_type"] = "thinking"
             out["content"] = thinking
             results.append(out)
 
@@ -299,7 +299,7 @@ def _translate_assistant(
             if not isinstance(tool_id, str) or not isinstance(tool_name, str):
                 continue
             out = _base(entry, claude_thread_id)
-            out["kind"] = "tool_use"
+            out["frame_type"] = "tool_use"
             out["toolId"] = tool_id
             out["toolName"] = tool_name
             out["toolInput"] = block.get("input")

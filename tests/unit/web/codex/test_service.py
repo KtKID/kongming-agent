@@ -240,7 +240,7 @@ class TestQueryHappyPath:
                 writer=writer,
             )
 
-        kinds = [m.get("kind") for m in writer.sent]
+        kinds = [m.get("frame_type") for m in writer.sent]
         # 至少包含 session_created / text / complete
         assert "session_created" in kinds
         assert "text" in kinds
@@ -248,10 +248,10 @@ class TestQueryHappyPath:
         # 最后一条是 complete（turn.completed normalize 出来的，service 不补发）
         assert kinds[-1] == "complete"
         # session_created 携带 newSessionId == thread_id
-        sc = next(m for m in writer.sent if m["kind"] == "session_created")
+        sc = next(m for m in writer.sent if m["frame_type"] == "session_created")
         assert sc.get("newSessionId") == "019dee"
         # complete 含 tokenBudget
-        complete = next(m for m in writer.sent if m["kind"] == "complete")
+        complete = next(m for m in writer.sent if m["frame_type"] == "complete")
         assert "tokenBudget" in complete
 
     async def test_thread_started_renames_session(
@@ -378,7 +378,7 @@ class TestErrorHandling:
                 writer=writer,
             )
 
-        errors = [m for m in writer.sent if m.get("kind") == "error"]
+        errors = [m for m in writer.sent if m.get("frame_type") == "error"]
         assert len(errors) >= 1
         assert "codex CLI not installed" in errors[0]["error"]
 
@@ -403,7 +403,7 @@ class TestErrorHandling:
                 writer=writer,
             )
 
-        errors = [m for m in writer.sent if m.get("kind") == "error"]
+        errors = [m for m in writer.sent if m.get("frame_type") == "error"]
         assert len(errors) == 1
         assert "codex login" in errors[0]["error"]
 
@@ -428,7 +428,7 @@ class TestErrorHandling:
                 writer=writer,
             )
 
-        errors = [m for m in writer.sent if m.get("kind") == "error"]
+        errors = [m for m in writer.sent if m.get("frame_type") == "error"]
         assert len(errors) == 1
         assert "exited with code 42" in errors[0]["error"]
         assert "some random failure" in errors[0]["error"]
@@ -457,13 +457,13 @@ class TestErrorHandling:
                 writer=writer,
             )
 
-        kinds = [m.get("kind") for m in writer.sent]
+        kinds = [m.get("frame_type") for m in writer.sent]
         # parse 失败 emit 一条 error 但后续 thread.started / complete 仍然正常处理
         assert "error" in kinds
         assert "session_created" in kinds
         assert "complete" in kinds
         # 验证错误消息含 jsonl parse 提示
-        errors = [m for m in writer.sent if m.get("kind") == "error"]
+        errors = [m for m in writer.sent if m.get("frame_type") == "error"]
         assert any("jsonl parse failed" in e["error"] for e in errors)
 
 

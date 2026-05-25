@@ -29,7 +29,7 @@ def test_system_init_translates_to_session_created() -> None:
     msg = SystemMessage(subtype="init", data={"session_id": "sdk-sid-1", "model": "sonnet"})
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "session_created"
+    assert out[0]["frame_type"] == "session_created"
     assert out[0]["newSessionId"] == "sdk-sid-1"
     assert out[0]["sessionId"] == "sdk-sid-1"
     assert out[0]["provider"] == "claude"
@@ -68,7 +68,7 @@ def test_assistant_text_block_translates_to_text() -> None:
     msg = _make_assistant([TextBlock(text="hello world")])
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "text"
+    assert out[0]["frame_type"] == "text"
     assert out[0]["role"] == "assistant"
     assert out[0]["content"] == "hello world"
 
@@ -78,7 +78,7 @@ def test_assistant_thinking_block_translates_to_thinking() -> None:
     msg = _make_assistant([ThinkingBlock(thinking="hmm", signature="sig")])
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "thinking"
+    assert out[0]["frame_type"] == "thinking"
     assert out[0]["content"] == "hmm"
 
 
@@ -88,7 +88,7 @@ def test_assistant_empty_thinking_block_still_emits() -> None:
     msg = _make_assistant([ThinkingBlock(thinking="", signature="sig")])
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "thinking"
+    assert out[0]["frame_type"] == "thinking"
     assert out[0]["content"] == ""
 
 
@@ -99,7 +99,7 @@ def test_assistant_tool_use_block_translates() -> None:
     )
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "tool_use"
+    assert out[0]["frame_type"] == "tool_use"
     assert out[0]["toolId"] == "toolu_xyz"
     assert out[0]["toolName"] == "Read"
     assert out[0]["toolInput"] == {"path": "/tmp"}
@@ -147,8 +147,8 @@ def test_assistant_multiple_blocks_emits_multiple_messages() -> None:
     )
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 2
-    assert out[0]["kind"] == "text"
-    assert out[1]["kind"] == "tool_use"
+    assert out[0]["frame_type"] == "text"
+    assert out[1]["frame_type"] == "tool_use"
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +169,7 @@ def test_user_tool_result_translates() -> None:
     )
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "tool_result"
+    assert out[0]["frame_type"] == "tool_result"
     assert out[0]["toolId"] == "toolu_xyz"
     assert out[0]["content"] == "some output"
     assert out[0]["isError"] is False
@@ -229,7 +229,7 @@ def test_stream_event_text_delta_translates() -> None:
     )
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "stream_delta"
+    assert out[0]["frame_type"] == "stream_delta"
     assert out[0]["content"] == "Hel"
     assert out[0]["deltaType"] == "text"
 
@@ -247,7 +247,7 @@ def test_stream_event_thinking_delta_translates() -> None:
     )
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "stream_delta"
+    assert out[0]["frame_type"] == "stream_delta"
     assert out[0]["content"] == "rea"
     assert out[0]["deltaType"] == "thinking"
 
@@ -268,7 +268,7 @@ def test_stream_event_input_json_delta_translates() -> None:
     )
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "stream_delta"
+    assert out[0]["frame_type"] == "stream_delta"
     assert out[0]["content"] == '{"path":'
     assert out[0]["deltaType"] == "input_json"
 
@@ -297,7 +297,7 @@ def test_stream_event_block_stop_emits_stream_end() -> None:
     )
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "stream_end"
+    assert out[0]["frame_type"] == "stream_end"
 
 
 def test_stream_event_message_start_emits_status() -> None:
@@ -316,7 +316,7 @@ def test_stream_event_message_start_emits_status() -> None:
     )
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "stream_status"
+    assert out[0]["frame_type"] == "stream_status"
     assert out[0]["phase"] == "responding"
     assert out[0]["model"] == "claude-sonnet-4-6"
 
@@ -332,7 +332,7 @@ def test_stream_event_message_start_without_model_omits_model_field() -> None:
     )
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "stream_status"
+    assert out[0]["frame_type"] == "stream_status"
     assert out[0]["phase"] == "responding"
     assert "model" not in out[0]
 
@@ -352,7 +352,7 @@ def test_stream_event_block_start_thinking_emits_status() -> None:
     )
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "stream_status"
+    assert out[0]["frame_type"] == "stream_status"
     assert out[0]["phase"] == "thinking"
     assert out[0]["blockIndex"] == 0
 
@@ -372,7 +372,7 @@ def test_stream_event_block_start_text_emits_status() -> None:
     )
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "stream_status"
+    assert out[0]["frame_type"] == "stream_status"
     assert out[0]["phase"] == "responding"
     assert out[0]["blockIndex"] == 1
 
@@ -397,7 +397,7 @@ def test_stream_event_block_start_tool_use_emits_status_with_tool_name() -> None
     )
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "stream_status"
+    assert out[0]["frame_type"] == "stream_status"
     assert out[0]["phase"] == "tool_calling"
     assert out[0]["blockIndex"] == 2
     assert out[0]["toolName"] == "Read"
@@ -423,7 +423,7 @@ def test_stream_event_block_start_tool_use_missing_id_omits_tool_id() -> None:
     )
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "stream_status"
+    assert out[0]["frame_type"] == "stream_status"
     assert out[0]["phase"] == "tool_calling"
     assert out[0]["toolName"] == "Read"
     assert "toolId" not in out[0]
@@ -449,7 +449,7 @@ def test_stream_event_block_start_server_tool_use_carries_tool_id() -> None:
     )
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "stream_status"
+    assert out[0]["frame_type"] == "stream_status"
     assert out[0]["phase"] == "tool_calling"
     assert out[0]["toolName"] == "WebSearch"
     assert out[0]["toolId"] == "stu_42"
@@ -492,7 +492,7 @@ def test_result_success_translates_to_complete() -> None:
     )
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "complete"
+    assert out[0]["frame_type"] == "complete"
     assert out[0]["exitCode"] == 0
     assert out[0]["durationMs"] == 1234
     assert out[0]["tokenBudget"]["inputTokens"] == 10
@@ -556,7 +556,7 @@ def test_result_error_translates_with_exit_code_1() -> None:
     )
     out = n.normalize(msg, SESSION_ID)
     assert len(out) == 1
-    assert out[0]["kind"] == "complete"
+    assert out[0]["frame_type"] == "complete"
     assert out[0]["exitCode"] == 1
     assert "Reached maximum" in out[0]["error"]
 

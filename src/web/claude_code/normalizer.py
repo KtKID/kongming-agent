@@ -173,7 +173,7 @@ class ClaudeNormalizer:
         if msg.data:
             sid = msg.data.get("session_id")
         out = _base(sid or session_id)
-        out["kind"] = "session_created"
+        out["frame_type"] = "session_created"
         if sid is not None:
             out["newSessionId"] = sid
         return [out]
@@ -194,19 +194,19 @@ class ClaudeNormalizer:
                     # 内部 system 注入文本：整条丢弃
                     continue
                 out = _base(session_id)
-                out["kind"] = "text"
+                out["frame_type"] = "text"
                 out["role"] = "assistant"
                 out["content"] = block.text
                 results.append(out)
             elif isinstance(block, ThinkingBlock):
                 # 空 thinking 也照实输出（[smoke §2.3]）
                 out = _base(session_id)
-                out["kind"] = "thinking"
+                out["frame_type"] = "thinking"
                 out["content"] = block.thinking
                 results.append(out)
             elif isinstance(block, ToolUseBlock):
                 out = _base(session_id)
-                out["kind"] = "tool_use"
+                out["frame_type"] = "tool_use"
                 out["toolId"] = block.id
                 out["toolName"] = block.name
                 out["toolInput"] = block.input
@@ -237,7 +237,7 @@ class ClaudeNormalizer:
                 continue
 
             out = _base(session_id)
-            out["kind"] = "tool_result"
+            out["frame_type"] = "tool_result"
             out["toolId"] = tool_use_id
             if block.content is not None:
                 out["content"] = block.content
@@ -253,7 +253,7 @@ class ClaudeNormalizer:
     ) -> list[NormalizedMessage]:
         """``ResultMessage`` → ``complete``。"""
         out = _base(session_id)
-        out["kind"] = "complete"
+        out["frame_type"] = "complete"
         out["exitCode"] = 1 if msg.is_error else 0
         if msg.duration_ms is not None:
             out["durationMs"] = msg.duration_ms
@@ -295,7 +295,7 @@ class ClaudeNormalizer:
 
         if event_type == "message_start":
             out = _base(session_id)
-            out["kind"] = "stream_status"
+            out["frame_type"] = "stream_status"
             out["phase"] = "responding"
             inner = event.get("message") or {}
             model = inner.get("model")
@@ -311,7 +311,7 @@ class ClaudeNormalizer:
                 # 未知 block type：保守不产出 stream_status，避免误导前端
                 return []
             out = _base(session_id)
-            out["kind"] = "stream_status"
+            out["frame_type"] = "stream_status"
             out["phase"] = phase
             index = event.get("index")
             if isinstance(index, int):
@@ -330,19 +330,19 @@ class ClaudeNormalizer:
             delta_type = delta.get("type")
             if delta_type == "text_delta":
                 out = _base(session_id)
-                out["kind"] = "stream_delta"
+                out["frame_type"] = "stream_delta"
                 out["content"] = delta.get("text", "")
                 out["deltaType"] = "text"
                 return [out]
             if delta_type == "thinking_delta":
                 out = _base(session_id)
-                out["kind"] = "stream_delta"
+                out["frame_type"] = "stream_delta"
                 out["content"] = delta.get("thinking", "")
                 out["deltaType"] = "thinking"
                 return [out]
             if delta_type == "input_json_delta":
                 out = _base(session_id)
-                out["kind"] = "stream_delta"
+                out["frame_type"] = "stream_delta"
                 out["content"] = delta.get("partial_json", "")
                 out["deltaType"] = "input_json"
                 return [out]
@@ -350,7 +350,7 @@ class ClaudeNormalizer:
             return []
         if event_type == "content_block_stop":
             out = _base(session_id)
-            out["kind"] = "stream_end"
+            out["frame_type"] = "stream_end"
             return [out]
         # message_delta / message_stop / 未知 SSE 控制帧丢弃
         return []

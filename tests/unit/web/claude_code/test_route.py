@@ -140,7 +140,7 @@ def test_claude_command_streams_normalized_messages(app_client: TestClient) -> N
     with app_client.websocket_connect("/ws/claude-code") as ws:
         ws.send_json(
             {
-                "type": "claude-command",
+                "frame_type": "claude-command",
                 "command": "hello",
                 "options": {"sessionId": "test-sid", "model": "sonnet"},
             },
@@ -153,10 +153,10 @@ def test_claude_command_streams_normalized_messages(app_client: TestClient) -> N
             except Exception:
                 break
             seen.append(msg)
-            if msg.get("kind") == "complete":
+            if msg.get("frame_type") == "complete":
                 break
 
-        kinds = [m.get("kind") for m in seen]
+        kinds = [m.get("frame_type") for m in seen]
         assert "text" in kinds, f"expected text frame, got {kinds}"
         assert "complete" in kinds, f"expected complete frame, got {kinds}"
 
@@ -164,9 +164,9 @@ def test_claude_command_streams_normalized_messages(app_client: TestClient) -> N
 def test_unknown_command_returns_error(app_client: TestClient) -> None:
     """未知 type → error 帧。"""
     with app_client.websocket_connect("/ws/claude-code") as ws:
-        ws.send_json({"type": "totally-unknown"})
+        ws.send_json({"frame_type": "totally-unknown"})
         msg = ws.receive_json()
-        assert msg.get("kind") == "error"
+        assert msg.get("frame_type") == "error"
         assert "unknown" in msg.get("error", "").lower()
 
 
@@ -175,12 +175,12 @@ def test_check_session_status_returns_inactive(app_client: TestClient) -> None:
     with app_client.websocket_connect("/ws/claude-code") as ws:
         ws.send_json(
             {
-                "type": "check-session-status",
+                "frame_type": "check-session-status",
                 "sessionId": "nope",
             },
         )
         msg = ws.receive_json()
-        assert msg.get("type") == "session-status"
+        assert msg.get("frame_type") == "session-status"
         assert msg.get("sessionId") == "nope"
         assert msg.get("isProcessing") is False
 
@@ -194,12 +194,12 @@ def test_abort_session_unknown_returns_complete_aborted(app_client: TestClient) 
     with app_client.websocket_connect("/ws/claude-code") as ws:
         ws.send_json(
             {
-                "type": "abort-session",
+                "frame_type": "abort-session",
                 "sessionId": "ghost-sid",
             },
         )
         msg = ws.receive_json()
-        assert msg.get("kind") == "complete"
+        assert msg.get("frame_type") == "complete"
         assert msg.get("aborted") is True
         assert msg.get("sessionId") == "ghost-sid"
 
@@ -235,7 +235,7 @@ def test_abort_session_active_does_not_emit_complete_from_route(
     with app_client.websocket_connect("/ws/claude-code") as ws:
         ws.send_json(
             {
-                "type": "abort-session",
+                "frame_type": "abort-session",
                 "sessionId": "active-sid",
             },
         )
@@ -243,11 +243,11 @@ def test_abort_session_active_does_not_emit_complete_from_route(
         # 反之 ws 没新帧，receive_json 会卡或抛 — 用 ws.send_json + 立即 receive
         # 一个 ping/pong 探针（ws.receive_json 不带 timeout 会卡死，这里用
         # 第二条消息后受控 yield）
-        ws.send_json({"type": "check-session-status", "sessionId": "active-sid"})
+        ws.send_json({"frame_type": "check-session-status", "sessionId": "active-sid"})
         msg = ws.receive_json()
         # 期望直接拿到 check-session-status 的 session-status 应答；
-        # 如果 route 误发了 complete，会先拿到 complete（kind="complete"）
-        assert msg.get("type") == "session-status", (
+        # 如果 route 误发了 complete，会先拿到 complete（frame_type="complete"）
+        assert msg.get("frame_type") == "session-status", (
             f"route 不应主动 emit complete（aborted=True 路径），但收到 {msg!r}"
         )
         assert msg.get("sessionId") == "active-sid"
@@ -261,23 +261,23 @@ def test_permission_response_routed_to_approval(
         # 不存在的 requestId 也只是 resolve 返回 False，不抛
         ws.send_json(
             {
-                "type": "claude-permission-response",
+                "frame_type": "claude-permission-response",
                 "requestId": "nonexistent",
                 "allow": True,
             },
         )
         # 后续发个 unknown 验证 ws 仍存活
-        ws.send_json({"type": "x"})
+        ws.send_json({"frame_type": "x"})
         msg = ws.receive_json()
-        assert msg.get("kind") == "error"
+        assert msg.get("frame_type") == "error"
 
 
 def test_invalid_command_field_types(app_client: TestClient) -> None:
     """字段类型不对 → error 帧。"""
     with app_client.websocket_connect("/ws/claude-code") as ws:
-        ws.send_json({"type": "claude-command", "command": 123})  # not str
+        ws.send_json({"frame_type": "claude-command", "command": 123})  # not str
         msg = ws.receive_json()
-        assert msg.get("kind") == "error"
+        assert msg.get("frame_type") == "error"
 
 
 def test_session_manager_attached_to_app_state(tmp_path: Path) -> None:
@@ -389,7 +389,7 @@ def test_thread_id_claude_code_thread_accepts_and_uses_thread_id_as_session(
     with client.websocket_connect(f"/ws/claude-code?thread_id={tid}") as ws:
         ws.send_json(
             {
-                "type": "claude-command",
+                "frame_type": "claude-command",
                 "command": "hello",
                 "options": {"model": "sonnet"},
             },
@@ -401,7 +401,7 @@ def test_thread_id_claude_code_thread_accepts_and_uses_thread_id_as_session(
             except Exception:
                 break
             seen.append(msg)
-            if msg.get("kind") == "complete":
+            if msg.get("frame_type") == "complete":
                 break
 
     # 至少出现一帧 sessionId == thread_id（不是 pending-XXX placeholder）
@@ -427,14 +427,14 @@ def test_thread_id_omitted_keeps_legacy_behavior(
     with app_client.websocket_connect("/ws/claude-code") as ws:
         ws.send_json(
             {
-                "type": "claude-command",
+                "frame_type": "claude-command",
                 "command": "hello",
                 "options": {"sessionId": "legacy-sid"},
             },
         )
         msg = ws.receive_json()
         # 只要能拿到任意 normalize 帧就证明没被 close
-        assert msg.get("provider") == "claude" or msg.get("kind") is not None
+        assert msg.get("provider") == "claude" or msg.get("frame_type") is not None
 
 
 def test_ping_frame_intercepted_by_network_manager_returns_pong(
@@ -458,6 +458,6 @@ def test_ping_frame_intercepted_by_network_manager_returns_pong(
         assert msg["timestamp_ms"] > 0
 
         # 验证 ws 仍存活：发个 unknown command 拿 error
-        ws.send_json({"type": "totally-unknown"})
+        ws.send_json({"frame_type": "totally-unknown"})
         msg = ws.receive_json()
-        assert msg.get("kind") == "error"
+        assert msg.get("frame_type") == "error"

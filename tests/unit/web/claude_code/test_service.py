@@ -163,7 +163,7 @@ async def test_query_sends_normalized_messages() -> None:
     await svc.query("hi", {"sessionId": "sid-1"}, writer)
 
     # 收到 text + complete
-    kinds = [m.get("kind") for m in writer.sent]
+    kinds = [m.get("frame_type") for m in writer.sent]
     assert "text" in kinds
     assert "complete" in kinds
 
@@ -242,7 +242,7 @@ async def test_query_failure_emits_error_and_evicts_client() -> None:
     writer = _FakeWriter()
     await svc.query("hi", {"sessionId": "sid-err"}, writer)
     # error 帧应当被发出
-    kinds = [m.get("kind") for m in writer.sent]
+    kinds = [m.get("frame_type") for m in writer.sent]
     assert "error" in kinds
 
 

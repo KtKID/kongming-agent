@@ -318,7 +318,7 @@ async def claude_code_ws(
         with contextlib.suppress(Exception):
             await websocket.send_json(
                 {
-                    "kind": "error",
+                    "frame_type": "error",
                     "provider": "claude",
                     "error": f"unhandled: {exc!r}",
                 },
@@ -353,7 +353,7 @@ async def _dispatch(
     bound_claude_tid: str = "",
 ) -> None:
     """单条入站帧分发。"""
-    msg_type = data.get("type") if isinstance(data, dict) else None
+    msg_type = data.get("frame_type") if isinstance(data, dict) else None
 
     if msg_type == "claude-command":
         command = data.get("command", "")
@@ -445,7 +445,7 @@ async def _dispatch(
         if not aborted:
             await websocket.send_json(
                 {
-                    "kind": "complete",
+                    "frame_type": "complete",
                     "provider": "claude",
                     "sessionId": session_id,
                     "aborted": True,
@@ -463,7 +463,7 @@ async def _dispatch(
             await sessions.replace_writer(session_id, websocket)
         await websocket.send_json(
             {
-                "type": "session-status",
+                "frame_type": "session-status",
                 "sessionId": session_id,
                 "isProcessing": active,
             },
@@ -493,7 +493,7 @@ async def _send_error(websocket: WebSocket, error_message: str) -> None:
     with contextlib.suppress(Exception):
         await websocket.send_json(
             {
-                "kind": "error",
+                "frame_type": "error",
                 "provider": "claude",
                 "error": error_message,
             },
