@@ -23,9 +23,6 @@
 
 - ``run_once`` 用 :func:`asyncio.create_task` 不阻塞读循环 —— 推理过程中
   ``approval.ack`` 才能送达；任务出错由 done_callback 推 ``error`` 帧。
-- protocol-frame-type-unify-v0.2：discriminated union 字段 ``kind`` →
-  ``frame_type``；``_dispatch_frame`` 内分派也从 ``frame.kind`` 切到
-  ``frame.frame_type``。
 - 1MB 限制：``len(raw_text)`` 字节而非字符数（中文 UTF-8 约 3 字节 / 字）。
 - ``cell.runtime`` 的 session history 由 ``runtime._sessions[thread_id]`` 提供；
   v0.1.5 通过 ``runtime.session_factory`` 兜底拿（需要 :class:`NativeRuntime` 暴露此接口）。
@@ -47,7 +44,7 @@ from pydantic import ValidationError
 
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore, resolve_evolution_root
-from network.network_log import log_network_event, log_network_exception
+from observability.network_log import log_network_event, log_network_exception
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 from web.auto_approval.ws_handlers import (
     handle_auto_approval_query,
@@ -237,8 +234,8 @@ async def _dispatch_frame(
     thread_id: str,
 ) -> None:
     """分派单个 C2S 帧。"""
-    frame_type = frame.frame_type
-    if frame_type == "user.input":
+    kind = frame.kind
+    if kind == "user.input":
         # 后台跑 run_once；不阻塞读循环
         effort = getattr(frame, "reasoning_effort", None)
         # claude-image-paste-e2e #20：把 UserInputAttachment(BaseModel) 列表
@@ -272,7 +269,7 @@ async def _dispatch_frame(
                 _cell.current_run_task = None
 
         task.add_done_callback(_clear_run_task)
-    elif frame_type == "interrupt":
+    elif kind == "interrupt":
         # interrupt-run-v0.1：浏览器点 Stop。检查当前 run 是否真在跑：
         # - None / 已 done：推 system notice "no_active_run"，不 cancel
         # - 否则 task.cancel() → runner 顶层 except → emit run.cancelled
@@ -286,7 +283,7 @@ async def _dispatch_frame(
                 "interrupt requested for thread=%s; cancelled current_run_task",
                 thread_id,
             )
-    elif frame_type == "approval.ack":
+    elif kind == "approval.ack":
         # v0.1.6 三态：传递字符串字面值给 thread_manager，由它转 ApprovalAction
         # 枚举（thread_manager 在装配层，可 import core.contracts；ws 是 app shell
         # 层不允许）。非法字段降级为 REJECT 由 thread_manager 处理。
@@ -294,7 +291,7 @@ async def _dispatch_frame(
             tm.resolve_approval(thread_id, frame.call_id, frame.action)
         except Exception:
             logger.exception("resolve_approval raised; ignored")
-    elif frame_type == "ping":
+    elif kind == "ping":
         try:
             pong = PongFrame(timestamp_ms=_now_ms(), ts=getattr(frame, "ts", None))
             await websocket.send_json(pong.model_dump())
@@ -308,7 +305,7 @@ async def _dispatch_frame(
             )
     else:
         # discriminated union 已经过滤；这里只是兜底
-        await _send_error_frame(websocket, "internal", f"unknown frame_type: {frame_type}")
+        await _send_error_frame(websocket, "internal", f"unknown frame kind: {kind}")
 
 
 async def _run_once_safely(

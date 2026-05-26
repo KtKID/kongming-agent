@@ -40,8 +40,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 
 from network import get_network_manager
-from network.keepalive_log import append_keepalive_log
-from network.network_log import log_network_event, log_network_exception
+from observability.network_log import log_network_event, log_network_exception
 from web._shared.reconnectable_writer import ReconnectableWebSocketWriter
 from web._shared.session_manager import SessionManager
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
@@ -51,6 +50,7 @@ from web.auto_approval.ws_handlers import (
     handle_auto_approval_toggle,
 )
 from web.claude_code.approval import ApprovalBridge
+from web.claude_code.keepalive_log import append_keepalive_log
 from web.claude_code.normalizer import ClaudeNormalizer
 from web.claude_code.service import ClaudeCodeService
 from web.protocol.rest_models import UserInputAttachment
@@ -294,7 +294,7 @@ async def claude_code_ws(
     if evolution_manager is not None and evolution_manager.enabled and bound_thread_id:
         from web.ws_event_sink import WSEventSink
 
-        evo_sink = WSEventSink(ws=websocket, thread_id=bound_thread_id)
+        evo_sink = WSEventSink(ws=websocket)
         evolution_manager.register_event_route(bound_thread_id, evo_sink)
 
     # 2.8 smart-approval-v1: 连接建立后主动 push 一次 state（前端 toggle 初始状态）
@@ -351,7 +351,7 @@ async def claude_code_ws(
         try:
             await websocket.send_json(
                 {
-                    "frame_type": "error",
+                    "kind": "error",
                     "provider": "claude",
                     "error": f"unhandled: {exc!r}",
                 },
@@ -407,28 +407,7 @@ async def _dispatch(
     bound_claude_tid: str = "",
 ) -> None:
     """单条入站帧分发。"""
-    # ──────────────────────────────────────────────────────────────────
-    # DEPRECATED · web-network-layer v0.1 重构遗留（待清理）
-    # ──────────────────────────────────────────────────────────────────
-    # 历史：fix commit 7270c0d (2026-05-26) 补 keepalive 日志时，在此重复
-    # 写了一份 ping→pong 处理逻辑；当时未意识到 5-24 引入的 NetworkManager
-    # (commit 1272a23) 已通过主循环 line 322 的 handle_inbound 接管全部
-    # ping 帧。本分支当前 100% 不可达（ping 帧在进 _dispatch 前已被拦下）。
-    #
-    # 新真源：
-    #   - src/network/manager.py::NetworkManager.handle_inbound
-    #   - src/network/heartbeat.py::Heartbeat.handle_inbound_frame
-    #   - 主循环拦截点：本文件 claude_code_ws 主循环 line 322-326
-    #
-    # 行为差异（保留本分支会回到分叉的旧行为，不要在此基础上改 bug）：
-    #   - pong 缺 ``timestamp_ms`` 字段（前端 RTT 诊断会少一个时间锚点）
-    #   - 日志写 ``.kongming/logs/claude-keepalive.jsonl``
-    #     （新真源走 ``network/heartbeat_log.jsonl``）
-    #
-    # TODO(web-network-layer-cleanup): 下一个独立 patch 删除本 ping 分支。
-    # 本 PR 仅做标注，与 writer/register 时序修复分开提交。
-    # ──────────────────────────────────────────────────────────────────
-    if data.get("frame_type") == "ping":
+    if data.get("kind") == "ping":
         ts = data.get("ts")
         if isinstance(ts, (int, float)):
             logger.debug(
@@ -436,7 +415,7 @@ async def _dispatch(
                 bound_thread_id,
                 ts,
             )
-            await websocket.send_json({"frame_type": "pong", "ts": ts})
+            await websocket.send_json({"kind": "pong", "ts": ts})
             _write_keepalive_log(
                 websocket,
                 event="heartbeat_ping_received",
@@ -453,7 +432,7 @@ async def _dispatch(
         await _send_error(websocket, "ping.ts required")
         return
 
-    msg_type = data.get("frame_type") if isinstance(data, dict) else None
+    msg_type = data.get("type") if isinstance(data, dict) else None
 
     if msg_type == "claude-command":
         command = data.get("command", "")
@@ -545,7 +524,7 @@ async def _dispatch(
         if not aborted:
             await websocket.send_json(
                 {
-                    "frame_type": "complete",
+                    "kind": "complete",
                     "provider": "claude",
                     "sessionId": session_id,
                     "aborted": True,
@@ -576,7 +555,7 @@ async def _dispatch(
         )
         await websocket.send_json(
             {
-                "frame_type": "session-status",
+                "type": "session-status",
                 "sessionId": session_id,
                 "isProcessing": active,
             },
@@ -606,7 +585,7 @@ async def _send_error(websocket: WebSocket, error_message: str) -> None:
     try:
         await websocket.send_json(
             {
-                "frame_type": "error",
+                "kind": "error",
                 "provider": "claude",
                 "error": error_message,
             },

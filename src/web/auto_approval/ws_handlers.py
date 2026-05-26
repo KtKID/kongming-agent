@@ -15,8 +15,7 @@ claude_code 与 generic_chat 两条通道都需要 ``auto-approval-toggle`` /
 - ``error`` / ``state`` 字面值与原 ``web.claude_code.route`` 完全对齐：
   ``"auto_approval_policy not configured"``、
   ``"auto-approval-toggle.cwd required"`` / ``"auto-approval-query.cwd required"``、
-  ``frame_type="auto_approval_state"``（protocol-frame-type-unify-v0.2 后从
-  ``kind`` 切到 ``frame_type``，与全局 wire 协议对齐）。
+  ``kind="auto_approval_state"``。
 - **通道参数化（v0.5 task #5 引入）**：``channel: str = "claude_code"``
   作为三个公共函数的可选关键字参数，默认值兼容原 claude_code 调用点，
   无需改 ``claude_code/route.py`` 装配。``generic_chat`` 通道（``/ws/threads``）
@@ -37,7 +36,7 @@ from typing import Any
 
 from fastapi import WebSocket
 
-from network.network_log import log_network_exception
+from observability.network_log import log_network_exception
 
 # channel → error 帧 provider 字段的映射。保持 claude_code 走 "claude"
 # 字面值（与老前端 100% 兼容），generic_chat 走 "generic"，与后端日志惯例
@@ -170,13 +169,13 @@ def build_auto_approval_state_msg(
             字段区分 UI 状态。
 
     Returns:
-        ``frame_type="auto_approval_state"`` 帧 dict，与 claude_code v1 schema 对齐
+        ``kind="auto_approval_state"`` 帧 dict，与 claude_code v1 schema 对齐
         （仅 ``channel`` 字段会跟随调用方切换）。
     """
     cfg = policy.get_config(cwd)
     effective_timeout = cfg.timeout_ms or policy.rule_set.default_timeout_ms
     return {
-        "frame_type": "auto_approval_state",
+        "kind": "auto_approval_state",
         "channel": channel,
         "cwd": cfg.cwd or cwd,
         "enabled": cfg.enabled,
@@ -191,7 +190,7 @@ async def _send_error(
     *,
     channel: str = "claude_code",
 ) -> None:
-    """发送 ``frame_type="error"`` 帧。
+    """发送 ``kind="error"`` 帧。
 
     向后兼容策略：
     - ``provider`` 字段保留原 ``claude_code/route._send_error`` 的字面值
@@ -211,7 +210,7 @@ async def _send_error(
     try:
         await websocket.send_json(
             {
-                "frame_type": "error",
+                "kind": "error",
                 "provider": provider,
                 "channel": channel,
                 "error": error_message,

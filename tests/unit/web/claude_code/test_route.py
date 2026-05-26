@@ -6,13 +6,15 @@
 2. claude-command（mock SDK 输出）→ 收到 normalize 后的 text + complete
 3. claude-permission-response → resolve Future
 4. abort-session → 收到 complete(aborted=True)
-5. check-session-status → 收到 session-status 帧
-6. unknown command → error 帧
-7. thread_id query 参数（v0.1.6）：非法格式 / thread 不存在 / backend_kind 不匹配 / 正常 claude_code thread
+5. ping → pong
+6. check-session-status → 收到 session-status 帧
+7. unknown command → error 帧
+8. thread_id query 参数（v0.1.6）：非法格式 / thread 不存在 / backend_kind 不匹配 / 正常 claude_code thread
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -183,6 +185,59 @@ def test_check_session_status_returns_inactive(app_client: TestClient) -> None:
         assert msg.get("type") == "session-status"
         assert msg.get("sessionId") == "nope"
         assert msg.get("isProcessing") is False
+
+
+def test_ping_returns_pong_with_same_ts(app_client: TestClient) -> None:
+    """app-level heartbeat：ping 带 ts，route 原样回 pong。"""
+    with app_client.websocket_connect("/ws/claude-code") as ws:
+        ws.send_json({"kind": "ping", "ts": 123456789})
+        msg = ws.receive_json()
+        assert msg == {"kind": "pong", "ts": 123456789}
+
+
+def test_keepalive_events_are_written_to_workspace_logs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude keepalive 事件落到 ``.kongming/logs/claude-keepalive.jsonl``。"""
+    fake_client = _make_fake_sdk_client([_make_assistant("hi"), _make_result()])
+
+    def factory(**_: Any) -> MagicMock:
+        return fake_client
+
+    monkeypatch.setattr(
+        "web.claude_code.service.ClaudeSDKClient",
+        factory,
+    )
+
+    _seed_password(tmp_path, "pwd")
+    cfg = _make_cfg()
+    tm = FakeThreadManager()
+    tm.list_threads = lambda: [  # type: ignore[method-assign]
+        _make_thread_meta(thread_id="thread-abcdef123456", backend_kind="claude_code"),
+    ]
+    app = create_app(cfg, tm, home_dir=tmp_path)
+
+    with TestClient(app) as client:
+        r = client.post("/api/auth/login", json={"password": "pwd"}, headers=CSRF_HEADERS)
+        assert r.status_code == 200
+        with client.websocket_connect("/ws/claude-code?thread_id=thread-abcdef123456") as ws:
+            ws.send_json({"kind": "ping", "ts": 123456789})
+            assert ws.receive_json() == {"kind": "pong", "ts": 123456789}
+            ws.send_json({"type": "check-session-status", "sessionId": "sid-1"})
+            msg = ws.receive_json()
+            assert msg.get("type") == "session-status"
+            assert msg.get("isProcessing") is False
+
+    log_path = tmp_path / "logs" / "claude-keepalive.jsonl"
+    assert log_path.is_file()
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    events = [row["event"] for row in rows]
+    assert "ws_connected" in events
+    assert "heartbeat_ping_received" in events
+    assert "heartbeat_pong_sent" in events
+    assert "session_status_checked" in events
+    assert "ws_disconnected" in events
 
 
 def test_abort_session_unknown_returns_complete_aborted(app_client: TestClient) -> None:

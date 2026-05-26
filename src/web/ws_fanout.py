@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from network.network_log import log_network_exception
+from observability.network_log import log_network_exception
 
 
 class WebSocketFanout:

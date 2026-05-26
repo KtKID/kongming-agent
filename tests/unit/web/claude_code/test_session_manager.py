@@ -14,6 +14,14 @@ class _FakeWriter:
         self.name = name
 
 
+class _AttachableWriter:
+    def __init__(self, target: object) -> None:
+        self.target = target
+
+    def attach_ws(self, new_target: object) -> None:
+        self.target = new_target
+
+
 async def test_register_and_get() -> None:
     sm = SessionManager()
     w = _FakeWriter("w1")
@@ -63,6 +71,20 @@ async def test_replace_writer_missing() -> None:
     sm = SessionManager()
     ok = await sm.replace_writer("nope", _FakeWriter())
     assert ok is False
+
+
+async def test_replace_writer_rebinds_attachable_writer() -> None:
+    sm = SessionManager()
+    target1 = _FakeWriter("w1")
+    target2 = _FakeWriter("w2")
+    writer = _AttachableWriter(target1)
+    await sm.register("sid", writer)
+    ok = await sm.replace_writer("sid", target2)
+    assert ok is True
+    record = sm.get("sid")
+    assert record is not None
+    assert record.writer is writer
+    assert writer.target is target2
 
 
 async def test_rename_success() -> None:
