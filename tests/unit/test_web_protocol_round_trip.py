@@ -4,11 +4,11 @@
 - 18 个 WS 帧的 ``model_dump_json`` ↔ ``model_validate_json`` round-trip
 - 8 个 REST DTO 的 round-trip
 - ``WSFrameC2SAdapter`` 与 ``WSFrameS2CAdapter`` 的 discriminator 分派
-- 各帧 / DTO 的 ``kind`` / ``schema_version`` 默认值
+- 各帧 / DTO 的 ``frame_type`` / ``schema_version`` 默认值
 
 设计要点：
 - 用 ``pytest.parametrize`` 把 25 个帧/DTO round-trip 收敛为 2 个参数化测试
-- adapter 分派测试单独写 2 个，验证 union 能正确按 kind 还原具体类
+- adapter 分派测试单独写 2 个，验证 union 能正确按 frame_type 还原具体类
 - 帧字段严格按 :mod:`web.protocol.ws_frames` 与 :mod:`web.protocol.rest_models`
   的真实声明（必填字段全填，可选字段挑代表性场景覆盖）
 """
@@ -53,7 +53,7 @@ from web.protocol.ws_frames import (
 )
 
 # ---------------------------------------------------------------------------
-# Fixtures：构造器返回 (instance, expected_kind) 对
+# Fixtures：构造器返回 (instance, expected_frame_type) 对
 # ---------------------------------------------------------------------------
 
 
@@ -367,19 +367,19 @@ def test_round_trip_rest_dto(factory):
 
 C2S_DISPATCH_CASES = [
     pytest.param(
-        {"kind": "user.input", "text": "hi", "request_id": "r-1"},
+        {"frame_type": "user.input", "text": "hi", "request_id": "r-1"},
         UserInputFrame,
         id="user_input_dispatch",
     ),
     pytest.param(
-        {"kind": "approval.ack", "call_id": "c-1", "action": "reject"},
+        {"frame_type": "approval.ack", "call_id": "c-1", "action": "reject"},
         ApprovalAckFrame,
         id="approval_ack_dispatch",
     ),
-    pytest.param({"kind": "ping"}, PingFrame, id="ping_dispatch"),
-    pytest.param({"kind": "interrupt"}, InterruptFrame, id="interrupt_dispatch"),
+    pytest.param({"frame_type": "ping"}, PingFrame, id="ping_dispatch"),
+    pytest.param({"frame_type": "interrupt"}, InterruptFrame, id="interrupt_dispatch"),
     pytest.param(
-        {"kind": "interrupt", "run_id": "run-abc-1"},
+        {"frame_type": "interrupt", "run_id": "run-abc-1"},
         InterruptFrame,
         id="interrupt_with_run_id_dispatch",
     ),
@@ -388,10 +388,10 @@ C2S_DISPATCH_CASES = [
 
 @pytest.mark.parametrize("payload, expected_cls", C2S_DISPATCH_CASES)
 def test_ws_c2s_adapter_dispatch(payload, expected_cls):
-    """``WSFrameC2SAdapter`` 按 ``kind`` 分派到正确帧类。"""
+    """``WSFrameC2SAdapter`` 按 ``frame_type`` 分派到正确帧类。"""
     obj = WSFrameC2SAdapter.validate_python(payload)
     assert isinstance(obj, expected_cls)
-    assert obj.kind == payload["kind"]
+    assert obj.frame_type == payload["frame_type"]
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +402,7 @@ def test_ws_c2s_adapter_dispatch(payload, expected_cls):
 S2C_DISPATCH_CASES = [
     pytest.param(
         {
-            "kind": "thread.history",
+            "frame_type": "thread.history",
             "timestamp_ms": 1,
             "messages": [],
         },
@@ -411,7 +411,7 @@ S2C_DISPATCH_CASES = [
     ),
     pytest.param(
         {
-            "kind": "assistant.final",
+            "frame_type": "assistant.final",
             "timestamp_ms": 1,
             "content": "x",
             "turn": 1,
@@ -421,7 +421,7 @@ S2C_DISPATCH_CASES = [
     ),
     pytest.param(
         {
-            "kind": "content.delta",
+            "frame_type": "content.delta",
             "timestamp_ms": 1,
             "delta": "x",
             "turn": 1,
@@ -432,7 +432,7 @@ S2C_DISPATCH_CASES = [
     ),
     pytest.param(
         {
-            "kind": "reasoning.delta",
+            "frame_type": "reasoning.delta",
             "timestamp_ms": 1,
             "delta": "x",
             "turn": 1,
@@ -443,7 +443,7 @@ S2C_DISPATCH_CASES = [
     ),
     pytest.param(
         {
-            "kind": "tool.call.start",
+            "frame_type": "tool.call.start",
             "timestamp_ms": 1,
             "tool_name": "t",
             "call_id": "c",
@@ -455,7 +455,7 @@ S2C_DISPATCH_CASES = [
     ),
     pytest.param(
         {
-            "kind": "tool.call.end",
+            "frame_type": "tool.call.end",
             "timestamp_ms": 1,
             "call_id": "c",
             "turn": 1,
@@ -466,7 +466,7 @@ S2C_DISPATCH_CASES = [
     ),
     pytest.param(
         {
-            "kind": "approval.request",
+            "frame_type": "approval.request",
             "timestamp_ms": 1,
             "call_id": "c",
             "tool_name": "t",
@@ -478,7 +478,7 @@ S2C_DISPATCH_CASES = [
     ),
     pytest.param(
         {
-            "kind": "approval.decision",
+            "frame_type": "approval.decision",
             "timestamp_ms": 1,
             "call_id": "c",
             "outcome": "rejected",
@@ -489,7 +489,7 @@ S2C_DISPATCH_CASES = [
     ),
     pytest.param(
         {
-            "kind": "usage",
+            "frame_type": "usage",
             "timestamp_ms": 1,
             "turn": 1,
             "usage": {
@@ -510,7 +510,7 @@ S2C_DISPATCH_CASES = [
     ),
     pytest.param(
         {
-            "kind": "error",
+            "frame_type": "error",
             "timestamp_ms": 1,
             "error_code": "network",
             "message": "m",
@@ -519,23 +519,23 @@ S2C_DISPATCH_CASES = [
         id="error_dispatch",
     ),
     pytest.param(
-        {"kind": "turn.start", "timestamp_ms": 1, "turn": 1},
+        {"frame_type": "turn.start", "timestamp_ms": 1, "turn": 1},
         TurnStartFrame,
         id="turn_start_dispatch",
     ),
     pytest.param(
-        {"kind": "turn.end", "timestamp_ms": 1, "turn": 1},
+        {"frame_type": "turn.end", "timestamp_ms": 1, "turn": 1},
         TurnEndFrame,
         id="turn_end_dispatch",
     ),
     pytest.param(
-        {"kind": "pong", "timestamp_ms": 1},
+        {"frame_type": "pong", "timestamp_ms": 1},
         PongFrame,
         id="pong_dispatch",
     ),
     pytest.param(
         {
-            "kind": "system.notice",
+            "frame_type": "system.notice",
             "timestamp_ms": 1,
             "notice_key": "self_evolution.review",
             "source": "self_evolution",
@@ -551,7 +551,7 @@ S2C_DISPATCH_CASES = [
     ),
     pytest.param(
         {
-            "kind": "cell.evicted",
+            "frame_type": "cell.evicted",
             "timestamp_ms": 1,
             "thread_id": "thread-abcdef012345",
             "reason": "manual_stop",
@@ -564,70 +564,70 @@ S2C_DISPATCH_CASES = [
 
 @pytest.mark.parametrize("payload, expected_cls", S2C_DISPATCH_CASES)
 def test_ws_s2c_adapter_dispatch(payload, expected_cls):
-    """``WSFrameS2CAdapter`` 按 ``kind`` 分派到正确帧类。"""
+    """``WSFrameS2CAdapter`` 按 ``frame_type`` 分派到正确帧类。"""
     obj = WSFrameS2CAdapter.validate_python(payload)
     assert isinstance(obj, expected_cls)
-    assert obj.kind == payload["kind"]
+    assert obj.frame_type == payload["frame_type"]
 
 
 # ---------------------------------------------------------------------------
-# kind / schema_version 默认值
+# frame_type / schema_version 默认值
 # ---------------------------------------------------------------------------
 
 
-def test_kind_default_user_input():
-    assert UserInputFrame(text="x", request_id="r").kind == "user.input"
+def test_frame_type_default_user_input():
+    assert UserInputFrame(text="x", request_id="r").frame_type == "user.input"
 
 
-def test_kind_default_approval_ack():
-    assert ApprovalAckFrame(call_id="c", action="accept_once").kind == "approval.ack"
+def test_frame_type_default_approval_ack():
+    assert ApprovalAckFrame(call_id="c", action="accept_once").frame_type == "approval.ack"
 
 
-def test_kind_default_ping():
-    assert PingFrame().kind == "ping"
+def test_frame_type_default_ping():
+    assert PingFrame().frame_type == "ping"
 
 
-def test_kind_default_thread_history():
+def test_frame_type_default_thread_history():
     frame = ThreadHistoryFrame(timestamp_ms=1, messages=[])
-    assert frame.kind == "thread.history"
+    assert frame.frame_type == "thread.history"
 
 
-def test_kind_default_assistant_final():
+def test_frame_type_default_assistant_final():
     frame = AssistantFinalFrame(timestamp_ms=1, content="x", turn=1)
-    assert frame.kind == "assistant.final"
+    assert frame.frame_type == "assistant.final"
 
 
-def test_kind_default_content_delta():
+def test_frame_type_default_content_delta():
     frame = ContentDeltaFrame(timestamp_ms=1, delta="x", turn=1, seq=0)
-    assert frame.kind == "content.delta"
+    assert frame.frame_type == "content.delta"
 
 
-def test_kind_default_reasoning_delta():
+def test_frame_type_default_reasoning_delta():
     frame = ReasoningDeltaFrame(timestamp_ms=1, delta="x", turn=1, seq=0)
-    assert frame.kind == "reasoning.delta"
+    assert frame.frame_type == "reasoning.delta"
 
 
-def test_kind_default_tool_call_start():
+def test_frame_type_default_tool_call_start():
     frame = ToolCallStartFrame(timestamp_ms=1, tool_name="t", call_id="c", turn=1, arguments={})
-    assert frame.kind == "tool.call.start"
+    assert frame.frame_type == "tool.call.start"
 
 
-def test_kind_default_tool_call_end():
+def test_frame_type_default_tool_call_end():
     frame = ToolCallEndFrame(timestamp_ms=1, call_id="c", turn=1, ok=True)
-    assert frame.kind == "tool.call.end"
+    assert frame.frame_type == "tool.call.end"
 
 
-def test_kind_default_approval_request():
+def test_frame_type_default_approval_request():
     frame = ApprovalRequestFrame(timestamp_ms=1, call_id="c", tool_name="t", arguments={}, turn=1)
-    assert frame.kind == "approval.request"
+    assert frame.frame_type == "approval.request"
 
 
-def test_kind_default_approval_decision():
+def test_frame_type_default_approval_decision():
     frame = ApprovalDecisionFrame(timestamp_ms=1, call_id="c", outcome="approved", turn=1)
-    assert frame.kind == "approval.decision"
+    assert frame.frame_type == "approval.decision"
 
 
-def test_kind_default_usage():
+def test_frame_type_default_usage():
     frame = UsageFrame(
         timestamp_ms=1,
         turn=1,
@@ -644,27 +644,27 @@ def test_kind_default_usage():
             "context_window": 0,
         },
     )
-    assert frame.kind == "usage"
+    assert frame.frame_type == "usage"
 
 
-def test_kind_default_error():
+def test_frame_type_default_error():
     frame = ErrorFrame(timestamp_ms=1, error_code="internal", message="m")
-    assert frame.kind == "error"
+    assert frame.frame_type == "error"
 
 
-def test_kind_default_turn_start():
-    assert TurnStartFrame(timestamp_ms=1, turn=1).kind == "turn.start"
+def test_frame_type_default_turn_start():
+    assert TurnStartFrame(timestamp_ms=1, turn=1).frame_type == "turn.start"
 
 
-def test_kind_default_turn_end():
-    assert TurnEndFrame(timestamp_ms=1, turn=1).kind == "turn.end"
+def test_frame_type_default_turn_end():
+    assert TurnEndFrame(timestamp_ms=1, turn=1).frame_type == "turn.end"
 
 
-def test_kind_default_pong():
-    assert PongFrame(timestamp_ms=1).kind == "pong"
+def test_frame_type_default_pong():
+    assert PongFrame(timestamp_ms=1).frame_type == "pong"
 
 
-def test_kind_default_system_notice():
+def test_frame_type_default_system_notice():
     frame = SystemNoticeFrame(
         timestamp_ms=1,
         notice_key="self_evolution.review",
@@ -675,12 +675,12 @@ def test_kind_default_system_notice():
         details={},
         icon="sparkles",
     )
-    assert frame.kind == "system.notice"
+    assert frame.frame_type == "system.notice"
 
 
-def test_kind_default_cell_evicted():
+def test_frame_type_default_cell_evicted():
     frame = CellEvictedFrame(timestamp_ms=1, thread_id="thread-abcdef012345", reason="idle")
-    assert frame.kind == "cell.evicted"
+    assert frame.frame_type == "cell.evicted"
 
 
 def test_thread_metadata_schema_version_default():

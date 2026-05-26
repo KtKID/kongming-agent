@@ -99,7 +99,7 @@ async def test_evict_cell_manual_pushes_evicted_frame_and_closes(tmp_path: Path)
     assert mgr.get_cell(meta.id) is None
     # 帧已推送
     sent_frames = [c.args[0] for c in ws.send_json.await_args_list]
-    evicted_frames = [f for f in sent_frames if f.get("kind") == "cell.evicted"]
+    evicted_frames = [f for f in sent_frames if f.get("frame_type") == "cell.evicted"]
     assert len(evicted_frames) == 1
     assert evicted_frames[0]["reason"] == "manual_stop"
     assert evicted_frames[0]["message"] == "user clicked stop"
@@ -146,7 +146,7 @@ async def test_evict_cell_shutdown_does_not_push_ws(tmp_path: Path) -> None:
     await mgr.evict_cell(meta.id, reason="server_shutdown", notify_ws=False)
     sent = [c.args[0] for c in ws.send_json.await_args_list]
     # 没有任何 cell.evicted 帧
-    assert not any(f.get("kind") == "cell.evicted" for f in sent)
+    assert not any(f.get("frame_type") == "cell.evicted" for f in sent)
 
 
 # ---------------------------------------------------------------------------
@@ -298,8 +298,8 @@ async def test_aclose_all_evicts_all_cells_without_ws_notify(tmp_path: Path) -> 
     # shutdown 不推 cell.evicted 帧
     sent_a = [c.args[0] for c in ws_a.send_json.await_args_list]
     sent_b = [c.args[0] for c in ws_b.send_json.await_args_list]
-    assert not any(f.get("kind") == "cell.evicted" for f in sent_a)
-    assert not any(f.get("kind") == "cell.evicted" for f in sent_b)
+    assert not any(f.get("frame_type") == "cell.evicted" for f in sent_a)
+    assert not any(f.get("frame_type") == "cell.evicted" for f in sent_b)
 
 
 async def test_aclose_all_idempotent(tmp_path: Path) -> None:

@@ -116,7 +116,7 @@ async def test_websink_deliver_calls_broker_broadcast():
     assert result.status is DeliveryStatus.DELIVERED
     broker.broadcast.assert_awaited_once()
     payload = broker.broadcast.await_args.args[0]
-    assert payload["kind"] == "cron.run.completed"
+    assert payload["frame_type"] == "cron.run.completed"
     assert payload["task_id"] == "task-abc"
     assert payload["task_name"] == "每天9点早安"
     assert payload["run_id"] == "run-xyz"

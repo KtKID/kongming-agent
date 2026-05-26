@@ -262,7 +262,7 @@ def test_ws_user_input_with_reasoning_effort(tmp_path: Path) -> None:
             _ = ws.receive_json()  # history
             ws.send_json(
                 {
-                    "kind": "user.input",
+                    "frame_type": "user.input",
                     "text": "think hard",
                     "request_id": "req-reasoning",
                     "reasoning_effort": "high",
@@ -288,7 +288,7 @@ def test_ws_user_input_without_reasoning_effort(tmp_path: Path) -> None:
             _ = ws.receive_json()  # history
             ws.send_json(
                 {
-                    "kind": "user.input",
+                    "frame_type": "user.input",
                     "text": "normal",
                     "request_id": "req-normal",
                 }
@@ -335,11 +335,11 @@ def test_ws_user_input_spawns_background_run_task(tmp_path: Path) -> None:
         with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
             # 接收 thread.history 帧（建连推）
             history = ws.receive_json()
-            assert history["kind"] == "thread.history"
+            assert history["frame_type"] == "thread.history"
 
             ws.send_json(
                 {
-                    "kind": "user.input",
+                    "frame_type": "user.input",
                     "text": "hello",
                     "request_id": "req-1",
                 }
@@ -366,7 +366,7 @@ def test_ws_approval_ack_routed(tmp_path: Path) -> None:
             _ = ws.receive_json()  # history
             ws.send_json(
                 {
-                    "kind": "approval.ack",
+                    "frame_type": "approval.ack",
                     "call_id": "call-1",
                     "action": "accept_once",
                 }
@@ -388,9 +388,9 @@ def test_ws_ping_receives_pong(tmp_path: Path) -> None:
     try:
         with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
             _ = ws.receive_json()  # history
-            ws.send_json({"kind": "ping"})
+            ws.send_json({"frame_type": "ping"})
             pong = ws.receive_json()
-            assert pong["kind"] == "pong"
+            assert pong["frame_type"] == "pong"
             assert "timestamp_ms" in pong
     finally:
         client.__exit__(None, None, None)
@@ -405,14 +405,14 @@ def test_ws_oversized_frame_rejected(tmp_path: Path) -> None:
             big = "a" * (1_000_001)
             ws.send_json(
                 {
-                    "kind": "user.input",
+                    "frame_type": "user.input",
                     "text": big,
                     "request_id": "req-big",
                 }
             )
             # 应当收到 error 帧
             err = ws.receive_json()
-            assert err["kind"] == "error"
+            assert err["frame_type"] == "error"
             assert "too large" in err["message"]
     finally:
         client.__exit__(None, None, None)
@@ -426,7 +426,7 @@ def test_ws_invalid_json_rejected(tmp_path: Path) -> None:
             _ = ws.receive_json()  # history
             ws.send_text("{not-json")
             err = ws.receive_json()
-            assert err["kind"] == "error"
+            assert err["frame_type"] == "error"
     finally:
         client.__exit__(None, None, None)
 
@@ -437,9 +437,9 @@ def test_ws_unknown_kind_rejected(tmp_path: Path) -> None:
     try:
         with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
             _ = ws.receive_json()  # history
-            ws.send_json({"kind": "nonexistent.kind"})
+            ws.send_json({"frame_type": "nonexistent.kind"})
             err = ws.receive_json()
-            assert err["kind"] == "error"
+            assert err["frame_type"] == "error"
     finally:
         client.__exit__(None, None, None)
 
@@ -457,9 +457,9 @@ def test_ws_interrupt_with_no_active_run_emits_system_notice(tmp_path: Path) -> 
         with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
             _ = ws.receive_json()  # history
             # 不发 user.input，直接发 interrupt（cell.current_run_task is None）
-            ws.send_json({"kind": "interrupt"})
+            ws.send_json({"frame_type": "interrupt"})
             notice = ws.receive_json()
-            assert notice["kind"] == "system.notice"
+            assert notice["frame_type"] == "system.notice"
             assert notice["notice_key"] == "no_active_run"
             assert notice["source"] == "ws.interrupt"
     finally:
@@ -487,7 +487,7 @@ def test_ws_interrupt_cancels_active_run_task(tmp_path: Path) -> None:
 
             ws.send_json(
                 {
-                    "kind": "user.input",
+                    "frame_type": "user.input",
                     "text": "hello",
                     "request_id": "req-1",
                 }
@@ -499,7 +499,7 @@ def test_ws_interrupt_cancels_active_run_task(tmp_path: Path) -> None:
             assert not cell.current_run_task.done()
 
             # 发 interrupt
-            ws.send_json({"kind": "interrupt"})
+            ws.send_json({"frame_type": "interrupt"})
             time.sleep(0.2)
 
             # bridge 应收到 CancelledError 透传
@@ -525,7 +525,7 @@ def test_ws_user_input_done_callback_clears_current_run_task(tmp_path: Path) -> 
             _ = ws.receive_json()  # history
             ws.send_json(
                 {
-                    "kind": "user.input",
+                    "frame_type": "user.input",
                     "text": "hello",
                     "request_id": "req-1",
                 }

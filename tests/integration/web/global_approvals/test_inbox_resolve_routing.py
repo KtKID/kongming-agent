@@ -25,7 +25,7 @@ from web.global_approvals.broadcaster import get_inbox_broadcaster
 
 def _drain_snapshot(ws: Any) -> dict[str, Any]:
     frame = ws.receive_json()
-    assert frame["kind"] == "approval.inbox.snapshot"
+    assert frame["frame_type"] == "approval.inbox.snapshot"
     return frame
 
 
@@ -74,7 +74,7 @@ async def test_inbox_resolve_routes_to_correct_bridge_by_thread_id(
         # 前端 ack thread-aaa 的某条审批
         ws.send_json(
             {
-                "kind": "approval.inbox.resolve",
+                "frame_type": "approval.inbox.resolve",
                 "threadId": "thread-aaa",
                 "requestId": "toolu_x",
                 "allow": True,
@@ -105,16 +105,16 @@ async def test_inbox_resolve_unknown_thread_silently_dropped(
         _drain_snapshot(ws)
         ws.send_json(
             {
-                "kind": "approval.inbox.resolve",
+                "frame_type": "approval.inbox.resolve",
                 "threadId": "thread-never-existed",
                 "requestId": "toolu_x",
                 "allow": False,
             }
         )
         # 不应收到任何回帧（handler 静默丢弃）；用 ping 验证连接还活着
-        ws.send_json({"kind": "ping"})
+        ws.send_json({"frame_type": "ping"})
         pong = ws.receive_json()
-        assert pong["kind"] == "pong"
+        assert pong["frame_type"] == "pong"
 
 
 @pytest.mark.asyncio
@@ -131,16 +131,16 @@ async def test_inbox_resolve_missing_thread_id_silently_dropped(
         _drain_snapshot(ws)
         ws.send_json(
             {
-                "kind": "approval.inbox.resolve",
+                "frame_type": "approval.inbox.resolve",
                 # 故意缺 threadId
                 "requestId": "toolu_x",
                 "allow": True,
             }
         )
         # 用 ping 探活
-        ws.send_json({"kind": "ping"})
+        ws.send_json({"frame_type": "ping"})
         pong = ws.receive_json()
-        assert pong["kind"] == "pong"
+        assert pong["frame_type"] == "pong"
 
     bridge.resolve.assert_not_called()
 
@@ -187,7 +187,7 @@ async def test_bridge_can_use_tool_cancelled_emits_remove_cancelled(
 
         # 排出 add 帧（fan-out 到 ws）
         add_frame = ws.receive_json()
-        assert add_frame["kind"] == "approval.inbox.add"
+        assert add_frame["frame_type"] == "approval.inbox.add"
         assert add_frame["requestId"] == "toolu_cancel"
         assert add_frame["threadId"] == "thread-cancel"
 
@@ -199,7 +199,7 @@ async def test_bridge_can_use_tool_cancelled_emits_remove_cancelled(
 
         # 收到 remove 帧 reason=cancelled
         remove_frame = ws.receive_json()
-        assert remove_frame["kind"] == "approval.inbox.remove"
+        assert remove_frame["frame_type"] == "approval.inbox.remove"
         assert remove_frame["requestId"] == "toolu_cancel"
         assert remove_frame["reason"] == "cancelled"
         # snapshot 也清掉
@@ -236,7 +236,7 @@ async def test_bridge_resolve_emits_remove_user_decided(
         assert broadcaster.pending_count == 1
 
         add_frame = ws.receive_json()
-        assert add_frame["kind"] == "approval.inbox.add"
+        assert add_frame["frame_type"] == "approval.inbox.add"
 
         # 模拟用户决策
         bridge.resolve("toolu_decide", {"allow": True})
@@ -246,6 +246,6 @@ async def test_bridge_resolve_emits_remove_user_decided(
         assert result is not None
 
         remove_frame = ws.receive_json()
-        assert remove_frame["kind"] == "approval.inbox.remove"
+        assert remove_frame["frame_type"] == "approval.inbox.remove"
         assert remove_frame["requestId"] == "toolu_decide"
         assert remove_frame["reason"] == "user_decided"

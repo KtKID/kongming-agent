@@ -60,7 +60,7 @@ async def test_run_cancelled_fans_out_to_all_attached_ws() -> None:
     sent_a = ws_a.send_json.await_args.args[0]
     sent_b = ws_b.send_json.await_args.args[0]
     for sent in (sent_a, sent_b):
-        assert sent["kind"] == "run.interrupted"
+        assert sent["frame_type"] == "run.interrupted"
         assert sent["run_id"] == "run-thread-mt-1"
         assert sent["cancelled_at_turn"] == 2
         assert sent["cancelled_tool_call_id"] == "call-z"
@@ -101,6 +101,6 @@ async def test_run_cancelled_drops_failed_ws_keeps_healthy() -> None:
     # healthy ws 收到 run.interrupted
     healthy.send_json.assert_awaited_once()
     sent = healthy.send_json.await_args.args[0]
-    assert sent["kind"] == "run.interrupted"
+    assert sent["frame_type"] == "run.interrupted"
     # bad 已 detach
     assert fanout.client_count == 1

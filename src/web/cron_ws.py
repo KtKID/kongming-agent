@@ -29,9 +29,7 @@ import logging
 from typing import Any
 
 from fastapi import FastAPI, WebSocket
-from starlette.websockets import WebSocketDisconnect
 
-from observability.network_log import log_network_event, log_network_exception
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 
 logger = logging.getLogger(__name__)
@@ -58,7 +56,7 @@ class CronWSBroker:
         finally:
             await broker.detach(websocket)
         # 业务侧广播
-        await broker.broadcast({"kind": "cron.run.completed", ...})
+        await broker.broadcast({"frame_type": "cron.run.completed", ...})
     """
 
     def __init__(self) -> None:
@@ -106,14 +104,8 @@ class CronWSBroker:
         """对单个连接 send；失败则自动 detach。"""
         try:
             await ws.send_json(payload)
-        except Exception as exc:
+        except Exception:
             # 半死连接：客户端已断开但未走到 finally detach 路径
-            log_network_exception(
-                "web.cron_ws",
-                "broadcast_send_failed",
-                exc,
-                websocket_id=id(ws),
-            )
             await self.detach(ws)
 
 
@@ -197,15 +189,9 @@ async def _cron_ws_handler(websocket: WebSocket) -> None:
         while True:
             # receive_text 会在客户端断开时抛 WebSocketDisconnect
             await websocket.receive_text()
-    except Exception as exc:
+    except Exception:
         # 客户端断连或其它 ws 错误；安静退出
         logger.debug("/ws/cron client disconnected or errored")
-        log_network_event(
-            "web.cron_ws",
-            "ws_loop_terminated",
-            level="INFO" if isinstance(exc, WebSocketDisconnect) else "WARNING",
-            message=str(exc),
-        )
     finally:
         # 4. detach
         await broker.detach(websocket)
