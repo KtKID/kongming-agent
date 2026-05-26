@@ -78,7 +78,7 @@ async def test_write_output_pushes_assistant_final_frame() -> None:
     await adapter.write_output("hello world")
     ws.send_json.assert_awaited_once()
     payload = ws.send_json.await_args.args[0]
-    assert payload["kind"] == "assistant.final"
+    assert payload["frame_type"] == "assistant.final"
     assert payload["content"] == "hello world"
     assert payload["turn"] == -1
     assert isinstance(payload["timestamp_ms"], int)
@@ -115,7 +115,7 @@ async def test_prompt_approval_accept_once_via_ack() -> None:
     # request 帧已发出
     ws.send_json.assert_awaited_once()
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "approval.request"
+    assert sent["frame_type"] == "approval.request"
     assert sent["call_id"] == "call-success"
     assert sent["tool_name"] == "ReadFile"
     # finally 块已清理 pending

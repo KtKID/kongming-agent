@@ -127,9 +127,9 @@ def test_refresh_stream_returns_progress_and_done(tmp_path: Path, monkeypatch) -
             assert resp.status_code == 200
             lines = [line for line in resp.iter_lines() if line]
         assert len(lines) == 2
-        assert '"kind": "progress"' in lines[0]
+        assert '"frame_type": "progress"' in lines[0]
         assert '"current": 1' in lines[0]
-        assert '"kind": "done"' in lines[1]
+        assert '"frame_type": "done"' in lines[1]
         assert '"display_name": "bar"' in lines[1]
     finally:
         client.__exit__(None, None, None)

@@ -19,10 +19,10 @@ async def test_ws_fanout_broadcasts_to_all_clients() -> None:
     fanout.attach_ws(ws1)
     fanout.attach_ws(ws2)
 
-    await fanout.send_json({"kind": "system.notice"})
+    await fanout.send_json({"frame_type": "system.notice"})
 
-    ws1.send_json.assert_awaited_once_with({"kind": "system.notice"})
-    ws2.send_json.assert_awaited_once_with({"kind": "system.notice"})
+    ws1.send_json.assert_awaited_once_with({"frame_type": "system.notice"})
+    ws2.send_json.assert_awaited_once_with({"frame_type": "system.notice"})
 
 
 async def test_ws_fanout_drops_failed_client_and_keeps_healthy_client() -> None:
@@ -33,10 +33,10 @@ async def test_ws_fanout_drops_failed_client_and_keeps_healthy_client() -> None:
     fanout.attach_ws(failing)
     fanout.attach_ws(healthy)
 
-    await fanout.send_json({"kind": "tool.call.start"})
+    await fanout.send_json({"frame_type": "tool.call.start"})
 
     failing.close.assert_awaited_once()
-    healthy.send_json.assert_awaited_once_with({"kind": "tool.call.start"})
+    healthy.send_json.assert_awaited_once_with({"frame_type": "tool.call.start"})
     assert fanout.client_count == 1
 
 
@@ -48,8 +48,8 @@ async def test_ws_fanout_detach_removes_only_target_client() -> None:
     fanout.attach_ws(ws2)
 
     fanout.detach_ws(ws1)
-    await fanout.send_json({"kind": "usage"})
+    await fanout.send_json({"frame_type": "usage"})
 
     ws1.send_json.assert_not_called()
-    ws2.send_json.assert_awaited_once_with({"kind": "usage"})
+    ws2.send_json.assert_awaited_once_with({"frame_type": "usage"})
     assert fanout.client_count == 1

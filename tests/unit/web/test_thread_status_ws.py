@@ -1,4 +1,4 @@
-"""ThreadStatusBroadcaster 单测：emit kind→phase 映射 + 连接管理。"""
+"""ThreadStatusBroadcaster 单测：emit frame_type→phase 映射 + 连接管理。"""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def _make_ws(*, fail: bool = False) -> AsyncMock:
 
 
 # ---------------------------------------------------------------------------
-# emit: kind → phase 映射
+# emit: frame_type → phase 映射
 # ---------------------------------------------------------------------------
 
 
@@ -37,11 +37,11 @@ async def test_emit_stream_status_responding() -> None:
     ws = _make_ws()
     await b.attach(ws)
 
-    await b.emit(THREAD_ID, {"kind": "stream_status", "phase": "responding"})
+    await b.emit(THREAD_ID, {"frame_type": "stream_status", "phase": "responding"})
 
     ws.send_json.assert_called_once()
     frame = ws.send_json.call_args[0][0]
-    assert frame["type"] == "thread-status"
+    assert frame["frame_type"] == "thread-status"
     assert frame["threadId"] == THREAD_ID
     assert frame["phase"] == "responding"
     assert "toolName" not in frame
@@ -53,7 +53,7 @@ async def test_emit_stream_status_thinking() -> None:
     ws = _make_ws()
     await b.attach(ws)
 
-    await b.emit(THREAD_ID, {"kind": "stream_status", "phase": "thinking"})
+    await b.emit(THREAD_ID, {"frame_type": "stream_status", "phase": "thinking"})
 
     frame = ws.send_json.call_args[0][0]
     assert frame["phase"] == "thinking"
@@ -68,7 +68,7 @@ async def test_emit_stream_status_tool_calling_with_tool_name() -> None:
     await b.emit(
         THREAD_ID,
         {
-            "kind": "stream_status",
+            "frame_type": "stream_status",
             "phase": "tool_calling",
             "toolName": "Read",
         },
@@ -85,7 +85,7 @@ async def test_emit_permission_request_maps_to_waiting_approval() -> None:
     ws = _make_ws()
     await b.attach(ws)
 
-    await b.emit(THREAD_ID, {"kind": "permission_request", "requestId": "r1"})
+    await b.emit(THREAD_ID, {"frame_type": "permission_request", "requestId": "r1"})
 
     frame = ws.send_json.call_args[0][0]
     assert frame["phase"] == "waiting_approval"
@@ -97,7 +97,7 @@ async def test_emit_permission_cancelled_maps_to_idle() -> None:
     ws = _make_ws()
     await b.attach(ws)
 
-    await b.emit(THREAD_ID, {"kind": "permission_cancelled"})
+    await b.emit(THREAD_ID, {"frame_type": "permission_cancelled"})
 
     frame = ws.send_json.call_args[0][0]
     assert frame["phase"] == "idle"
@@ -109,7 +109,7 @@ async def test_emit_complete_maps_to_complete() -> None:
     ws = _make_ws()
     await b.attach(ws)
 
-    await b.emit(THREAD_ID, {"kind": "complete", "exitCode": 0})
+    await b.emit(THREAD_ID, {"frame_type": "complete", "exitCode": 0})
 
     frame = ws.send_json.call_args[0][0]
     assert frame["phase"] == "complete"
@@ -121,20 +121,20 @@ async def test_emit_error_maps_to_error() -> None:
     ws = _make_ws()
     await b.attach(ws)
 
-    await b.emit(THREAD_ID, {"kind": "error", "error": "boom"})
+    await b.emit(THREAD_ID, {"frame_type": "error", "error": "boom"})
 
     frame = ws.send_json.call_args[0][0]
     assert frame["phase"] == "error"
 
 
 @pytest.mark.asyncio
-async def test_emit_irrelevant_kind_does_not_broadcast() -> None:
+async def test_emit_irrelevant_frame_type_does_not_broadcast() -> None:
     """text / tool_use / stream_delta 等非状态帧不触发广播。"""
     b = ThreadStatusBroadcaster()
     ws = _make_ws()
     await b.attach(ws)
 
-    for kind in (
+    for frame_type in (
         "text",
         "tool_use",
         "tool_result",
@@ -142,7 +142,7 @@ async def test_emit_irrelevant_kind_does_not_broadcast() -> None:
         "stream_end",
         "session_created",
     ):
-        await b.emit(THREAD_ID, {"kind": kind})
+        await b.emit(THREAD_ID, {"frame_type": frame_type})
 
     ws.send_json.assert_not_called()
 
@@ -154,13 +154,13 @@ async def test_emit_unknown_stream_status_phase_ignored() -> None:
     ws = _make_ws()
     await b.attach(ws)
 
-    await b.emit(THREAD_ID, {"kind": "stream_status", "phase": "unknown_phase"})
+    await b.emit(THREAD_ID, {"frame_type": "stream_status", "phase": "unknown_phase"})
 
     ws.send_json.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_emit_missing_kind_does_nothing() -> None:
+async def test_emit_missing_frame_type_does_nothing() -> None:
     b = ThreadStatusBroadcaster()
     ws = _make_ws()
     await b.attach(ws)
@@ -200,7 +200,7 @@ async def test_broadcast_fan_out_to_multiple_clients() -> None:
     await b.attach(ws1)
     await b.attach(ws2)
 
-    await b.emit(THREAD_ID, {"kind": "complete", "exitCode": 0})
+    await b.emit(THREAD_ID, {"frame_type": "complete", "exitCode": 0})
 
     assert ws1.send_json.call_count == 1
     assert ws2.send_json.call_count == 1
@@ -217,7 +217,7 @@ async def test_failed_connection_auto_detached() -> None:
     await b.attach(ws_fail)
     assert b.connection_count == 2
 
-    await b.emit(THREAD_ID, {"kind": "complete", "exitCode": 0})
+    await b.emit(THREAD_ID, {"frame_type": "complete", "exitCode": 0})
 
     assert b.connection_count == 1
     assert ws_ok.send_json.call_count == 1
@@ -227,4 +227,4 @@ async def test_failed_connection_auto_detached() -> None:
 async def test_no_connections_emit_is_noop() -> None:
     """0 连接时 emit 不抛异常。"""
     b = ThreadStatusBroadcaster()
-    await b.emit(THREAD_ID, {"kind": "complete", "exitCode": 0})
+    await b.emit(THREAD_ID, {"frame_type": "complete", "exitCode": 0})

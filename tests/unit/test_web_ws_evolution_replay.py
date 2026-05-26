@@ -85,7 +85,7 @@ async def test_send_evolution_replay_frames_replays_completed_notice(tmp_path: P
 
     assert len(ws.sent) == 1
     sent = ws.sent[0]
-    assert sent["kind"] == "system.notice"
+    assert sent["frame_type"] == "system.notice"
     assert sent["notice_key"] == "self_evolution.review"
     assert sent["status"] == "completed"
     assert sent["message"] == "发现 1 条进化养料"

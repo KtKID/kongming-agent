@@ -228,9 +228,9 @@ class NetworkManager:
             info = self._connections.get(conn_id)
         if heartbeat is None or info is None:
             _heartbeat_logger.warning(
-                "handle_inbound conn_id=%s NOT_REGISTERED frame_kind=%s",
+                "handle_inbound conn_id=%s NOT_REGISTERED frame_type=%s",
                 conn_id,
-                frame.get("kind") if isinstance(frame, dict) else "<not-dict>",
+                frame.get("frame_type") if isinstance(frame, dict) else "<not-dict>",
             )
             return False
 

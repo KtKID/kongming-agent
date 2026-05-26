@@ -103,7 +103,7 @@ class TestEmit:
 
         for ws in (ws1, ws2, ws3):
             assert len(ws.sent) == 1
-            assert ws.sent[0]["kind"] == "approval.inbox.add"
+            assert ws.sent[0]["frame_type"] == "approval.inbox.add"
             assert ws.sent[0]["requestId"] == "toolu_a"
             assert ws.sent[0]["threadId"] == "thread-aaa"
 
@@ -136,7 +136,7 @@ class TestEmit:
         # ws.sent[0] = add, [1] = remove
         assert len(ws.sent) == 2
         assert ws.sent[1] == {
-            "kind": "approval.inbox.remove",
+            "frame_type": "approval.inbox.remove",
             "requestId": "toolu_a",
             "reason": "timeout",
         }
@@ -173,7 +173,7 @@ class TestPushSnapshot:
 
         assert len(ws.sent) == 1
         frame = ws.sent[0]
-        assert frame["kind"] == "approval.inbox.snapshot"
+        assert frame["frame_type"] == "approval.inbox.snapshot"
         ids = sorted(item["requestId"] for item in frame["items"])
         assert ids == ["a", "b"]
 
@@ -181,7 +181,7 @@ class TestPushSnapshot:
         ws = _FakeWS()
         await broadcaster.attach(ws)
         await broadcaster.push_snapshot(ws)
-        assert ws.sent[0] == {"kind": "approval.inbox.snapshot", "items": []}
+        assert ws.sent[0] == {"frame_type": "approval.inbox.snapshot", "items": []}
 
 
 # ---------- 失败连接自动 detach ----------

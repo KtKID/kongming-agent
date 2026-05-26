@@ -21,7 +21,7 @@ from web.global_approvals.broadcaster import get_inbox_broadcaster
 def _drain_snapshot(ws: Any) -> dict[str, Any]:
     """连上后第一帧必为 approval.inbox.snapshot。"""
     frame = ws.receive_json()
-    assert frame["kind"] == "approval.inbox.snapshot"
+    assert frame["frame_type"] == "approval.inbox.snapshot"
     return frame
 
 
@@ -66,11 +66,11 @@ async def test_inbox_add_fans_out_to_all_subscribers(
         for ws in (ws1, ws2, ws3):
             frame_a = ws.receive_json()
             frame_b = ws.receive_json()
-            assert frame_a["kind"] == "approval.inbox.add"
+            assert frame_a["frame_type"] == "approval.inbox.add"
             assert frame_a["requestId"] == "toolu_a"
             assert frame_a["threadId"] == "thread-aaa"
             assert frame_a["toolName"] == "Bash"
-            assert frame_b["kind"] == "approval.inbox.add"
+            assert frame_b["frame_type"] == "approval.inbox.add"
             assert frame_b["requestId"] == "toolu_b"
             assert frame_b["threadId"] == "thread-bbb"
 
@@ -96,7 +96,7 @@ async def test_inbox_remove_fans_out_to_all_subscribers(
         for ws in (ws1, ws2):
             add_frame = ws.receive_json()
             remove_frame = ws.receive_json()
-            assert add_frame["kind"] == "approval.inbox.add"
-            assert remove_frame["kind"] == "approval.inbox.remove"
+            assert add_frame["frame_type"] == "approval.inbox.add"
+            assert remove_frame["frame_type"] == "approval.inbox.remove"
             assert remove_frame["requestId"] == "toolu_x"
             assert remove_frame["reason"] == "user_decided"

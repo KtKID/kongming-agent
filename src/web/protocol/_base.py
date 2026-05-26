@@ -8,8 +8,11 @@
 - 所有帧用 :class:`pydantic.BaseModel` + ``model_config = ConfigDict(frozen=True,
   extra='forbid')``。``frozen`` 让帧不可变（避免传递过程中被消费方误改）；
   ``extra='forbid'`` 让协议升级期间未知字段直接拒绝，发现漂移更早。
-- 帧的 ``kind`` 字段用 :class:`typing.Literal`，让 Pydantic v2 在 union 上能用
-  ``Field(discriminator='kind')`` 自动分派；TS 侧 discriminated union 与之对应。
+- 帧的 ``frame_type`` 字段用 :class:`typing.Literal`，让 Pydantic v2 在 union
+  上能用 ``Field(discriminator='frame_type')`` 自动分派；TS 侧 discriminated
+  union 与之对应。protocol-frame-type-unify-v0.2 统一从 ``kind`` 切到
+  ``frame_type``，避免与业务字段（``UserInputAttachment.kind`` 等）字面值
+  冲突。
 - S2C 帧默认带 ``timestamp_ms``（必填），方便前端按时序重排；某些 S2C 帧
   （如 ``thread.history``）也含 ``messages`` 列表，列表内每条自带 ``timestamp_ms``。
 - C2S 帧通常不需要 ``timestamp_ms`` / ``turn`` / ``seq``——浏览器发出时刻和
@@ -84,8 +87,9 @@ class _FrameBase(BaseModel):
     - frozen：帧一经构造不可变，避免下游误改
     - extra='forbid'：未知字段直接拒绝，让漂移在 round-trip 测试里立刻爆出
 
-    注意：本基类**不**含 ``kind`` 字段——具体帧类各自声明 ``kind: Literal[...]``，
-    Pydantic v2 才能基于 ``kind`` 做 discriminator 分派。
+    注意：本基类**不**含 ``frame_type`` 字段——具体帧类各自声明
+    ``frame_type: Literal[...]``，Pydantic v2 才能基于 ``frame_type`` 做
+    discriminator 分派。
     """
 
     model_config = ConfigDict(

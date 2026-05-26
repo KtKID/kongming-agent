@@ -54,7 +54,7 @@ def _last_frame(ws: _FakeWS) -> ThreadHistoryFrame:
     """从 ws.sent 取最后一帧并 round-trip 到 pydantic 模型，做强校验。"""
     assert ws.sent, "expected at least one frame"
     payload = ws.sent[-1]
-    assert payload["kind"] == "thread.history"
+    assert payload["frame_type"] == "thread.history"
     return ThreadHistoryFrame.model_validate(payload)
 
 

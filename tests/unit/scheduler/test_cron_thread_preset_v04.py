@@ -343,7 +343,7 @@ class TestWebDeliverySinkDeliveryTarget:
         broker.broadcast.assert_called_once()
         payload = broker.broadcast.call_args[0][0]
         assert payload["delivery_target"] == "thread:thread-abc123456789"
-        assert payload["kind"] == "cron.run.completed"
+        assert payload["frame_type"] == "cron.run.completed"
         assert payload["task_id"] == "t1"
         assert payload["final_message"] == "hello from cron"
         # v0.5 web-cron-router 扩展字段

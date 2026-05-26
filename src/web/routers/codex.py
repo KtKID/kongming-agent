@@ -173,10 +173,12 @@ async def remove_codex_project(cwd: str, request: Request) -> Response:
 async def refresh_codex_projects(request: Request) -> StreamingResponse:
     """流式刷新 Codex projects，并持续返回扫描进度。
 
-    NDJSON 事件：
-    - ``{"kind":"progress","current":1,"total":12,"current_project":"..."}``
-    - ``{"kind":"done","projects":[...]}``
-    - ``{"kind":"error","detail":"..."}``
+    NDJSON 事件（protocol-frame-type-unify-v0.2 后判别字段从 ``kind`` 切到
+    ``frame_type``，与全局 wire 协议对齐）：
+
+    - ``{"frame_type":"progress","current":1,"total":12,"current_project":"..."}``
+    - ``{"frame_type":"done","projects":[...]}``
+    - ``{"frame_type":"error","detail":"..."}``
     """
     home: Path = request.app.state.kongming_home
     codex_home: Path | None = getattr(request.app.state, "codex_home", None)
@@ -200,7 +202,7 @@ async def refresh_codex_projects(request: Request) -> StreamingResponse:
             loop.call_soon_threadsafe(
                 queue.put_nowait,
                 {
-                    "kind": "progress",
+                    "frame_type": "progress",
                     "current": current,
                     "total": total,
                     "current_project": current_project,
@@ -217,7 +219,7 @@ async def refresh_codex_projects(request: Request) -> StreamingResponse:
                 loop.call_soon_threadsafe(
                     queue.put_nowait,
                     {
-                        "kind": "done",
+                        "frame_type": "done",
                         "projects": _serialize_projects(projects, pinned_ids),
                     },
                 )
@@ -226,7 +228,7 @@ async def refresh_codex_projects(request: Request) -> StreamingResponse:
                 loop.call_soon_threadsafe(
                     queue.put_nowait,
                     {
-                        "kind": "error",
+                        "frame_type": "error",
                         "detail": str(exc),
                     },
                 )
@@ -236,7 +238,7 @@ async def refresh_codex_projects(request: Request) -> StreamingResponse:
             while True:
                 item = await queue.get()
                 yield json.dumps(item, ensure_ascii=False) + "\n"
-                if item["kind"] in {"done", "error"}:
+                if item["frame_type"] in {"done", "error"}:
                     break
         finally:
             await task

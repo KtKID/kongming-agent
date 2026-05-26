@@ -15,7 +15,8 @@ cron 触发完成后通过 :class:`web.cron_ws.CronWSBroker` 把 ``cron.run.comp
 
 事件 payload 字段（与 M7 前端解析对齐）：
 
-- ``kind: "cron.run.completed"``
+- ``frame_type: "cron.run.completed"``（protocol-frame-type-unify-v0.2 后从
+  ``kind`` 切到 ``frame_type``，与全局 wire 协议对齐）
 - ``task_id`` / ``task_name`` / ``run_id``
 - ``final_message``: 完整的（已被 ``_classify_result`` 截断到 excerpt limit）消息
 - ``delivered_at_iso``: 投递时间 ISO8601；用 ``run.finished_at`` 替代（一致性）
@@ -68,7 +69,7 @@ class WebDeliverySink(DeliverySink):
         delivery_target = task.delivery.target if task.delivery is not None else None
         await self._broker.broadcast(
             {
-                "kind": "cron.run.completed",
+                "frame_type": "cron.run.completed",
                 "task_id": task.task_id,
                 "task_name": task.name,
                 "run_id": run.run_id,

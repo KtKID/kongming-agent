@@ -3,7 +3,7 @@
 覆盖：
 
 1. ping 帧 → 返回 pong 含 echo 的 ts + 服务端 timestamp_ms
-2. 非 ping 帧（业务 type / pong / 其他 kind）→ 返回 None
+2. 非 ping 帧（业务 type / pong / 其他 frame_type）→ 返回 None
 3. 两个 Heartbeat 实例并存互不串扰（多频道扩展性铁律）
 """
 
@@ -37,10 +37,10 @@ def _make_config() -> HeartbeatConfig:
 async def test_handle_inbound_frame_returns_pong_for_ping_with_echoed_ts() -> None:
     """ping 帧 → pong 帧，``ts`` 原样回传，``timestamp_ms`` 为服务端当前时间。"""
     heartbeat = Heartbeat(_make_config(), _DummyHooks())
-    frame = {"kind": "ping", "ts": 1234567890}
+    frame = {"frame_type": "ping", "ts": 1234567890}
     response = await heartbeat.handle_inbound_frame(frame)
     assert response is not None
-    assert response["kind"] == "pong"
+    assert response["frame_type"] == "pong"
     assert response["ts"] == 1234567890
     # timestamp_ms 是 int 毫秒；不写死值，只校验类型 + 大致量级
     assert isinstance(response["timestamp_ms"], int)
@@ -51,22 +51,22 @@ async def test_handle_inbound_frame_returns_pong_for_ping_with_echoed_ts() -> No
 async def test_handle_inbound_frame_handles_ping_without_ts() -> None:
     """ping 帧不带 ts → pong 帧 ts=None（不抛 KeyError）。"""
     heartbeat = Heartbeat(_make_config(), _DummyHooks())
-    response = await heartbeat.handle_inbound_frame({"kind": "ping"})
+    response = await heartbeat.handle_inbound_frame({"frame_type": "ping"})
     assert response is not None
-    assert response["kind"] == "pong"
+    assert response["frame_type"] == "pong"
     assert response["ts"] is None
     assert isinstance(response["timestamp_ms"], int)
 
 
 @pytest.mark.asyncio
 async def test_handle_inbound_frame_returns_none_for_non_ping_frame() -> None:
-    """业务帧（type / 其他 kind / 不是 dict）→ 返回 None 让上层路由。"""
+    """业务帧（type / 其他 frame_type / 不是 dict）→ 返回 None 让上层路由。"""
     heartbeat = Heartbeat(_make_config(), _DummyHooks())
     # 业务 type 字段（Claude 频道 6 个 msg_type）
     assert await heartbeat.handle_inbound_frame({"type": "claude-command"}) is None
-    # 其他 kind（应回的 pong 不应该走到这条路径，但万一收到也不应触发）
-    assert await heartbeat.handle_inbound_frame({"kind": "pong"}) is None
-    # 完全无 kind / type 字段
+    # 其他 frame_type（应回的 pong 不应该走到这条路径，但万一收到也不应触发）
+    assert await heartbeat.handle_inbound_frame({"frame_type": "pong"}) is None
+    # 完全无 frame_type / type 字段
     assert await heartbeat.handle_inbound_frame({}) is None
 
 
@@ -85,7 +85,7 @@ async def test_two_heartbeat_instances_do_not_share_state() -> None:
     hb_b = Heartbeat(_make_config(), hooks_b)
 
     # 仅对 A 处理 ping
-    resp_a = await hb_a.handle_inbound_frame({"kind": "ping", "ts": 1000})
+    resp_a = await hb_a.handle_inbound_frame({"frame_type": "ping", "ts": 1000})
     assert resp_a is not None
     assert resp_a["ts"] == 1000
 
@@ -95,7 +95,7 @@ async def test_two_heartbeat_instances_do_not_share_state() -> None:
     assert hooks_b.sent_pongs == []
 
     # 对 B 调一次不同 ts
-    resp_b = await hb_b.handle_inbound_frame({"kind": "ping", "ts": 9999})
+    resp_b = await hb_b.handle_inbound_frame({"frame_type": "ping", "ts": 9999})
     assert resp_b is not None
     assert resp_b["ts"] == 9999
     # A 状态不受影响
