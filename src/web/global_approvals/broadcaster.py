@@ -29,7 +29,7 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from network.network_log import log_network_exception
+from observability.network_log import log_network_exception
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
@@ -97,7 +97,7 @@ class ApprovalInboxBroadcaster:
         """
         async with self._lock:
             items = list(self._pending_snapshot.values())
-        frame = {"frame_type": "approval.inbox.snapshot", "items": items}
+        frame = {"kind": "approval.inbox.snapshot", "items": items}
         try:
             await ws.send_json(frame)
         except Exception as exc:
@@ -120,7 +120,7 @@ class ApprovalInboxBroadcaster:
                 ``{"requestId", "threadId", "threadDisplayName?", "toolName",
                 "toolInput", "autoApproveAtMs", "autoRejectAtMs",
                 "blockedByRule", "isElevated", "channel", "cwd",
-                "arrivedAtMs"}``。**payload 内不应含 "frame_type" 字段**——
+                "arrivedAtMs"}``。**payload 内不应含 "kind" 字段**——
                 由本方法补成 ``approval.inbox.add``。
         """
         request_id = payload.get("requestId")
@@ -130,7 +130,7 @@ class ApprovalInboxBroadcaster:
         async with self._lock:
             self._pending_snapshot[request_id] = dict(payload)
             subscribers = list(self._subscribers)
-        frame = {"frame_type": "approval.inbox.add", **payload}
+        frame = {"kind": "approval.inbox.add", **payload}
         await self._broadcast(subscribers, frame)
 
     async def emit_remove(self, request_id: str, reason: str) -> None:
@@ -144,7 +144,7 @@ class ApprovalInboxBroadcaster:
         async with self._lock:
             self._pending_snapshot.pop(request_id, None)
             subscribers = list(self._subscribers)
-        frame = {"frame_type": "approval.inbox.remove", "requestId": request_id, "reason": reason}
+        frame = {"kind": "approval.inbox.remove", "requestId": request_id, "reason": reason}
         await self._broadcast(subscribers, frame)
 
     async def _broadcast(self, subscribers: list[Any], frame: dict[str, Any]) -> None:

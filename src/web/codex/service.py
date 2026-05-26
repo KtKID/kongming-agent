@@ -31,6 +31,7 @@ import logging
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
+from observability.network_log import log_network_exception
 from web._shared.session_manager import SessionManager
 from web.codex._image_cli_args import CodexImageCliArgsBuilder
 from web.codex.approval import map_permission_mode
@@ -240,19 +241,17 @@ class CodexService:
         except asyncio.CancelledError:
             # 被 SessionManager.request_abort cancel —— abort 路径已 SIGTERM/SIGKILL
             logger.info("codex service.query cancelled (session=%s)", active_sid)
-            with contextlib.suppress(Exception):
-                await self._safe_send(
-                    writer,
-                    self._complete_msg(active_sid, exit_code=1, aborted=True),
-                )
+            await self._safe_send(
+                writer,
+                self._complete_msg(active_sid, exit_code=1, aborted=True),
+            )
             # 不再 raise——让 finally 收尾，调用方不需要 CancelledError
         except Exception as exc:
             logger.exception("codex service.query failed")
-            with contextlib.suppress(Exception):
-                await self._safe_send(
-                    writer,
-                    self._error_msg(active_sid, f"codex service error: {exc}"),
-                )
+            await self._safe_send(
+                writer,
+                self._error_msg(active_sid, f"codex service error: {exc}"),
+            )
         finally:
             # 移除子进程映射（active_sid 可能已 rename，旧 placeholder 也尝试删）
             self._processes.pop(active_sid, None)
@@ -291,8 +290,15 @@ class CodexService:
         except TimeoutError:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
-            with contextlib.suppress(Exception):
+            try:
                 await proc.wait()
+            except Exception as exc:
+                log_network_exception(
+                    "web.codex.service",
+                    "kill_wait_failed",
+                    exc,
+                    session_id=session_id,
+                )
         return True
 
     # ----------------------------------------------------------- 内部辅助
@@ -424,7 +430,7 @@ class CodexService:
                     and kongming_thread_id
                     and self.thread_manager is not None
                 ):
-                    with contextlib.suppress(Exception):
+                    try:
                         metas = self.thread_manager.list_threads()
                         meta = next((m for m in metas if m.id == kongming_thread_id), None)
                         if meta is not None and not getattr(meta, "codex_thread_id", ""):
@@ -433,6 +439,14 @@ class CodexService:
                                 new_sid,
                                 cwd,
                             )
+                    except Exception as exc:
+                        log_network_exception(
+                            "web.codex.service",
+                            "bind_codex_thread_failed",
+                            exc,
+                            thread_id=kongming_thread_id,
+                            session_id=new_sid,
+                        )
 
             # usage 派生：turn.completed 时从 codex rollout 真源派生最新 usage 推前端。
             # **v2**：manager 无状态门面，service 不再写盘。
@@ -441,7 +455,7 @@ class CodexService:
                 and self.thread_manager is not None
                 and kongming_thread_id is not None
             ):
-                with contextlib.suppress(Exception):
+                try:
                     usage_dto = await self.thread_manager.usage_manager.get_thread_usage(
                         kongming_thread_id
                     )
@@ -453,6 +467,14 @@ class CodexService:
                                 "usage": usage_dto.model_dump(),
                             }
                         )
+                except Exception as exc:
+                    log_network_exception(
+                        "web.codex.service",
+                        "complete_usage_broadcast_failed",
+                        exc,
+                        thread_id=kongming_thread_id,
+                        session_id=active_sid,
+                    )
 
             # 归一化 + 下发
             for msg in normalize(event, active_sid):
@@ -460,7 +482,7 @@ class CodexService:
                 # 用调用时传入的 session_id，可能是 rename 前的）
                 if msg.get("sessionId") != active_sid:
                     msg["sessionId"] = active_sid
-                if msg.get("frame_type") == "complete":
+                if msg.get("kind") == "complete":
                     complete_already_sent = True
                 await self._safe_send(writer, dict(msg))
                 if kongming_thread_id is not None:
@@ -507,9 +529,9 @@ class CodexService:
 
     @staticmethod
     def _error_msg(session_id: str, error: str) -> dict[str, Any]:
-        """构造 ``frame_type:error`` 出站消息（最小字段集）。"""
+        """构造 ``kind:error`` 出站消息（最小字段集）。"""
         return {
-            "frame_type": "error",
+            "kind": "error",
             "provider": "codex",
             "sessionId": session_id,
             "error": error,
@@ -522,9 +544,9 @@ class CodexService:
         exit_code: int,
         aborted: bool,
     ) -> dict[str, Any]:
-        """构造 ``frame_type:complete`` 出站消息（用于 turn.completed 缺失时补发）。"""
+        """构造 ``kind:complete`` 出站消息（用于 turn.completed 缺失时补发）。"""
         return {
-            "frame_type": "complete",
+            "kind": "complete",
             "provider": "codex",
             "sessionId": session_id,
             "exitCode": exit_code,
@@ -534,8 +556,16 @@ class CodexService:
     @staticmethod
     async def _safe_send(writer: Any, msg: dict[str, Any]) -> None:
         """``writer.send_json`` 的容错包装（连接断开时不抛）。"""
-        with contextlib.suppress(Exception):
+        try:
             await writer.send_json(msg)
+        except Exception as exc:
+            log_network_exception(
+                "web.codex.service",
+                "safe_send_failed",
+                exc,
+                frame_kind=msg.get("kind"),
+                session_id=msg.get("sessionId"),
+            )
 
 
 __all__ = ["CodexService"]

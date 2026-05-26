@@ -31,7 +31,7 @@ from typing import Any
 from fastapi import FastAPI, WebSocket
 from starlette.websockets import WebSocketDisconnect
 
-from network.network_log import log_network_event, log_network_exception
+from observability.network_log import log_network_event, log_network_exception
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ class CronWSBroker:
         finally:
             await broker.detach(websocket)
         # 业务侧广播
-        await broker.broadcast({"frame_type": "cron.run.completed", ...})
+        await broker.broadcast({"kind": "cron.run.completed", ...})
     """
 
     def __init__(self) -> None:

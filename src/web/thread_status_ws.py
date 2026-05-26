@@ -10,7 +10,7 @@
 - 鉴权：复用 thread WS 的 cookie-based session
 - 连接管理：单例 :class:`ThreadStatusBroadcaster` 维护 ``set[WebSocket]``
 - broadcast：``asyncio.gather(..., return_exceptions=True)`` 包裹
-- ``emit(thread_id, normalized)``：从 normalized["frame_type"] 映射到 phase，
+- ``emit(thread_id, normalized)``：从 normalized["kind"] 映射到 phase，
   构造帧后调 ``broadcast``
 """
 
@@ -23,7 +23,9 @@ import time
 from typing import Any, Literal, cast
 
 from fastapi import FastAPI, WebSocket
+from starlette.websockets import WebSocketDisconnect
 
+from observability.network_log import log_network_event, log_network_exception
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 
 logger = logging.getLogger(__name__)
@@ -111,7 +113,13 @@ class ThreadStatusBroadcaster:
         """对单个连接 send；失败则自动 detach。"""
         try:
             await ws.send_json(payload)
-        except Exception:
+        except Exception as exc:
+            log_network_exception(
+                "web.thread_status_ws",
+                "broadcast_send_failed",
+                exc,
+                websocket_id=id(ws),
+            )
             await self.detach(ws)
 
     async def emit(self, thread_id: str, normalized: dict[str, Any]) -> None:
@@ -125,25 +133,22 @@ class ThreadStatusBroadcaster:
         - ``permission_cancelled`` → ``idle``
         - ``complete`` → ``complete``
         - ``error`` → ``error``
-        - 其他 frame_type → 不推送
+        - 其他 kind → 不推送
         """
-        # NormalizedMessage 的判别字段已由 protocol-frame-type-unify-v0.1
-        # 从 ``kind`` 改成 ``frame_type``；本路径属内部消费 NormalizedMessage，
-        # 跟随真源字段名同步，与 thread-status 出站 wire 帧（``type``）解耦
-        frame_type = normalized.get("frame_type")
-        if frame_type is None:
+        kind = normalized.get("kind")
+        if kind is None:
             return
 
         phase: Phase | None = None
 
-        if frame_type == "stream_status":
+        if kind == "stream_status":
             raw_phase = normalized.get("phase")
             if isinstance(raw_phase, str) and raw_phase in _STREAM_STATUS_PHASES:
                 phase = cast(Phase, raw_phase)
             else:
                 return
         else:
-            phase = _KIND_TO_PHASE.get(frame_type)
+            phase = _KIND_TO_PHASE.get(kind)
 
         if phase is None:
             return
@@ -316,8 +321,14 @@ async def _thread_status_ws_handler(websocket: WebSocket) -> None:
                     decision["rememberScope"] = remember_scope
                 inbox.resolve(thread_id, request_id, decision)
             # 其他 kind 静默
-    except Exception:
+    except Exception as exc:
         logger.debug("/ws/thread-status client disconnected or errored")
+        log_network_event(
+            "web.thread_status_ws",
+            "ws_loop_terminated",
+            level="INFO" if isinstance(exc, WebSocketDisconnect) else "WARNING",
+            message=str(exc),
+        )
     finally:
         # 4. detach 两个 broadcaster
         await broadcaster.detach(websocket)
