@@ -79,7 +79,7 @@ web-dev:
 	cd web && npm run dev
 
 web-test:
-	cd web && npm run test:unit
+	uv run python scripts/run_with_timing.py --label web-test --cwd web -- npm run test:unit
 
 # web：启动 uvicorn web 后端（v0.1.5 web-app-shell）。
 # 前置：
