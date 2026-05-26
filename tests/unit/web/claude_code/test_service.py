@@ -26,6 +26,17 @@ class _FakeWriter:
         self.sent.append(msg)
 
 
+class _ReconnectableWriter:
+    def __init__(self, sink: _FakeWriter) -> None:
+        self._sink = sink
+
+    def attach_ws(self, sink: _FakeWriter) -> None:
+        self._sink = sink
+
+    async def send_json(self, msg: dict[str, Any]) -> None:
+        await self._sink.send_json(msg)
+
+
 def _make_fake_client(messages: list[Any]) -> MagicMock:
     """构造一个看起来像 ClaudeSDKClient 的 mock。"""
     client = MagicMock()
@@ -163,9 +174,55 @@ async def test_query_sends_normalized_messages() -> None:
     await svc.query("hi", {"sessionId": "sid-1"}, writer)
 
     # 收到 text + complete
-    kinds = [m.get("frame_type") for m in writer.sent]
+    kinds = [m.get("kind") for m in writer.sent]
     assert "text" in kinds
     assert "complete" in kinds
+
+
+async def test_query_reconnect_rebinds_stream_writer() -> None:
+    gate = asyncio.Event()
+
+    async def receive_response() -> Any:
+        yield _make_assistant("first", message_id="msg-1")
+        await gate.wait()
+        yield _make_assistant("second", message_id="msg-2")
+        yield _make_result()
+
+    fake_client = MagicMock()
+    fake_client.connect = AsyncMock()
+    fake_client.disconnect = AsyncMock()
+    fake_client.query = AsyncMock()
+    fake_client.receive_response = receive_response
+    fake_client.interrupt = AsyncMock()
+
+    sessions = SessionManager()
+    normalizer = ClaudeNormalizer()
+    approval = ApprovalBridge(normalizer, sessions)
+    svc = ClaudeCodeService(
+        normalizer,
+        approval,
+        sessions,
+        client_factory=lambda **_: fake_client,
+    )
+
+    first_sink = _FakeWriter()
+    second_sink = _FakeWriter()
+    writer = _ReconnectableWriter(first_sink)
+    task = asyncio.create_task(svc.query("hi", {"sessionId": "sid-1"}, writer))
+
+    for _ in range(50):
+        if first_sink.sent:
+            break
+        await asyncio.sleep(0)
+    assert first_sink.sent, "expected first frame before reconnect"
+
+    replaced = await sessions.replace_writer("sid-1", second_sink)
+    assert replaced is True
+    gate.set()
+    await task
+
+    assert [msg.get("kind") for msg in first_sink.sent] == ["text"]
+    assert [msg.get("kind") for msg in second_sink.sent] == ["text", "complete"]
 
 
 async def test_query_reuses_client_across_runs() -> None:
@@ -242,7 +299,7 @@ async def test_query_failure_emits_error_and_evicts_client() -> None:
     writer = _FakeWriter()
     await svc.query("hi", {"sessionId": "sid-err"}, writer)
     # error 帧应当被发出
-    kinds = [m.get("frame_type") for m in writer.sent]
+    kinds = [m.get("kind") for m in writer.sent]
     assert "error" in kinds
 
 
