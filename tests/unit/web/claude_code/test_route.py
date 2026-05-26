@@ -6,13 +6,15 @@
 2. claude-command（mock SDK 输出）→ 收到 normalize 后的 text + complete
 3. claude-permission-response → resolve Future
 4. abort-session → 收到 complete(aborted=True)
-5. check-session-status → 收到 session-status 帧
-6. unknown command → error 帧
-7. thread_id query 参数（v0.1.6）：非法格式 / thread 不存在 / backend_kind 不匹配 / 正常 claude_code thread
+5. ping → pong
+6. check-session-status → 收到 session-status 帧
+7. unknown command → error 帧
+8. thread_id query 参数（v0.1.6）：非法格式 / thread 不存在 / backend_kind 不匹配 / 正常 claude_code thread
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -185,8 +187,65 @@ def test_check_session_status_returns_inactive(app_client: TestClient) -> None:
         assert msg.get("isProcessing") is False
 
 
+def test_ping_returns_pong_with_same_ts(app_client: TestClient) -> None:
+    """app-level heartbeat：ping 带 ts，route 原样回 pong。"""
+    with app_client.websocket_connect("/ws/claude-code") as ws:
+        ws.send_json({"kind": "ping", "ts": 123456789})
+        msg = ws.receive_json()
+        assert msg == {"kind": "pong", "ts": 123456789}
+
+
+def test_keepalive_events_are_written_to_workspace_logs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude keepalive 事件落到 ``.kongming/logs/claude-keepalive.jsonl``。"""
+    fake_client = _make_fake_sdk_client([_make_assistant("hi"), _make_result()])
+
+    def factory(**_: Any) -> MagicMock:
+        return fake_client
+
+    monkeypatch.setattr(
+        "web.claude_code.service.ClaudeSDKClient",
+        factory,
+    )
+
+    _seed_password(tmp_path, "pwd")
+    cfg = _make_cfg()
+    tm = FakeThreadManager()
+    tm.list_threads = lambda: [  # type: ignore[method-assign]
+        _make_thread_meta(thread_id="thread-abcdef123456", backend_kind="claude_code"),
+    ]
+    app = create_app(cfg, tm, home_dir=tmp_path)
+
+    with TestClient(app) as client:
+        r = client.post("/api/auth/login", json={"password": "pwd"}, headers=CSRF_HEADERS)
+        assert r.status_code == 200
+        with client.websocket_connect("/ws/claude-code?thread_id=thread-abcdef123456") as ws:
+            ws.send_json({"kind": "ping", "ts": 123456789})
+            assert ws.receive_json() == {"kind": "pong", "ts": 123456789}
+            ws.send_json({"type": "check-session-status", "sessionId": "sid-1"})
+            msg = ws.receive_json()
+            assert msg.get("type") == "session-status"
+            assert msg.get("isProcessing") is False
+
+    log_path = tmp_path / "logs" / "claude-keepalive.jsonl"
+    assert log_path.is_file()
+    rows = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    events = [row["event"] for row in rows]
+    assert "ws_connected" in events
+    assert "heartbeat_ping_received" in events
+    assert "heartbeat_pong_sent" in events
+    assert "session_status_checked" in events
+    assert "ws_disconnected" in events
+
+
 def test_abort_session_unknown_returns_complete_aborted(app_client: TestClient) -> None:
-    """abort-session：未注册 session 仍然回 complete(aborted=True) 给前端。"""
+    """abort-session：未注册 session（service.abort 返 False）→ route 兜底发 complete。
+
+    interrupt-claude-channel-v0.1：unknown sid 无活 _consume，必须有 route 层
+    主动兜底 emit，否则前端 isRunning 卡在 true 等不到任何回应。
+    """
     with app_client.websocket_connect("/ws/claude-code") as ws:
         ws.send_json(
             {
@@ -198,6 +257,55 @@ def test_abort_session_unknown_returns_complete_aborted(app_client: TestClient) 
         assert msg.get("kind") == "complete"
         assert msg.get("aborted") is True
         assert msg.get("sessionId") == "ghost-sid"
+
+
+def test_abort_session_active_does_not_emit_complete_from_route(
+    app_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """abort-session：有活 session（service.abort 返 True）→ route **不**主动发 complete。
+
+    interrupt-claude-channel-v0.1 #2 改造核心契约：避免 route + service._consume 双重
+    emit 让前端渲染 2 张"对话已中止"卡片。aborted=True 时 complete 帧由
+    service._consume() CancelledError finally 单一来源 emit。
+
+    实现细节：因为 _consume 的 CancelledError 路径**也会**通过同一个 ws
+    （websocket.send_json）发 complete，本测试用 service.abort monkeypatch 让它
+    返 True 但不触发 _consume，验证 route handler 自身**不**主动 send_json
+    complete 帧（队列里只有 ws.receive_json timeout 或 pong）。
+    """
+    from web.claude_code import route as route_mod
+
+    # 拦截 service.abort 让它返 True（模拟"有活 session 被 cancel"），但不真起
+    # _consume → 不会有 _consume finally 路径发 complete
+    async def _mock_abort_true(self: Any, sid: str) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        route_mod.ClaudeCodeService,
+        "abort",
+        _mock_abort_true,
+    )
+
+    with app_client.websocket_connect("/ws/claude-code") as ws:
+        ws.send_json(
+            {
+                "type": "abort-session",
+                "sessionId": "active-sid",
+            },
+        )
+        # route 不应主动发 complete；如果发了 receive_json 会立刻拿到 complete
+        # 反之 ws 没新帧，receive_json 会卡或抛 — 用 ws.send_json + 立即 receive
+        # 一个 ping/pong 探针（ws.receive_json 不带 timeout 会卡死，这里用
+        # 第二条消息后受控 yield）
+        ws.send_json({"type": "check-session-status", "sessionId": "active-sid"})
+        msg = ws.receive_json()
+        # 期望直接拿到 check-session-status 的 session-status 应答；
+        # 如果 route 误发了 complete，会先拿到 complete（kind="complete"）
+        assert msg.get("type") == "session-status", (
+            f"route 不应主动 emit complete（aborted=True 路径），但收到 {msg!r}"
+        )
+        assert msg.get("sessionId") == "active-sid"
 
 
 def test_permission_response_routed_to_approval(
@@ -382,3 +490,29 @@ def test_thread_id_omitted_keeps_legacy_behavior(
         msg = ws.receive_json()
         # 只要能拿到任意 normalize 帧就证明没被 close
         assert msg.get("provider") == "claude" or msg.get("kind") is not None
+
+
+def test_ping_frame_intercepted_by_network_manager_returns_pong(
+    app_client: TestClient,
+) -> None:
+    """network-layer-claude-keepalive-v0.1：``{"kind":"ping"}`` 帧被 NetworkManager
+    拦下，原样 echo ts + 附带 server timestamp_ms，返回 pong 帧。
+
+    端到端验证：
+    1. ws.send_json ping → ws.receive_json 拿到 pong（不经过业务 _dispatch）
+    2. ts 字段原样回传，timestamp_ms 是 int（服务端 wall-clock 毫秒）
+    3. ws 仍存活，可继续发业务帧（验证 ``continue`` 跳过 _dispatch 后主循环
+       继续等下一帧而不是断开）
+    """
+    with app_client.websocket_connect("/ws/claude-code") as ws:
+        ws.send_json({"kind": "ping", "ts": 1700000000000})
+        msg = ws.receive_json()
+        assert msg.get("kind") == "pong", f"expected pong, got {msg!r}"
+        assert msg.get("ts") == 1700000000000
+        assert isinstance(msg.get("timestamp_ms"), int)
+        assert msg["timestamp_ms"] > 0
+
+        # 验证 ws 仍存活：发个 unknown command 拿 error
+        ws.send_json({"type": "totally-unknown"})
+        msg = ws.receive_json()
+        assert msg.get("kind") == "error"

@@ -23,7 +23,9 @@ import time
 from typing import Any, Literal, cast
 
 from fastapi import FastAPI, WebSocket
+from starlette.websockets import WebSocketDisconnect
 
+from observability.network_log import log_network_event, log_network_exception
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 
 logger = logging.getLogger(__name__)
@@ -111,7 +113,13 @@ class ThreadStatusBroadcaster:
         """对单个连接 send；失败则自动 detach。"""
         try:
             await ws.send_json(payload)
-        except Exception:
+        except Exception as exc:
+            log_network_exception(
+                "web.thread_status_ws",
+                "broadcast_send_failed",
+                exc,
+                websocket_id=id(ws),
+            )
             await self.detach(ws)
 
     async def emit(self, thread_id: str, normalized: dict[str, Any]) -> None:
@@ -297,15 +305,30 @@ async def _thread_status_ws_handler(websocket: WebSocket) -> None:
                 request_id = data.get("requestId")
                 if not isinstance(thread_id, str) or not isinstance(request_id, str):
                     continue
-                decision = {
+                # rememberScope（generic-chat-session-grant）：仅在非 None 时
+                # 加入 dict，避免污染 claude_code v2-inbox 老 bridge 路径的
+                # decision 字面值（老 bridge 完全不感知此字段；下游测试用
+                # assert_called_once_with 严格匹配 dict 形状，多余字段会挂）。
+                # 用于 ``ApprovalManager.resolve`` 检测 == "session" 时调
+                # ``ApprovalRules.add_session_grant`` 写 thread 级 overrides。
+                decision: dict[str, Any] = {
                     "allow": bool(data.get("allow", False)),
                     "message": data.get("message"),
                     "rememberEntry": data.get("rememberEntry"),
                 }
+                remember_scope = data.get("rememberScope")
+                if remember_scope is not None:
+                    decision["rememberScope"] = remember_scope
                 inbox.resolve(thread_id, request_id, decision)
             # 其他 kind 静默
-    except Exception:
+    except Exception as exc:
         logger.debug("/ws/thread-status client disconnected or errored")
+        log_network_event(
+            "web.thread_status_ws",
+            "ws_loop_terminated",
+            level="INFO" if isinstance(exc, WebSocketDisconnect) else "WARNING",
+            message=str(exc),
+        )
     finally:
         # 4. detach 两个 broadcaster
         await broadcaster.detach(websocket)

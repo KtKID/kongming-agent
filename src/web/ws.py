@@ -44,6 +44,7 @@ from pydantic import ValidationError
 
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore, resolve_evolution_root
+from observability.network_log import log_network_event, log_network_exception
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 from web.auto_approval.ws_handlers import (
     handle_auto_approval_query,
@@ -140,8 +141,15 @@ async def _thread_ws_handler(websocket: WebSocket, thread_id: str) -> None:
         # ThreadManager 管，避免同一 thread 的其它连接被一条断连带走。
         detach_call = getattr(cell, "detach_ws", None)
         if callable(detach_call):
-            with contextlib.suppress(Exception):
+            try:
                 detach_call(websocket)
+            except Exception as exc:
+                log_network_exception(
+                    "web.ws",
+                    "detach_ws_failed",
+                    exc,
+                    thread_id=thread_id,
+                )
 
 
 async def _receive_loop(
@@ -155,6 +163,13 @@ async def _receive_loop(
         try:
             raw = await websocket.receive_text()
         except WebSocketDisconnect:
+            log_network_event(
+                "web.ws",
+                "ws_disconnected",
+                level="INFO",
+                message="generic chat websocket disconnected",
+                thread_id=thread_id,
+            )
             return
         except Exception:
             logger.exception("ws receive_text raised; closing")
@@ -280,9 +295,14 @@ async def _dispatch_frame(
         try:
             pong = PongFrame(timestamp_ms=_now_ms(), ts=getattr(frame, "ts", None))
             await websocket.send_json(pong.model_dump())
-        except Exception:
+        except Exception as exc:
             # 推 pong 失败说明 ws 断了；让下次 receive 抛 WebSocketDisconnect
-            pass
+            log_network_exception(
+                "web.ws",
+                "pong_send_failed",
+                exc,
+                thread_id=thread_id,
+            )
     else:
         # discriminated union 已经过滤；这里只是兜底
         await _send_error_frame(websocket, "internal", f"unknown frame kind: {kind}")
@@ -476,8 +496,14 @@ async def _send_error_frame(
             timestamp_ms=_now_ms(),
         )
         await websocket.send_json(frame.model_dump())
-    except Exception:
-        logger.debug("send error frame failed; ignoring")
+    except Exception as exc:
+        log_network_exception(
+            "web.ws",
+            "send_error_frame_failed",
+            exc,
+            error_code=error_code,
+            thread_turn=turn,
+        )
 
 
 async def _send_no_active_run_notice(websocket: WebSocket, thread_id: str) -> None:
@@ -498,8 +524,13 @@ async def _send_no_active_run_notice(websocket: WebSocket, thread_id: str) -> No
             icon="info",
         )
         await websocket.send_json(frame.model_dump())
-    except Exception:
-        logger.debug("send no_active_run notice failed; ignoring")
+    except Exception as exc:
+        log_network_exception(
+            "web.ws",
+            "send_no_active_run_notice_failed",
+            exc,
+            thread_id=thread_id,
+        )
 
 
 __all__ = [

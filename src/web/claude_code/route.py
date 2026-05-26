@@ -34,10 +34,14 @@ import asyncio
 import contextlib
 import logging
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 
+from network import get_network_manager
+from observability.network_log import log_network_event, log_network_exception
+from web._shared.reconnectable_writer import ReconnectableWebSocketWriter
 from web._shared.session_manager import SessionManager
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 from web.auto_approval.ws_handlers import (
@@ -46,6 +50,7 @@ from web.auto_approval.ws_handlers import (
     handle_auto_approval_toggle,
 )
 from web.claude_code.approval import ApprovalBridge
+from web.claude_code.keepalive_log import append_keepalive_log
 from web.claude_code.normalizer import ClaudeNormalizer
 from web.claude_code.service import ClaudeCodeService
 from web.protocol.rest_models import UserInputAttachment
@@ -64,6 +69,13 @@ WS_CLOSE_POLICY_VIOLATION = 1008
 _THREAD_ID_RE: re.Pattern[str] = re.compile(r"^thread-[a-f0-9]{12}$")
 
 router = APIRouter()
+
+
+def _write_keepalive_log(websocket: WebSocket, *, event: str, **fields: Any) -> None:
+    """写工作区 ``.kongming/logs/claude-keepalive.jsonl``。"""
+    home = getattr(websocket.app.state, "kongming_home", None)
+    if isinstance(home, Path):
+        append_keepalive_log(home, event=event, **fields)
 
 
 @router.get("/api/claude-code/test-evolution-event")
@@ -256,11 +268,27 @@ async def claude_code_ws(
         thread_manager=tm_for_service,
         asset_storage=asset_storage_for_service,
     )
+    writer = ReconnectableWebSocketWriter(websocket)
 
     # 跟踪 fire-and-forget 后台 task，避免 GC 提前回收（asyncio 文档约定）
     bg_tasks: set[asyncio.Task[Any]] = set()
 
     await websocket.accept()
+    _write_keepalive_log(
+        websocket,
+        event="ws_connected",
+        thread_id=bound_thread_id,
+    )
+
+    # network-layer-claude-keepalive-v0.1: 注册到 NetworkManager 拿 conn_id，
+    # 主循环里每条 inbound 帧先走 network_manager.handle_inbound() 拦下 ping
+    # 帧回 pong；走完心跳路径后才进业务 _dispatch。
+    network_manager = get_network_manager()
+    conn_id = await network_manager.register(
+        "claude",
+        websocket,
+        thread_id=bound_thread_id,
+    )
 
     # 2.7 evolution hook: register event route
     if evolution_manager is not None and evolution_manager.enabled and bound_thread_id:
@@ -271,17 +299,34 @@ async def claude_code_ws(
 
     # 2.8 smart-approval-v1: 连接建立后主动 push 一次 state（前端 toggle 初始状态）
     if auto_approval_policy is not None and bound_cwd:
-        with contextlib.suppress(Exception):
+        try:
             await websocket.send_json(
                 build_auto_approval_state_msg(auto_approval_policy, bound_cwd),
+            )
+        except Exception as exc:
+            log_network_exception(
+                "web.claude_code.route",
+                "initial_auto_approval_state_failed",
+                exc,
+                thread_id=bound_thread_id,
+                cwd=bound_cwd,
             )
 
     # 3. 主循环
     try:
         while True:
             data = await websocket.receive_json()
+            # network-layer v0.1: 心跳帧由 NetworkManager 拦下回 pong；返回
+            # True 即跳过业务路由。非 dict 帧（如纯字符串）由 _dispatch 自己
+            # 报 error，本路径只对 dict 走 handle_inbound。
+            if isinstance(data, dict) and await network_manager.handle_inbound(
+                conn_id,
+                data,
+            ):
+                continue
             await _dispatch(
                 websocket,
+                writer,
                 data,
                 service,
                 approval,
@@ -294,9 +339,16 @@ async def claude_code_ws(
             )
     except WebSocketDisconnect:
         logger.debug("claude-code ws disconnected")
+        log_network_event(
+            "web.claude_code.route",
+            "ws_disconnected",
+            level="INFO",
+            message="claude websocket disconnected",
+            thread_id=bound_thread_id,
+        )
     except Exception as exc:
         logger.exception("claude-code ws unhandled error")
-        with contextlib.suppress(Exception):
+        try:
             await websocket.send_json(
                 {
                     "kind": "error",
@@ -304,9 +356,33 @@ async def claude_code_ws(
                     "error": f"unhandled: {exc!r}",
                 },
             )
-        with contextlib.suppress(Exception):
+        except Exception as send_exc:
+            log_network_exception(
+                "web.claude_code.route",
+                "unhandled_error_send_failed",
+                send_exc,
+                thread_id=bound_thread_id,
+            )
+        try:
             await websocket.close()
+        except Exception as close_exc:
+            log_network_exception(
+                "web.claude_code.route",
+                "unhandled_error_close_failed",
+                close_exc,
+                thread_id=bound_thread_id,
+            )
     finally:
+        # network-layer v0.1: 注销连接，停止心跳状态机。幂等：未知 conn_id
+        # 静默返回，多次 disconnect / 异常退出都安全。
+        with contextlib.suppress(Exception):
+            await network_manager.unregister(conn_id)
+        writer.detach_ws(websocket)
+        _write_keepalive_log(
+            websocket,
+            event="ws_disconnected",
+            thread_id=bound_thread_id,
+        )
         # evolution hook: unregister event route on any exit path
         if evolution_manager is not None and evolution_manager.enabled and bound_thread_id:
             evolution_manager.unregister_event_route(bound_thread_id)
@@ -318,6 +394,7 @@ async def claude_code_ws(
 
 async def _dispatch(
     websocket: WebSocket,
+    writer: ReconnectableWebSocketWriter,
     data: dict[str, Any],
     service: ClaudeCodeService,
     approval: ApprovalBridge,
@@ -330,6 +407,31 @@ async def _dispatch(
     bound_claude_tid: str = "",
 ) -> None:
     """单条入站帧分发。"""
+    if data.get("kind") == "ping":
+        ts = data.get("ts")
+        if isinstance(ts, (int, float)):
+            logger.debug(
+                "claude-code heartbeat ping received: thread_id=%s ts=%s",
+                bound_thread_id,
+                ts,
+            )
+            await websocket.send_json({"kind": "pong", "ts": ts})
+            _write_keepalive_log(
+                websocket,
+                event="heartbeat_ping_received",
+                thread_id=bound_thread_id,
+                wire_ts=ts,
+            )
+            _write_keepalive_log(
+                websocket,
+                event="heartbeat_pong_sent",
+                thread_id=bound_thread_id,
+                wire_ts=ts,
+            )
+            return
+        await _send_error(websocket, "ping.ts required")
+        return
+
     msg_type = data.get("type") if isinstance(data, dict) else None
 
     if msg_type == "claude-command":
@@ -365,7 +467,7 @@ async def _dispatch(
             service.query(
                 command,
                 options,
-                websocket,
+                writer,
                 register_id_override=bound_thread_id,
                 attachments=parsed_attachments,
             ),
@@ -407,19 +509,27 @@ async def _dispatch(
         return
 
     if msg_type == "abort-session":
+        # interrupt-claude-channel-v0.1：
+        # - service.abort() 返回 True（有活 run 被 cancel）→ _consume() 的
+        #   CancelledError finally 分支会 emit complete（service.py:192-201），
+        #   route 层**不**再发，避免双重 emit 让前端渲染 2 张"对话已中止"
+        # - service.abort() 返回 False（无活 run：unknown sid / 已 disconnect /
+        #   register 已 unregister）→ route 主动发 complete 兜底，否则前端
+        #   等不到任何回应卡死
         session_id = data.get("sessionId")
         if not isinstance(session_id, str):
             await _send_error(websocket, "abort-session.sessionId required")
             return
-        await service.abort(session_id)
-        await websocket.send_json(
-            {
-                "kind": "complete",
-                "provider": "claude",
-                "sessionId": session_id,
-                "aborted": True,
-            },
-        )
+        aborted = await service.abort(session_id)
+        if not aborted:
+            await websocket.send_json(
+                {
+                    "kind": "complete",
+                    "provider": "claude",
+                    "sessionId": session_id,
+                    "aborted": True,
+                },
+            )
         return
 
     if msg_type == "check-session-status":
@@ -430,6 +540,19 @@ async def _dispatch(
         active = sessions.is_active(session_id)
         if active:
             await sessions.replace_writer(session_id, websocket)
+        logger.debug(
+            "claude-code session status checked: thread_id=%s session_id=%s active=%s",
+            bound_thread_id,
+            session_id,
+            active,
+        )
+        _write_keepalive_log(
+            websocket,
+            event="session_status_checked",
+            thread_id=bound_thread_id,
+            session_id=session_id,
+            active=active,
+        )
         await websocket.send_json(
             {
                 "type": "session-status",
@@ -459,13 +582,20 @@ async def _dispatch(
 
 async def _send_error(websocket: WebSocket, error_message: str) -> None:
     """发送 error 帧。"""
-    with contextlib.suppress(Exception):
+    try:
         await websocket.send_json(
             {
                 "kind": "error",
                 "provider": "claude",
                 "error": error_message,
             },
+        )
+    except Exception as exc:
+        log_network_exception(
+            "web.claude_code.route",
+            "send_error_frame_failed",
+            exc,
+            error_message=error_message,
         )
 
 

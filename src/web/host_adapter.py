@@ -43,6 +43,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from core.contracts import ApprovalAction, ApprovalRequest, Event
 from host.base import HostAdapter
+from observability.network_log import log_network_exception
 from web.protocol import ApprovalRequestFrame, AssistantFinalFrame
 
 logger = logging.getLogger(__name__)
@@ -361,12 +362,23 @@ class WebHostAdapter(HostAdapter):
                 "WebHostAdapter ws.send_json failed: %s; marking closed",
                 exc,
             )
+            log_network_exception(
+                "web.host_adapter",
+                "safe_send_failed",
+                exc,
+            )
             self._closed = True
-            with contextlib.suppress(Exception):
+            try:
                 # 即便 send 失败也尝试 best-effort close（不抛）
                 close_call = self._ws.close()
                 if asyncio.iscoroutine(close_call):
                     await close_call
+            except Exception as close_exc:
+                log_network_exception(
+                    "web.host_adapter",
+                    "safe_send_close_failed",
+                    close_exc,
+                )
 
 
 __all__ = ["WebHostAdapter"]

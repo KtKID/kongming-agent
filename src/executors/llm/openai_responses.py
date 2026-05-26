@@ -38,6 +38,7 @@ import httpx
 from config_loader.models import ModelConfig
 from core.contracts import LLMRequest, LLMResponse, LLMStreamChunk
 from core.errors import ProviderError
+from observability.network_log import log_network_exception
 from executors.llm.base import BaseLLMProvider
 from executors.llm.openai_compat_stream_parser import OpenAICompatStreamParser
 from executors.llm.raw_dump import dump_raw_llm_interaction
@@ -256,7 +257,7 @@ class OpenAIResponsesProvider(BaseLLMProvider):
             # 流结束（成功或异常）一次性 dump，opt-in。
             # 用 contextlib.suppress 兜底：dump 是观测层旁路，磁盘满 / 序列化
             # 失败等副作用绝不能覆盖原始 ProviderError（finally 中抛异常会丢失主异常）。
-            with contextlib.suppress(Exception):
+            try:
                 dump_raw_llm_interaction(
                     enabled=self._enable_raw_dump,
                     provider="openai_responses_stream",
@@ -267,6 +268,14 @@ class OpenAIResponsesProvider(BaseLLMProvider):
                     response_headers={},
                     response_body={"chunks": chunks_buffer},
                     error=dump_error,
+                )
+            except Exception as exc:
+                log_network_exception(
+                    "executors.llm.openai_responses",
+                    "raw_dump_failed",
+                    exc,
+                    url=url,
+                    model=self._model_config.name,
                 )
 
     # ------------------------------------------------------------------

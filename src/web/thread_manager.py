@@ -39,6 +39,7 @@ from typing import Any, Literal
 from config_loader.models import Config, LLMPresetConfig
 from core.contracts import ApprovalAction
 from core.message import Message
+from observability.network_log import log_network_exception
 from web.claude_code.jsonl_history import jsonl_path_for
 from web.codex.projects_scanner import list_codex_projects
 from web.host_adapter import WebHostAdapter
@@ -790,8 +791,16 @@ class ThreadManager:
                 message=message,
                 timestamp_ms=int(_now() * 1000),
             )
-            with suppress(Exception):
+            try:
                 await cell.adapter._safe_send_json(frame.model_dump())
+            except Exception as exc:
+                log_network_exception(
+                    "web.thread_manager",
+                    "cell_evicted_notify_failed",
+                    exc,
+                    thread_id=thread_id,
+                    reason=reason,
+                )
 
         # 2. cancel current_run_task（5s 上限）
         run_task = cell.current_run_task
@@ -1126,8 +1135,13 @@ class ThreadManager:
                         "content": text,
                     }
                 )
-        except Exception:
-            pass  # WS 通知失败不影响投递结果
+        except Exception as exc:
+            log_network_exception(
+                "web.thread_manager",
+                "cron_message_notify_failed",
+                exc,
+                thread_id=thread_id,
+            )
 
         cell.touch()
         return True

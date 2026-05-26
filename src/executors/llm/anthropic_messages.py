@@ -34,6 +34,7 @@ from config_loader.models import ModelConfig
 from core.contracts import LLMRequest, LLMResponse, LLMStreamChunk
 from core.errors import ProviderError
 from core.message import Message, ToolCall
+from observability.network_log import log_network_exception
 from executors.llm.anthropic_stream_parser import AnthropicStreamParser
 from executors.llm.base import BaseLLMProvider
 from executors.llm.media_adapter import (
@@ -215,7 +216,7 @@ class AnthropicMessagesProvider(BaseLLMProvider):
                 details={"url": url, "exception_type": type(exc).__name__},
             ) from exc
         finally:
-            with contextlib.suppress(Exception):
+            try:
                 dump_raw_llm_interaction(
                     enabled=self._enable_raw_dump,
                     provider="anthropic_messages_stream",
@@ -226,6 +227,14 @@ class AnthropicMessagesProvider(BaseLLMProvider):
                     response_headers={},
                     response_body={"chunks": chunks_buffer},
                     error=dump_error,
+                )
+            except Exception as exc:
+                log_network_exception(
+                    "executors.llm.anthropic_messages",
+                    "raw_dump_failed",
+                    exc,
+                    url=url,
+                    model=self._model_config.name,
                 )
 
     # ------------------------------------------------------------------
