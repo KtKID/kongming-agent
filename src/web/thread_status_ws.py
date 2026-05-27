@@ -23,7 +23,9 @@ import time
 from typing import Any, Literal, cast
 
 from fastapi import FastAPI, WebSocket
+from starlette.websockets import WebSocketDisconnect
 
+from network.network_log import log_network_event, log_network_exception
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 
 logger = logging.getLogger(__name__)
@@ -111,7 +113,13 @@ class ThreadStatusBroadcaster:
         """对单个连接 send；失败则自动 detach。"""
         try:
             await ws.send_json(payload)
-        except Exception:
+        except Exception as exc:
+            log_network_exception(
+                "web.thread_status_ws",
+                "broadcast_send_failed",
+                exc,
+                websocket_id=id(ws),
+            )
             await self.detach(ws)
 
     async def emit(self, thread_id: str, normalized: dict[str, Any]) -> None:
@@ -321,8 +329,14 @@ async def _thread_status_ws_handler(websocket: WebSocket) -> None:
                     decision["rememberScope"] = remember_scope
                 inbox.resolve(thread_id, request_id, decision)
             # 其他 frame_type 静默
-    except Exception:
+    except Exception as exc:
         logger.debug("/ws/thread-status client disconnected or errored")
+        log_network_event(
+            "web.thread_status_ws",
+            "ws_loop_terminated",
+            level="INFO" if isinstance(exc, WebSocketDisconnect) else "WARNING",
+            message=str(exc),
+        )
     finally:
         # 4. detach 两个 broadcaster
         await broadcaster.detach(websocket)

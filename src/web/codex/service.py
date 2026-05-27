@@ -31,7 +31,7 @@ import logging
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from observability.network_log import log_network_exception
+from network.network_log import log_network_exception
 from web._shared.session_manager import SessionManager
 from web.codex._image_cli_args import CodexImageCliArgsBuilder
 from web.codex.approval import map_permission_mode
@@ -482,7 +482,7 @@ class CodexService:
                 # 用调用时传入的 session_id，可能是 rename 前的）
                 if msg.get("sessionId") != active_sid:
                     msg["sessionId"] = active_sid
-                if msg.get("kind") == "complete":
+                if msg.get("frame_type") == "complete":
                     complete_already_sent = True
                 await self._safe_send(writer, dict(msg))
                 if kongming_thread_id is not None:
@@ -529,9 +529,9 @@ class CodexService:
 
     @staticmethod
     def _error_msg(session_id: str, error: str) -> dict[str, Any]:
-        """构造 ``kind:error`` 出站消息（最小字段集）。"""
+        """构造 ``frame_type:error`` 出站消息（最小字段集）。"""
         return {
-            "kind": "error",
+            "frame_type": "error",
             "provider": "codex",
             "sessionId": session_id,
             "error": error,
@@ -544,9 +544,9 @@ class CodexService:
         exit_code: int,
         aborted: bool,
     ) -> dict[str, Any]:
-        """构造 ``kind:complete`` 出站消息（用于 turn.completed 缺失时补发）。"""
+        """构造 ``frame_type:complete`` 出站消息（用于 turn.completed 缺失时补发）。"""
         return {
-            "kind": "complete",
+            "frame_type": "complete",
             "provider": "codex",
             "sessionId": session_id,
             "exitCode": exit_code,

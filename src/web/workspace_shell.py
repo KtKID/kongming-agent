@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from observability.network_log import log_network_exception
+from network.network_log import log_network_exception
 from web.claude_code.jsonl_history import jsonl_path_for
 
 AnsiCallback = Callable[[str], Awaitable[None]]

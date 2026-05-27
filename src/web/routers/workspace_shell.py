@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
-from observability.network_log import log_network_event, log_network_exception
+from network.network_log import log_network_event, log_network_exception
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 from web.claude_code.jsonl_history import jsonl_path_for
 from web.workspace import WorkspaceError, get_thread_meta, require_workspace_root
@@ -69,6 +69,7 @@ except ModuleNotFoundError as exc:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             del args, kwargs
             raise RuntimeError("workspace shell runtime unavailable on this platform")
+
 
 if TYPE_CHECKING:
     from itsdangerous import URLSafeTimedSerializer

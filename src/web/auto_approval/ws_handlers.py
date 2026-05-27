@@ -33,10 +33,11 @@ claude_code 与 generic_chat 两条通道都需要 ``auto-approval-toggle`` /
 
 from __future__ import annotations
 
-import contextlib
 from typing import Any
 
 from fastapi import WebSocket
+
+from network.network_log import log_network_exception
 
 # channel → error 帧 provider 字段的映射。保持 claude_code 走 "claude"
 # 字面值（与老前端 100% 兼容），generic_chat 走 "generic"，与后端日志惯例
@@ -87,9 +88,17 @@ async def handle_auto_approval_toggle(
         return
     enabled = bool(data.get("enabled", False))
     policy.set_enabled(cwd, enabled)
-    with contextlib.suppress(Exception):
+    try:
         await websocket.send_json(
             build_auto_approval_state_msg(policy, cwd, channel=channel),
+        )
+    except Exception as exc:
+        log_network_exception(
+            "web.auto_approval.ws_handlers",
+            "toggle_state_send_failed",
+            exc,
+            channel=channel,
+            cwd=cwd,
         )
 
 
@@ -127,9 +136,17 @@ async def handle_auto_approval_query(
             channel=channel,
         )
         return
-    with contextlib.suppress(Exception):
+    try:
         await websocket.send_json(
             build_auto_approval_state_msg(policy, cwd, channel=channel),
+        )
+    except Exception as exc:
+        log_network_exception(
+            "web.auto_approval.ws_handlers",
+            "query_state_send_failed",
+            exc,
+            channel=channel,
+            cwd=cwd,
         )
 
 
@@ -191,7 +208,7 @@ async def _send_error(
         channel: 通道标识，决定 ``provider`` / ``channel`` 字段。
     """
     provider = _PROVIDER_BY_CHANNEL.get(channel, channel)
-    with contextlib.suppress(Exception):
+    try:
         await websocket.send_json(
             {
                 "frame_type": "error",
@@ -199,6 +216,14 @@ async def _send_error(
                 "channel": channel,
                 "error": error_message,
             },
+        )
+    except Exception as exc:
+        log_network_exception(
+            "web.auto_approval.ws_handlers",
+            "error_send_failed",
+            exc,
+            channel=channel,
+            error_message=error_message,
         )
 
 

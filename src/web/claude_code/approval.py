@@ -39,7 +39,7 @@ from claude_agent_sdk.types import (
     ToolPermissionContext,
 )
 
-from observability.network_log import log_network_exception
+from network.network_log import log_network_exception
 from web._shared.session_manager import SessionManager
 from web.auto_approval import AuditLogger, AutoApprovalPolicy
 from web.claude_code.normalizer import ClaudeNormalizer
@@ -220,7 +220,7 @@ class ApprovalBridge:
             # else: toggle OFF / elevated → 两者都 None，timeout_seconds 也 None → 无限等
 
         permission_msg: dict[str, Any] = {
-            "kind": "permission_request",
+            "frame_type": "permission_request",
             "provider": "claude",
             "channel": self._channel,
             "requestId": request_id,

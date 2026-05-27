@@ -29,6 +29,8 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from network.network_log import log_network_exception
+
 if TYPE_CHECKING:
     from fastapi import WebSocket
 
@@ -98,8 +100,14 @@ class ApprovalInboxBroadcaster:
         frame = {"frame_type": "approval.inbox.snapshot", "items": items}
         try:
             await ws.send_json(frame)
-        except Exception:
+        except Exception as exc:
             logger.warning("inbox.push_snapshot: send_json failed; detaching")
+            log_network_exception(
+                "web.global_approvals.broadcaster",
+                "push_snapshot_failed",
+                exc,
+                websocket_id=id(ws),
+            )
             await self.detach(ws)
 
     # ----- 事件 fan-out -----
@@ -151,7 +159,14 @@ class ApprovalInboxBroadcaster:
     async def _send_one(self, ws: WebSocket, frame: dict[str, Any]) -> None:
         try:
             await ws.send_json(frame)
-        except Exception:
+        except Exception as exc:
+            log_network_exception(
+                "web.global_approvals.broadcaster",
+                "emit_send_failed",
+                exc,
+                websocket_id=id(ws),
+                frame_kind=frame.get("kind"),
+            )
             await self.detach(ws)
 
     # ----- bridge registry（inbox.resolve 路由用）-----

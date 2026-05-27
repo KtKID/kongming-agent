@@ -21,7 +21,6 @@ provider 内部拼 ``/v1/messages``——与 OpenAI provider 约定一致，版�
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import uuid
@@ -34,7 +33,6 @@ from config_loader.models import ModelConfig
 from core.contracts import LLMRequest, LLMResponse, LLMStreamChunk
 from core.errors import ProviderError
 from core.message import Message, ToolCall
-from observability.network_log import log_network_exception
 from executors.llm.anthropic_stream_parser import AnthropicStreamParser
 from executors.llm.base import BaseLLMProvider
 from executors.llm.media_adapter import (
@@ -46,6 +44,7 @@ from executors.llm.media_adapter import (
 from executors.llm.raw_dump import dump_raw_llm_interaction
 from executors.llm.reasoning import ReasoningConfig, resolve_reasoning_plan
 from executors.llm.sse_reader import iter_sse_events
+from network.network_log import log_network_exception
 
 _LOGGER = logging.getLogger(__name__)
 

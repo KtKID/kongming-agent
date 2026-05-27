@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import re
 from collections.abc import Sequence
@@ -27,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
-from observability.network_log import log_network_exception
+from network.network_log import log_network_exception
 from web._shared.session_manager import SessionManager
 from web.claude_code._attachment_prefix import AttachmentPrefixBuilder
 from web.claude_code.approval import ApprovalBridge
@@ -200,7 +199,7 @@ class ClaudeCodeService:
             try:
                 await writer.send_json(
                     {
-                        "kind": "complete",
+                        "frame_type": "complete",
                         "provider": "claude",
                         "sessionId": register_id,
                         "aborted": True,
@@ -219,7 +218,7 @@ class ClaudeCodeService:
             try:
                 await writer.send_json(
                     {
-                        "kind": "error",
+                        "frame_type": "error",
                         "provider": "claude",
                         "sessionId": register_id,
                         "error": str(exc),
@@ -417,7 +416,7 @@ class ClaudeCodeService:
             normalized = self._normalizer.normalize(msg, active_sid)
             for n in normalized:
                 # 第一次见到 session_created → 把 placeholder 改名成真实 SDK id
-                if n.get("kind") == "session_created":
+                if n.get("frame_type") == "session_created":
                     new_id = n.get("newSessionId")
                     if isinstance(new_id, str) and new_id and active_sid != new_id:
                         renamed = await self._sessions.rename(active_sid, new_id)
@@ -449,7 +448,7 @@ class ClaudeCodeService:
                 # ResultMessage（complete）到达时：从 SDK 真源 jsonl 派生最新 usage
                 # 推前端刷新。**v2**：用 manager.get_thread_usage（无状态门面）。
                 if (
-                    n.get("kind") == "complete"
+                    n.get("frame_type") == "complete"
                     and self._thread_manager is not None
                     and self._is_thread_id(register_id)
                 ):
