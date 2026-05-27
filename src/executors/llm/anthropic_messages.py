@@ -21,7 +21,6 @@ provider 内部拼 ``/v1/messages``——与 OpenAI provider 约定一致，版�
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import uuid
@@ -45,6 +44,7 @@ from executors.llm.media_adapter import (
 from executors.llm.raw_dump import dump_raw_llm_interaction
 from executors.llm.reasoning import ReasoningConfig, resolve_reasoning_plan
 from executors.llm.sse_reader import iter_sse_events
+from network.network_log import log_network_exception
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -215,7 +215,7 @@ class AnthropicMessagesProvider(BaseLLMProvider):
                 details={"url": url, "exception_type": type(exc).__name__},
             ) from exc
         finally:
-            with contextlib.suppress(Exception):
+            try:
                 dump_raw_llm_interaction(
                     enabled=self._enable_raw_dump,
                     provider="anthropic_messages_stream",
@@ -226,6 +226,14 @@ class AnthropicMessagesProvider(BaseLLMProvider):
                     response_headers={},
                     response_body={"chunks": chunks_buffer},
                     error=dump_error,
+                )
+            except Exception as exc:
+                log_network_exception(
+                    "executors.llm.anthropic_messages",
+                    "raw_dump_failed",
+                    exc,
+                    url=url,
+                    model=self._model_config.name,
                 )
 
     # ------------------------------------------------------------------

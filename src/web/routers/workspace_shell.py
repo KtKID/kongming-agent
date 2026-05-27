@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import re
 from collections.abc import Awaitable
 from pathlib import Path
@@ -11,16 +12,64 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
+from network.network_log import log_network_event, log_network_exception
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
+from web.claude_code.jsonl_history import jsonl_path_for
 from web.workspace import WorkspaceError, get_thread_meta, require_workspace_root
-from web.workspace_shell import (
-    WorkspaceShellProcess,
-    build_claude_command,
-    build_system_shell_command,
-    is_claude_command,
-    list_claude_session_ids,
-    wait_for_new_claude_session,
-)
+
+try:
+    from web.workspace_shell import (
+        WorkspaceShellProcess,
+        build_claude_command,
+        build_system_shell_command,
+        is_claude_command,
+        list_claude_session_ids,
+        wait_for_new_claude_session,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name not in {"fcntl", "termios"}:
+        raise
+
+    def build_claude_command(*, claude_thread_id: str) -> list[str]:
+        command = ["claude"]
+        if claude_thread_id.strip():
+            command.extend(["--resume", claude_thread_id.strip()])
+        return command
+
+    def build_system_shell_command() -> list[str]:
+        shell = os.environ.get("SHELL", "/bin/zsh").strip() or "/bin/zsh"
+        return [shell, "-l"]
+
+    def is_claude_command(command: list[str]) -> bool:
+        return bool(command) and Path(command[0]).name == "claude"
+
+    def list_claude_session_ids(
+        cwd: str | Path,
+        *,
+        claude_home: Path | None = None,
+    ) -> set[str]:
+        project_dir = jsonl_path_for(str(cwd), "__probe__", claude_home=claude_home).parent
+        if not project_dir.is_dir():
+            return set()
+        return {path.stem for path in project_dir.glob("*.jsonl") if path.is_file()}
+
+    async def wait_for_new_claude_session(
+        cwd: str | Path,
+        *,
+        known_session_ids: set[str],
+        claude_home: Path | None = None,
+        timeout_seconds: float = 30.0,
+        poll_interval_seconds: float = 0.5,
+    ) -> str | None:
+        del timeout_seconds, poll_interval_seconds
+        new_ids = list_claude_session_ids(cwd, claude_home=claude_home) - known_session_ids
+        return sorted(new_ids)[-1] if new_ids else None
+
+    class WorkspaceShellProcess:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+            raise RuntimeError("workspace shell runtime unavailable on this platform")
+
 
 if TYPE_CHECKING:
     from itsdangerous import URLSafeTimedSerializer
@@ -53,8 +102,16 @@ async def _bind_new_claude_session_when_detected(
     meta = get_thread_meta(thread_id, metas)
     if meta is None or meta.claude_thread_id.strip():
         return
-    with contextlib.suppress(Exception):
+    try:
         await tm.bind_claude_thread(thread_id, new_session_id, str(cwd))
+    except Exception as exc:
+        log_network_exception(
+            "web.routers.workspace_shell",
+            "bind_claude_thread_failed",
+            exc,
+            thread_id=thread_id,
+            session_id=new_session_id,
+        )
 
 
 @router.websocket("/ws/workspace-shell")
@@ -100,8 +157,15 @@ async def workspace_shell_ws(
         root = require_workspace_root(meta)
     except WorkspaceError as exc:
         await send_frame({"type": "shell-error", "detail": str(exc)})
-        with contextlib.suppress(Exception):
+        try:
             await websocket.close()
+        except Exception as close_exc:
+            log_network_exception(
+                "web.routers.workspace_shell",
+                "close_after_workspace_error_failed",
+                close_exc,
+                thread_id=thread_id,
+            )
         return
 
     command = (
@@ -169,25 +233,53 @@ async def workspace_shell_ws(
                     "detail": f"{exc}; fallback to workspace shell",
                 }
             )
-            with contextlib.suppress(Exception):
+            try:
                 if process is not None:
                     await process.terminate()
+            except Exception as term_exc:
+                log_network_exception(
+                    "web.routers.workspace_shell",
+                    "terminate_before_fallback_failed",
+                    term_exc,
+                    thread_id=thread_id,
+                )
             try:
                 process = make_process(fallback_command)
                 await send_starting_status(fallback_command)
                 await process.start()
             except Exception as fallback_exc:
                 await send_frame({"type": "shell-error", "detail": str(fallback_exc)})
-                with contextlib.suppress(Exception):
+                try:
                     await websocket.close()
+                except Exception as close_exc:
+                    log_network_exception(
+                        "web.routers.workspace_shell",
+                        "close_after_fallback_failed",
+                        close_exc,
+                        thread_id=thread_id,
+                    )
                 return
         else:
-            with contextlib.suppress(Exception):
+            try:
                 if process is not None:
                     await process.terminate()
+            except Exception as term_exc:
+                log_network_exception(
+                    "web.routers.workspace_shell",
+                    "terminate_after_spawn_failed",
+                    term_exc,
+                    thread_id=thread_id,
+                )
             await send_frame({"type": "shell-error", "detail": str(exc)})
-            with contextlib.suppress(Exception):
+            try:
                 await websocket.close()
+            except Exception as close_exc:
+                log_network_exception(
+                    "web.routers.workspace_shell",
+                    "close_after_spawn_failed",
+                    close_exc,
+                    thread_id=thread_id,
+                )
             return
 
     try:
@@ -222,11 +314,24 @@ async def workspace_shell_ws(
                 }
             )
     except WebSocketDisconnect:
-        pass
+        log_network_event(
+            "web.routers.workspace_shell",
+            "ws_disconnected",
+            level="INFO",
+            message="workspace shell websocket disconnected",
+            thread_id=thread_id,
+        )
     finally:
         if bind_task is not None:
             bind_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await bind_task
-        with contextlib.suppress(Exception):
+        try:
             await process.terminate()
+        except Exception as exc:
+            log_network_exception(
+                "web.routers.workspace_shell",
+                "final_terminate_failed",
+                exc,
+                thread_id=thread_id,
+            )

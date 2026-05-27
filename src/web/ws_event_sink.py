@@ -32,6 +32,7 @@ from typing import Any, cast
 
 from core.contracts import Event
 from devtools import get_full_logger
+from network.network_log import log_network_exception
 from web.protocol import (
     ApprovalDecisionFrame,
     ApprovalOutcome,
@@ -175,12 +176,25 @@ class WSEventSink:
                 event.kind,
                 exc,
             )
+            log_network_exception(
+                "web.ws_event_sink",
+                "emit_send_failed",
+                exc,
+                event_kind=event.kind,
+            )
             self._closed = True
-            with contextlib.suppress(Exception):
+            try:
                 close_call = self._ws.close()
                 # 兼容同步 close (mock) / 异步 close (websocket)
                 if asyncio.iscoroutine(close_call):
                     await close_call
+            except Exception as close_exc:
+                log_network_exception(
+                    "web.ws_event_sink",
+                    "emit_close_failed",
+                    close_exc,
+                    event_kind=event.kind,
+                )
             return
 
         # full-log-v0.1 阶段 1：send 成功后把 turn.* 帧记录到 full_log。
