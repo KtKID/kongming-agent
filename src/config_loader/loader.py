@@ -122,6 +122,12 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("web", "idle_check_interval_seconds"),
     ("web", "dashboard_poll_interval_seconds"),
     ("web", "pending_approval_timeout_seconds"),
+    # web.full_log (full-log-v0.1)
+    ("web", "full_log", "enabled"),
+    ("web", "full_log", "path"),
+    ("web", "full_log", "rotate_daily"),
+    ("web", "full_log", "include_http_body"),
+    ("web", "full_log", "queue_size"),
     ("scheduler", "approval", "allow_write_file_create_in_cwd"),
     ("sitian", "version"),
     ("sitian", "default_scan_interval_sec"),
