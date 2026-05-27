@@ -181,6 +181,24 @@ def create_app(
         # startup
         try:
             progress.report("lifespan")
+
+            # full-log-v0.1 阶段 1：装配 FullLogger 单例（enabled=False 时是 no-op，
+            # 不影响现有链路）。必须放在 thread_manager.start() 之前 —— ws_event_sink
+            # 在 emit() 时 get_full_logger()，没 init 会拿到哑实例（数据丢但不抛）。
+            try:
+                from devtools import init_full_logger
+
+                _full_logger = init_full_logger(cfg.web.full_log)
+                await _full_logger.start()
+                if _full_logger.enabled:
+                    logger.info(
+                        "FullLogger started: path=%s queue_size=%d",
+                        _full_logger.path,
+                        cfg.web.full_log.queue_size,
+                    )
+            except Exception:
+                logger.exception("FullLogger init failed; continuing without full_log")
+
             await thread_manager.start()
             try:
                 from evolution.apply_executor import recover_pending_apply_jobs
@@ -400,6 +418,15 @@ def create_app(
                 )
             except Exception:
                 logger.exception("ThreadManager.aclose_all() raised; ignoring during shutdown")
+
+            # full-log-v0.1 阶段 1：放在最后 flush 队列，让前面所有 shutdown 阶段
+            # 产生的最后几帧也能落盘。未 init / 已 closed 时 aclose() 是 no-op。
+            try:
+                from devtools import get_full_logger
+
+                await get_full_logger().aclose()
+            except Exception:
+                logger.exception("FullLogger.aclose failed; ignoring during shutdown")
 
     # 4. FastAPI 实例
     docs_url = "/docs" if cfg.web.dev_mode else None

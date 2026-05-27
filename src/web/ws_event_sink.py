@@ -31,7 +31,7 @@ import time
 from typing import Any, cast
 
 from core.contracts import Event
-from observability.network_log import log_network_exception
+from devtools import get_full_logger
 from web.protocol import (
     ApprovalDecisionFrame,
     ApprovalOutcome,
@@ -48,6 +48,10 @@ from web.protocol import (
 )
 from web.protocol._base import _S2CFrameBase
 from web.protocol.ws_frames import SystemNoticeFrame
+
+# full-log-v0.1 阶段 1：只对 turn.* 边界帧调 full_logger 记录，
+# 阶段 2 #11 取消白名单后全部 frame 都记。
+_FULL_LOG_KIND_WHITELIST: frozenset[str] = frozenset({"turn.start", "turn.end"})
 
 logger = logging.getLogger(__name__)
 
@@ -145,11 +149,15 @@ class WSEventSink:
     Attributes:
         _ws: 当前 WS 连接。可在 :meth:`attach_ws` 时替换。
         _closed: 标记 ws 已断 / 不可写。closed 后所有 emit 静默丢。
+        _thread_id: 当前 sink 服务的 thread id，写入 full_log 时作为记录字段。
+            可选——历史构造点（测试 / claude_code evolution sink）不传时为
+            ``None``，对应 full_log 记录里 ``thread_id`` 字段为 null。
     """
 
-    def __init__(self, ws: Any) -> None:
+    def __init__(self, ws: Any, *, thread_id: str | None = None) -> None:
         self._ws: Any = ws
         self._closed = False
+        self._thread_id: str | None = thread_id
 
     async def emit(self, event: Event) -> None:
         """实现 EventSink 协议；把 event 翻成帧推 WS。"""
@@ -158,32 +166,34 @@ class WSEventSink:
         frame = self._translate(event)
         if frame is None:
             return
+        payload = frame.model_dump()
         try:
-            await self._ws.send_json(frame.model_dump())
+            await self._ws.send_json(payload)
         except Exception as exc:
             logger.warning(
                 "WSEventSink ws.send_json failed for event.kind=%s: %s; marking closed",
                 event.kind,
                 exc,
             )
-            log_network_exception(
-                "web.ws_event_sink",
-                "emit_send_failed",
-                exc,
-                event_kind=event.kind,
-            )
             self._closed = True
-            try:
+            with contextlib.suppress(Exception):
                 close_call = self._ws.close()
                 # 兼容同步 close (mock) / 异步 close (websocket)
                 if asyncio.iscoroutine(close_call):
                     await close_call
-            except Exception as close_exc:
-                log_network_exception(
-                    "web.ws_event_sink",
-                    "emit_close_failed",
-                    close_exc,
-                    event_kind=event.kind,
+            return
+
+        # full-log-v0.1 阶段 1：send 成功后把 turn.* 帧记录到 full_log。
+        # 用 whitelist 控制阶段 1 只接 turn.start / turn.end，阶段 2 #11 移除。
+        # full_logger 未启用 / 未 init 时 log() 是 no-op，零开销 + 永不抛。
+        if event.kind in _FULL_LOG_KIND_WHITELIST:
+            with contextlib.suppress(Exception):
+                full_logger = get_full_logger()
+                await full_logger.log(
+                    "s2c",
+                    "ws.threads",
+                    payload,
+                    thread_id=self._thread_id,
                 )
 
     def attach_ws(self, new_ws: Any) -> None:

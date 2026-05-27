@@ -726,7 +726,7 @@ class ThreadManager:
             # ApprovalManager.cancel_by_thread 清 manager 路径的 pending（R10 防护）。
             thread_id=meta.id,
         )
-        ws_sink = WSEventSink(fanout)
+        ws_sink = WSEventSink(fanout, thread_id=meta.id)
         # usage-token-v2-bigbang: UsagePersistSink 已删除——v2 manager 是无状态门面，
         # 不接受外部 push token。usage 事件无需持久化 sink；前端通过
         # GET /threads/<tid>/usage 端点拉取派生结果。
