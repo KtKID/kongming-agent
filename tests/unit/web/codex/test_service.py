@@ -2,7 +2,7 @@
 
 mock ``asyncio.create_subprocess_exec`` 验证：
 
-- spawn args 装配（permission_mode 三档 / resume / model / 中文 cwd）
+- spawn args + stdin 装配（permission_mode 三档 / resume / model / 中文 cwd）
 - 主路径 query：thread.started → text → complete 序列
 - abort：SIGTERM → 2s 超时 → SIGKILL
 - 错误处理：FileNotFoundError / 认证失败 / exit_code != 0 / jsonl parse failed
@@ -53,6 +53,26 @@ class _MockStderr:
             yield line
 
 
+class _MockStdin:
+    """模拟 subprocess stdin：记录写入内容，并支持 drain/close/wait_closed。"""
+
+    def __init__(self) -> None:
+        self.buffer = bytearray()
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self.buffer.extend(data)
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        return None
+
+
 def _make_mock_proc(
     stdout_lines: list[bytes],
     stderr_lines: list[bytes] | None = None,
@@ -60,6 +80,7 @@ def _make_mock_proc(
 ) -> MagicMock:
     """构造 mock subprocess：stdout 异步迭代 + wait/terminate/kill。"""
     proc = MagicMock()
+    proc.stdin = _MockStdin()
     proc.stdout = _MockStdout(stdout_lines)
     proc.stderr = _MockStderr(stderr_lines)
     proc.wait = AsyncMock(return_value=exit_code)
@@ -98,10 +119,10 @@ def writer() -> _FakeWriter:
 
 
 class TestSpawnArgs:
-    """验证 ``_build_args`` 构造的 codex 启动参数。"""
+    """验证 ``_build_invocation`` 构造的 codex 启动参数与 stdin。"""
 
     def test_default_mode(self, codex_service: CodexService) -> None:
-        args = codex_service._build_args(
+        invocation = codex_service._build_invocation(
             session_id="pending-1",
             command="hi",
             cwd="/tmp",
@@ -109,22 +130,22 @@ class TestSpawnArgs:
             model=None,
             resume=False,
         )
-        assert args == [
+        assert invocation.argv == [
             "codex",
             "exec",
             "--json",
             "--skip-git-repo-check",
-            "-C",
+            "--cd",
             "/tmp",
-            "-s",
+            "--sandbox",
             "workspace-write",
-            "--ask-for-approval",
-            "untrusted",
-            "hi",
+            "--config",
+            'approval_policy="untrusted"',
         ]
+        assert invocation.stdin_text == "hi"
 
     def test_accept_edits_mode(self, codex_service: CodexService) -> None:
-        args = codex_service._build_args(
+        invocation = codex_service._build_invocation(
             session_id="pending-1",
             command="hi",
             cwd="/tmp",
@@ -132,13 +153,13 @@ class TestSpawnArgs:
             model=None,
             resume=False,
         )
-        assert "-s" in args
-        assert args[args.index("-s") + 1] == "workspace-write"
-        assert "--ask-for-approval" in args
-        assert args[args.index("--ask-for-approval") + 1] == "never"
+        assert "--sandbox" in invocation.argv
+        assert invocation.argv[invocation.argv.index("--sandbox") + 1] == "workspace-write"
+        assert "--config" in invocation.argv
+        assert 'approval_policy="never"' in invocation.argv
 
     def test_bypass_permissions_mode(self, codex_service: CodexService) -> None:
-        args = codex_service._build_args(
+        invocation = codex_service._build_invocation(
             session_id="pending-1",
             command="hi",
             cwd="/tmp",
@@ -146,14 +167,14 @@ class TestSpawnArgs:
             model=None,
             resume=False,
         )
-        assert args[args.index("-s") + 1] == "danger-full-access"
-        assert args[args.index("--ask-for-approval") + 1] == "never"
+        assert invocation.argv[invocation.argv.index("--sandbox") + 1] == "danger-full-access"
+        assert 'approval_policy="never"' in invocation.argv
 
     def test_resume_inserts_session_id_after_exec(
         self,
         codex_service: CodexService,
     ) -> None:
-        args = codex_service._build_args(
+        invocation = codex_service._build_invocation(
             session_id="abc",
             command="hi",
             cwd="/tmp",
@@ -161,14 +182,10 @@ class TestSpawnArgs:
             model=None,
             resume=True,
         )
-        # codex exec resume <session_id> ...
-        assert args[0] == "codex"
-        assert args[1] == "exec"
-        assert args[2] == "resume"
-        assert args[3] == "abc"
+        assert invocation.argv[-2:] == ["resume", "abc"]
 
     def test_model_flag_appended(self, codex_service: CodexService) -> None:
-        args = codex_service._build_args(
+        invocation = codex_service._build_invocation(
             session_id="pending-1",
             command="hi",
             cwd="/tmp",
@@ -176,27 +193,27 @@ class TestSpawnArgs:
             model="o3",
             resume=False,
         )
-        assert "-m" in args
-        assert args[args.index("-m") + 1] == "o3"
-        # command 始终在最后一个位置
-        assert args[-1] == "hi"
+        assert "--model" in invocation.argv
+        assert invocation.argv[invocation.argv.index("--model") + 1] == "o3"
+        assert invocation.stdin_text == "hi"
 
-    def test_command_is_last_positional_arg(
+    def test_command_is_sent_via_stdin(
         self,
         codex_service: CodexService,
     ) -> None:
-        args = codex_service._build_args(
+        invocation = codex_service._build_invocation(
             session_id="pending-1",
-            command="my prompt",
+            command="--ask-for-approval",
             cwd="/tmp",
             permission_mode="default",
             model="o3",
             resume=False,
         )
-        assert args[-1] == "my prompt"
+        assert invocation.stdin_text == "--ask-for-approval"
+        assert "--ask-for-approval" not in invocation.argv
 
     def test_chinese_cwd_passes_through(self, codex_service: CodexService) -> None:
-        args = codex_service._build_args(
+        invocation = codex_service._build_invocation(
             session_id="pending-1",
             command="hi",
             cwd="/tmp/中文目录",
@@ -205,7 +222,20 @@ class TestSpawnArgs:
             resume=False,
         )
         # subprocess.exec 自动处理 quote，参数原样
-        assert args[args.index("-C") + 1] == "/tmp/中文目录"
+        assert invocation.argv[invocation.argv.index("--cd") + 1] == "/tmp/中文目录"
+
+    def test_resume_keeps_image_flags_in_argv(self, codex_service: CodexService) -> None:
+        invocation = codex_service._build_invocation(
+            session_id="abc",
+            command="hi",
+            cwd="/tmp",
+            permission_mode="default",
+            model=None,
+            resume=True,
+            image_args=["--image", "/tmp/a.png"],
+        )
+        assert invocation.argv[-4:] == ["resume", "abc", "--image", "/tmp/a.png"]
+        assert invocation.stdin_text == "hi"
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +283,8 @@ class TestQueryHappyPath:
         # complete 含 tokenBudget
         complete = next(m for m in writer.sent if m["frame_type"] == "complete")
         assert "tokenBudget" in complete
+        assert proc.stdin.buffer == b"hi"
+        assert proc.stdin.closed is True
 
     async def test_thread_started_renames_session(
         self,

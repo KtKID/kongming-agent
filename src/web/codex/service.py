@@ -4,8 +4,8 @@
 
 职责：
 
-- 装配 ``codex exec --json`` 启动参数（含 ``-s/--ask-for-approval`` 三档映射）
-- spawn 子进程（``stdin=DEVNULL`` 必需，否则 codex 不退出）
+- 装配 ``codex exec --json`` 启动参数（含 ``--sandbox`` + ``--config approval_policy=...``）
+- spawn 子进程（stdin 写入 prompt 后立即关闭）
 - 注册到 :class:`SessionManager`，初始 register_id 是 ``pending-XXX`` placeholder；
   收到 ``thread.started`` 后 :meth:`SessionManager.rename` 替换为真实 thread_id
 - stdout 行级 reader：``json.loads`` → :func:`normalize` → ``writer.send_json``
@@ -29,6 +29,7 @@ import contextlib
 import json
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from network.network_log import log_network_exception
@@ -60,6 +61,14 @@ _STDERR_NOISE_PREFIXES: tuple[str, ...] = (
     "failed to load skill",
     "rmcp transport closed",
 )
+
+
+@dataclass(frozen=True)
+class _CodexInvocation:
+    """一次 codex exec 启动所需的 argv 与 stdin prompt。"""
+
+    argv: list[str]
+    stdin_text: str
 
 
 class CodexService:
@@ -116,11 +125,11 @@ class CodexService:
             session_id: 注册到 SessionManager 的初始 id。在 ``thread.started``
                 到达前是临时占位（建议传 ``pending-XXX``），到达后会被 rename
                 成真实 thread_id。
-            command: 用户 prompt（作为 codex 命令的最后一个位置参数）
-            cwd: 工作目录（``-C`` flag）
+            command: 用户 prompt（通过 stdin 写给 codex）
+            cwd: 工作目录（``--cd`` flag）
             permission_mode: 三档之一（``default`` / ``acceptEdits`` /
                 ``bypassPermissions``）；未知值走 default 兜底
-            model: 可选 ``-m`` flag
+            model: 可选 ``--model`` flag
             resume: True 时使用 ``codex exec resume <session_id>`` 形式
             kongming_thread_id: Kongming 产品层 thread id；提供时会把 Codex
                 ``thread.started`` 的真实 id 回写到 ``codex_thread_id``。
@@ -131,7 +140,7 @@ class CodexService:
         if attachments and self._image_args_builder is not None and kongming_thread_id:
             image_args = self._image_args_builder.build(attachments, thread_id=kongming_thread_id)
 
-        args = self._build_args(
+        invocation = self._build_invocation(
             session_id=session_id,
             command=command,
             cwd=cwd,
@@ -147,8 +156,8 @@ class CodexService:
         try:
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    *args,
-                    stdin=asyncio.subprocess.DEVNULL,
+                    *invocation.argv,
+                    stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -164,6 +173,7 @@ class CodexService:
                 return
 
             self._processes[active_sid] = proc
+            await self._write_stdin(proc, invocation.stdin_text)
 
             # stderr 抽取 task（不抢 stdout）
             stderr_task = asyncio.create_task(self._drain_stderr(proc))
@@ -303,7 +313,7 @@ class CodexService:
 
     # ----------------------------------------------------------- 内部辅助
 
-    def _build_args(
+    def _build_invocation(
         self,
         *,
         session_id: str,
@@ -313,54 +323,60 @@ class CodexService:
         model: str | None,
         resume: bool,
         image_args: list[str] | None = None,
-    ) -> list[str]:
-        """构造 ``codex exec`` 启动参数。
+    ) -> _CodexInvocation:
+        """构造 ``codex exec`` 启动参数与 stdin prompt。
 
         非 resume 形式：
-            ``codex exec --json --skip-git-repo-check -C <cwd> -s <sandbox>
-            --ask-for-approval <policy> [-m <model>] <command>``
+            ``codex exec --json --skip-git-repo-check --cd <cwd>
+            --sandbox <sandbox> --config approval_policy="<policy>" [-m <model>]``
+            + stdin 写入 ``command``
 
         resume 形式：
-            ``codex exec resume <session_id> --json --skip-git-repo-check
-            -C <cwd> -s <sandbox> --ask-for-approval <policy> [-m <model>] <command>``
+            ``codex exec --json --skip-git-repo-check --cd <cwd>
+            --sandbox <sandbox> --config approval_policy="<policy>" [-m <model>]
+            resume <session_id>``
+            + stdin 写入 ``command``
         """
         sandbox, policy = map_permission_mode(permission_mode)
-        if resume:
-            args: list[str] = [
-                "codex",
-                "exec",
-                "resume",
-                session_id,
-                "--json",
-                "--skip-git-repo-check",
-                "-C",
-                cwd,
-                "-s",
-                sandbox,
-                "--ask-for-approval",
-                policy,
-            ]
-        else:
-            args = [
-                "codex",
-                "exec",
-                "--json",
-                "--skip-git-repo-check",
-                "-C",
-                cwd,
-                "-s",
-                sandbox,
-                "--ask-for-approval",
-                policy,
-            ]
+        args: list[str] = [
+            "codex",
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "--cd",
+            cwd,
+            "--sandbox",
+            sandbox,
+            "--config",
+            f'approval_policy="{policy}"',
+        ]
         if model:
-            args += ["-m", model]
-        # codex-channel-image-paste：--image flag 必须在 command (positional) 之前
-        # 否则 Codex CLI 会把 image 路径当成 prompt 的一部分
+            args += ["--model", model]
+        if resume:
+            args += ["resume", session_id]
+        # codex-channel-image-paste：--image flag 跟在 resume 后面，prompt 走 stdin
         if image_args:
             args += image_args
-        args.append(command)
-        return args
+        return _CodexInvocation(argv=args, stdin_text=command)
+
+    async def _write_stdin(
+        self,
+        proc: asyncio.subprocess.Process,
+        prompt: str,
+    ) -> None:
+        """把 prompt 写入 codex stdin，然后关闭写端。"""
+        stdin = proc.stdin
+        if stdin is None:
+            raise RuntimeError("codex child process has no stdin")
+
+        try:
+            stdin.write(prompt.encode("utf-8"))
+            await stdin.drain()
+        finally:
+            stdin.close()
+            wait_closed = getattr(stdin, "wait_closed", None)
+            if callable(wait_closed):
+                await wait_closed()
 
     async def _consume_stdout(
         self,

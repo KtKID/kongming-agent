@@ -242,7 +242,7 @@ async def _handle_codex_command(
     - ``cwd``             默认走 service 自取 ``os.getcwd()``（这里转空串让
                           service 端取默认）—— v0.1 设计：route 不读环境
     - ``permissionMode``  ``default`` / ``acceptEdits`` / ``bypassPermissions``
-    - ``model``           可选 ``-m`` flag
+    - ``model``           可选 ``--model`` flag
     - ``resume``          True 时必须配真实 ``sessionId``
     - ``sessionId``       resume=True 必填；否则可空，本端生成 ``pending-XXX``
     """
