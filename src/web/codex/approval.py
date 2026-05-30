@@ -3,7 +3,7 @@
 抄 claudecodeui ``server/openai-codex.js:168-187`` 的 ``mapPermissionModeToCodexOptions``。
 v0.1 没有 per-call 审批 UI（exec 模式做不到），唯一的"审批"控制点
 就是这里——把前端的 ``permissionMode`` 三档映射到 codex CLI 的
-``-s/--ask-for-approval`` flag 组合。
+``--sandbox`` + ``--config approval_policy=...`` 组合。
 
 设计要点：
 

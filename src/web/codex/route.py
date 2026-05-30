@@ -9,7 +9,7 @@
 - ``abort-session``         → :meth:`CodexService.abort` + send ``complete(aborted=True)``
 - ``check-session-status``  → :meth:`SessionManager.is_active` +（active 时）
   :meth:`SessionManager.replace_writer` + send ``session-status``
-- 其他                       → ``kind:error`` 帧
+- 其他                       → ``frame_type:error`` 帧
 
 鉴权：复用现有 ``src/web/auth.py`` 的 cookie ``kongming_session`` →
 ``verify_session_cookie``，与 ``/ws/claude-code`` 同款。
@@ -39,14 +39,13 @@ import 边界：
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import uuid
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
-from observability.network_log import log_network_event, log_network_exception
+from network.network_log import log_network_event, log_network_exception
 from web._shared.reconnectable_writer import ReconnectableWebSocketWriter
 from web._shared.session_manager import SessionManager
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
@@ -143,7 +142,7 @@ async def codex_websocket(
         try:
             await writer.send_json(
                 {
-                    "kind": "error",
+                    "frame_type": "error",
                     "provider": "codex",
                     "error": f"unhandled: {exc!r}",
                 },
@@ -179,7 +178,7 @@ async def _dispatch(
     thread_id: str | None,
 ) -> None:
     """单条入站帧分发。"""
-    msg_type = data.get("type") if isinstance(data, dict) else None
+    msg_type = data.get("frame_type") if isinstance(data, dict) else None
 
     if msg_type == "codex-command":
         await _handle_codex_command(
@@ -199,7 +198,7 @@ async def _dispatch(
         await service.abort(session_id)
         await writer.send_json(
             {
-                "kind": "complete",
+                "frame_type": "complete",
                 "provider": "codex",
                 "sessionId": session_id,
                 "aborted": True,
@@ -218,7 +217,7 @@ async def _dispatch(
             await sessions.replace_writer(session_id, websocket)
         await writer.send_json(
             {
-                "type": "session-status",
+                "frame_type": "session-status",
                 "sessionId": session_id,
                 "isProcessing": active,
             },
@@ -243,7 +242,7 @@ async def _handle_codex_command(
     - ``cwd``             默认走 service 自取 ``os.getcwd()``（这里转空串让
                           service 端取默认）—— v0.1 设计：route 不读环境
     - ``permissionMode``  ``default`` / ``acceptEdits`` / ``bypassPermissions``
-    - ``model``           可选 ``-m`` flag
+    - ``model``           可选 ``--model`` flag
     - ``resume``          True 时必须配真实 ``sessionId``
     - ``sessionId``       resume=True 必填；否则可空，本端生成 ``pending-XXX``
     """
@@ -319,11 +318,11 @@ def _default_cwd() -> str:
 
 
 async def _send_error(writer: WebSocketWriter, error_message: str) -> None:
-    """发送 ``kind:error`` 帧（容错）。"""
+    """发送 ``frame_type:error`` 帧（容错）。"""
     try:
         await writer.send_json(
             {
-                "kind": "error",
+                "frame_type": "error",
                 "provider": "codex",
                 "error": error_message,
             },
