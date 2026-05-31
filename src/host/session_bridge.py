@@ -148,12 +148,17 @@ class SessionBridge:
                 f"[error] {type(result.error).__name__}: {result.error.message}"
             )
 
-        usage = result.metadata.get("usage")
-        if isinstance(usage, dict) and usage:
-            prompt = usage.get("prompt_tokens", 0)
-            completion = usage.get("completion_tokens", 0)
-            total = usage.get("total_tokens", 0)
-            await self._adapter.write_output(f"[tokens ↑{prompt} ↓{completion} ={total}]")
+        # token 用量同样受 echo_final_content 控制：CLI（True）在终端打印一行
+        # `[tokens ↑↓=]`；web（False）不走这条文本输出——web 已通过 UsageFrame
+        # 把用量推给 StatusLine，若这里再 write_output 会被 WebHostAdapter 包成
+        # AssistantFinalFrame，错误地渲染成一条 assistant 消息气泡。
+        if self._echo_final_content:
+            usage = result.metadata.get("usage")
+            if isinstance(usage, dict) and usage:
+                prompt = usage.get("prompt_tokens", 0)
+                completion = usage.get("completion_tokens", 0)
+                total = usage.get("total_tokens", 0)
+                await self._adapter.write_output(f"[tokens ↑{prompt} ↓{completion} ={total}]")
 
     async def _write_command_result(self, result: CommandResult) -> None:
         if result.output_text:
