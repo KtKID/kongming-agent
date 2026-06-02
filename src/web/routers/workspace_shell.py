@@ -65,10 +65,11 @@ except ModuleNotFoundError as exc:
         new_ids = list_claude_session_ids(cwd, claude_home=claude_home) - known_session_ids
         return sorted(new_ids)[-1] if new_ids else None
 
-    class WorkspaceShellProcess:
+    class WorkspaceShellProcess:  # type: ignore[no-redef]
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             del args, kwargs
             raise RuntimeError("workspace shell runtime unavailable on this platform")
+
 
 if TYPE_CHECKING:
     from itsdangerous import URLSafeTimedSerializer

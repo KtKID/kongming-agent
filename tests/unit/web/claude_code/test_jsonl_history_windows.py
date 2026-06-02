@@ -16,8 +16,5 @@ def test_jsonl_path_for_windows_cwd_matches_sdk_layout(tmp_path: Path) -> None:
         claude_home=tmp_path,
     )
     assert path == (
-        tmp_path
-        / "projects"
-        / "E--xgt-proj-agent-proj-kongming-agent"
-        / "sid-win.jsonl"
+        tmp_path / "projects" / "E--xgt-proj-agent-proj-kongming-agent" / "sid-win.jsonl"
     )

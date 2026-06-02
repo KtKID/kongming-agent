@@ -161,12 +161,7 @@ class TestGetProjects:
         unregistered_cwd = tmp_path / "unregistered"
         unregistered_cwd.mkdir()
         rollout = (
-            _codex_home(tmp_path)
-            / "sessions"
-            / "2026"
-            / "05"
-            / "10"
-            / _rollout_filename(_UUID_A)
+            _codex_home(tmp_path) / "sessions" / "2026" / "05" / "10" / _rollout_filename(_UUID_A)
         )
         _write_rollout(rollout, _UUID_A, str(unregistered_cwd))
 
@@ -220,12 +215,7 @@ class TestGetProjects:
 
         # 在 isolated codex_home 下铺真实 rollout，session_meta.cwd 指向上面的 cwd
         rollout = (
-            _codex_home(tmp_path)
-            / "sessions"
-            / "2026"
-            / "05"
-            / "10"
-            / _rollout_filename(_UUID_A)
+            _codex_home(tmp_path) / "sessions" / "2026" / "05" / "10" / _rollout_filename(_UUID_A)
         )
         _write_rollout(rollout, _UUID_A, cwd, extra_lines=2)
 
