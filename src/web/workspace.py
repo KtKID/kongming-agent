@@ -20,11 +20,58 @@ def get_thread_meta(thread_id: str, metas: list[ThreadMetadata]) -> ThreadMetada
     return next((meta for meta in metas if meta.id == thread_id), None)
 
 
-def require_workspace_root(meta: ThreadMetadata) -> Path:
-    """要求 thread 已绑定有效 workspace root。"""
+def resolve_workspace_cwd(meta: ThreadMetadata, server_workspace_root: Path) -> str:
+    """thread.cwd 空时 fallback 到 server 启动目录。
+
+    用户心智："纯聊天 thread 没填 cwd，默认走 server 启动路径"。
+    所有需要 cwd 的链路（approval / Zap UI / files / shell）统一走这个 helper，
+    保证全链路一致。
+
+    Args:
+        meta: thread metadata（含 ``cwd`` 字段）。
+        server_workspace_root: server 启动目录（通常是
+            ``app.state.workspace_root``）。
+
+    Returns:
+        ``meta.cwd`` 非空（strip 后）直接返回；否则返回
+        ``str(server_workspace_root)``。
+    """
+    cwd = meta.cwd.strip()
+    if cwd:
+        return cwd
+    return str(server_workspace_root)
+
+
+def require_workspace_root(
+    meta: ThreadMetadata,
+    *,
+    fallback_to: Path | None = None,
+) -> Path:
+    """要求 thread 已绑定有效 workspace root，可选 fallback 到 server 启动目录。
+
+    默认行为（``fallback_to=None``）与历史一致：``meta.cwd`` 空字符串直接抛
+    :class:`WorkspaceError`。
+
+    调用方按需传 ``fallback_to=app.state.workspace_root`` 启用 fallback：
+    ``meta.cwd`` 空时改用 ``fallback_to``；若 ``fallback_to`` 也不存在 / 不是目录
+    同样抛 :class:`WorkspaceError`，不会再 silently 继续。
+
+    Args:
+        meta: thread metadata。
+        fallback_to: 可选 fallback 路径，必须以关键字方式传入（kw-only）；
+            ``None`` 表示不启用 fallback，保持向后兼容。
+
+    Returns:
+        已解析（``expanduser`` + ``resolve``）的 workspace 根目录绝对路径。
+
+    Raises:
+        WorkspaceError: thread 无 cwd 且未提供（或 fallback 路径无效）的情况。
+    """
     cwd = meta.cwd.strip()
     if not cwd:
-        raise WorkspaceError("thread has no workspace cwd")
+        if fallback_to is None:
+            raise WorkspaceError("thread has no workspace cwd")
+        cwd = str(fallback_to)
     root = Path(cwd).expanduser().resolve()
     if not root.exists():
         raise WorkspaceError(f"workspace root not found: {root}")

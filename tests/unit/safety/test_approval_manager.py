@@ -181,7 +181,7 @@ async def test_request_then_resolve_deny_returns_rejected(
 
 async def test_request_timeout_returns_rejected_with_manager_timeout_source() -> None:
     """timeout 触发 → outcome='rejected', source='manager_timeout', reason='timeout'。"""
-    m = ApprovalManager(rules=ApprovalRules(default_timeout_ms=100), default_timeout_ms=100)
+    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=100)
     decision = await m.request(
         channel="generic_chat",
         thread_id="t1",
@@ -326,6 +326,56 @@ def test_make_manager_prompt_fn_marked_action_aware() -> None:
     assert getattr(prompt_fn, "__action_aware__", False) is True
 
 
+# ============ default_cwd fallback（thread-cwd-fallback 任务 #3）============
+
+
+async def test_make_manager_prompt_fn_uses_default_cwd_when_req_cwd_empty() -> None:
+    """req.metadata.cwd 为空 → 落到 default_cwd（装配点传入的 thread.cwd 解析值）。"""
+    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=10_000)
+    spy = AsyncMock(return_value=ApprovalDecision(outcome="approved", metadata={}))
+    m.request = spy  # type: ignore[method-assign]
+
+    prompt_fn = make_manager_prompt_fn(m, thread_id="tid-1", default_cwd="/proj/server-root")
+    req = _make_request(metadata={"cwd": ""})
+    action = await prompt_fn(req)
+
+    assert action == ApprovalAction.ACCEPT_ONCE
+    spy.assert_awaited_once()
+    assert spy.await_args is not None
+    assert spy.await_args.kwargs["cwd"] == "/proj/server-root"
+    assert spy.await_args.kwargs["thread_id"] == "tid-1"
+
+
+async def test_make_manager_prompt_fn_req_cwd_overrides_default() -> None:
+    """req.metadata.cwd 非空 → 优先级最高，覆盖 default_cwd。"""
+    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=10_000)
+    spy = AsyncMock(return_value=ApprovalDecision(outcome="approved", metadata={}))
+    m.request = spy  # type: ignore[method-assign]
+
+    prompt_fn = make_manager_prompt_fn(m, thread_id="tid-2", default_cwd="/proj/server-root")
+    req = _make_request(metadata={"cwd": "/explicit/cwd"})
+    _ = await prompt_fn(req)
+
+    spy.assert_awaited_once()
+    assert spy.await_args is not None
+    assert spy.await_args.kwargs["cwd"] == "/explicit/cwd"
+
+
+async def test_make_manager_prompt_fn_no_default_cwd_keeps_empty() -> None:
+    """default_cwd 不传 + req.cwd 空 → 落到空字符串（兼容老调用方）。"""
+    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=10_000)
+    spy = AsyncMock(return_value=ApprovalDecision(outcome="approved", metadata={}))
+    m.request = spy  # type: ignore[method-assign]
+
+    prompt_fn = make_manager_prompt_fn(m, thread_id="tid-3")
+    req = _make_request(metadata={"cwd": ""})
+    _ = await prompt_fn(req)
+
+    spy.assert_awaited_once()
+    assert spy.await_args is not None
+    assert spy.await_args.kwargs["cwd"] == ""
+
+
 def test_decision_to_action_remember_for_session_maps_correctly() -> None:
     """_decision_to_action 的 remember_for_session 分支 → ACCEPT_FOR_SESSION。"""
     d = ApprovalDecision(outcome="approved", metadata={"remember_for_session": True})
@@ -370,7 +420,7 @@ def test_reset_for_testing_clears_singleton() -> None:
 
 def test_get_approval_manager_accepts_custom_rules() -> None:
     """首次调用传入的 rules / timeout 生效。"""
-    custom_rules = ApprovalRules(default_timeout_ms=5_000)
+    custom_rules = ApprovalRules()
     m = get_approval_manager(rules=custom_rules, default_timeout_ms=5_000)
     assert m._rules is custom_rules
     assert m._default_timeout_ms == 5_000

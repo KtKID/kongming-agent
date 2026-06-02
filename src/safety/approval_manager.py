@@ -372,6 +372,29 @@ class ApprovalManager:
         pending.future.set_result(
             ApprovalDecision(outcome=outcome, metadata=meta)  # type: ignore[arg-type]
         )
+
+        # generic-chat-session-grant：用户点「本 session 都同意」+ allow=True
+        # → 触发 thread 级 grant 写入；下次同 thread + cwd + tool 的
+        # classify 命中 _thread_overrides → immediate allow。
+        # 仅 allow=True + rememberScope="session" 时写入（拒绝时即使带
+        # rememberScope 也不写——拒绝没有 remember 语义）。
+        if allow and remember_scope == "session":
+            try:
+                self._rules.add_session_grant(
+                    channel=pending.channel,
+                    thread_id=pending.thread_id,
+                    cwd=pending.cwd,
+                    tool_name=pending.tool_name,
+                )
+            except Exception:
+                # fail-open：grant 写入失败不影响本次 resolve 的成功结果
+                # （下次仍弹卡，等同没记住——可接受降级）
+                logger.exception(
+                    "add_session_grant failed: thread=%s cwd=%s tool=%s",
+                    pending.thread_id,
+                    pending.cwd,
+                    pending.tool_name,
+                )
         return True
 
     def cancel(self, request_id: str, reason: str = "cancelled") -> bool:
@@ -401,6 +424,10 @@ class ApprovalManager:
         reviewer 必修 #4：避免用户关 tab 后 pending 卡 60s timeout
         （spec 60-risk R10 内存泄漏现实诱因）。
 
+        generic-chat-session-grant：同时清掉该 thread 的 session grant
+        （:meth:`ApprovalRules.clear_thread_grants`）；与 pending cancel 同款
+        生命周期，防止 thread 关闭后 grant 残留造成内存泄漏。
+
         Args:
             thread_id: 要清理的 thread
             reason: 写到每条 pending 的 metadata.reason
@@ -418,6 +445,11 @@ class ApprovalManager:
         for req_id in targets:
             if self.cancel(req_id, reason=reason):
                 count += 1
+        # 清 thread 级 session grants（R10 同款防内存泄漏）；失败不抛
+        try:
+            self._rules.clear_thread_grants(thread_id)
+        except Exception:
+            logger.exception("clear_thread_grants failed: thread=%s", thread_id)
         return count
 
     async def _handle_timeout(self, request_id: str, timeout_seconds: float) -> None:
@@ -545,7 +577,10 @@ def get_approval_manager(
     global _singleton
     if _singleton is None:
         if rules is None:
-            rules = ApprovalRules(default_timeout_ms=default_timeout_ms)
+            # approval-rules-unified：ApprovalRules 不再持 default_timeout_ms，
+            # 走 fail-closed 默认 60s（policy=None 时安全网）。manager 自己的
+            # default_timeout_ms 仍按入参生效。
+            rules = ApprovalRules()
         _singleton = ApprovalManager(
             rules=rules,
             event_sinks=event_sinks,
@@ -570,6 +605,7 @@ def make_manager_prompt_fn(
     thread_id: str,
     *,
     channel: str = "generic_chat",
+    default_cwd: str = "",
 ) -> Callable[[ApprovalRequest], Awaitable[ApprovalAction]]:
     """生成 prompt_fn，内部调 ``manager.request``；返回值映射成 :class:`ApprovalAction`。
 
@@ -578,10 +614,10 @@ def make_manager_prompt_fn(
 
     .. code-block:: python
 
-        prompt_fn = make_manager_prompt_fn(manager, thread_id)
+        prompt_fn = make_manager_prompt_fn(manager, thread_id, default_cwd=resolved_cwd)
         approval = build_default_approval(mode, prompt_fn=prompt_fn)
 
-    二态映射（reviewer 必修 #2，阶段 1）：
+    二态映射(reviewer 必修 #2，阶段 1):
 
     - ``decision.outcome="approved"`` → ``ApprovalAction.ACCEPT_ONCE``
     - ``decision.outcome="rejected"`` → ``ApprovalAction.REJECT``
@@ -596,10 +632,20 @@ def make_manager_prompt_fn(
     :class:`tools.approval.InteractiveApproval` 识别为 action-aware
     （返回 ApprovalAction 而非 bool）。
 
+    cwd 解析优先级（thread-cwd-fallback 任务 #3）:
+
+    1. ``req.metadata["cwd"]``：运行时显式传入，优先级最高
+    2. ``default_cwd``：装配时由调用方解析后传入的 fallback（通常是 thread.cwd
+       或 server 启动目录 ``app.state.workspace_root``）
+    3. ``""``：两者都空时落到空字符串（与改前行为一致，兼容老调用方）
+
     Args:
         manager: ApprovalManager 单例
         thread_id: 该 prompt_fn 绑定的 thread（多 thread 一个 thread 一个 prompt_fn）
         channel: 通道名（默认 ``"generic_chat"``，阶段 2 改 ``"claude_code"``）
+        default_cwd: thread.cwd 空时的 fallback（由装配点解析传入；
+            通常是 server 启动目录 ``app.state.workspace_root``）；
+            空字符串 = 不 fallback（保持原行为，兼容旧调用方）
 
     Returns:
         action-aware prompt_fn，签名 ``(ApprovalRequest) -> Awaitable[ApprovalAction]``
@@ -607,10 +653,13 @@ def make_manager_prompt_fn(
 
     async def prompt_fn(req: ApprovalRequest) -> ApprovalAction:
         """从 ApprovalRequest 提取信息调 manager.request，映射回 ApprovalAction。"""
+        # cwd 优先级：req.metadata.cwd（运行时显式传） > default_cwd（装配时 thread.cwd 解析后的值）
+        req_cwd = (req.metadata or {}).get("cwd", "")
+        resolved_cwd = req_cwd if req_cwd else default_cwd
         decision = await manager.request(
             channel=channel,
             thread_id=thread_id,
-            cwd=(req.metadata or {}).get("cwd", ""),
+            cwd=resolved_cwd,
             tool_name=req.tool_name,
             tool_input=dict(req.arguments),
             metadata=dict(req.metadata) if req.metadata else {},
