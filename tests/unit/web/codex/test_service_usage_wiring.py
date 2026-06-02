@@ -55,6 +55,13 @@ def _make_mock_proc(
     proc.returncode = exit_code
     proc.terminate = MagicMock()
     proc.kill = MagicMock()
+    # service._write_stdin 需要 drain() 和 wait_closed() 为 awaitable。
+    stdin = MagicMock()
+    stdin.write = MagicMock()
+    stdin.drain = AsyncMock()
+    stdin.close = MagicMock()
+    stdin.wait_closed = AsyncMock()
+    proc.stdin = stdin
     return proc
 
 

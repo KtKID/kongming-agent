@@ -12,16 +12,7 @@ import json
 import uuid
 from pathlib import Path
 
-import pytest
-
 from web.codex.projects_scanner import list_codex_projects
-
-# 整个文件 5 个测试在 CI 上全挂（疑似 ~/.codex/ 路径 / 环境敏感），
-# 先 module 级 xfail 让 PR #2 过，单独建 task 修。
-pytestmark = pytest.mark.xfail(
-    reason="codex projects_scanner CI 环境敏感；先 xfail 让 PR #2 过，单独修",
-    strict=False,
-)
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -95,7 +86,7 @@ class TestNoIndex:
         cwd_val = str(tmp_path / "my-project")
         _write_rollout(rollout, _UUID_A, cwd_val, extra_lines=3)
 
-        projects = list_codex_projects(codex_home=tmp_path)
+        projects = list_codex_projects([cwd_val], codex_home=tmp_path)
 
         assert len(projects) == 1
         proj = projects[0]
@@ -139,7 +130,7 @@ class TestIndexLag:
             ],
         )
 
-        projects = list_codex_projects(codex_home=tmp_path)
+        projects = list_codex_projects([cwd_val], codex_home=tmp_path)
 
         assert len(projects) == 1
         proj = projects[0]
@@ -170,7 +161,7 @@ class TestCwdGrouping:
         _write_rollout(dir_day / _rollout_filename(_UUID_A), _UUID_A, cwd_val)
         _write_rollout(dir_day / _rollout_filename(_UUID_B), _UUID_B, cwd_val)
 
-        projects = list_codex_projects(codex_home=tmp_path)
+        projects = list_codex_projects([cwd_val], codex_home=tmp_path)
 
         assert len(projects) == 1
         assert len(projects[0].sessions) == 2
@@ -189,7 +180,10 @@ class TestCwdGrouping:
             str(tmp_path / "repo-beta"),
         )
 
-        projects = list_codex_projects(codex_home=tmp_path)
+        projects = list_codex_projects(
+            [str(tmp_path / "repo-alpha"), str(tmp_path / "repo-beta")],
+            codex_home=tmp_path,
+        )
 
         assert len(projects) == 2
         names = {p.display_name for p in projects}
@@ -206,5 +200,6 @@ class TestCwdGrouping:
 class TestEmptyHome:
     def test_codex_home_not_exist(self, tmp_path: Path) -> None:
         missing = tmp_path / "does-not-exist"
-        projects = list_codex_projects(codex_home=missing)
+        # 空 registry → 即使 codex_home 不存在也不会返回任何登记节点。
+        projects = list_codex_projects([], codex_home=missing)
         assert projects == []
