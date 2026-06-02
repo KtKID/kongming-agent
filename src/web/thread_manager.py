@@ -39,6 +39,7 @@ from typing import Any, Literal
 from config_loader.models import Config, LLMPresetConfig
 from core.contracts import ApprovalAction
 from core.message import Message
+from network.network_log import log_network_exception
 from web.claude_code.jsonl_history import jsonl_path_for
 from web.codex.projects_scanner import list_codex_projects
 from web.host_adapter import WebHostAdapter
@@ -726,7 +727,7 @@ class ThreadManager:
             # ApprovalManager.cancel_by_thread 清 manager 路径的 pending（R10 防护）。
             thread_id=meta.id,
         )
-        ws_sink = WSEventSink(fanout)
+        ws_sink = WSEventSink(fanout, thread_id=meta.id)
         # usage-token-v2-bigbang: UsagePersistSink 已删除——v2 manager 是无状态门面，
         # 不接受外部 push token。usage 事件无需持久化 sink；前端通过
         # GET /threads/<tid>/usage 端点拉取派生结果。
@@ -790,8 +791,16 @@ class ThreadManager:
                 message=message,
                 timestamp_ms=int(_now() * 1000),
             )
-            with suppress(Exception):
+            try:
                 await cell.adapter._safe_send_json(frame.model_dump())
+            except Exception as exc:
+                log_network_exception(
+                    "web.thread_manager",
+                    "cell_evicted_notify_failed",
+                    exc,
+                    thread_id=thread_id,
+                    reason=reason,
+                )
 
         # 2. cancel current_run_task（5s 上限）
         run_task = cell.current_run_task
@@ -1121,13 +1130,20 @@ class ThreadManager:
             if fanout is not None and hasattr(fanout, "send_json"):
                 await fanout.send_json(
                     {
-                        "kind": "cron.message.appended",
+                        # protocol-frame-type-unify-v0.2：wire 协议判别字段
+                        # 从 ``kind`` 切到 ``frame_type``。
+                        "frame_type": "cron.message.appended",
                         "thread_id": thread_id,
                         "content": text,
                     }
                 )
-        except Exception:
-            pass  # WS 通知失败不影响投递结果
+        except Exception as exc:
+            log_network_exception(
+                "web.thread_manager",
+                "cron_message_notify_failed",
+                exc,
+                thread_id=thread_id,
+            )
 
         cell.touch()
         return True

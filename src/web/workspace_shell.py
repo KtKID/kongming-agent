@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from network.network_log import log_network_exception
 from web.claude_code.jsonl_history import jsonl_path_for
 
 AnsiCallback = Callable[[str], Awaitable[None]]
@@ -231,8 +232,14 @@ class WorkspaceShellProcess:
             with contextlib.suppress(ProcessLookupError):
                 process.terminate()
         if self._wait_task is not None:
-            with contextlib.suppress(Exception):
+            try:
                 await self._wait_task
+            except Exception as exc:
+                log_network_exception(
+                    "web.workspace_shell",
+                    "wait_task_failed",
+                    exc,
+                )
         await self._close_fds()
 
     async def _pump_output(self) -> None:

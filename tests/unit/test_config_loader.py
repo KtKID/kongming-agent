@@ -87,6 +87,23 @@ def test_env_override_max_turns(
 
 
 @pytest.mark.unit
+def test_dashboard_poll_interval_defaults_to_five_seconds() -> None:
+    cfg = load_config(SETTING_YAML, load_env_file=False)
+    assert cfg.web.dashboard_poll_interval_seconds == 5
+    assert cfg.web.normalized_dashboard_poll_interval_seconds == 5
+
+
+@pytest.mark.unit
+def test_dashboard_poll_interval_normalizes_to_minimum_three_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KONGMING_WEB_DASHBOARD_POLL_INTERVAL_SECONDS", "1")
+    cfg = load_config(LOCAL_YAML, load_env_file=False)
+    assert cfg.web.dashboard_poll_interval_seconds == 1
+    assert cfg.web.normalized_dashboard_poll_interval_seconds == 3
+
+
+@pytest.mark.unit
 def test_env_override_base_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

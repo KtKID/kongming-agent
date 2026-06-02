@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import time
 import uuid
 from collections.abc import Callable, Sequence
@@ -70,6 +71,9 @@ from scheduler.timing import to_iso, utc_now
 if TYPE_CHECKING:
     from config_loader.models import Config, LLMPresetConfig
     from observability import JsonlTraceSink
+
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -270,7 +274,8 @@ class _CronAuditWriterSink:
     store: Store
     task_id: str
     preset_id: str = ""
-    """v0.5.2: task 显式声明的 preset_id（空串表示 fallback cfg.model）。"""
+    """v0.5.2: task 显式声明的 preset_id（空串表示未声明 preset → 走默认
+    provider，即 cli/web 装配时由 ``cfg.model.*`` 构造的 ``self._llm``）。"""
     model_name: str = ""
     """v0.5.2: 装配后实际生效的模型名（preset.model 或 cfg.model.name）。"""
 
@@ -348,14 +353,72 @@ class ExecutionBridge:
     # ------------------------------------------------------------------
 
     def _build_provider(self, preset_id: str) -> LLMProvider:
-        """根据 ``preset_id`` 构建独立 LLM provider；无匹配时 fallback 到默认。"""
-        if not preset_id or not self._preset_map or preset_id not in self._preset_map:
+        """根据 ``preset_id`` 构建独立 LLM provider。
+
+        两种合法路径：
+
+        1. **未启用 preset 体系**（``preset_id`` 为空 **或** ``preset_map`` 为
+           ``None``）→ 返回 ``self._llm``，即 cli/web 装配时通过
+           :func:`executors.llm.provider_factory.build_provider` 用 ``cfg.model``
+           构造的**默认 provider**。``cfg.model`` 字段优先级（高 → 低）：
+
+           - env：``KONGMING_MODEL_BASE_URL`` / ``KONGMING_MODEL_NAME`` /
+             ``KONGMING_MODEL_API_KEY``（见 :class:`config_loader.models.ModelConfig`）
+           - ``config/setting.yaml`` 的 ``model:`` 段
+           - dataclass 默认值
+
+           这条路径不是 fallback，是"未启用 preset 功能"的合法默认。
+
+        2. **启用了 preset 且命中**（``preset_id in preset_map``）→ 用 preset
+           覆盖 ``cfg.model`` 后构造独立 provider，调用方负责 ``aclose``。
+
+        **错配场景（v0.5.3 改）**：装配方启用了 preset 体系但
+        ``task.preset_id`` 在 ``preset_map`` 里找不到（key 拼错 / 配置漂移），
+        **不再静默 fallback 到默认 provider**，直接抛 :class:`ValueError`，由
+        :meth:`execute` 捕获转 FAILED run + 写日志，把错配暴露给用户。
+        """
+        # 未启用 preset 体系 → 走默认 provider（self._llm = cfg.model.*）
+        if not preset_id or not self._preset_map:
             return self._llm
+        # 启用了 preset 但 task 写的 preset_id 不存在 → 抛错，不偷换默认
+        if preset_id not in self._preset_map:
+            raise ValueError(
+                f"scheduled task preset_id {preset_id!r} not found in preset_map "
+                f"(available presets: {sorted(self._preset_map.keys())})"
+            )
         from executors.llm.provider_factory import apply_preset, build_provider
 
         preset = self._preset_map[preset_id]
         cfg = apply_preset(self._base_config, preset)  # type: ignore[arg-type]
         return build_provider(cfg)
+
+    def _resolve_effective_agent_spec(self, preset_id: str) -> AgentSpec:
+        """v0.5.3：preset 命中时返回覆盖了 ``default_model`` /
+        ``reasoning_effort`` 的 per-run :class:`AgentSpec`；否则返回装配期
+        ``self._agent_spec``。
+
+        修复 v0.4 切 preset 时只换 provider 不换 agent_spec 的"半拉子" bug。
+        :class:`core.runner.Runner` 组装 :class:`core.contracts.LLMRequest`
+        时把 ``agent_spec.default_model`` 作为 ``request.model`` 透传给
+        provider；如果不在此处一起覆盖，请求体 ``"model"`` 字段仍是装配期
+        ``cfg.model.name``（env ``KONGMING_MODEL_NAME`` 默认值），导致
+        ``base_url=preset`` + ``model=默认`` 的错配——后端返回"模型不存在"。
+
+        ``reasoning_effort``：preset 未声明时保留 spec 现值，避免 ``None``
+        覆盖装配期已存在的设置。
+        """
+        if not preset_id or not self._preset_map or preset_id not in self._preset_map:
+            return self._agent_spec
+        preset = self._preset_map[preset_id]
+        # dataclasses.replace 对 **dict[str, str] 报 invariance 错；直接列出
+        # 字段保持类型安全，分支处理 reasoning_effort 是否为 None。
+        if preset.reasoning_effort is not None:
+            return replace(
+                self._agent_spec,
+                default_model=preset.model,
+                reasoning_effort=preset.reasoning_effort,
+            )
+        return replace(self._agent_spec, default_model=preset.model)
 
     def _resolve_run_audit_context(self, task: ScheduledTask) -> dict[str, str]:
         """v0.5.2: 解析 cron run audit payload 中要附加的 model 上下文。
@@ -509,7 +572,32 @@ class ExecutionBridge:
         )
 
         # v0.4 per-task provider：根据 task.preset_id 构建独立 provider
-        provider = self._build_provider(task.preset_id)
+        # v0.5.3：_build_provider 错配（preset_id 不在 preset_map）会抛
+        # ValueError；这里转 FAILED run + supersede RUNNING + 写收尾 audit，
+        # 不向上抛（符合模块约定 "所有错误进 ScheduledRun.error_message"）。
+        try:
+            provider = self._build_provider(task.preset_id)
+        except ValueError as exc:
+            logger.error(
+                "execute: task %s preset misconfigured: %s",
+                task.task_id,
+                exc,
+            )
+            failed_run = self._build_exception_record(
+                running_record=running_record,
+                exc=exc,
+            )
+            self._store.supersede_and_append_run(failed_run)
+            self._emit_finishing_audit(task=task, run=failed_run)
+            return failed_run
+
+        # v0.5.3 修复：preset 命中时 agent_spec.default_model 必须跟 preset.model
+        # 走，否则 LLMRequest.model 仍是装配期 cfg.model.name（env 默认），导致
+        # 实际请求 = preset.base_url + 默认 model name → 后端 400/不存在。
+        # provider 只覆盖 base_url + api_key + 内部 model_config.name；
+        # request.model 字段读 agent_spec.default_model，得在此处一并覆盖。
+        effective_agent_spec = self._resolve_effective_agent_spec(task.preset_id)
+
         is_per_task_provider = provider is not self._llm
 
         try:
@@ -519,6 +607,7 @@ class ExecutionBridge:
                 task=task,
                 running_record=running_record,
                 llm=provider,
+                agent_spec=effective_agent_spec,
             )
 
             # v0.3 cron-delivery M3：投递阶段（在 supersede 之前合并 delivery 字段）
@@ -584,8 +673,16 @@ class ExecutionBridge:
         task: ScheduledTask,
         running_record: ScheduledRun,
         llm: LLMProvider,
+        agent_spec: AgentSpec | None = None,
     ) -> ScheduledRun:
-        """装配 fresh runner 调用 + watchdog；返回最终 ``ScheduledRun``。"""
+        """装配 fresh runner 调用 + watchdog；返回最终 ``ScheduledRun``。
+
+        v0.5.3：``agent_spec`` 参数允许 :meth:`execute` 在 preset 命中时按
+        ``preset.model`` / ``preset.reasoning_effort`` 替换默认 spec，让
+        :class:`core.contracts.LLMRequest` 里的 ``model`` 字段跟实际 provider
+        对齐。未传时回退到 ``self._agent_spec``（装配期 cfg.model.name）。
+        """
+        resolved_agent_spec = agent_spec if agent_spec is not None else self._agent_spec
         # 1) 工具裁剪
         allowed_tool_names = frozenset(
             name for name in self._enabled_tool_names if not _is_disallowed_tool_name(name)
@@ -646,7 +743,7 @@ class ExecutionBridge:
                 self._runner.run(
                     request.user_input,
                     session=session,
-                    agent_spec=self._agent_spec,
+                    agent_spec=resolved_agent_spec,
                     llm=llm,
                     tools=filtered_tools_lookup,
                     approval=wrapped_approval,

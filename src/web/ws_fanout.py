@@ -13,8 +13,9 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from typing import Any
+
+from network.network_log import log_network_exception
 
 
 class WebSocketFanout:
@@ -42,22 +43,42 @@ class WebSocketFanout:
         for client in list(self._clients):
             try:
                 await client.send_json(payload)
-            except Exception:
+            except Exception as exc:
                 dead_clients.append(client)
-                with contextlib.suppress(Exception):
+                log_network_exception(
+                    "web.ws_fanout",
+                    "client_send_failed",
+                    exc,
+                    client_id=id(client),
+                )
+                try:
                     close_call = client.close()
                     if asyncio.iscoroutine(close_call):
                         await close_call
+                except Exception as close_exc:
+                    log_network_exception(
+                        "web.ws_fanout",
+                        "client_close_failed",
+                        close_exc,
+                        client_id=id(client),
+                    )
         if dead_clients:
             dead_ids = {id(client) for client in dead_clients}
             self._clients = [client for client in self._clients if id(client) not in dead_ids]
 
     async def close(self) -> None:
         for client in list(self._clients):
-            with contextlib.suppress(Exception):
+            try:
                 close_call = client.close()
                 if asyncio.iscoroutine(close_call):
                     await close_call
+            except Exception as exc:
+                log_network_exception(
+                    "web.ws_fanout",
+                    "fanout_close_failed",
+                    exc,
+                    client_id=id(client),
+                )
         self._clients.clear()
 
 

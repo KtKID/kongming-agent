@@ -29,7 +29,6 @@ runner 通过 ``isinstance(llm, SupportsLLMStream)`` 能力探测分派。
 
 from __future__ import annotations
 
-import contextlib
 from collections.abc import AsyncIterator
 from typing import Any, Literal, cast
 
@@ -43,6 +42,7 @@ from executors.llm.openai_compat_stream_parser import OpenAICompatStreamParser
 from executors.llm.raw_dump import dump_raw_llm_interaction
 from executors.llm.reasoning import EffortLevel, ReasoningConfig, resolve_reasoning_plan
 from executors.llm.sse_reader import iter_sse_events
+from network.network_log import log_network_exception
 
 FinishReasonStr = Literal["stop", "tool_calls", "length", "error", "other"]
 
@@ -256,7 +256,7 @@ class OpenAIResponsesProvider(BaseLLMProvider):
             # 流结束（成功或异常）一次性 dump，opt-in。
             # 用 contextlib.suppress 兜底：dump 是观测层旁路，磁盘满 / 序列化
             # 失败等副作用绝不能覆盖原始 ProviderError（finally 中抛异常会丢失主异常）。
-            with contextlib.suppress(Exception):
+            try:
                 dump_raw_llm_interaction(
                     enabled=self._enable_raw_dump,
                     provider="openai_responses_stream",
@@ -267,6 +267,14 @@ class OpenAIResponsesProvider(BaseLLMProvider):
                     response_headers={},
                     response_body={"chunks": chunks_buffer},
                     error=dump_error,
+                )
+            except Exception as exc:
+                log_network_exception(
+                    "executors.llm.openai_responses",
+                    "raw_dump_failed",
+                    exc,
+                    url=url,
+                    model=self._model_config.name,
                 )
 
     # ------------------------------------------------------------------

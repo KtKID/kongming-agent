@@ -130,6 +130,68 @@ class CellSummaryDTO(_FrameBase):
     status: Literal["idle", "running", "awaiting_approval"]
 
 
+class RuntimeStatusPollingDTO(_FrameBase):
+    """dashboard 轮询配置真值。"""
+
+    interval_seconds: Annotated[int, Field(ge=3)]
+
+
+class RuntimeStatusProcessDTO(_FrameBase):
+    """运行中 web 进程摘要。"""
+
+    running: bool
+    pid: Annotated[int, Field(ge=1)]
+    host: str
+    port: Annotated[int, Field(ge=1, le=65535)]
+    url: str
+    log_path: str
+
+
+class RuntimeStatusGlobalWSDTO(_FrameBase):
+    """全局 WS / 广播订阅计数。"""
+
+    thread_status_connections: Annotated[int, Field(ge=0)]
+    cron_connections: Annotated[int, Field(ge=0)]
+    approval_subscribers: Annotated[int, Field(ge=0)]
+
+
+class RuntimeStatusProviderSessionsDTO(_FrameBase):
+    """provider 活跃 session 计数。"""
+
+    claude_active_sessions: Annotated[int, Field(ge=0)]
+    codex_active_sessions: Annotated[int, Field(ge=0)]
+
+
+class ActiveCellStatusDTO(_FrameBase):
+    """runtime-status 中的活跃 cell 明细。"""
+
+    thread_id: Annotated[str, Field(pattern=r"^thread-[a-f0-9]{12}$")]
+    thread_name: str
+    backend_kind: Literal["generic_chat", "claude_code", "codex"] = "generic_chat"
+    preset_id: str
+    cwd: str = ""
+    created_at: float
+    last_active_at: float
+    pending_approval_count: Annotated[int, Field(ge=0)]
+    status: Literal["idle", "running", "awaiting_approval"]
+    chat_ws_connections: Annotated[int, Field(ge=0)]
+
+
+class RuntimeStatusSnapshotDTO(_FrameBase):
+    """统一 runtime 快照。"""
+
+    process: RuntimeStatusProcessDTO
+    polling: RuntimeStatusPollingDTO
+    global_ws: RuntimeStatusGlobalWSDTO
+    provider_sessions: RuntimeStatusProviderSessionsDTO
+    cells_total: Annotated[int, Field(ge=0)]
+    chat_ws_connections_total: Annotated[int, Field(ge=0)]
+    approval_pending_total: Annotated[int, Field(ge=0)]
+    workspace_shell_connections: Annotated[int, Field(ge=0)] | None = None
+    cells: list[ActiveCellStatusDTO]
+    generated_at_ms: Annotated[int, Field(ge=0)]
+
+
 class CreateThreadRequest(_FrameBase):
     """创建 thread 请求体（``POST /api/threads``）。
 

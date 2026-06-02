@@ -29,6 +29,8 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from network.network_log import log_network_exception
+
 if TYPE_CHECKING:
     from fastapi import WebSocket
 
@@ -95,11 +97,17 @@ class ApprovalInboxBroadcaster:
         """
         async with self._lock:
             items = list(self._pending_snapshot.values())
-        frame = {"kind": "approval.inbox.snapshot", "items": items}
+        frame = {"frame_type": "approval.inbox.snapshot", "items": items}
         try:
             await ws.send_json(frame)
-        except Exception:
+        except Exception as exc:
             logger.warning("inbox.push_snapshot: send_json failed; detaching")
+            log_network_exception(
+                "web.global_approvals.broadcaster",
+                "push_snapshot_failed",
+                exc,
+                websocket_id=id(ws),
+            )
             await self.detach(ws)
 
     # ----- 事件 fan-out -----
@@ -112,7 +120,7 @@ class ApprovalInboxBroadcaster:
                 ``{"requestId", "threadId", "threadDisplayName?", "toolName",
                 "toolInput", "autoApproveAtMs", "autoRejectAtMs",
                 "blockedByRule", "isElevated", "channel", "cwd",
-                "arrivedAtMs"}``。**payload 内不应含 "kind" 字段**——
+                "arrivedAtMs"}``。**payload 内不应含 "frame_type" 字段**——
                 由本方法补成 ``approval.inbox.add``。
         """
         request_id = payload.get("requestId")
@@ -122,7 +130,7 @@ class ApprovalInboxBroadcaster:
         async with self._lock:
             self._pending_snapshot[request_id] = dict(payload)
             subscribers = list(self._subscribers)
-        frame = {"kind": "approval.inbox.add", **payload}
+        frame = {"frame_type": "approval.inbox.add", **payload}
         await self._broadcast(subscribers, frame)
 
     async def emit_remove(self, request_id: str, reason: str) -> None:
@@ -136,7 +144,7 @@ class ApprovalInboxBroadcaster:
         async with self._lock:
             self._pending_snapshot.pop(request_id, None)
             subscribers = list(self._subscribers)
-        frame = {"kind": "approval.inbox.remove", "requestId": request_id, "reason": reason}
+        frame = {"frame_type": "approval.inbox.remove", "requestId": request_id, "reason": reason}
         await self._broadcast(subscribers, frame)
 
     async def _broadcast(self, subscribers: list[Any], frame: dict[str, Any]) -> None:
@@ -151,7 +159,14 @@ class ApprovalInboxBroadcaster:
     async def _send_one(self, ws: WebSocket, frame: dict[str, Any]) -> None:
         try:
             await ws.send_json(frame)
-        except Exception:
+        except Exception as exc:
+            log_network_exception(
+                "web.global_approvals.broadcaster",
+                "emit_send_failed",
+                exc,
+                websocket_id=id(ws),
+                frame_kind=frame.get("kind"),
+            )
             await self.detach(ws)
 
     # ----- bridge registry（inbox.resolve 路由用）-----

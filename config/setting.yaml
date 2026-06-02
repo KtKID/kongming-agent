@@ -1,4 +1,4 @@
-# kongming-agent 统一配置
+﻿# kongming-agent 统一配置
 #
 # 单一配置文件，覆盖所有模块的全部可配置项。
 # 切换远端模型：在 .env 中设置 KONGMING_MODEL_BASE_URL 和 KONGMING_MODEL_API_KEY。
@@ -534,6 +534,9 @@ web:
   # 后台扫盘检查周期（默认 60s，下限 10s）
   idle_check_interval_seconds: 60
 
+  # dashboard 状态页轮询周期（默认 5s；代码层最小按 3s 生效）
+  dashboard_poll_interval_seconds: 5
+
   # 单次审批等待上限（超时默认拒绝，默认 60s，下限 10s）
   pending_approval_timeout_seconds: 60
 
@@ -551,6 +554,12 @@ web:
       base_url: https://api.minimaxi.com/anthropic
       model: MiniMax-M2.7
       api_key_env: MINIMAX_API_KEY
+      reasoning_effort: medium
+    - id: deepseek
+      display_name: "deepseek-v4-flash"
+      base_url: https://api.deepseek.com/anthropic
+      model: deepseek-v4-flash
+      api_key_env: DEEPSEEK_API_KEY
       reasoning_effort: medium
   # 示例：
   # llm_presets:

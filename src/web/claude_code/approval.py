@@ -39,6 +39,7 @@ from claude_agent_sdk.types import (
     ToolPermissionContext,
 )
 
+from network.network_log import log_network_exception
 from web._shared.session_manager import SessionManager
 from web.auto_approval import AuditLogger, AutoApprovalPolicy
 from web.claude_code.normalizer import ClaudeNormalizer
@@ -219,7 +220,7 @@ class ApprovalBridge:
             # else: toggle OFF / elevated → 两者都 None，timeout_seconds 也 None → 无限等
 
         permission_msg: dict[str, Any] = {
-            "kind": "permission_request",
+            "frame_type": "permission_request",
             "provider": "claude",
             "channel": self._channel,
             "requestId": request_id,
@@ -238,6 +239,14 @@ class ApprovalBridge:
             logger.warning(
                 "approval.can_use_tool: writer.send_json failed: %s",
                 exc,
+            )
+            log_network_exception(
+                "web.claude_code.approval",
+                "permission_request_send_failed",
+                exc,
+                thread_id=self._thread_id,
+                request_id=request_id,
+                tool_name=tool_name,
             )
             return PermissionResultDeny(message="writer disconnected")
 
@@ -259,8 +268,16 @@ class ApprovalBridge:
                         "arrivedAtMs": int(time.time() * 1000),
                     },
                 )
-            except Exception:
+            except Exception as exc:
                 logger.exception("inbox.emit_add failed (non-fatal)")
+                log_network_exception(
+                    "web.claude_code.approval",
+                    "inbox_emit_add_failed",
+                    exc,
+                    thread_id=self._thread_id,
+                    request_id=request_id,
+                    tool_name=tool_name,
+                )
 
         # === audit: log_request ===
         rule_eval = (
@@ -408,8 +425,16 @@ class ApprovalBridge:
             return
         try:
             await self._inbox.emit_remove(request_id, reason)
-        except Exception:
+        except Exception as exc:
             logger.exception("inbox.emit_remove failed (non-fatal)")
+            log_network_exception(
+                "web.claude_code.approval",
+                "inbox_emit_remove_failed",
+                exc,
+                thread_id=self._thread_id,
+                request_id=request_id,
+                reason=reason,
+            )
 
     def _log_decision(
         self,
