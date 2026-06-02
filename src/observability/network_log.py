@@ -51,9 +51,8 @@ def log_network_event(
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(payload, ensure_ascii=False)
-        with _LOCK:
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
+        with _LOCK, path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
     except OSError:
         logger.warning(
             "network log append failed: path=%s component=%s action=%s",
