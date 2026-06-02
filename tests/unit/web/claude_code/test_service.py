@@ -174,7 +174,7 @@ async def test_query_sends_normalized_messages() -> None:
     await svc.query("hi", {"sessionId": "sid-1"}, writer)
 
     # 收到 text + complete
-    kinds = [m.get("kind") for m in writer.sent]
+    kinds = [m.get("frame_type") for m in writer.sent]
     assert "text" in kinds
     assert "complete" in kinds
 
@@ -221,8 +221,9 @@ async def test_query_reconnect_rebinds_stream_writer() -> None:
     gate.set()
     await task
 
-    assert [msg.get("kind") for msg in first_sink.sent] == ["text"]
-    assert [msg.get("kind") for msg in second_sink.sent] == ["text", "complete"]
+    # protocol-frame-type-unify：原 `kind` 已统一改为 `frame_type` 作判别字段。
+    assert [msg.get("frame_type") for msg in first_sink.sent] == ["text"]
+    assert [msg.get("frame_type") for msg in second_sink.sent] == ["text", "complete"]
 
 
 async def test_query_reuses_client_across_runs() -> None:
@@ -299,7 +300,7 @@ async def test_query_failure_emits_error_and_evicts_client() -> None:
     writer = _FakeWriter()
     await svc.query("hi", {"sessionId": "sid-err"}, writer)
     # error 帧应当被发出
-    kinds = [m.get("kind") for m in writer.sent]
+    kinds = [m.get("frame_type") for m in writer.sent]
     assert "error" in kinds
 
 
