@@ -4,12 +4,12 @@ import argparse
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 
 def _utc_now() -> tuple[int, str]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return int(now.timestamp() * 1000), now.isoformat().replace("+00:00", "Z")
 
 
