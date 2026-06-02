@@ -29,7 +29,7 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from observability.network_log import log_network_exception
+from network.network_log import log_network_exception
 
 if TYPE_CHECKING:
     from fastapi import WebSocket

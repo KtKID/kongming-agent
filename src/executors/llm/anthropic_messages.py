@@ -44,7 +44,7 @@ from executors.llm.media_adapter import (
 from executors.llm.raw_dump import dump_raw_llm_interaction
 from executors.llm.reasoning import ReasoningConfig, resolve_reasoning_plan
 from executors.llm.sse_reader import iter_sse_events
-from observability.network_log import log_network_exception
+from network.network_log import log_network_exception
 
 _LOGGER = logging.getLogger(__name__)
 

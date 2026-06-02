@@ -42,7 +42,7 @@ from executors.llm.openai_compat_stream_parser import OpenAICompatStreamParser
 from executors.llm.raw_dump import dump_raw_llm_interaction
 from executors.llm.reasoning import EffortLevel, ReasoningConfig, resolve_reasoning_plan
 from executors.llm.sse_reader import iter_sse_events
-from observability.network_log import log_network_exception
+from network.network_log import log_network_exception
 
 FinishReasonStr = Literal["stop", "tool_calls", "length", "error", "other"]
 

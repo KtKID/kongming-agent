@@ -30,7 +30,7 @@ import time
 from typing import Any, cast
 
 from core.contracts import Event
-from observability.network_log import log_network_exception
+from network.network_log import log_network_exception
 from web.protocol import (
     ApprovalDecisionFrame,
     ApprovalOutcome,

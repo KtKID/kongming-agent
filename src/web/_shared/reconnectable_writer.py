@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from observability.network_log import log_network_exception
+from network.network_log import log_network_exception
 
 
 class ReconnectableWebSocketWriter:

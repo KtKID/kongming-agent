@@ -39,7 +39,7 @@ from claude_agent_sdk.types import (
     ToolPermissionContext,
 )
 
-from observability.network_log import log_network_exception
+from network.network_log import log_network_exception
 from web._shared.session_manager import SessionManager
 from web.auto_approval import AuditLogger, AutoApprovalPolicy
 from web.claude_code.normalizer import ClaudeNormalizer

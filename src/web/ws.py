@@ -44,7 +44,7 @@ from pydantic import ValidationError
 
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore, resolve_evolution_root
-from observability.network_log import log_network_event, log_network_exception
+from network.network_log import log_network_event, log_network_exception
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 from web.auto_approval.ws_handlers import (
     handle_auto_approval_query,

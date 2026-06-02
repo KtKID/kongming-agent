@@ -36,7 +36,7 @@ from typing import Any
 
 from fastapi import WebSocket
 
-from observability.network_log import log_network_exception
+from network.network_log import log_network_exception
 
 # channel → error 帧 provider 字段的映射。保持 claude_code 走 "claude"
 # 字面值（与老前端 100% 兼容），generic_chat 走 "generic"，与后端日志惯例

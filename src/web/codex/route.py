@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
-from observability.network_log import log_network_event, log_network_exception
+from network.network_log import log_network_event, log_network_exception
 from web._shared.reconnectable_writer import ReconnectableWebSocketWriter
 from web._shared.session_manager import SessionManager
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie

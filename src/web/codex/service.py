@@ -31,7 +31,7 @@ import logging
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from observability.network_log import log_network_exception
+from network.network_log import log_network_exception
 from web._shared.session_manager import SessionManager
 from web.codex._image_cli_args import CodexImageCliArgsBuilder
 from web.codex.approval import map_permission_mode

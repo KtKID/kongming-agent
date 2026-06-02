@@ -42,7 +42,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from core.contracts import ApprovalAction, ApprovalRequest, Event
 from host.base import HostAdapter
-from observability.network_log import log_network_exception
+from network.network_log import log_network_exception
 from web.protocol import ApprovalRequestFrame, AssistantFinalFrame
 
 logger = logging.getLogger(__name__)
