@@ -361,6 +361,9 @@ def test_post_threads_generic_chat_omitted_preset_id_returns_400(
 
 
 def test_post_threads_relative_cwd_returns_400(tmp_path: Path) -> None:
+    # 注：a413c9b (windows-path 任务) 后，相对路径校验从 router 业务层迁到
+    # pydantic schema 层，status code 从 400 → 422。测试名保留兼容，仅更新
+    # 断言（按"不扩大影响面"原则，不动业务代码 / 不改测试名引用）。
     tm = FakeTM()
     client = _login_client(tmp_path, tm)
     try:
@@ -369,7 +372,7 @@ def test_post_threads_relative_cwd_returns_400(tmp_path: Path) -> None:
             json={"name": "t", "preset_id": "p1", "cwd": "relative/path"},
             headers=CSRF_HEADERS,
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 422
         assert "cwd" in str(resp.json())
     finally:
         client.__exit__(None, None, None)

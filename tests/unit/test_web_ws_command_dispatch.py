@@ -217,7 +217,7 @@ def test_ws_command_result_no_crash(tmp_path: Path) -> None:
             _ = ws.receive_json()  # history
             ws.send_json(
                 {
-                    "kind": "user.input",
+                    "frame_type": "user.input",
                     "text": "/review",
                     "request_id": "req-cmd",
                 }
@@ -247,7 +247,7 @@ def test_ws_runtime_result_still_logs_usage(tmp_path: Path) -> None:
             _ = ws.receive_json()  # history
             ws.send_json(
                 {
-                    "kind": "user.input",
+                    "frame_type": "user.input",
                     "text": "hello",
                     "request_id": "req-text",
                 }
@@ -273,7 +273,7 @@ def test_ws_command_failed_result_no_crash(tmp_path: Path) -> None:
             _ = ws.receive_json()  # history
             ws.send_json(
                 {
-                    "kind": "user.input",
+                    "frame_type": "user.input",
                     "text": "/deploy",
                     "request_id": "req-fail",
                 }

@@ -34,7 +34,7 @@ async def test_safe_send_json_success_returns_true() -> None:
     """正常写盘 → 返回 True；ws.send_json 被传入原 payload。"""
     ws = AsyncMock()
     ws.send_json = AsyncMock()
-    payload = {"kind": "pong", "ts": 1234}
+    payload = {"frame_type": "pong", "ts": 1234}
     ok = await safe_send_json(ws, payload)
     assert ok is True
     ws.send_json.assert_called_once_with(payload)

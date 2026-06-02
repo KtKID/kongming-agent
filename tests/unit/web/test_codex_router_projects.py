@@ -102,6 +102,10 @@ def _codex_home(tmp_path: Path) -> Path:
     return tmp_path / "codex_home"
 
 
+def _rollout_filename(session_id: str) -> str:
+    return f"rollout-2026-05-10T14-00-00-{session_id}.jsonl"
+
+
 def _write_rollout(
     rollout_path: Path,
     session_id: str,
@@ -147,16 +151,6 @@ def _write_rollout(
 
 
 class TestGetProjects:
-    def test_empty_registry_returns_empty_list(self, tmp_path: Path) -> None:
-        tm = FakeTM()
-        client = _login_client_with_isolated_codex_home(tmp_path, tm)
-        try:
-            resp = client.get("/api/codex/projects")
-            assert resp.status_code == 200
-            assert resp.json() == []
-        finally:
-            client.__exit__(None, None, None)
-
     def test_registry_empty_but_codex_home_has_jsonl_returns_empty(self, tmp_path: Path) -> None:
         """registry 空 → 即使 sessions/ 目录里有 jsonl 也不返回任何 project。
 
@@ -164,15 +158,12 @@ class TestGetProjects:
         未登记的 cwd 一律丢弃（D1 决议）。
         """
         # 在 codex_home 下铺一个真实 rollout，cwd 指向 /proj/unregistered
+        unregistered_cwd = tmp_path / "unregistered"
+        unregistered_cwd.mkdir()
         rollout = (
-            _codex_home(tmp_path)
-            / "sessions"
-            / "2026"
-            / "05"
-            / "10"
-            / f"rollout-2026-05-10T14:00:00-{_UUID_A}.jsonl"
+            _codex_home(tmp_path) / "sessions" / "2026" / "05" / "10" / _rollout_filename(_UUID_A)
         )
-        _write_rollout(rollout, _UUID_A, "/proj/unregistered")
+        _write_rollout(rollout, _UUID_A, str(unregistered_cwd))
 
         tm = FakeTM()
         client = _login_client_with_isolated_codex_home(tmp_path, tm)
@@ -188,7 +179,8 @@ class TestGetProjects:
         → 仍返回 project 节点，``sessions`` 为空列表。
         """
         # 先 add 一条 cwd 到 registry，但不在 codex_home 下创建对应 rollout
-        add_project(tmp_path, "/proj/empty", alias="empty-alias")
+        empty_cwd = str(tmp_path / "proj-empty")
+        add_project(tmp_path, empty_cwd, alias="empty-alias")
 
         tm = FakeTM()
         client = _login_client_with_isolated_codex_home(tmp_path, tm)
@@ -200,8 +192,8 @@ class TestGetProjects:
             assert isinstance(body, list)
             assert len(body) == 1
             p = body[0]
-            assert p["cwd"] == "/proj/empty"
-            assert p["display_name"] == "empty"
+            assert p["cwd"] == str(Path(empty_cwd).resolve())
+            assert p["display_name"] == Path(empty_cwd).name
             assert p["sessions"] == []
         finally:
             client.__exit__(None, None, None)
@@ -223,12 +215,7 @@ class TestGetProjects:
 
         # 在 isolated codex_home 下铺真实 rollout，session_meta.cwd 指向上面的 cwd
         rollout = (
-            _codex_home(tmp_path)
-            / "sessions"
-            / "2026"
-            / "05"
-            / "10"
-            / f"rollout-2026-05-10T14:00:00-{_UUID_A}.jsonl"
+            _codex_home(tmp_path) / "sessions" / "2026" / "05" / "10" / _rollout_filename(_UUID_A)
         )
         _write_rollout(rollout, _UUID_A, cwd, extra_lines=2)
 

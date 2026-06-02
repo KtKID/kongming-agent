@@ -55,6 +55,13 @@ def _make_mock_proc(
     proc.returncode = exit_code
     proc.terminate = MagicMock()
     proc.kill = MagicMock()
+    # service._write_stdin 需要 drain() 和 wait_closed() 为 awaitable。
+    stdin = MagicMock()
+    stdin.write = MagicMock()
+    stdin.drain = AsyncMock()
+    stdin.close = MagicMock()
+    stdin.wait_closed = AsyncMock()
+    proc.stdin = stdin
     return proc
 
 
@@ -147,7 +154,7 @@ async def test_record_run_usage_skipped_when_thread_manager_none() -> None:
         )
 
     # 测试能跑完 = 跳过逻辑正确（不抛 AttributeError）
-    kinds = [m.get("kind") for m in writer.sent]
+    kinds = [m.get("frame_type") for m in writer.sent]
     assert "complete" in kinds
 
 
@@ -305,6 +312,6 @@ async def test_record_run_usage_failure_does_not_break_main_flow() -> None:
         )
 
     # 主流程正常完成
-    kinds = [m.get("kind") for m in writer.sent]
+    kinds = [m.get("frame_type") for m in writer.sent]
     assert "session_created" in kinds
     assert "complete" in kinds

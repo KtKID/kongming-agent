@@ -47,7 +47,7 @@ class HeartbeatHooks(Protocol):
     async def send_pong(self, frame: dict[str, Any]) -> None:
         """把一条 pong 帧写回 socket。
 
-        :param frame: 已构造好的 pong 帧 dict（包含 ``kind`` /
+        :param frame: 已构造好的 pong 帧 dict（包含 ``frame_type`` /
             ``timestamp_ms`` / ``ts`` 等字段，schema 见
             ``src/web/protocol/ws_frames.py::PongFrame``）
         """
@@ -91,8 +91,8 @@ class Heartbeat:
     async def handle_inbound_frame(self, frame: dict[str, Any]) -> dict[str, Any] | None:
         """处理一条入站帧；若为 ping 则返回应回的 pong 帧 dict。
 
-        非心跳相关帧（``kind != "ping"``）返回 ``None``，让上层把帧路由给
-        业务 handler。
+        非心跳相关帧（``frame_type != "ping"``）返回 ``None``，让上层把帧路由
+        给业务 handler。
 
         服务端 v0.1 角色是 **被动响应**：客户端按 ``intervalMs`` 周期发 ping，
         本方法识别后原样 echo 客户端的 ``ts`` 用于 RTT 计算，并附带服务端
@@ -105,17 +105,21 @@ class Heartbeat:
         来自入参 ``frame``，副作用为 ``None``（pong 发送由上层 ``send_pong``
         hook 负责）。
 
+        protocol-frame-type-unify-v0.2：wire 协议判别字段统一为
+        ``frame_type``；本方法消费入站 ``frame["frame_type"]`` 并输出
+        ``{"frame_type": "pong", ...}``。
+
         :param frame: 已被上层解析为 ``dict`` 的入站帧
-        :returns: 若 ``frame["kind"] == "ping"``，返回 pong 帧 dict
-            ``{"kind": "pong", "ts": <原 ts>, "timestamp_ms": <服务端 ms>}``；
+        :returns: 若 ``frame["frame_type"] == "ping"``，返回 pong 帧 dict
+            ``{"frame_type": "pong", "ts": <原 ts>, "timestamp_ms": <服务端 ms>}``；
             否则 ``None``
         """
         if not isinstance(frame, dict):
             return None
-        if frame.get("kind") != "ping":
+        if frame.get("frame_type") != "ping":
             return None
         return {
-            "kind": "pong",
+            "frame_type": "pong",
             "ts": frame.get("ts"),
             "timestamp_ms": int(time.time() * 1000),
         }

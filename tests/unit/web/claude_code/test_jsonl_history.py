@@ -2,8 +2,8 @@
 
 覆盖：
 1. jsonl_path_for 路径计算（默认 home / 注入 home）
-2. user content=string → kind=text role=user
-3. user content=[tool_result] → kind=tool_result
+2. user content=string → frame_type=text role=user
+3. user content=[tool_result] → frame_type=tool_result
 4. assistant.content text/thinking/tool_use block 三类
 5. system + subtype=init → session_created
 6. 异常 type 全 skip（attachment / queue-operation / file-history-snapshot 等）
@@ -72,7 +72,7 @@ def test_parse_user_text_message(tmp_path: Path) -> None:
     )
     out = parse_jsonl_history(path, sid)
     assert len(out) == 1
-    assert out[0]["kind"] == "text"
+    assert out[0]["frame_type"] == "text"
     assert out[0]["role"] == "user"
     assert out[0]["content"] == "hello world"
     assert out[0]["sessionId"] == sid
@@ -152,7 +152,7 @@ def test_parse_user_string_plain_text_still_passes(tmp_path: Path) -> None:
     )
     out = parse_jsonl_history(path, sid)
     assert len(out) == 1
-    assert out[0]["kind"] == "text"
+    assert out[0]["frame_type"] == "text"
     assert out[0]["role"] == "user"
     assert out[0]["content"] == "你好，帮我搜一下白板代码"
 
@@ -184,10 +184,38 @@ def test_parse_user_tool_result_block(tmp_path: Path) -> None:
     )
     out = parse_jsonl_history(path, sid)
     assert len(out) == 1
-    assert out[0]["kind"] == "tool_result"
+    assert out[0]["frame_type"] == "tool_result"
     assert out[0]["toolId"] == "tu-1"
     assert out[0]["content"] == "result text"
     assert out[0]["isError"] is False
+
+
+def test_parse_user_tool_result_block_skipped_when_include_tools_false(tmp_path: Path) -> None:
+    sid = "sid-1"
+    path = tmp_path / "f.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "type": "user",
+                "uuid": "u1",
+                "sessionId": sid,
+                "timestamp": "2026-05-02T10:00:00Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "tu-1",
+                            "content": "result text",
+                            "is_error": False,
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+    assert parse_jsonl_history(path, sid, include_tools=False) == []
 
 
 def test_parse_assistant_text_block(tmp_path: Path) -> None:
@@ -210,7 +238,7 @@ def test_parse_assistant_text_block(tmp_path: Path) -> None:
     )
     out = parse_jsonl_history(path, sid)
     assert len(out) == 1
-    assert out[0]["kind"] == "text"
+    assert out[0]["frame_type"] == "text"
     assert out[0]["role"] == "assistant"
     assert out[0]["content"] == "hi there"
 
@@ -237,7 +265,7 @@ def test_parse_assistant_thinking_block(tmp_path: Path) -> None:
     )
     out = parse_jsonl_history(path, sid)
     assert len(out) == 1
-    assert out[0]["kind"] == "thinking"
+    assert out[0]["frame_type"] == "thinking"
     assert out[0]["content"] == "let me think..."
 
 
@@ -268,10 +296,40 @@ def test_parse_assistant_tool_use_block(tmp_path: Path) -> None:
     )
     out = parse_jsonl_history(path, sid)
     assert len(out) == 1
-    assert out[0]["kind"] == "tool_use"
+    assert out[0]["frame_type"] == "tool_use"
     assert out[0]["toolName"] == "Bash"
     assert out[0]["toolInput"] == {"command": "ls"}
     assert out[0]["toolId"] == "tu-1"
+
+
+def test_parse_assistant_tool_use_block_skipped_when_include_tools_false(
+    tmp_path: Path,
+) -> None:
+    sid = "sid-1"
+    path = tmp_path / "f.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "type": "assistant",
+                "uuid": "a1",
+                "sessionId": sid,
+                "timestamp": "2026-05-02T10:00:00Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tu-1",
+                            "name": "Bash",
+                            "input": {"command": "ls"},
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+    assert parse_jsonl_history(path, sid, include_tools=False) == []
 
 
 def test_parse_system_init(tmp_path: Path) -> None:
@@ -290,7 +348,7 @@ def test_parse_system_init(tmp_path: Path) -> None:
     )
     out = parse_jsonl_history(path, sid)
     assert len(out) == 1
-    assert out[0]["kind"] == "session_created"
+    assert out[0]["frame_type"] == "session_created"
     assert out[0]["newSessionId"] == sid
 
 
@@ -393,6 +451,25 @@ def test_sort_by_timestamp_ascending(tmp_path: Path) -> None:
     assert [o["content"] for o in out] == ["first", "middle", "second"]
 
 
+def test_max_messages_keeps_recent_tail(tmp_path: Path) -> None:
+    sid = "sid-tail"
+    path = tmp_path / "f.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {
+                "type": "user",
+                "sessionId": sid,
+                "timestamp": f"2026-05-02T10:0{i}:00Z",
+                "message": {"role": "user", "content": f"msg-{i}"},
+            }
+            for i in range(5)
+        ],
+    )
+    out = parse_jsonl_history(path, sid, max_messages=2)
+    assert [o["content"] for o in out] == ["msg-3", "msg-4"]
+
+
 def test_real_fixture_smoke() -> None:
     """真实 fixture 端到端 smoke。
 
@@ -415,9 +492,9 @@ def test_real_fixture_smoke() -> None:
     for r in out:
         assert r["sessionId"] == sid
         assert r["provider"] == "claude"
-        assert r["kind"] in {"text", "thinking", "tool_use", "tool_result", "session_created"}
+        assert r["frame_type"] in {"text", "thinking", "tool_use", "tool_result", "session_created"}
         # 核心回归：内部前缀不应再出现在 history 输出（与 normalizer live 流对齐）
-        if r["kind"] == "text" and r.get("role") == "user":
+        if r["frame_type"] == "text" and r.get("role") == "user":
             content = r.get("content")
             assert isinstance(content, str)
             assert not content.startswith("<task-notification>"), (

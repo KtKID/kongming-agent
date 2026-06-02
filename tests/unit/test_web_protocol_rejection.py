@@ -6,7 +6,7 @@
 2. 字段类型错 → ValidationError
 3. ``extra='forbid'`` 生效 → 未知字段 ValidationError
 4. ``Literal`` 枚举字段拒绝错误值（ErrorCode / EvictReason / ApprovalOutcome / HistoryMessageRole）
-5. ``WSFrameC2SAdapter`` / ``WSFrameS2CAdapter`` discriminator 拒绝未知 ``kind``
+5. ``WSFrameC2SAdapter`` / ``WSFrameS2CAdapter`` discriminator 拒绝未知 ``frame_type``
 6. ``frozen=True`` 生效——构造后赋值会抛异常
 7. ``ThreadMetadataDTO.id`` / ``CellSummaryDTO.thread_id`` pattern 约束
 8. 数值约束（``LoginRequest.password`` ``min_length=1`` / ``ThreadMetadataDTO.message_count`` ``ge=0``）
@@ -249,28 +249,30 @@ def test_reject_literal_enum_invalid_value(model: Any, kwargs: dict[str, Any]) -
 
 
 # ---------------------------------------------------------------------------
-# 5. discriminator 拒绝未知 kind
+# 5. discriminator 拒绝未知 frame_type
 # ---------------------------------------------------------------------------
 
 
-def test_reject_unknown_kind_c2s_adapter() -> None:
-    """C2S adapter 必须拒绝未注册的 kind。"""
+def test_reject_unknown_frame_type_c2s_adapter() -> None:
+    """C2S adapter 必须拒绝未注册的 frame_type。"""
     with pytest.raises(ValidationError):
-        WSFrameC2SAdapter.validate_python({"kind": "unknown.kind", "text": "x", "request_id": "r"})
+        WSFrameC2SAdapter.validate_python(
+            {"frame_type": "unknown.kind", "text": "x", "request_id": "r"}
+        )
 
 
-def test_reject_unknown_kind_s2c_adapter() -> None:
-    """S2C adapter 必须拒绝未注册的 kind。"""
+def test_reject_unknown_frame_type_s2c_adapter() -> None:
+    """S2C adapter 必须拒绝未注册的 frame_type。"""
     with pytest.raises(ValidationError):
-        WSFrameS2CAdapter.validate_python({"kind": "unknown.kind", "timestamp_ms": 1})
+        WSFrameS2CAdapter.validate_python({"frame_type": "unknown.kind", "timestamp_ms": 1})
 
 
-def test_reject_c2s_adapter_with_s2c_kind() -> None:
-    """C2S 入站 adapter 不应接受 S2C 帧的 kind（如 ``content.delta``）。"""
+def test_reject_c2s_adapter_with_s2c_frame_type() -> None:
+    """C2S 入站 adapter 不应接受 S2C 帧的 frame_type（如 ``content.delta``）。"""
     with pytest.raises(ValidationError):
         WSFrameC2SAdapter.validate_python(
             {
-                "kind": "content.delta",
+                "frame_type": "content.delta",
                 "delta": "x",
                 "turn": 1,
                 "seq": 0,
@@ -279,10 +281,12 @@ def test_reject_c2s_adapter_with_s2c_kind() -> None:
         )
 
 
-def test_reject_s2c_adapter_with_c2s_kind() -> None:
-    """S2C 出站 adapter 不应接受 C2S 帧的 kind（如 ``user.input``）。"""
+def test_reject_s2c_adapter_with_c2s_frame_type() -> None:
+    """S2C 出站 adapter 不应接受 C2S 帧的 frame_type（如 ``user.input``）。"""
     with pytest.raises(ValidationError):
-        WSFrameS2CAdapter.validate_python({"kind": "user.input", "text": "x", "request_id": "r"})
+        WSFrameS2CAdapter.validate_python(
+            {"frame_type": "user.input", "text": "x", "request_id": "r"}
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +298,7 @@ def test_reject_s2c_adapter_with_c2s_kind() -> None:
 
 
 def test_reject_attribute_assignment_on_frozen_frame() -> None:
-    """frozen=True 帧构造后不允许字段赋值（C2S：``PingFrame`` 无非 kind 字段，
+    """frozen=True 帧构造后不允许字段赋值（C2S：``PingFrame`` 无非 frame_type 字段，
     选有字段的 ``UserInputFrame``）。"""
     frame = UserInputFrame(text="hi", request_id="r1")
     with pytest.raises(ValidationError):

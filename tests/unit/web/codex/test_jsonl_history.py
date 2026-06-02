@@ -41,7 +41,7 @@ class TestParseMinimal:
 
         # session_meta / response_item / turn_context / task_started /
         # task_complete 都不应出现在结果里
-        kinds = {m["kind"] for m in msgs}
+        kinds = {m["frame_type"] for m in msgs}
         assert "session_created" not in kinds
         assert "response_item" not in kinds
         # 不应含 task_started / task_complete 衍生内容
@@ -57,7 +57,7 @@ class TestParseMinimal:
 
         msgs = parse_codex_rollout(path, sid)
 
-        text_msgs = [m for m in msgs if m["kind"] == "text"]
+        text_msgs = [m for m in msgs if m["frame_type"] == "text"]
         assert len(text_msgs) == 1
         assert text_msgs[0]["content"] == "hello from codex"
         assert text_msgs[0]["role"] == "assistant"
@@ -77,8 +77,8 @@ class TestToolCallRollout:
 
         msgs = parse_codex_rollout(path, sid)
 
-        tool_use_msgs = [m for m in msgs if m["kind"] == "tool_use"]
-        tool_result_msgs = [m for m in msgs if m["kind"] == "tool_result"]
+        tool_use_msgs = [m for m in msgs if m["frame_type"] == "tool_use"]
+        tool_result_msgs = [m for m in msgs if m["frame_type"] == "tool_result"]
         # command_execution 产出 tool_use + tool_result
         assert any(m["toolName"] == "shell" for m in tool_use_msgs)
         assert len(tool_result_msgs) >= 1
@@ -89,7 +89,7 @@ class TestToolCallRollout:
 
         msgs = parse_codex_rollout(path, sid)
 
-        tool_use_msgs = [m for m in msgs if m["kind"] == "tool_use"]
+        tool_use_msgs = [m for m in msgs if m["frame_type"] == "tool_use"]
         mcp_uses = [m for m in tool_use_msgs if "test-server" in m.get("toolName", "")]
         assert len(mcp_uses) == 1
         assert mcp_uses[0]["toolName"] == "test-server/search"
@@ -112,7 +112,7 @@ class TestPartialRollout:
 
         assert isinstance(msgs, list)
         # 至少有 agent_message "Starting work..."
-        text_msgs = [m for m in msgs if m["kind"] == "text"]
+        text_msgs = [m for m in msgs if m["frame_type"] == "text"]
         assert len(text_msgs) == 1
         assert text_msgs[0]["content"] == "Starting work..."
 

@@ -83,21 +83,21 @@ async def test_handle_inbound_routes_ping_returns_pong_via_websocket() -> None:
     ws = _make_ws()
     conn_id = await manager.register("claude", ws)
 
-    handled = await manager.handle_inbound(conn_id, {"kind": "ping", "ts": 12345})
+    handled = await manager.handle_inbound(conn_id, {"frame_type": "ping", "ts": 12345})
 
     assert handled is True
     ws.send_json.assert_called_once()
     # 验证 pong 帧内容
     call_args = ws.send_json.call_args
     pong = call_args.args[0]
-    assert pong["kind"] == "pong"
+    assert pong["frame_type"] == "pong"
     assert pong["ts"] == 12345
     assert isinstance(pong["timestamp_ms"], int)
 
 
 @pytest.mark.asyncio
 async def test_handle_inbound_returns_false_for_business_frame() -> None:
-    """业务帧（无 kind / kind != ping）→ 返回 False + ws 未被调用。"""
+    """业务帧（无 frame_type / frame_type != ping）→ 返回 False + ws 未被调用。"""
     manager = NetworkManager()
     manager.configure(_make_config())
     ws = _make_ws()
@@ -119,7 +119,7 @@ async def test_handle_inbound_returns_false_for_unknown_conn_id() -> None:
     """unknown conn_id → 返回 False 不抛异常。"""
     manager = NetworkManager()
     manager.configure(_make_config())
-    handled = await manager.handle_inbound("not-registered", {"kind": "ping", "ts": 1})
+    handled = await manager.handle_inbound("not-registered", {"frame_type": "ping", "ts": 1})
     assert handled is False
 
 

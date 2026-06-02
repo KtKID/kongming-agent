@@ -66,7 +66,7 @@ def test_auto_approval_toggle_persists(app_client: TestClient, tmp_path: Path) -
     with app_client.websocket_connect("/ws/claude-code") as ws:
         ws.send_json(
             {
-                "type": "auto-approval-toggle",
+                "frame_type": "auto-approval-toggle",
                 "cwd": "/proj/test",
                 "enabled": True,
             },
@@ -86,26 +86,28 @@ def test_auto_approval_toggle_persists(app_client: TestClient, tmp_path: Path) -
 
 def test_auto_approval_toggle_off_persists(app_client: TestClient) -> None:
     with app_client.websocket_connect("/ws/claude-code") as ws:
-        ws.send_json({"type": "auto-approval-toggle", "cwd": "/p", "enabled": True})
+        ws.send_json({"frame_type": "auto-approval-toggle", "cwd": "/p", "enabled": True})
         _wait_for_kind(ws, "auto_approval_state")
-        ws.send_json({"type": "auto-approval-toggle", "cwd": "/p", "enabled": False})
+        ws.send_json({"frame_type": "auto-approval-toggle", "cwd": "/p", "enabled": False})
         msg = _wait_for_kind(ws, "auto_approval_state")
         assert msg["enabled"] is False
 
 
 def test_auto_approval_toggle_missing_cwd_returns_error(app_client: TestClient) -> None:
     with app_client.websocket_connect("/ws/claude-code") as ws:
-        ws.send_json({"type": "auto-approval-toggle", "enabled": True})
+        ws.send_json({"frame_type": "auto-approval-toggle", "enabled": True})
         msg = ws.receive_json()
-        assert msg.get("kind") == "error"
+        # auto_approval helper 的 _send_error 跨通道 helper，统一走 frame_type
+        assert msg.get("frame_type") == "error"
         assert "cwd required" in msg.get("error", "")
 
 
 def test_auto_approval_toggle_empty_cwd_returns_error(app_client: TestClient) -> None:
     with app_client.websocket_connect("/ws/claude-code") as ws:
-        ws.send_json({"type": "auto-approval-toggle", "cwd": "", "enabled": True})
+        ws.send_json({"frame_type": "auto-approval-toggle", "cwd": "", "enabled": True})
         msg = ws.receive_json()
-        assert msg.get("kind") == "error"
+        # auto_approval helper 的 _send_error 跨通道 helper，统一走 frame_type
+        assert msg.get("frame_type") == "error"
 
 
 # ---------- query 路由 ----------
@@ -114,7 +116,7 @@ def test_auto_approval_toggle_empty_cwd_returns_error(app_client: TestClient) ->
 def test_auto_approval_query_new_cwd_returns_default_off(app_client: TestClient) -> None:
     """query 新 cwd → 默认 enabled=False。"""
     with app_client.websocket_connect("/ws/claude-code") as ws:
-        ws.send_json({"type": "auto-approval-query", "cwd": "/new/never/seen"})
+        ws.send_json({"frame_type": "auto-approval-query", "cwd": "/new/never/seen"})
         msg = _wait_for_kind(ws, "auto_approval_state")
         assert msg["cwd"] == "/new/never/seen"
         assert msg["enabled"] is False
@@ -124,27 +126,28 @@ def test_auto_approval_query_new_cwd_returns_default_off(app_client: TestClient)
 
 def test_auto_approval_query_after_toggle_reflects_state(app_client: TestClient) -> None:
     with app_client.websocket_connect("/ws/claude-code") as ws:
-        ws.send_json({"type": "auto-approval-toggle", "cwd": "/p", "enabled": True})
+        ws.send_json({"frame_type": "auto-approval-toggle", "cwd": "/p", "enabled": True})
         _wait_for_kind(ws, "auto_approval_state")
-        ws.send_json({"type": "auto-approval-query", "cwd": "/p"})
+        ws.send_json({"frame_type": "auto-approval-query", "cwd": "/p"})
         msg = _wait_for_kind(ws, "auto_approval_state")
         assert msg["enabled"] is True
 
 
 def test_auto_approval_query_missing_cwd_returns_error(app_client: TestClient) -> None:
     with app_client.websocket_connect("/ws/claude-code") as ws:
-        ws.send_json({"type": "auto-approval-query"})
+        ws.send_json({"frame_type": "auto-approval-query"})
         msg = ws.receive_json()
-        assert msg.get("kind") == "error"
+        # auto_approval helper 的 _send_error 跨通道 helper，统一走 frame_type
+        assert msg.get("frame_type") == "error"
 
 
 # ---------- 辅助 ----------
 
 
 def _wait_for_kind(ws: Any, kind: str, max_msgs: int = 10) -> dict[str, Any]:
-    """等收到指定 kind 的 frame；最多读 max_msgs 个消息。"""
+    """等收到指定 frame_type 的 frame；最多读 max_msgs 个消息。"""
     for _ in range(max_msgs):
         msg = ws.receive_json()
-        if msg.get("kind") == kind:
+        if msg.get("frame_type") == kind:
             return msg  # type: ignore[no-any-return]
-    raise AssertionError(f"did not receive kind={kind}")
+    raise AssertionError(f"did not receive frame_type={kind}")

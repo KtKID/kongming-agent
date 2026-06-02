@@ -195,6 +195,45 @@ def test_list_recent_runs_limit_zero_or_negative_raises(tmp_path: Path) -> None:
         store.list_recent_runs(limit=0)
 
 
+def test_list_recent_runs_limit_above_max_raises(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    store.create_task(_make_task(task_id="t-1"))
+    with pytest.raises(ValueError, match="limit"):
+        store.list_recent_runs(limit=300)
+
+
+def test_list_recent_runs_negative_limit_raises(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    store.create_task(_make_task(task_id="t-1"))
+    with pytest.raises(ValueError, match="limit"):
+        store.list_recent_runs(limit=-1)
+
+
+def test_list_recent_runs_cursor_pagination_has_no_overlap(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    store.create_task(_make_task(task_id="t-1"))
+    timestamps = [f"2026-05-04T{hour:02d}:00:00+00:00" for hour in range(8)]
+    for i, ts in enumerate(timestamps):
+        store.append_run(_make_run(run_id=f"r-{i:02d}", task_id="t-1", started_at=ts))
+
+    page1 = store.list_recent_runs(limit=3)
+    assert [r.run_id for r in page1] == ["r-07", "r-06", "r-05"]
+
+    cursor = page1[-1].started_at
+    assert cursor == "2026-05-04T05:00:00+00:00"
+
+    page2 = store.list_recent_runs(limit=3, cursor=cursor)
+    assert [r.run_id for r in page2] == ["r-04", "r-03", "r-02"]
+    assert {r.run_id for r in page1} & {r.run_id for r in page2} == set()
+    assert all(r.started_at is not None and r.started_at < cursor for r in page2)
+
+    page3 = store.list_recent_runs(limit=3, cursor=page2[-1].started_at)
+    assert [r.run_id for r in page3] == ["r-01", "r-00"]
+
+    page4 = store.list_recent_runs(limit=3, cursor=page3[-1].started_at)
+    assert page4 == []
+
+
 # ---------------------------------------------------------------------------
 # mark_run_seen
 # ---------------------------------------------------------------------------

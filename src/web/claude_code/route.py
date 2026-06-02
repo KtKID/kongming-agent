@@ -407,27 +407,6 @@ async def _dispatch(
     bound_claude_tid: str = "",
 ) -> None:
     """单条入站帧分发。"""
-    # ──────────────────────────────────────────────────────────────────
-    # DEPRECATED · web-network-layer v0.1 重构遗留（待清理）
-    # ──────────────────────────────────────────────────────────────────
-    # 历史：fix commit 7270c0d (2026-05-26) 补 keepalive 日志时，在此重复
-    # 写了一份 ping→pong 处理逻辑；当时未意识到 5-24 引入的 NetworkManager
-    # (commit 1272a23) 已通过主循环 line 322 的 handle_inbound 接管全部
-    # ping 帧。本分支当前 100% 不可达（ping 帧在进 _dispatch 前已被拦下）。
-    #
-    # 新真源：
-    #   - src/network/manager.py::NetworkManager.handle_inbound
-    #   - src/network/heartbeat.py::Heartbeat.handle_inbound_frame
-    #   - 主循环拦截点：本文件 claude_code_ws 主循环 line 322-326
-    #
-    # 行为差异（保留本分支会回到分叉的旧行为，不要在此基础上改 bug）：
-    #   - pong 缺 ``timestamp_ms`` 字段（前端 RTT 诊断会少一个时间锚点）
-    #   - 日志写 ``.kongming/logs/claude-keepalive.jsonl``
-    #     （新真源走 ``network/heartbeat_log.jsonl``）
-    #
-    # TODO(web-network-layer-cleanup): 下一个独立 patch 删除本 ping 分支。
-    # 本 PR 仅做标注，与 writer/register 时序修复分开提交。
-    # ──────────────────────────────────────────────────────────────────
     if data.get("frame_type") == "ping":
         ts = data.get("ts")
         if isinstance(ts, (int, float)):

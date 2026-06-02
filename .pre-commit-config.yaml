@@ -73,7 +73,7 @@ repos:
       # 全量回归在 GitHub Actions CI 里跑（.github/workflows/ci.yml）
       - id: pytest-picked
         name: pytest --picked (受影响 unit 测试，并行)
-        entry: uv run pytest tests/unit --picked --mode=branch -n 4 -q -W ignore::pytest.PytestUnraisableExceptionWarning
+        entry: uv run python scripts/run_with_timing.py --label pytest-picked -- uv run pytest tests/unit --picked --mode=branch -n 4 -q -W ignore::pytest.PytestUnraisableExceptionWarning
         language: system
         pass_filenames: false
         files: ^(src|tests/unit)/.*\.py$

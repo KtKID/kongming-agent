@@ -48,7 +48,7 @@ async def test_emit_content_delta() -> None:
         )
     )
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "content.delta"
+    assert sent["frame_type"] == "content.delta"
     assert sent["delta"] == "hello"
     assert sent["turn"] == 2
     assert sent["seq"] == 5
@@ -66,7 +66,7 @@ async def test_emit_reasoning_delta() -> None:
         )
     )
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "reasoning.delta"
+    assert sent["frame_type"] == "reasoning.delta"
     assert sent["delta"] == "thinking..."
     # seq 缺省 → 0
     assert sent["seq"] == 0
@@ -82,7 +82,7 @@ async def test_emit_turn_start() -> None:
     sink = WSEventSink(ws)
     await sink.emit(Event(kind="turn.start", run_id="r", turn=1))
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "turn.start"
+    assert sent["frame_type"] == "turn.start"
     assert sent["turn"] == 1
 
 
@@ -91,7 +91,7 @@ async def test_emit_turn_end() -> None:
     sink = WSEventSink(ws)
     await sink.emit(Event(kind="turn.end", run_id="r", turn=1))
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "turn.end"
+    assert sent["frame_type"] == "turn.end"
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +115,7 @@ async def test_emit_tool_call_start() -> None:
         )
     )
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "tool.call.start"
+    assert sent["frame_type"] == "tool.call.start"
     assert sent["tool_name"] == "ReadFile"
     assert sent["call_id"] == "c1"
     assert sent["arguments"] == {"path": "/x"}
@@ -133,7 +133,7 @@ async def test_emit_tool_call_end_success() -> None:
         )
     )
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "tool.call.end"
+    assert sent["frame_type"] == "tool.call.end"
     assert sent["ok"] is True
     assert sent["error_message"] is None
 
@@ -179,7 +179,7 @@ async def test_emit_tool_call_end_passes_content_through() -> None:
         )
     )
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "tool.call.end"
+    assert sent["frame_type"] == "tool.call.end"
     assert sent["content"] == "stdout\nline2\n"
     assert sent["data"] == {"stdout": "stdout\nline2\n", "exit_code": 0}
 
@@ -239,7 +239,7 @@ async def test_emit_usage_includes_run_id() -> None:
         )
     )
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "usage"
+    assert sent["frame_type"] == "usage"
     assert sent["run_id"] == "run-42"
     assert sent["turn"] == 3
     usage = sent["usage"]
@@ -265,7 +265,7 @@ async def test_emit_approval_decision_approved() -> None:
         )
     )
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "approval.decision"
+    assert sent["frame_type"] == "approval.decision"
     assert sent["outcome"] == "approved"
 
 
@@ -336,7 +336,7 @@ async def test_emit_usage() -> None:
         )
     )
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "usage"
+    assert sent["frame_type"] == "usage"
     usage = sent["usage"]
     assert usage["provider"] == "openai"
     assert usage["last"]["input_tokens"] == 100
@@ -360,7 +360,7 @@ async def test_emit_error_known_type_maps_to_code() -> None:
         )
     )
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "error"
+    assert sent["frame_type"] == "error"
     assert sent["error_code"] == "network"
     assert sent["message"] == "DNS failed"
     assert sent["turn"] == 1
@@ -446,7 +446,7 @@ async def test_emit_evolution_review_started_notice() -> None:
         )
     )
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "system.notice"
+    assert sent["frame_type"] == "system.notice"
     assert sent["notice_key"] == "self_evolution.review"
     assert sent["source"] == "self_evolution"
     assert sent["status"] == "started"
@@ -486,7 +486,7 @@ async def test_emit_evolution_review_completed_notice() -> None:
         )
     )
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "system.notice"
+    assert sent["frame_type"] == "system.notice"
     assert sent["status"] == "completed"
     assert sent["title"] == "进化复盘"
     assert (
@@ -527,7 +527,7 @@ async def test_emit_evolution_review_failed_notice() -> None:
         )
     )
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "system.notice"
+    assert sent["frame_type"] == "system.notice"
     assert sent["status"] == "failed"
     assert sent["title"] == "进化复盘"
     assert sent["message"] == "本轮未写入：write path failed"
@@ -557,7 +557,7 @@ async def test_emit_evolution_review_drain_timeout_notice() -> None:
         )
     )
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "system.notice"
+    assert sent["frame_type"] == "system.notice"
     assert sent["status"] == "drain_timeout"
     assert sent["title"] == "进化复盘"
     assert sent["message"] == "关闭前复盘超时，仍有 2 条待处理复盘"
@@ -751,7 +751,7 @@ async def test_run_id_propagates_to_turn_start_and_end() -> None:
     sent_frames = [
         c.args[0]
         for c in ws.send_json.await_args_list
-        if c.args[0]["kind"] in ("turn.start", "turn.end")
+        if c.args[0]["frame_type"] in ("turn.start", "turn.end")
     ]
     assert len(sent_frames) == 2
     assert all(s["run_id"] == "run-t-1" for s in sent_frames)
@@ -776,7 +776,9 @@ async def test_run_id_propagates_to_tool_call_start_and_end() -> None:
             payload={"call_id": "c1", "ok": True, "content": "out"},
         )
     )
-    sent_kinds = {c.args[0]["kind"]: c.args[0]["run_id"] for c in ws.send_json.await_args_list}
+    sent_kinds = {
+        c.args[0]["frame_type"]: c.args[0]["run_id"] for c in ws.send_json.await_args_list
+    }
     assert sent_kinds.get("tool.call.start") == "run-tc-7"
     assert sent_kinds.get("tool.call.end") == "run-tc-7"
 
@@ -819,7 +821,7 @@ async def test_emit_run_cancelled_translates_to_run_interrupted_frame() -> None:
         )
     )
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "run.interrupted"
+    assert sent["frame_type"] == "run.interrupted"
     assert sent["run_id"] == "run-thread-aaa-5"
     assert sent["cancelled_at_turn"] == 3
     assert sent["cancelled_tool_call_id"] == "call-xyz"
@@ -843,5 +845,5 @@ async def test_emit_run_cancelled_with_no_tool_call_id_keeps_none() -> None:
         )
     )
     sent = ws.send_json.await_args.args[0]
-    assert sent["kind"] == "run.interrupted"
+    assert sent["frame_type"] == "run.interrupted"
     assert sent["cancelled_tool_call_id"] is None

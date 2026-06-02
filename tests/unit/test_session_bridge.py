@@ -199,6 +199,35 @@ async def test_run_once_skips_usage_line_when_empty():
 
 
 @pytest.mark.asyncio
+async def test_run_once_skips_usage_line_when_echo_disabled():
+    """web 场景 echo_final_content=False：token 用量不走 write_output。
+
+    回归：web 的 WebHostAdapter.write_output 会把文本包成 AssistantFinalFrame，
+    token 行若在此输出会被错误渲染成一条 assistant 消息气泡。token 用量在 web
+    已通过 UsageFrame 推给 StatusLine，这里必须跳过。CLI（echo_final_content=True）
+    仍由 test_run_once_writes_usage_line 覆盖、保留终端打印。
+    """
+
+    def factory(sid, ui):
+        return _ok_result(
+            sid,
+            metadata={"usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}},
+        )
+
+    rt, ad = _StubRuntime(result_factory=factory), _StubAdapter()
+    b = SessionBridge(
+        runtime=rt,  # type: ignore[arg-type]
+        adapter=ad,
+        session_id="sid-1",
+        echo_final_content=False,
+    )
+    await b.run_once("hello")
+    # echo 关闭：既不回显正文，也不输出 token 文本 → adapter 完全无输出
+    assert not any("[tokens" in out for out in ad.outputs)
+    assert ad.outputs == []
+
+
+@pytest.mark.asyncio
 async def test_run_once_handles_no_final_message():
     def factory(sid, ui):
         return Result(

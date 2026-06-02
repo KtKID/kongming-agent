@@ -84,7 +84,7 @@ class TestHandleToggle:
     async def test_toggle_on_success_calls_policy_and_sends_state(self) -> None:
         ws = _FakeWebSocket()
         policy = _StubPolicy()
-        data = {"type": "auto-approval-toggle", "cwd": "/proj/test", "enabled": True}
+        data = {"frame_type": "auto-approval-toggle", "cwd": "/proj/test", "enabled": True}
 
         await handle_auto_approval_toggle(ws, data, policy)  # type: ignore[arg-type]
 
@@ -93,7 +93,7 @@ class TestHandleToggle:
         # 2. 回了 1 帧 state，且字段对齐
         assert len(ws.sent) == 1
         msg = ws.sent[0]
-        assert msg["kind"] == "auto_approval_state"
+        assert msg["frame_type"] == "auto_approval_state"
         assert msg["channel"] == "claude_code"
         assert msg["cwd"] == "/proj/test"
         assert msg["enabled"] is True
@@ -129,7 +129,7 @@ class TestHandleToggle:
         assert policy.set_enabled_calls == []
         assert len(ws.sent) == 1
         msg = ws.sent[0]
-        assert msg["kind"] == "error"
+        assert msg["frame_type"] == "error"
         assert msg["provider"] == "claude"
         # error 字面值与 claude_code/route.py 原版 100% 对齐
         assert msg["error"] == "auto-approval-toggle.cwd required"
@@ -145,7 +145,7 @@ class TestHandleToggle:
             policy,  # type: ignore[arg-type]
         )
 
-        assert ws.sent[0]["kind"] == "error"
+        assert ws.sent[0]["frame_type"] == "error"
         assert ws.sent[0]["error"] == "auto-approval-toggle.cwd required"
 
     @pytest.mark.asyncio
@@ -159,7 +159,7 @@ class TestHandleToggle:
             policy,  # type: ignore[arg-type]
         )
 
-        assert ws.sent[0]["kind"] == "error"
+        assert ws.sent[0]["frame_type"] == "error"
 
     @pytest.mark.asyncio
     async def test_toggle_policy_none_returns_error(self) -> None:
@@ -169,7 +169,7 @@ class TestHandleToggle:
 
         assert len(ws.sent) == 1
         msg = ws.sent[0]
-        assert msg["kind"] == "error"
+        assert msg["frame_type"] == "error"
         # error 字面值与 claude_code/route.py 原版 100% 对齐
         assert msg["error"] == "auto_approval_policy not configured"
 
@@ -201,7 +201,7 @@ class TestHandleQuery:
         assert policy.set_enabled_calls == []
         assert len(ws.sent) == 1
         msg = ws.sent[0]
-        assert msg["kind"] == "auto_approval_state"
+        assert msg["frame_type"] == "auto_approval_state"
         assert msg["cwd"] == "/new"
         assert msg["enabled"] is False
         assert msg["timeoutMs"] == 10000
@@ -228,7 +228,7 @@ class TestHandleQuery:
 
         await handle_auto_approval_query(ws, {}, policy)  # type: ignore[arg-type]
 
-        assert ws.sent[0]["kind"] == "error"
+        assert ws.sent[0]["frame_type"] == "error"
         # error 字面值与 claude_code/route.py 原版 100% 对齐
         assert ws.sent[0]["error"] == "auto-approval-query.cwd required"
 
@@ -238,7 +238,7 @@ class TestHandleQuery:
 
         await handle_auto_approval_query(ws, {"cwd": "/p"}, None)  # type: ignore[arg-type]
 
-        assert ws.sent[0]["kind"] == "error"
+        assert ws.sent[0]["frame_type"] == "error"
         assert ws.sent[0]["error"] == "auto_approval_policy not configured"
 
 
@@ -254,7 +254,7 @@ class TestBuildStateMsg:
         msg = build_auto_approval_state_msg(policy, "/proj")
 
         assert msg == {
-            "kind": "auto_approval_state",
+            "frame_type": "auto_approval_state",
             "channel": "claude_code",
             "cwd": "/proj",
             "enabled": False,
@@ -322,7 +322,7 @@ class TestGenericChatChannel:
         msg = build_auto_approval_state_msg(policy, "/p", channel="generic_chat")
 
         assert msg == {
-            "kind": "auto_approval_state",
+            "frame_type": "auto_approval_state",
             "channel": "generic_chat",
             "cwd": "/p",
             "enabled": False,
@@ -346,7 +346,7 @@ class TestGenericChatChannel:
         assert policy.set_enabled_calls == [("/proj/test", True)]
         assert len(ws.sent) == 1
         msg = ws.sent[0]
-        assert msg["kind"] == "auto_approval_state"
+        assert msg["frame_type"] == "auto_approval_state"
         assert msg["channel"] == "generic_chat"
         assert msg["enabled"] is True
 
@@ -366,7 +366,7 @@ class TestGenericChatChannel:
 
         assert len(ws.sent) == 1
         msg = ws.sent[0]
-        assert msg["kind"] == "error"
+        assert msg["frame_type"] == "error"
         # provider 按 _PROVIDER_BY_CHANNEL 映射到 "generic"
         assert msg["provider"] == "generic"
         # channel 字段独立暴露，前端 / 测试可直接断言通道
@@ -387,7 +387,7 @@ class TestGenericChatChannel:
         )
 
         msg = ws.sent[0]
-        assert msg["kind"] == "error"
+        assert msg["frame_type"] == "error"
         assert msg["provider"] == "generic"
         assert msg["channel"] == "generic_chat"
         assert msg["error"] == "auto-approval-query.cwd required"
@@ -412,6 +412,6 @@ class TestGenericChatChannel:
             channel="generic_chat",
         )
 
-        assert ws.sent[0]["kind"] == "auto_approval_state"
+        assert ws.sent[0]["frame_type"] == "auto_approval_state"
         assert ws.sent[0]["channel"] == "generic_chat"
         assert ws.sent[0]["enabled"] is True

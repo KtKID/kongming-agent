@@ -15,7 +15,7 @@ class TestThreadStarted:
         msgs = normalize({"type": "thread.started", "thread_id": "019dee38"}, SID)
         assert len(msgs) == 1
         m = msgs[0]
-        assert m["kind"] == "session_created"
+        assert m["frame_type"] == "session_created"
         assert m["provider"] == "codex"
         assert m.get("newSessionId") == "019dee38"
 
@@ -40,13 +40,13 @@ class TestTurnLifecycle:
             SID,
         )
         assert len(msgs) == 1
-        assert msgs[0]["kind"] == "complete"
+        assert msgs[0]["frame_type"] == "complete"
         assert "tokenBudget" in msgs[0]
 
     def test_turn_failed_emits_error(self) -> None:
         msgs = normalize({"type": "turn.failed", "error": {"message": "boom"}}, SID)
         assert len(msgs) == 1
-        assert msgs[0]["kind"] == "error"
+        assert msgs[0]["frame_type"] == "error"
 
 
 class TestAgentMessage:
@@ -59,7 +59,7 @@ class TestAgentMessage:
             SID,
         )
         assert len(msgs) == 1
-        assert msgs[0]["kind"] == "text"
+        assert msgs[0]["frame_type"] == "text"
         assert msgs[0].get("content") == "hello"
 
 
@@ -73,7 +73,7 @@ class TestReasoning:
             SID,
         )
         assert len(msgs) == 1
-        assert msgs[0]["kind"] == "thinking"
+        assert msgs[0]["frame_type"] == "thinking"
 
 
 class TestCommandExecution:
@@ -93,7 +93,7 @@ class TestCommandExecution:
             SID,
         )
         assert len(msgs) == 1
-        assert msgs[0]["kind"] == "tool_use"
+        assert msgs[0]["frame_type"] == "tool_use"
 
     def test_completed_emits_tool_result(self) -> None:
         msgs = normalize(
@@ -111,7 +111,7 @@ class TestCommandExecution:
             SID,
         )
         # 依实现可能 1 条（仅 tool_result）或 2 条（含一个补充的 tool_use）；至少要有 tool_result
-        kinds = [m["kind"] for m in msgs]
+        kinds = [m["frame_type"] for m in msgs]
         assert "tool_result" in kinds
 
     def test_failed_command_marks_is_error(self) -> None:
@@ -130,7 +130,7 @@ class TestCommandExecution:
             SID,
         )
         # 找到 tool_result 那条
-        results = [m for m in msgs if m["kind"] == "tool_result"]
+        results = [m for m in msgs if m["frame_type"] == "tool_result"]
         assert len(results) >= 1
         assert results[0].get("isError") is True
 
@@ -139,7 +139,7 @@ class TestUnknownEvent:
     def test_unknown_type_emits_error_with_raw(self) -> None:
         msgs = normalize({"type": "unknown.future.event", "foo": "bar"}, SID)
         assert len(msgs) == 1
-        assert msgs[0]["kind"] == "error"
+        assert msgs[0]["frame_type"] == "error"
         # 必须保留原始事件供前端 raw_dump
         # 字段名实现可能用 content / raw / data 之一，至少包含原始信息
         m = msgs[0]
@@ -168,4 +168,4 @@ class TestBaseFields:
         assert m["sessionId"] == SID
         assert m["timestamp"]  # iso8601
         assert m["provider"] == "codex"
-        assert m["kind"] == "text"
+        assert m["frame_type"] == "text"

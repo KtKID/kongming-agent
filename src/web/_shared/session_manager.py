@@ -98,7 +98,11 @@ class SessionManager:
             record = self._sessions.get(session_id)
             if record is None:
                 return False
-            record.writer = new_writer
+            attach = getattr(type(record.writer), "attach_ws", None)
+            if callable(attach):
+                record.writer.attach_ws(new_writer)
+            else:
+                record.writer = new_writer
             return True
 
     async def request_abort(self, session_id: str) -> bool:
