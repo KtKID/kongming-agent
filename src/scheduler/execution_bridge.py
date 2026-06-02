@@ -410,10 +410,15 @@ class ExecutionBridge:
         if not preset_id or not self._preset_map or preset_id not in self._preset_map:
             return self._agent_spec
         preset = self._preset_map[preset_id]
-        overrides: dict[str, str] = {"default_model": preset.model}
+        # dataclasses.replace 对 **dict[str, str] 报 invariance 错；直接列出
+        # 字段保持类型安全，分支处理 reasoning_effort 是否为 None。
         if preset.reasoning_effort is not None:
-            overrides["reasoning_effort"] = preset.reasoning_effort
-        return replace(self._agent_spec, **overrides)
+            return replace(
+                self._agent_spec,
+                default_model=preset.model,
+                reasoning_effort=preset.reasoning_effort,
+            )
+        return replace(self._agent_spec, default_model=preset.model)
 
     def _resolve_run_audit_context(self, task: ScheduledTask) -> dict[str, str]:
         """v0.5.2: 解析 cron run audit payload 中要附加的 model 上下文。
