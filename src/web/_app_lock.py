@@ -118,9 +118,7 @@ def _acquire_win(lock_path: Path) -> int:
         sys.exit(1)
 
     if holder_pid is not None:
-        sys.stderr.write(
-            f"[web] WARN: 检测到孤儿锁（PID={holder_pid} 已死），清理后重写\n"
-        )
+        sys.stderr.write(f"[web] WARN: 检测到孤儿锁（PID={holder_pid} 已死），清理后重写\n")
 
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
     _write_owner(fd)
