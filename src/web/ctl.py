@@ -67,9 +67,10 @@ def _fetch_runtime_status(port: int) -> dict[str, Any] | None:
     except (HTTPError, URLError, OSError, ValueError):
         return None
     try:
-        return json.loads(body)
+        result = json.loads(body)
     except json.JSONDecodeError:
         return None
+    return result if isinstance(result, dict) else None
 
 
 def _is_port_listening(port: int, host: str = "127.0.0.1") -> bool:
