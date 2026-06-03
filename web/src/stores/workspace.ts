@@ -9,14 +9,23 @@ export interface WorkspaceFileOpenRequest {
   nonce: number;
 }
 
+export interface FileDrawerState {
+  threadId: string;
+  relativePath: string;   // workspace 相对路径（传给 API）
+  absolutePath: string;    // 原始绝对路径（展示用）
+}
+
 interface WorkspaceState {
   contextsByThread: Record<string, WorkspaceContextDTO | undefined>;
   loadingByThread: Record<string, boolean | undefined>;
   activeTabByThread: Record<string, WorkspaceTab | undefined>;
   fileOpenRequestByThread: Record<string, WorkspaceFileOpenRequest | undefined>;
+  drawerFile: FileDrawerState | null;
   fetchContext: (threadId: string) => Promise<WorkspaceContextDTO>;
   setActiveTab: (threadId: string, tab: WorkspaceTab) => void;
   requestOpenFile: (threadId: string, path: string) => void;
+  openFileDrawer: (threadId: string, absolutePath: string, workspaceRoot: string) => void;
+  closeFileDrawer: () => void;
   resetThreadState: (threadId: string) => void;
 }
 
@@ -25,6 +34,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   loadingByThread: {},
   activeTabByThread: {},
   fileOpenRequestByThread: {},
+  drawerFile: null,
 
   fetchContext: async (threadId) => {
     set((state) => ({
@@ -75,6 +85,21 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }));
   },
 
+  openFileDrawer: (threadId, absolutePath, workspaceRoot) => {
+    let relativePath = absolutePath;
+    if (workspaceRoot) {
+      const prefix = workspaceRoot.endsWith("/") ? workspaceRoot : workspaceRoot + "/";
+      if (absolutePath.startsWith(prefix)) {
+        relativePath = absolutePath.slice(prefix.length);
+      }
+    }
+    set({ drawerFile: { threadId, relativePath, absolutePath } });
+  },
+
+  closeFileDrawer: () => {
+    set({ drawerFile: null });
+  },
+
   resetThreadState: (threadId) => {
     const nextContexts = { ...get().contextsByThread };
     const nextLoading = { ...get().loadingByThread };
@@ -84,11 +109,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     delete nextLoading[threadId];
     delete nextTabs[threadId];
     delete nextFileOpenRequests[threadId];
+    const clearDrawer = get().drawerFile?.threadId === threadId;
     set({
       contextsByThread: nextContexts,
       loadingByThread: nextLoading,
       activeTabByThread: nextTabs,
       fileOpenRequestByThread: nextFileOpenRequests,
+      ...(clearDrawer ? { drawerFile: null } : {}),
     });
   },
 }));

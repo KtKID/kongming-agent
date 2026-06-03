@@ -12,6 +12,8 @@ function getSystemTheme(): "light" | "dark" {
 function applyTheme(theme: Theme) {
   const resolved = theme === "system" ? getSystemTheme() : theme;
   document.documentElement.classList.toggle("dark", resolved === "dark");
+  document.documentElement.dataset.kongmingTheme =
+    resolved === "dark" ? "obsidian-dark" : "guofeng-light";
 }
 
 interface ThemeState {

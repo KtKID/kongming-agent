@@ -11,7 +11,7 @@ beforeEach(() => {
 
 function pushApproval() {
   useApprovalDialogStore.getState().push({
-    kind: "approval.request",
+    frame_type: "approval.request",
     timestamp_ms: 1,
     call_id: "c1",
     tool_name: "Shell",
@@ -22,7 +22,7 @@ function pushApproval() {
 
 function pushElevatedApproval() {
   useApprovalDialogStore.getState().push({
-    kind: "approval.request",
+    frame_type: "approval.request",
     timestamp_ms: 1,
     call_id: "c-elevated",
     tool_name: "run_shell",
@@ -57,7 +57,7 @@ describe("ApprovalDialog — standard 模式", () => {
     );
     await user.click(screen.getByTestId("approval-approve"));
     expect(sock.send).toHaveBeenCalledWith({
-      kind: "approval.ack",
+      frame_type: "approval.ack",
       call_id: "c1",
       action: "accept_once",
     });
@@ -86,7 +86,7 @@ describe("ApprovalDialog — standard 模式", () => {
     );
     await user.click(screen.getByTestId("approval-approve-session"));
     expect(sock.send).toHaveBeenCalledWith({
-      kind: "approval.ack",
+      frame_type: "approval.ack",
       call_id: "c1",
       action: "accept_for_session",
     });
@@ -103,7 +103,7 @@ describe("ApprovalDialog — standard 模式", () => {
     );
     await user.click(screen.getByTestId("approval-reject"));
     expect(sock.send).toHaveBeenCalledWith({
-      kind: "approval.ack",
+      frame_type: "approval.ack",
       call_id: "c1",
       action: "reject",
     });
@@ -119,7 +119,7 @@ describe("ApprovalDialog — standard 模式", () => {
     const user = userEvent.setup();
     await user.keyboard("{Escape}");
     expect(sock.send).toHaveBeenCalledWith({
-      kind: "approval.ack",
+      frame_type: "approval.ack",
       call_id: "c1",
       action: "reject",
     });
@@ -229,7 +229,7 @@ describe("ApprovalDialog — elevated 模式", () => {
     await user.type(screen.getByTestId("confirm-token-input"), "a1b2c3d4");
     await user.click(screen.getByTestId("approval-approve"));
     expect(sock.send).toHaveBeenCalledWith({
-      kind: "approval.ack",
+      frame_type: "approval.ack",
       call_id: "c-elevated",
       action: "accept_once",
     });
@@ -259,7 +259,7 @@ describe("ApprovalDialog — elevated 模式", () => {
     );
     await user.click(screen.getByTestId("approval-reject"));
     expect(sock.send).toHaveBeenCalledWith({
-      kind: "approval.ack",
+      frame_type: "approval.ack",
       call_id: "c-elevated",
       action: "reject",
     });

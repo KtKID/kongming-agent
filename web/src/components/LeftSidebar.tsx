@@ -20,6 +20,7 @@ import {
 import { apiPost } from "@/lib/api";
 import { useThreadsStore } from "@/stores/threads";
 import type {
+  BackendKind,
   ClaudeProjectSummaryDTO,
   ClaudeSessionSummaryDTO,
   ImportClaudeSessionRequest,
@@ -50,7 +51,20 @@ export function LeftSidebar({
   const [tab, setTab] = useState<LeftSidebarTab>(() => loadPersistedTab());
   const navigate = useNavigate();
   const fetchThreads = useThreadsStore((s) => s.fetchThreads);
-  const setPendingNewClaudeSession = useThreadsStore((s) => s.setPendingNewClaudeSession);
+  const setPendingNewSession = useThreadsStore((s) => s.setPendingNewSession);
+
+  const openPendingProviderSession = (
+    cwd: string,
+    projectName: string,
+    backendKind: Extract<BackendKind, "claude_code" | "codex">,
+  ): void => {
+    setPendingNewSession({
+      cwd,
+      projectName,
+      backendKind,
+    });
+    navigate("/chat");
+  };
 
   // mount 时无条件 fetch threads —— Claude tab 下 ThreadList 不渲染时也要拿
   // 数据，否则 Chat.tsx 在刷新页面后找不到当前 thread 的 backend_kind，
@@ -65,11 +79,19 @@ export function LeftSidebar({
   };
 
   const handleNewSession = (project: ClaudeProjectSummaryDTO): void => {
-    setPendingNewClaudeSession({
-      cwd: project.cwd,
-      projectName: project.display_name,
-    });
-    navigate("/chat");
+    openPendingProviderSession(
+      project.cwd,
+      project.display_name,
+      "claude_code",
+    );
+  };
+
+  const handleNewCodexSession = (project: CodexProjectSummary): void => {
+    openPendingProviderSession(
+      project.cwd,
+      project.display_name,
+      "codex",
+    );
   };
 
   const handleSessionClick = async (
@@ -134,7 +156,7 @@ export function LeftSidebar({
       ) : null}
       <aside
       className={cn(
-        "relative z-20 flex h-full shrink-0 flex-col border-r border-border bg-card transition-[width,min-width,transform] duration-300 ease-out",
+        "obsidian-panel obsidian-hairline relative z-20 flex h-full shrink-0 flex-col rounded-[1.85rem] transition-[width,min-width,transform] duration-300 ease-out",
         compactMode ? "absolute inset-y-0 left-0 shadow-xl" : "shadow-none",
         isOpen
           ? mobileMode
@@ -153,7 +175,7 @@ export function LeftSidebar({
           type="button"
           onClick={onToggleOpen}
           aria-label="收起左侧栏"
-          className="absolute right-0 top-5 z-20 inline-flex h-11 w-11 translate-x-1/2 items-center justify-center rounded-[1.3rem] border border-border/80 bg-background/92 text-foreground shadow-sm backdrop-blur-sm transition-colors hover:bg-card"
+          className="absolute right-0 top-6 z-20 inline-flex h-11 w-11 translate-x-1/2 items-center justify-center rounded-[1.3rem] border border-border/80 bg-card/90 text-foreground shadow-glass backdrop-blur-xl transition-colors hover:bg-card"
         >
           <PanelLeftClose className="h-4.5 w-4.5" />
         </button>
@@ -166,7 +188,7 @@ export function LeftSidebar({
             : "pointer-events-none -translate-x-8 opacity-0",
         )}
       >
-        <div className="border-b border-border p-2 pr-8">
+        <div className="border-b border-border/70 p-3 pr-10">
           <LeftSidebarTabs active={tab} onChange={handleTabChange} />
         </div>
         <div className="min-h-0 flex-1 overflow-hidden">
@@ -175,7 +197,10 @@ export function LeftSidebar({
           ) : tab === "claude" ? (
             <ClaudeProjectsTree onSessionClick={handleSessionClick} onNewSession={handleNewSession} />
           ) : (
-            <CodexProjectsTree onSessionClick={handleCodexSessionClick} />
+            <CodexProjectsTree
+              onSessionClick={handleCodexSessionClick}
+              onNewSession={handleNewCodexSession}
+            />
           )}
         </div>
       </div>
@@ -193,7 +218,7 @@ export function LeftSidebar({
           aria-label="展开左侧栏"
           data-testid="left-edge-handle"
           className={cn(
-            "inline-flex items-center justify-center border border-border/80 bg-card/88 text-foreground shadow-sm backdrop-blur-sm transition-colors hover:bg-card",
+            "inline-flex items-center justify-center border border-border/80 bg-card/90 text-foreground shadow-glass backdrop-blur-xl transition-colors hover:bg-card",
             mobileMode
               ? "absolute left-0 top-5 h-20 w-6 rounded-r-2xl border-l-0"
               : "mt-5 ml-2 h-12 w-12 rounded-[1.4rem]",

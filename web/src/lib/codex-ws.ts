@@ -1,5 +1,5 @@
 import { toast } from "sonner";
-import type { NormalizedMessage } from "@/protocol";
+import type { NormalizedMessage, UserInputAttachment } from "@/protocol";
 
 /**
  * Codex endpoint 客户端帧。
@@ -13,7 +13,7 @@ import type { NormalizedMessage } from "@/protocol";
  */
 export type CodexC2SFrame =
   | {
-      type: "codex-command";
+      frame_type: "codex-command";
       command: string;
       options?: {
         cwd?: string;
@@ -21,10 +21,26 @@ export type CodexC2SFrame =
         resume?: boolean;
         model?: string;
         permissionMode?: "default" | "acceptEdits" | "bypassPermissions";
+        // message-runtime #8: 三频道 reasoning 字段贯通 — Composer 选择的思考等级
+        // 透传到 wire 帧。codex 后端目前不消费此字段（独立后端 task），但前端
+        // 契约层先打通，避免 Composer→视图→ChatManager→provider 链路断点。
+        reasoningEffort?: "low" | "medium" | "high";
       };
+      /**
+       * 图片附件（codex-channel-image-paste）。
+       *
+       * 后端 ``_handle_codex_command`` 解析后传给
+       * ``CodexService.query(attachments=...)``，由 ``CodexImageCliArgsBuilder``
+       * 拼成 ``--image <path>`` CLI flag 注入 codex exec 子进程；Rust 端转 base64
+       * 后注入 OpenAI Responses API。缺省 / 空数组 → 走纯文本 prompt，向后兼容。
+       *
+       * **范围限定**：仅本轮发送 + 本轮 optimistic 缩略图。**不含**刷新后历史回显
+       * （Codex jsonl 存 base64 而非 asset_id，独立后续 task 处理）。
+       */
+      attachments?: UserInputAttachment[];
     }
-  | { type: "abort-session"; sessionId: string }
-  | { type: "check-session-status"; sessionId: string };
+  | { frame_type: "abort-session"; sessionId: string }
+  | { frame_type: "check-session-status"; sessionId: string };
 
 /**
  * 后端到前端的两类帧：NormalizedMessage（主流）+ session-status（特殊）。
@@ -33,7 +49,7 @@ export type CodexC2SFrame =
  * 完全不同（用 `type` 而非 `kind`），单独建模。
  */
 export interface SessionStatusFrame {
-  type: "session-status";
+  frame_type: "session-status";
   sessionId: string;
   isProcessing: boolean;
 }

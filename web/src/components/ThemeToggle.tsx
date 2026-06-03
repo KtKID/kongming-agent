@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 const ICONS = { light: Sun, dark: Moon, system: Monitor } as const;
-const LABELS = { light: "浅色", dark: "深色", system: "跟随系统" } as const;
+const LABELS = { light: "古风亮", dark: "黑曜暗", system: "跟随系统" } as const;
 
 export function ThemeToggle() {
   const { theme, setTheme } = useThemeStore();

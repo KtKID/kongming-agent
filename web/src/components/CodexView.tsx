@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { toast } from "sonner";
 import { ChatMessageItem, MessageViewport } from "@/components/MessageList";
 import { Composer } from "@/components/Composer";
 import {
@@ -6,15 +8,20 @@ import {
   type CodexPermissionMode,
 } from "@/components/CodexPermissionMode";
 import { useCodexWS } from "@/hooks/useCodexWS";
+import { ChatManager } from "@/chat/ChatManager";
+import { makeNetworkHandle, getTimelineStore } from "@/chat/runtimeWiring";
+import { useThreadRunning } from "@/hooks/useThreadRunning";
 import { apiGet } from "@/lib/api";
 import type { NormalizedMessage, ThreadMetadataDTO } from "@/protocol";
 import type { ChatItem as GenericChatItem } from "@/stores/chat";
+import { useItemsWithFileSummary } from "@/hooks/useItemsWithFileSummary";
+import { ModifiedFilesSummary } from "@/components/ModifiedFilesSummary";
+import { useThreadsStore } from "@/stores/threads";
 
 type CodexMetaItem =
   | { kind: "status"; content?: unknown; id: string }
   | {
       kind: "complete";
-      tokenBudget?: Record<string, unknown>;
       aborted?: boolean;
       id: string;
     };
@@ -95,7 +102,7 @@ function convertHistoryToChatItems(
   const nextTurn = () => n;
 
   for (const msg of messages) {
-    switch (msg.kind) {
+    switch (msg.frame_type) {
       case "text": {
         const text = stringifyContent(msg.content);
         if (!text.trim()) break;
@@ -189,19 +196,68 @@ function convertHistoryToChatItems(
 }
 
 interface Props {
-  threadId: string;
+  threadId?: string;
   thread?: ThreadMetadataDTO;
 }
 
 export function CodexView({ threadId, thread }: Props) {
+  const navigate = useNavigate();
   const { socket, state } = useCodexWS(threadId);
   const [items, setItems] = useState<CodexRenderItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [permissionMode, setPermissionMode] =
     useState<CodexPermissionMode>("acceptEdits");
+  // message-runtime-v0.1 #5：codex 发送走统一 ChatManager。保留 pending 创建时序，
+  // 仅把 codex-command 帧的组装收口到 CodexChatProvider（permissionMode 经 provider 选项透传）。
+  const chatManager = useMemo(() => {
+    if (!socket) return null;
+    return new ChatManager({
+      resolveHandle: (_kind, tid) =>
+        makeNetworkHandle(tid, (frame) =>
+          socket.send(frame as Parameters<typeof socket.send>[0]),
+        ),
+      ensureThread: async (req) => req.provider.threadId,
+      timelineFor: (tid) => getTimelineStore(tid),
+    });
+  }, [socket]);
+
+  // chat-running-state-unify #4：codex 频道补 Stop 按钮（之前 Composer 没传
+  // isRunning/onInterrupt，没接打断）。isRunning 走三频道共享 useThreadRunning
+  // （后端 thread-status phase 真源）；abort-session 需要 sessionId——优先用
+  // listener 收 session_created/任意带 sessionId 帧后更新的 live sid，否则退到
+  // thread.codex_thread_id（落盘的 resume sid）。参考 ClaudeCodeView 同模式。
+  const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
+  const isRunning = useThreadRunning(threadId);
+  const sessionIdForAbort = useMemo(() => {
+    const live = resumeSessionId?.trim();
+    if (live) return live;
+    const fallback = thread?.codex_thread_id?.trim();
+    return fallback || null;
+  }, [resumeSessionId, thread?.codex_thread_id]);
+  // message-runtime #9：发帧改走 chatManager.interrupt 统一接口（三频道一致），
+  // 不再视图层直接 socket.send。UX gate 与 sessionId 计算仍在视图层。
+  const onInterrupt = useCallback(() => {
+    if (!isRunning) return;                                 // 没在跑不发帧
+    if (!sessionIdForAbort) return;                          // 早 return 避免发空帧
+    if (!threadId || !chatManager) return;
+    void chatManager
+      .interrupt({ threadId, provider: "codex", sessionId: sessionIdForAbort })
+      .catch((err) => {
+        console.error("[CodexView] interrupt failed", err);
+      });
+  }, [isRunning, sessionIdForAbort, threadId, chatManager]);
+
   const streamIdRef = useRef<string | null>(null);
   const hadStreamThisTurnRef = useRef(false);
   const turnSeqRef = useRef(0);
+  const pendingNewSession = useThreadsStore((s) => s.pendingNewSession);
+  const setPendingNewSession = useThreadsStore((s) => s.setPendingNewSession);
+  const initialMessage = useThreadsStore((s) => s.initialMessage);
+  const setInitialMessage = useThreadsStore((s) => s.setInitialMessage);
+  const createThread = useThreadsStore((s) => s.createThread);
+  const fetchThreads = useThreadsStore((s) => s.fetchThreads);
+  const isPending =
+    !threadId && pendingNewSession?.backendKind === "codex";
 
   const nextTurn = () => {
     turnSeqRef.current += 1;
@@ -218,7 +274,7 @@ export function CodexView({ threadId, thread }: Props) {
 
   const codexThreadId = thread?.codex_thread_id ?? "";
   useEffect(() => {
-    if (!codexThreadId) return;
+    if (!threadId || !codexThreadId) return;
     let cancelled = false;
     setHistoryLoading(true);
     apiGet<{ messages: NormalizedMessage[] }>(
@@ -251,14 +307,48 @@ export function CodexView({ threadId, thread }: Props) {
   }, [threadId, codexThreadId]);
 
   useEffect(() => {
-    if (!socket) return;
+    if (!threadId || !socket || state !== "open" || !initialMessage) return;
+    const text = initialMessage;
+    setInitialMessage(null);
+    setItems((prev) => [
+      ...prev,
+      {
+        id: newId(),
+        kind: "user",
+        threadId,
+        content: text,
+        timestampMs: Date.now(),
+      },
+    ]);
+    void chatManager?.sendMessage({
+      common: { text },
+      provider: { provider: "codex", threadId, permissionMode },
+    });
+    fetchThreads();
+  }, [
+    threadId,
+    socket,
+    state,
+    initialMessage,
+    setInitialMessage,
+    permissionMode,
+    fetchThreads,
+    chatManager,
+  ]);
+
+  useEffect(() => {
+    if (!socket || !threadId) return;
     const off = socket.on((frame) => {
-      if ("type" in frame && frame.type === "session-status") {
+      if ("frame_type" in frame && frame.frame_type === "session-status") {
         return;
       }
 
       const msg = frame as NormalizedMessage;
-      switch (msg.kind) {
+      // #4：任何带 sessionId 的 NormalizedMessage 都更新 live sid，确保 abort 有最新 sessionId。
+      if (typeof msg.sessionId === "string" && msg.sessionId.trim()) {
+        setResumeSessionId(msg.sessionId.trim());
+      }
+      switch (msg.frame_type) {
         case "text": {
           const role = msg.role ?? "assistant";
           if (role === "assistant" && hadStreamThisTurnRef.current) {
@@ -428,7 +518,6 @@ export function CodexView({ threadId, thread }: Props) {
             ),
             {
               kind: "complete",
-              tokenBudget: msg.tokenBudget,
               aborted: msg.aborted,
               id: newId(),
             },
@@ -452,7 +541,13 @@ export function CodexView({ threadId, thread }: Props) {
           streamIdRef.current = null;
           return;
         }
-        case "session_created":
+        case "session_created": {
+          // SDK 创建 session 后下发真实 sid——优先级最高，强制覆盖。
+          if (typeof msg.newSessionId === "string" && msg.newSessionId.trim()) {
+            setResumeSessionId(msg.newSessionId.trim());
+          }
+          return;
+        }
         case "interactive_prompt":
         case "task_notification": {
           return;
@@ -462,7 +557,41 @@ export function CodexView({ threadId, thread }: Props) {
     return off;
   }, [socket, threadId]);
 
-  const onSend = (text: string) => {
+  // codex-channel-image-paste §4：加 attachments 参数，把 Composer 粘贴的图片 ref
+  // 透传给 WS codex-command 帧，后端 _image_cli_args 拼成 --image flag 给 codex exec。
+  // 仅本轮 optimistic 缩略图（setItems user item 加 attachments 字段让气泡显示）；
+  // 刷新后历史回显不闭环（Codex jsonl 存 base64 而非 asset_id，独立后续 task）。
+  // message-runtime #8: reasoningEffort 三频道贯通 — 不再丢 Composer 的 reasoning。
+  //   CodexChatProvider 把 reasoningEffort 透传到 wire 帧 options.reasoningEffort；
+  //   codex 后端目前不消费 reasoning_effort（待后端 task），但前端契约不再断链。
+  const onSend = (
+    text: string,
+    attachments?: import("@/protocol").UserInputAttachment[],
+    reasoningEffort?: import("@/chat/types").ReasoningEffort | null,
+  ) => {
+    if (isPending) {
+      const pending = pendingNewSession;
+      if (!pending) return;
+      void (async () => {
+        try {
+          const created = await createThread(
+            pending.projectName,
+            "",
+            "codex",
+            pending.cwd,
+          );
+          setPendingNewSession(null);
+          setInitialMessage(text);
+          navigate(`/chat/${created.id}`, { replace: true });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          toast.error(`创建会话失败：${msg}`);
+        }
+      })();
+      return;
+    }
+
+    if (!threadId) return;
     if (!socket || state !== "open") return;
     setItems((prev) => [
       ...prev,
@@ -472,16 +601,20 @@ export function CodexView({ threadId, thread }: Props) {
         threadId,
         content: text,
         timestampMs: Date.now(),
+        // 把刚发的图片附件塞进 user item，让 ChatMessageItem 渲染缩略图。
+        // 不传 attachments → 走纯文本路径（前置 task 已兼容）。
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
       },
     ]);
-    socket.send({
-      type: "codex-command",
-      command: text,
-      options: {
-        permissionMode,
-      },
+    void chatManager?.sendMessage({
+      common: { text, attachments, reasoningEffort },
+      provider: { provider: "codex", threadId, permissionMode },
     });
   };
+
+  // 按 user 消息分界插入文件汇总（通用 hook，三频道共用）
+  const renderItems = useItemsWithFileSummary(items, threadId,
+    (it: CodexRenderItem) => isGenericChatItem(it) && it.kind === "user");
 
   return (
     <div
@@ -490,20 +623,24 @@ export function CodexView({ threadId, thread }: Props) {
     >
       <div className="min-h-0 flex-1 overflow-hidden" data-testid="codex-viewport">
         <MessageViewport
-          items={items}
+          items={renderItems}
           emptyText={
-            historyLoading
-              ? "加载历史中..."
-              : `Codex 会话已就绪（${state}）。发送一条消息开始。`
+            isPending
+              ? "输入消息开始新的 Codex 会话"
+              : historyLoading
+                ? "加载历史中..."
+                : `Codex 会话已就绪（${state}）。发送一条消息开始。`
           }
-          resetKey={threadId}
+          resetKey={threadId ?? "__pending__"}
           getUserMessageCount={(list) =>
             list.filter(
-              (item) => isGenericChatItem(item) && item.kind === "user",
+              (item) => "kind" in item && item.kind === "user",
             ).length
           }
           renderItem={(item) =>
-            isGenericChatItem(item) ? (
+            "kind" in item && item.kind === "files-summary" ? (
+              <ModifiedFilesSummary key={item.id} files={item.files} threadId={item.threadId} />
+            ) : isGenericChatItem(item) ? (
               <ChatMessageItem key={item.id} item={item} />
             ) : (
               <CodexMetaRow key={item.id} item={item} />
@@ -515,12 +652,14 @@ export function CodexView({ threadId, thread }: Props) {
         <CodexPermissionModeSelector
           value={permissionMode}
           onChange={setPermissionMode}
-          disabled={state !== "open"}
+          disabled={!isPending && state !== "open"}
         />
       </div>
       <Composer
-        disabled={state !== "open"}
-        onSubmit={(text) => onSend(text)}
+        disabled={(!isPending && state !== "open") || isRunning}
+        isRunning={isRunning}
+        onInterrupt={onInterrupt}
+        onSubmit={(text, reasoning, attachments) => onSend(text, attachments, reasoning)}
         threadId={threadId}
       />
     </div>
@@ -536,15 +675,9 @@ function CodexMetaRow({ item }: { item: CodexMetaItem }) {
         </div>
       );
     case "complete": {
-      const summary = item.tokenBudget
-        ? Object.entries(item.tokenBudget)
-            .map(([key, value]) => `${key}=${stringifyContent(value)}`)
-            .join(" · ")
-        : "";
       return (
         <div className="self-center rounded border px-3 py-1 text-xs text-muted-foreground">
           {item.aborted ? "对话已中止" : "对话结束"}
-          {summary ? ` · ${summary}` : ""}
         </div>
       );
     }

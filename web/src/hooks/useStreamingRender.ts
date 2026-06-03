@@ -57,7 +57,7 @@ export function useStreamingRender(
     if (!threadId || !socket) return;
 
     const off = socket.on((frame) => {
-      switch (frame.kind) {
+      switch (frame.frame_type) {
         case "thread.history":
           setHistory(threadId, frame.messages);
           break;
@@ -119,6 +119,19 @@ export function useStreamingRender(
             `cell 已回收（${frame.reason}）：${frame.message ?? ""}`,
           );
           clearBuffers(threadId);
+          break;
+        case "run.interrupted":
+          // interrupt-run-v0.1：runner 顶层 cancel 收尾 → fanout 到这里。
+          // 同 turn.end 一样 flush buffer + 标 streaming=false（按
+          // cancelled_at_turn + run_id 定位），让 Stop 按钮立刻隐藏；
+          // 占位 tool_result 已经在后端 session 写过，前端 chat store
+          // 拿不到也没关系（下次 thread.history 重连时会带回）。
+          flushTurn(
+            threadId,
+            frame.cancelled_at_turn,
+            frame.run_id ?? "",
+          );
+          toast.info("已停止当前任务");
           break;
         default: {
           // 穷尽性检查

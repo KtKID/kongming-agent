@@ -60,6 +60,37 @@ if (typeof window !== "undefined") {
       globalThis as unknown as { ResizeObserver: typeof FakeResizeObserver }
     ).ResizeObserver = FakeResizeObserver;
   }
+  // Node 25 ships 个空壳原生 localStorage（无 setItem/clear），会覆盖 jsdom 实现 → 用内存版兜底
+  if (
+    typeof window.localStorage === "undefined" ||
+    typeof window.localStorage.setItem !== "function"
+  ) {
+    const memStorage = new Map<string, string>();
+    const mockStorage: Storage = {
+      get length() {
+        return memStorage.size;
+      },
+      clear: () => memStorage.clear(),
+      getItem: (k) => (memStorage.has(k) ? memStorage.get(k)! : null),
+      key: (i) => Array.from(memStorage.keys())[i] ?? null,
+      removeItem: (k) => {
+        memStorage.delete(k);
+      },
+      setItem: (k, v) => {
+        memStorage.set(k, String(v));
+      },
+    };
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      writable: true,
+      value: mockStorage,
+    });
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      writable: true,
+      value: mockStorage,
+    });
+  }
   // IntersectionObserver 兜底
   if (typeof window.IntersectionObserver === "undefined") {
     class FakeIntersectionObserver {
