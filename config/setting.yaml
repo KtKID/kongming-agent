@@ -1,4 +1,4 @@
-﻿# kongming-agent 统一配置
+# kongming-agent 统一配置
 #
 # 单一配置文件，覆盖所有模块的全部可配置项。
 # 切换远端模型：在 .env 中设置 KONGMING_MODEL_BASE_URL 和 KONGMING_MODEL_API_KEY。
@@ -107,7 +107,7 @@ model:
     gemma-4-e4b-it:                   # 本地模型明确禁用 reasoning 参数
       match: exact
       adapter: none
-    MiniMax-M2.7:                     # MiniMax Anthropic 兼容端点
+    MiniMax-M3:                       # MiniMax Anthropic 兼容端点
       match: prefix
       adapter: anthropic_compatible_reasoning
       supported_efforts: [low, medium, high]
@@ -227,7 +227,7 @@ evolution:
     # ---------- reviewer 独立模型配置 ----------
     # 全部留空时继承主 agent 的 model / base_url / api_key / provider。
     # 跟 web.llm_presets 同模式：可以让 reviewer 用跟主模型完全不同的服务。
-    # reviewer 模型名（如 claude-sonnet-4-20250514 / MiniMax-M2.7）。
+    # reviewer 模型名（如 claude-sonnet-4-20250514 / MiniMax-M3）。
     model_name:
     # reviewer 独立 API 地址（如 https://api.anthropic.com / https://api.minimaxi.com/anthropic）。
     base_url:
@@ -315,14 +315,14 @@ safety:
     # （rm -rf warp / build / node_modules 等）、未列入敏感的绝对路径等。
     # severity=elevated → UI 显示高强度审批弹框（典型实现：默认拒绝、需明确点击、
     # 不接受顺手回车），避免顺手点同意酿成误删。
-    - name: "rm-recursive-elevated"
+  - name: "rm-recursive-elevated"
       # macOS BSD rm 支持 -R 大写，GNU rm 支持 -r 小写 / --recursive；都拦。
       # 短选项簇：-rf / -fr / -fR / -Rf 等任意顺序。
-      matcher: "^rm\\s+(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\\b"
-      match_mode: "segment_regex"
-      severity: "elevated"
-      boundary_scope: "any"
-      reason: "递归删除：升级 elevated 审批，避免顺手点同意"
+    matcher: "^rm\\s+(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\\b"
+    match_mode: "segment_regex"
+    severity: "elevated"
+    boundary_scope: "any"
+    reason: "递归删除：升级 elevated 审批，避免顺手点同意"
   # 例子：
   # approval_required_commands:
   #   - name: "git-force-push"
@@ -358,70 +358,70 @@ safety:
     # 不覆盖用户日常文档目录。本组规则补齐：agent 通过任何 tool 接触这些目录的
     # write 都会被 HardBlockGuard 直接拦截（不经审批弹框）。
 
-    - name: "user-documents"
-      matcher: "~/Documents/"
-      match_mode: "path_prefix"
-      ops: ["read", "write"]
-      effect: "block"
-      boundary_scope: "any"
-      reason: "用户文档目录，agent 不应触碰个人数据"
+  - name: "user-documents"
+    matcher: "~/Documents/"
+    match_mode: "path_prefix"
+    ops: ["read", "write"]
+    effect: "block"
+    boundary_scope: "any"
+    reason: "用户文档目录，agent 不应触碰个人数据"
 
-    - name: "user-desktop"
-      matcher: "~/Desktop/"
-      match_mode: "path_prefix"
-      ops: ["read", "write"]
-      effect: "block"
-      boundary_scope: "any"
-      reason: "用户桌面，可能含临时敏感文件"
+  - name: "user-desktop"
+    matcher: "~/Desktop/"
+    match_mode: "path_prefix"
+    ops: ["read", "write"]
+    effect: "block"
+    boundary_scope: "any"
+    reason: "用户桌面，可能含临时敏感文件"
 
-    - name: "user-downloads"
-      matcher: "~/Downloads/"
-      match_mode: "path_prefix"
-      ops: ["read", "write"]
-      effect: "block"
-      boundary_scope: "any"
-      reason: "下载目录，常含未审核的外部文件"
+  - name: "user-downloads"
+    matcher: "~/Downloads/"
+    match_mode: "path_prefix"
+    ops: ["read", "write"]
+    effect: "block"
+    boundary_scope: "any"
+    reason: "下载目录，常含未审核的外部文件"
 
-    - name: "macos-keychains"
-      matcher: "~/Library/Keychains/"
-      match_mode: "path_prefix"
-      ops: ["read", "write"]
-      effect: "block"
-      boundary_scope: "any"
-      reason: "macOS 钥匙串容器"
+  - name: "macos-keychains"
+    matcher: "~/Library/Keychains/"
+    match_mode: "path_prefix"
+    ops: ["read", "write"]
+    effect: "block"
+    boundary_scope: "any"
+    reason: "macOS 钥匙串容器"
 
-    - name: "macos-mail"
-      matcher: "~/Library/Mail/"
-      match_mode: "path_prefix"
-      ops: ["read", "write"]
-      effect: "block"
-      boundary_scope: "any"
-      reason: "本地邮件存档"
+  - name: "macos-mail"
+    matcher: "~/Library/Mail/"
+    match_mode: "path_prefix"
+    ops: ["read", "write"]
+    effect: "block"
+    boundary_scope: "any"
+    reason: "本地邮件存档"
 
     # 媒体目录：read 不拦（让 agent 看图/音/视频是合理用例），write 硬拦
-    - name: "user-pictures-write"
-      matcher: "~/Pictures/"
-      match_mode: "path_prefix"
-      ops: ["write"]
-      effect: "block"
-      boundary_scope: "any"
-      reason: "禁止删除/修改个人照片"
+  - name: "user-pictures-write"
+    matcher: "~/Pictures/"
+    match_mode: "path_prefix"
+    ops: ["write"]
+    effect: "block"
+    boundary_scope: "any"
+    reason: "禁止删除/修改个人照片"
 
-    - name: "user-movies-write"
-      matcher: "~/Movies/"
-      match_mode: "path_prefix"
-      ops: ["write"]
-      effect: "block"
-      boundary_scope: "any"
-      reason: "禁止删除/修改个人视频"
+  - name: "user-movies-write"
+    matcher: "~/Movies/"
+    match_mode: "path_prefix"
+    ops: ["write"]
+    effect: "block"
+    boundary_scope: "any"
+    reason: "禁止删除/修改个人视频"
 
-    - name: "user-music-write"
-      matcher: "~/Music/"
-      match_mode: "path_prefix"
-      ops: ["write"]
-      effect: "block"
-      boundary_scope: "any"
-      reason: "禁止删除/修改个人音乐"
+  - name: "user-music-write"
+    matcher: "~/Music/"
+    match_mode: "path_prefix"
+    ops: ["write"]
+    effect: "block"
+    boundary_scope: "any"
+    reason: "禁止删除/修改个人音乐"
 
     # 跨卷写规则已删除：项目本身在 /Volumes/ 下，该规则导致所有写操作
     # 都被升级为 elevated 审批（需输确认码），误伤正常文件操作。
@@ -491,8 +491,8 @@ safety:
   # 此字段是 tool **名字**集合，**不涉及路径**——填工具的 `name` 属性即可。
   # read 类工具放这里最常见；放 write_file 等价于"全盘信任所有写入"，慎用。
   allow_tools_silent:
-    - "read_file"
-    - "list_dir"
+  - "read_file"
+  - "list_dir"
 
   # ---- ⑦ log_silent_reads —— silent_allow + read 操作的 trace 写盘开关 ----
   # 默认 false（避免 jsonl 膨胀）；调试时设 true 可看到完整决策事件。
@@ -543,24 +543,24 @@ web:
   # LLM preset 列表；浏览器创建 thread 时下拉选其一。
   # v0.1.5 留空，由 web-app-shell 任务实际填默认 preset。
   llm_presets:
-    - id: bigmodel-glm5
-      display_name: "智谱 GLM-5.1"
-      base_url: https://open.bigmodel.cn/api/coding/paas/v4
-      model: glm-5.1
-      api_key_env: KONGMING_MODEL_API_KEY
-      reasoning_effort: high
-    - id: minimax-m2-7
-      display_name: "MiniMax M2.7"
-      base_url: https://api.minimaxi.com/anthropic
-      model: MiniMax-M2.7
-      api_key_env: MINIMAX_API_KEY
-      reasoning_effort: high
-    - id: deepseek
-      display_name: "deepseek-v4-flash"
-      base_url: https://api.deepseek.com/anthropic
-      model: deepseek-v4-flash
-      api_key_env: DEEPSEEK_API_KEY
-      reasoning_effort: medium
+  - id: bigmodel-glm5
+    display_name: "智谱 GLM-5.1"
+    base_url: https://open.bigmodel.cn/api/coding/paas/v4
+    model: glm-5.1
+    api_key_env: KONGMING_MODEL_API_KEY
+    reasoning_effort: high
+  - id: minimax-m3
+    display_name: "MiniMax M3"
+    base_url: https://api.minimaxi.com/anthropic
+    model: MiniMax-M3
+    api_key_env: MINIMAX_API_KEY
+    reasoning_effort: high
+  - id: deepseek
+    display_name: "deepseek-v4-flash"
+    base_url: https://api.deepseek.com/anthropic
+    model: deepseek-v4-flash
+    api_key_env: DEEPSEEK_API_KEY
+    reasoning_effort: medium
   # 示例：
   # llm_presets:
   #   - id: claude-sonnet-4
