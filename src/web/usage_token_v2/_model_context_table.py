@@ -27,7 +27,7 @@ DEFAULT_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # === 国产 ===
     "glm-5.1": 128_000,  # placeholder
     "glm-4": 128_000,  # placeholder
-    "MiniMax-M2.7": 200_000,  # placeholder
+    "MiniMax-M3": 200_000,  # placeholder
     "deepseek-chat": 64_000,  # placeholder
     # === 本地 / 小模型 ===
     "gemma-4-e4b-it": 8_192,  # placeholder
