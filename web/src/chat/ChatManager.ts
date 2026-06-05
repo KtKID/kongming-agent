@@ -5,9 +5,9 @@
  * 内部负责 pending 新会话首发创建 + provider 分发，把差异下沉到 ChatProvider，
  * 把时间线归并下沉到 ChatTimelineStore。
  *
- * 解耦设计（本 task 不收编 transport，故用依赖注入留接缝）：
+ * 解耦设计（transport 通过依赖注入留接缝）：
  * - `resolveHandle(kind, threadId)`：拿到该频道的 `NetworkHandle`。真实实现由 #5 视图
- *   接入时提供（包装现有 ThreadSocket / CodexSocket / NetworkManager），ChatManager
+ *   接入时提供（包装现有 NetworkManager / CodexSocket），ChatManager
  *   不直连任何具体 socket。
  * - `ensureThread(request)`：pending 新会话首发时创建真实 thread 并返回 threadId。
  *   真实实现包装现有 threads store 的 pending→create 语义。

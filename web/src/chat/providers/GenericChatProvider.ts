@@ -2,7 +2,7 @@
  * message-runtime-v0.1 · GenericChatProvider（#2 骨架）
  *
  * 把公共 `SendRequest` 翻译成 generic_chat 的 `WSFrameC2S`，把入站 `WSFrameS2C`
- * 翻译成统一 `ChatEvent`。传输仍走现有 `ThreadSocket`（本 task 不收编 transport）。
+ * 翻译成统一 `ChatEvent`。传输走 `NetworkManager` 提供的 `NetworkHandle`。
  *
  * generic 链路特点（与 claude / codex 不同）：
  * - 发送帧 = `user.input`（带 request_id / reasoning_effort / attachments）
@@ -13,7 +13,7 @@
  */
 import type {
   WSFrameS2C,
-  HistoryMessageDTO,
+  NormalizedMessage,
 } from "@/protocol";
 import type {
   ChatProvider,
@@ -240,7 +240,7 @@ export class GenericChatProvider implements ChatProvider {
   private historyEvent(
     threadId: string,
     createdAt: number,
-    messages: HistoryMessageDTO[],
+    messages: NormalizedMessage[],
   ): ChatEvent {
     return {
       kind: "history_batch_loaded",

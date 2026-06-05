@@ -15,7 +15,7 @@
  *
  * ## v0.1 范围
  *
- * - 只接 Claude 频道一条（`ChannelKind = "claude"`）
+ * - 接入 Claude / generic 两类 per-thread channel
  * - close code 1000 → closed（不重连），1008 → failed + toast（不重连），
  *   其他（1006 / 1011 等） → reconnecting + 指数退避；10 次后转 failed
  */
@@ -44,9 +44,9 @@ export type SocketState =
   | "failed";
 
 /**
- * 频道种类标识。v0.1 只支持 "claude"。
+ * 频道种类标识。
  */
-export type ChannelKind = "claude";
+export type ChannelKind = "claude" | "generic";
 
 /**
  * `openChannel` 返回的业务侧句柄。
@@ -92,14 +92,31 @@ interface ConnectionRecord {
 const MAX_RETRY = 10;
 
 /**
- * 把 ChannelKind 映射到后端 WS path：
- * - "claude" → "/ws/claude-code"
+ * 把 ChannelKind 映射到后端 WS URL path：
+ * - "claude" → "/ws/claude-code?thread_id=..."
+ * - "generic" → "/ws/threads/{threadId}"
  */
-function pathForKind(kind: ChannelKind): string {
+function pathForKind(kind: ChannelKind, threadId: string): string {
   switch (kind) {
     case "claude":
-      return "/ws/claude-code";
+      return `/ws/claude-code?thread_id=${encodeURIComponent(threadId)}`;
+    case "generic":
+      return `/ws/threads/${encodeURIComponent(threadId)}`;
   }
+}
+
+function isPositiveFiniteNumber(value: number): boolean {
+  return Number.isFinite(value) && value > 0;
+}
+
+function isValidHeartbeatConfig(config: HeartbeatConfig): boolean {
+  return (
+    isPositiveFiniteNumber(config.intervalMs) &&
+    isPositiveFiniteNumber(config.backgroundIntervalMs) &&
+    isPositiveFiniteNumber(config.timeoutMs) &&
+    Number.isFinite(config.maxMissed) &&
+    config.maxMissed >= 1
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -125,23 +142,26 @@ export class NetworkManager {
   }
 
   /**
-   * 注入心跳配置。NetworkManager 首次使用前必须调一次（由 `useClaudeCodeWS`
+   * 注入心跳配置。NetworkManager 首次使用前必须调一次（由各频道装配点
    * 在 `useHeartbeatConfig` 拿到后注入）。
    *
    * 幂等：重复调用使用最新配置；不影响已经在跑的 Heartbeat（它们持有自己的
    * config 引用，由当时的快照决定行为）。
    */
   configure(config: HeartbeatConfig): void {
+    if (!isValidHeartbeatConfig(config)) {
+      throw new Error("[NetworkManager] invalid heartbeat config");
+    }
     this._config = { ...config };
   }
 
   /**
    * 打开（或复用）一条 channel 连接，返回业务句柄。
    *
-   * - 同 (kind, threadId) 已连接 → 共享底层 socket / heartbeat，新建一个句柄
-   *   包装独立的 listener 集合（防 unmount 串扰）。
+   * - 同 (kind, threadId) 已连接 → 共享底层 socket / heartbeat；每个句柄
+   *   通过 unsubscribe 精准移除自身 listener（防 unmount 串扰）。
    *
-   * @param kind     频道种类（v0.1 仅 "claude"）
+   * @param kind     频道种类（当前接入 "claude" / "generic"）
    * @param threadId thread 标识
    */
   openChannel(kind: ChannelKind, threadId: string): ChannelHandle {
@@ -160,6 +180,7 @@ export class NetworkManager {
     if (record === null || record.disposed) {
       record = this._createRecord(kind, threadId);
       this._records.set(record.connId, record);
+      this._setChannelActive(record, true);
       this._connect(record);
     }
     return this._makeHandle(record);
@@ -188,6 +209,8 @@ export class NetworkManager {
       record.socket = null;
     }
     this._setState(record, "closed");
+    this._setChannelActive(record, false);
+    this._clearChannelLatency(record);
     this._records.delete(connId);
   }
 
@@ -241,7 +264,7 @@ export class NetworkManager {
     const base =
       (import.meta.env.VITE_WS_BASE as string | undefined) ??
       `${proto}://${window.location.host}`;
-    const url = `${base}${pathForKind(record.kind)}?thread_id=${encodeURIComponent(record.threadId)}`;
+    const url = `${base}${pathForKind(record.kind, record.threadId)}`;
 
     let socket: WebSocket;
     try {
@@ -274,9 +297,11 @@ export class NetworkManager {
         }
       },
       onLatency: (ms) => {
-        // 单一真源：claude 频道独立 setter，避免误碰 state 字段
+        // 单一真源：lifecycle 写 state，heartbeat 写 latency。
         if (record.kind === "claude") {
           useConnectionStatusStore.getState().setClaudeWsLatency(ms);
+        } else if (record.kind === "generic") {
+          useConnectionStatusStore.getState().setThreadWsLatency(ms);
         }
       },
     };
@@ -346,6 +371,7 @@ export class NetworkManager {
     if (code === 1000) {
       // 正常关闭：不重连
       this._setState(record, "closed");
+      this._retireRecord(record);
       return;
     }
     if (code === 1008) {
@@ -354,8 +380,9 @@ export class NetworkManager {
       try {
         toast.error("登录已过期，请重新登录");
       } catch {
-        // 测试环境 sonner 可能未初始化
+          // 测试环境 sonner 可能未初始化
       }
+      this._retireRecord(record);
       return;
     }
     // 其他（1006 / 1011 / 4000=heartbeat-missed 等）：指数退避重连
@@ -367,10 +394,11 @@ export class NetworkManager {
     if (record.retryCount >= MAX_RETRY) {
       this._setState(record, "failed");
       try {
-        toast.error("Claude Code 连接失败 10 次，请刷新页面重试");
+        toast.error(`${record.kind} 连接失败 10 次，请刷新页面重试`);
       } catch {
         // 测试环境 sonner 可能未初始化
       }
+      this._retireRecord(record);
       return;
     }
     const delay = exponentialBackoff(record.retryCount);
@@ -390,15 +418,31 @@ export class NetworkManager {
     }
   }
 
+  private _retireRecord(record: ConnectionRecord): void {
+    record.disposed = true;
+    this._clearRetryTimer(record);
+    if (record.heartbeat) {
+      record.heartbeat.stop();
+      record.heartbeat = null;
+    }
+    record.socket = null;
+    this._setChannelActive(record, false);
+    this._clearChannelLatency(record);
+    this._records.delete(record.connId);
+  }
+
   private _setState(record: ConnectionRecord, next: SocketState): void {
     if (record.state === next) return;
     record.state = next;
-    // 状态聚合到 connectionStatusStore（v0.1 仅 claude）
     if (record.kind === "claude") {
       useConnectionStatusStore.getState().setClaudeWsState(next);
       if (next === "closed" || next === "failed") {
-        // 断开 / 失败时 latency 置 null，UI 顶栏球显示 ?
-        useConnectionStatusStore.getState().setClaudeWsLatency(null);
+        this._clearChannelLatency(record);
+      }
+    } else if (record.kind === "generic") {
+      useConnectionStatusStore.getState().setThreadWsState(next);
+      if (next === "closed" || next === "failed") {
+        this._clearChannelLatency(record);
       }
     }
     for (const listener of record.stateListeners) {
@@ -407,6 +451,20 @@ export class NetworkManager {
       } catch (err) {
         console.error("[NetworkManager] state listener threw", err);
       }
+    }
+  }
+
+  private _setChannelActive(record: ConnectionRecord, active: boolean): void {
+    if (record.kind === "generic") {
+      useConnectionStatusStore.getState().setThreadWsActive(active);
+    }
+  }
+
+  private _clearChannelLatency(record: ConnectionRecord): void {
+    if (record.kind === "claude") {
+      useConnectionStatusStore.getState().setClaudeWsLatency(null);
+    } else if (record.kind === "generic") {
+      useConnectionStatusStore.getState().setThreadWsLatency(null);
     }
   }
 
@@ -470,6 +528,7 @@ export class NetworkManager {
       if (!hidden) {
         // 切回前台时先清 latency，等下一个 pong 回来再灌真实 RTT
         useConnectionStatusStore.getState().setClaudeWsLatency(null);
+        useConnectionStatusStore.getState().setThreadWsLatency(null);
       }
     });
   }

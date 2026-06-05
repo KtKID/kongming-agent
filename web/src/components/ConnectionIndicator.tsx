@@ -5,7 +5,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import type { SocketState } from "@/lib/ws";
+import type { SocketState } from "@/network/manager";
 
 export type ConnectionState = SocketState;
 

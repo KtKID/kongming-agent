@@ -21,13 +21,13 @@ def _make_config(
 
 
 class TestListSources:
-    def test_returns_seven_items(self, tmp_path: Path) -> None:
+    def test_returns_eight_items(self, tmp_path: Path) -> None:
         cfg = _make_config()
         home = tmp_path / ".kongming"
         home.mkdir()
         reg = LogSourceRegistry(cfg, home)
         sources = reg.list_sources()
-        assert len(sources) == 7
+        assert len(sources) == 8
 
     def test_all_types_present(self, tmp_path: Path) -> None:
         cfg = _make_config()
@@ -40,6 +40,7 @@ class TestListSources:
             "full_log",
             "trace",
             "heartbeat",
+            "generic_channel",
             "evolution",
             "cron_audit",
             "auto_approval_audit",
@@ -47,9 +48,12 @@ class TestListSources:
         assert types == expected
 
     def test_missing_files_have_exists_false(self, tmp_path: Path) -> None:
-        cfg = _make_config()
         home = tmp_path / ".kongming"
         home.mkdir()
+        cfg = _make_config(
+            full_log_path=str(home / "logs" / "missing-full-log.jsonl"),
+            trace_output_path=str(home / "missing-trace.jsonl"),
+        )
         reg = LogSourceRegistry(cfg, home)
         for src in reg.list_sources():
             assert src.exists is False
@@ -66,6 +70,16 @@ class TestGetSource:
         src = reg.get_source("web_server")
         assert src.type == "web_server"
         assert src.format == "plain"
+
+    def test_generic_channel_source(self, tmp_path: Path) -> None:
+        cfg = _make_config()
+        home = tmp_path / ".kongming"
+        home.mkdir()
+        reg = LogSourceRegistry(cfg, home)
+        src = reg.get_source("generic_channel")
+        assert src.type == "generic_channel"
+        assert src.format == "jsonl"
+        assert src.path.endswith("logs/generic-channel/generic-channel.jsonl")
 
     def test_unknown_type_raises(self, tmp_path: Path) -> None:
         cfg = _make_config()

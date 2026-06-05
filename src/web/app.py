@@ -473,6 +473,14 @@ def create_app(
         repo_root=_REPO_ROOT,
     )
 
+    # full-log-v0.2 log viewer：LogSourceRegistry + LogReadService 单例。
+    # registry 持静态 source 目录 + resolve 函数；service 读文件尾部 + 过滤。
+    from web.dashboard.logs.registry import LogSourceRegistry
+    from web.dashboard.logs.service import LogReadService
+
+    app.state.log_source_registry = LogSourceRegistry(cfg, home)
+    app.state.log_read_service = LogReadService(app.state.log_source_registry)
+
     # smart-approval-v1：进程级单例
     # - policy 持 rule_set + config_store；config_store 每次 classify 重读盘，UI toggle 立即生效
     # - audit 单文件 JSONL 追加（O_APPEND 并发安全）
@@ -519,7 +527,7 @@ def create_app(
 
     # network-layer-claude-keepalive-v0.1: 进程级单例，注入心跳配置
     # （来自 cfg.web.ws_heartbeat_* 真源；所有频道公用一个倒计时配置）。
-    # 当前仅 Claude 频道接入；其他频道在 v0.2 才走 NetworkManager。
+    # 当前 Claude / generic 两类 per-thread channel 已接入 NetworkManager。
     # 注：get_kongming_home 走 config_loader.paths 子模块直 import，避免
     # config_loader/__init__.py → config_loader.errors → core.errors 间接链
     # 触发 Contract 6 (web-app-shell-no-cross-pillar) 违规。
@@ -537,6 +545,9 @@ def create_app(
     # 心跳诊断日志：写 .kongming/logs/heartbeat/heartbeat.log
     # （旁路设计；删除本调用 + 重启即关闭日志，不影响功能）
     configure_heartbeat_log(get_kongming_home() / "logs" / "heartbeat")
+    from web.generic_channel_log import configure_generic_channel_log
+
+    configure_generic_channel_log(home / "logs" / "generic-channel")
     app.state.network_manager = _network_manager
 
     # codex 通道（与 claude_code 平级，独立 SessionManager 单例）
@@ -563,6 +574,7 @@ def create_app(
     from web.claude_code import router as claude_code_router
     from web.codex import router as codex_router
     from web.dashboard.config import router as dashboard_config_router
+    from web.dashboard.logs.router import router as logs_router
     from web.routers.auth import router as auth_router
     from web.routers.claude import router as claude_router
     from web.routers.codex import router as codex_rest_router
@@ -590,6 +602,8 @@ def create_app(
     app.include_router(manage_router)
     # manage-config-tab #6：挂 /api/manage/config/* 5 个端点
     app.include_router(dashboard_config_router)
+    # full-log-v0.2：挂 /api/manage/logs/* 2 个端点
+    app.include_router(logs_router)
     app.include_router(whiteboard_router)
     app.include_router(diagrams_router)
     app.include_router(claude_code_router)

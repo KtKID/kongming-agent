@@ -1,12 +1,12 @@
 /**
  * message-runtime-v0.1 · 运行时装配接缝（#5）
  *
- * 把现有传输层（ThreadSocket / CodexSocket / claude socket）包成 ChatManager 需要的
+ * 把现有传输层（NetworkManager / CodexSocket / claude socket）包成 ChatManager 需要的
  * `NetworkHandle`，并提供 per-thread 的时间线状态机缓存。三个频道视图复用同一套装配，
  * 避免各自重写 ChatManager 依赖注入。
  *
- * 注意：本 task 不收编 transport，这里只做「现有 socket → NetworkHandle」的薄适配。
- * `network-manager-multi-channel` 收编后，本文件可改为直接向 NetworkManager 取 handle。
+ * 注意：generic 已由 NetworkManager 提供 handle，其他频道仍保留薄适配。
+ * `network-manager-multi-channel` 收编更多频道后，本文件可改为直接向 NetworkManager 取 handle。
  */
 import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { ChatTimelineStore } from "@/chat/ChatTimelineStore";
@@ -20,7 +20,7 @@ import { useThreadStatusStore } from "@/stores/threadStatus";
 /**
  * 把一个「发送函数」包成 NetworkHandle。
  *
- * `close` 默认 no-op：generic 等频道的 socket 生命周期归各自的 hook（useWS 等）管理，
+ * `close` 默认 no-op：频道 socket 生命周期归各自的装配点管理，
  * ChatManager 不负责关闭底层连接。需要时由 caller 显式传入 close。
  */
 export function makeNetworkHandle(

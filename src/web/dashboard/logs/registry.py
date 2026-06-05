@@ -119,6 +119,10 @@ def _resolve_heartbeat(_cfg: Config, home: Path) -> Path:
     return (home / "logs" / "heartbeat" / "heartbeat.log").resolve()
 
 
+def _resolve_generic_channel(_cfg: Config, home: Path) -> Path:
+    return (home / "logs" / "generic-channel" / "generic-channel.jsonl").resolve()
+
+
 def _resolve_evolution(_cfg: Config, home: Path) -> Path:
     return (home / "logs" / "evolution.log").resolve()
 
@@ -213,6 +217,13 @@ class LogSourceRegistry:
                 format="plain",
                 description="网络心跳诊断",
                 resolve_path=_resolve_heartbeat,
+            ),
+            LogSourceSpec(
+                type="generic_channel",
+                label="Generic Channel Log",
+                format="jsonl",
+                description="通用频道关键路径诊断",
+                resolve_path=_resolve_generic_channel,
             ),
             LogSourceSpec(
                 type="evolution",

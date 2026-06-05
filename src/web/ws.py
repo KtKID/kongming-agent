@@ -40,22 +40,28 @@ import json
 import logging
 import re
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore, resolve_evolution_root
+from network import get_network_manager
 from network.network_log import log_network_event, log_network_exception
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
 from web.auto_approval.ws_handlers import (
     handle_auto_approval_query,
     handle_auto_approval_toggle,
 )
+from web.generic_channel_log import (
+    log_generic_channel_event,
+    log_generic_channel_exception,
+)
 from web.protocol import (
     ErrorFrame,
-    HistoryMessageDTO,
     PongFrame,
     SystemNoticeFrame,
     ThreadHistoryFrame,
@@ -80,6 +86,10 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _now_iso_utc() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
 def register_ws_routes(app: FastAPI) -> None:
     """把 WS 端点注册到 FastAPI app（由 :func:`web.app.create_app` 调）。"""
 
@@ -93,6 +103,12 @@ async def _thread_ws_handler(websocket: WebSocket, thread_id: str) -> None:
     # 1. cookie 验
     serializer: URLSafeTimedSerializer | None = getattr(websocket.app.state, "serializer", None)
     if serializer is None:
+        log_generic_channel_event(
+            "auth_rejected",
+            level="WARNING",
+            thread_id=thread_id,
+            reason="auth_not_configured",
+        )
         # 装配缺失，按 1008 关
         await websocket.close(
             code=WS_CLOSE_POLICY_VIOLATION,
@@ -103,11 +119,23 @@ async def _thread_ws_handler(websocket: WebSocket, thread_id: str) -> None:
     raw_cookie = websocket.cookies.get(SESSION_COOKIE_NAME)
     payload = verify_session_cookie(raw_cookie, serializer)
     if payload is None:
+        log_generic_channel_event(
+            "auth_rejected",
+            level="WARNING",
+            thread_id=thread_id,
+            reason="not_authenticated",
+        )
         await websocket.close(code=WS_CLOSE_POLICY_VIOLATION, reason="not authenticated")
         return
 
     # 2. thread_id 正则
     if not THREAD_ID_RE.match(thread_id):
+        log_generic_channel_event(
+            "thread_rejected",
+            level="WARNING",
+            thread_id=thread_id,
+            reason="invalid_thread_id",
+        )
         await websocket.close(code=WS_CLOSE_POLICY_VIOLATION, reason="invalid thread id")
         return
 
@@ -116,15 +144,32 @@ async def _thread_ws_handler(websocket: WebSocket, thread_id: str) -> None:
     try:
         cell = await tm.boot_or_attach(thread_id)
     except KeyError:
+        log_generic_channel_event(
+            "thread_rejected",
+            level="WARNING",
+            thread_id=thread_id,
+            reason="thread_not_found",
+        )
         await websocket.close(code=WS_CLOSE_POLICY_VIOLATION, reason="thread not found")
         return
-    except Exception:
+    except Exception as exc:
         logger.exception("boot_or_attach failed for thread_id=%s", thread_id)
+        log_generic_channel_exception(
+            "boot_failed",
+            exc,
+            level="ERROR",
+            thread_id=thread_id,
+        )
         await websocket.close(code=WS_CLOSE_POLICY_VIOLATION, reason="boot failed")
         return
 
     # 4. accept
     await websocket.accept()
+    network_manager = getattr(websocket.app.state, "network_manager", None)
+    if network_manager is None:
+        network_manager = get_network_manager()
+    conn_id = await network_manager.register("generic", websocket, thread_id)
+    log_generic_channel_event("registered", thread_id=thread_id, conn_id=conn_id)
     cell.attach_ws(websocket)
     cell.touch()
 
@@ -132,14 +177,24 @@ async def _thread_ws_handler(websocket: WebSocket, thread_id: str) -> None:
     try:
         await _send_history_frame(websocket, cell)
         await _send_evolution_replay_frames(websocket, cell)
-    except Exception:
+        log_generic_channel_event("history_replay_sent", thread_id=thread_id, conn_id=conn_id)
+    except Exception as exc:
         logger.exception("send history frame failed for thread_id=%s", thread_id)
+        log_generic_channel_exception(
+            "history_replay_failed",
+            exc,
+            thread_id=thread_id,
+            conn_id=conn_id,
+        )
         # 不关连接，只是 history 失败 —— 让用户继续对话
 
     # 6. 入帧循环
     try:
-        await _receive_loop(websocket, cell, tm, thread_id)
+        await _receive_loop(websocket, cell, tm, thread_id, network_manager, conn_id)
     finally:
+        with contextlib.suppress(Exception):
+            await network_manager.unregister(conn_id)
+        log_generic_channel_event("unregistered", thread_id=thread_id, conn_id=conn_id)
         # cleanup：只注销当前 ws；cell / adapter / runtime 生命周期继续由
         # ThreadManager 管，避免同一 thread 的其它连接被一条断连带走。
         detach_call = getattr(cell, "detach_ws", None)
@@ -153,6 +208,12 @@ async def _thread_ws_handler(websocket: WebSocket, thread_id: str) -> None:
                     exc,
                     thread_id=thread_id,
                 )
+                log_generic_channel_exception(
+                    "detach_ws_failed",
+                    exc,
+                    thread_id=thread_id,
+                    conn_id=conn_id,
+                )
 
 
 async def _receive_loop(
@@ -160,6 +221,8 @@ async def _receive_loop(
     cell: Any,
     tm: ThreadManagerProtocol,
     thread_id: str,
+    network_manager: Any,
+    conn_id: str,
 ) -> None:
     """C2S 帧分发循环；客户端断连 → :class:`WebSocketDisconnect` → 退出。"""
     while True:
@@ -173,32 +236,74 @@ async def _receive_loop(
                 message="generic chat websocket disconnected",
                 thread_id=thread_id,
             )
+            log_generic_channel_event("disconnected", thread_id=thread_id, conn_id=conn_id)
             return
-        except Exception:
+        except Exception as exc:
             logger.exception("ws receive_text raised; closing")
+            log_generic_channel_exception(
+                "receive_failed",
+                exc,
+                level="ERROR",
+                thread_id=thread_id,
+                conn_id=conn_id,
+            )
             return
 
         # 1MB 限制（按 UTF-8 字节）
-        if len(raw.encode("utf-8")) > MAX_FRAME_BYTES:
+        raw_bytes = len(raw.encode("utf-8"))
+        if raw_bytes > MAX_FRAME_BYTES:
+            log_generic_channel_event(
+                "frame_rejected",
+                level="WARNING",
+                thread_id=thread_id,
+                conn_id=conn_id,
+                reason="frame_too_large",
+                raw_bytes=raw_bytes,
+            )
             await _send_error_frame(websocket, "internal", "frame too large (>1MB)")
             continue
 
-        # smart-approval v0.5：auto-approval-toggle / auto-approval-query 走
-        # type 字段（不是 kind），且不在 WSFrameC2S discriminated union 内 ——
-        # 旁路 validate_json，直接拿原 dict 派发到共用 handler。这样既不污染
-        # 协议（命令式 type 字段语义跟流式 kind 不混），也避免 ValidationError
-        # 把 auto-approval 帧识别成"非法帧"。其他帧仍按原 union 校验。
+        try:
+            data = json.loads(raw)
+        except Exception as exc:
+            log_generic_channel_exception(
+                "frame_parse_failed",
+                exc,
+                level="WARNING",
+                thread_id=thread_id,
+                conn_id=conn_id,
+                raw_bytes=raw_bytes,
+            )
+            await _send_error_frame(websocket, "internal", f"frame parse error: {exc}")
+            continue
+
+        # smart-approval v0.5：auto-approval-toggle / auto-approval-query 是
+        # 命令式帧，**不在** WSFrameC2S discriminated union 内（union 只收
+        # user.input / approval.ack / ping / interrupt 四种流式帧）—— 旁路
+        # validate_json，直接拿原 dict 派发到共用 handler。这样既避免污染
+        # 协议（命令式语义跟流式分派不混），也避免 ValidationError 把
+        # auto-approval 帧识别成"非法帧"。其他帧仍按原 union 校验。
+        #
+        # 字段命名：peek 读 ``frame_type``（protocol-frame-type-unify-v0.2
+        # 之后 wire 协议从历史的 ``kind`` / ``type`` 统一到 ``frame_type``；
+        # 前端 useAutoApproval.ts 和 claude_code route 都已切，本旁路漏改过
+        # 一次导致整帧被 union 拒，现修正）。
         peek_type: str | None = None
-        with contextlib.suppress(Exception):
-            preview = json.loads(raw)
-            if isinstance(preview, dict):
-                t = preview.get("type")
-                if isinstance(t, str):
-                    peek_type = t
+        if isinstance(data, dict):
+            t = data.get("frame_type")
+            if isinstance(t, str):
+                peek_type = t
         if peek_type in ("auto-approval-toggle", "auto-approval-query"):
+            log_generic_channel_event(
+                "auto_approval_frame",
+                thread_id=thread_id,
+                conn_id=conn_id,
+                frame_type=peek_type,
+                raw_bytes=raw_bytes,
+                cwd_present=bool(data.get("cwd")) if isinstance(data, dict) else None,
+            )
             cell.touch()
             policy = getattr(websocket.app.state, "auto_approval_policy", None)
-            data: dict[str, Any] = preview
             if peek_type == "auto-approval-toggle":
                 await handle_auto_approval_toggle(
                     websocket,
@@ -215,18 +320,55 @@ async def _receive_loop(
                 )
             continue
 
+        if isinstance(data, dict) and await network_manager.handle_inbound(conn_id, data):
+            log_generic_channel_event(
+                "heartbeat_frame_consumed",
+                thread_id=thread_id,
+                conn_id=conn_id,
+                frame_type=peek_type,
+                raw_bytes=raw_bytes,
+                client_ts=data.get("ts"),
+            )
+            continue
+
         # JSON 解析 + discriminated union
         try:
-            frame = WSFrameC2SAdapter.validate_json(raw)
+            frame = WSFrameC2SAdapter.validate_python(data)
         except ValidationError as exc:
+            log_generic_channel_event(
+                "frame_validation_failed",
+                level="WARNING",
+                thread_id=thread_id,
+                conn_id=conn_id,
+                frame_type=peek_type,
+                raw_bytes=raw_bytes,
+                error_count=len(exc.errors()),
+            )
             await _send_error_frame(websocket, "internal", f"invalid frame: {exc.errors()[:3]}")
             continue
         except Exception as exc:
+            log_generic_channel_exception(
+                "frame_validation_failed",
+                exc,
+                level="WARNING",
+                thread_id=thread_id,
+                conn_id=conn_id,
+                frame_type=peek_type,
+                raw_bytes=raw_bytes,
+            )
             await _send_error_frame(websocket, "internal", f"frame parse error: {exc}")
             continue
 
         cell.touch()
-        await _dispatch_frame(frame, cell, websocket, tm, thread_id)
+        log_generic_channel_event(
+            "frame_dispatch",
+            thread_id=thread_id,
+            conn_id=conn_id,
+            frame_type=frame.frame_type,
+            raw_bytes=raw_bytes,
+            **_frame_log_fields(frame),
+        )
+        await _dispatch_frame(frame, cell, websocket, tm, thread_id, conn_id)
 
 
 async def _dispatch_frame(
@@ -235,6 +377,7 @@ async def _dispatch_frame(
     websocket: WebSocket,
     tm: ThreadManagerProtocol,
     thread_id: str,
+    conn_id: str,
 ) -> None:
     """分派单个 C2S 帧。"""
     frame_type = frame.frame_type
@@ -272,6 +415,16 @@ async def _dispatch_frame(
                 _cell.current_run_task = None
 
         task.add_done_callback(_clear_run_task)
+        log_generic_channel_event(
+            "run_task_started",
+            thread_id=thread_id,
+            conn_id=conn_id,
+            frame_type=frame_type,
+            request_id=getattr(frame, "request_id", None),
+            text_len=len(frame.text),
+            reasoning_effort=effort,
+            attachment_count=len(attachments_dicts) if attachments_dicts else 0,
+        )
     elif frame_type == "interrupt":
         # interrupt-run-v0.1：浏览器点 Stop。检查当前 run 是否真在跑：
         # - None / 已 done：推 system notice "no_active_run"，不 cancel
@@ -280,11 +433,25 @@ async def _dispatch_frame(
         current_task: asyncio.Task[Any] | None = getattr(cell, "current_run_task", None)
         if current_task is None or current_task.done():
             await _send_no_active_run_notice(websocket, thread_id)
+            log_generic_channel_event(
+                "interrupt_no_active_run",
+                thread_id=thread_id,
+                conn_id=conn_id,
+                frame_type=frame_type,
+                run_id=getattr(frame, "run_id", None),
+            )
         else:
             current_task.cancel()
             logger.info(
                 "interrupt requested for thread=%s; cancelled current_run_task",
                 thread_id,
+            )
+            log_generic_channel_event(
+                "interrupt_requested",
+                thread_id=thread_id,
+                conn_id=conn_id,
+                frame_type=frame_type,
+                run_id=getattr(frame, "run_id", None),
             )
     elif frame_type == "approval.ack":
         # v0.1.6 三态：传递字符串字面值给 thread_manager，由它转 ApprovalAction
@@ -292,12 +459,36 @@ async def _dispatch_frame(
         # 层不允许）。非法字段降级为 REJECT 由 thread_manager 处理。
         try:
             tm.resolve_approval(thread_id, frame.call_id, frame.action)
-        except Exception:
+            log_generic_channel_event(
+                "approval_ack_resolved",
+                thread_id=thread_id,
+                conn_id=conn_id,
+                frame_type=frame_type,
+                call_id=frame.call_id,
+                action=frame.action,
+            )
+        except Exception as exc:
             logger.exception("resolve_approval raised; ignored")
+            log_generic_channel_exception(
+                "approval_ack_resolve_failed",
+                exc,
+                thread_id=thread_id,
+                conn_id=conn_id,
+                frame_type=frame_type,
+                call_id=frame.call_id,
+                action=frame.action,
+            )
     elif frame_type == "ping":
         try:
             pong = PongFrame(timestamp_ms=_now_ms(), ts=getattr(frame, "ts", None))
             await websocket.send_json(pong.model_dump())
+            log_generic_channel_event(
+                "legacy_ping_pong_sent",
+                thread_id=thread_id,
+                conn_id=conn_id,
+                frame_type=frame_type,
+                client_ts=getattr(frame, "ts", None),
+            )
         except Exception as exc:
             # 推 pong 失败说明 ws 断了；让下次 receive 抛 WebSocketDisconnect
             log_network_exception(
@@ -306,9 +497,41 @@ async def _dispatch_frame(
                 exc,
                 thread_id=thread_id,
             )
+            log_generic_channel_exception(
+                "legacy_ping_pong_failed",
+                exc,
+                thread_id=thread_id,
+                conn_id=conn_id,
+                frame_type=frame_type,
+                client_ts=getattr(frame, "ts", None),
+            )
     else:
         # discriminated union 已经过滤；这里只是兜底
         await _send_error_frame(websocket, "internal", f"unknown frame_type: {frame_type}")
+
+
+def _frame_log_fields(frame: Any) -> dict[str, Any]:
+    """Return safe, content-free fields for generic channel diagnostics."""
+
+    frame_type = getattr(frame, "frame_type", None)
+    if frame_type == "user.input":
+        attachments = getattr(frame, "attachments", None)
+        return {
+            "request_id": getattr(frame, "request_id", None),
+            "text_len": len(getattr(frame, "text", "") or ""),
+            "reasoning_effort": getattr(frame, "reasoning_effort", None),
+            "attachment_count": len(attachments) if attachments else 0,
+        }
+    if frame_type == "approval.ack":
+        return {
+            "call_id": getattr(frame, "call_id", None),
+            "action": getattr(frame, "action", None),
+        }
+    if frame_type == "interrupt":
+        return {"run_id": getattr(frame, "run_id", None)}
+    if frame_type == "ping":
+        return {"client_ts": getattr(frame, "ts", None)}
+    return {}
 
 
 async def _run_once_safely(
@@ -335,10 +558,33 @@ async def _run_once_safely(
             reasoning_effort=reasoning_effort,
             attachments=attachments,
         )
+        log_generic_channel_event(
+            "run_once_completed",
+            thread_id=getattr(cell, "thread_id", None),
+            text_len=len(text),
+            reasoning_effort=reasoning_effort,
+            attachment_count=len(attachments) if attachments else 0,
+        )
     except asyncio.CancelledError:
+        log_generic_channel_event(
+            "run_once_cancelled",
+            thread_id=getattr(cell, "thread_id", None),
+            text_len=len(text),
+            reasoning_effort=reasoning_effort,
+            attachment_count=len(attachments) if attachments else 0,
+        )
         raise
     except Exception as exc:
         logger.exception("run_once failed; emitting error frame")
+        log_generic_channel_exception(
+            "run_once_failed",
+            exc,
+            level="ERROR",
+            thread_id=getattr(cell, "thread_id", None),
+            text_len=len(text),
+            reasoning_effort=reasoning_effort,
+            attachment_count=len(attachments) if attachments else 0,
+        )
         with contextlib.suppress(Exception):
             await _send_error_frame(
                 websocket,
@@ -357,10 +603,10 @@ async def _send_history_frame(websocket: WebSocket, cell: Any) -> None:
       新建 session 仍可从磁盘读取已持久化的历史。
     - 降级：若 factory 返回空，再查 ``runtime._sessions[thread_id]``（内存缓存）。
     - history 转换：runtime 的 message dict（``role`` + ``content``）→
-      :class:`HistoryMessageDTO`。``turn`` 字段在 runtime history 里通常没有，
-      用 -1 占位，让浏览器按 timestamp_ms 顺序排即可。
+      :class:`web.llm_protocol.NormalizedMessage`，与 Claude/Codex history
+      形态对齐。
     """
-    messages: list[HistoryMessageDTO] = []
+    messages: list[dict[str, Any]] = []
     runtime = getattr(cell, "runtime", None)
     thread_id: str = cell.thread_id
 
@@ -411,35 +657,74 @@ async def _send_history_frame(websocket: WebSocket, cell: Any) -> None:
         # 改成空串兜底——"无文本"的语义就是空，不是字符串 "None"。
         if not isinstance(content, str):
             content = ""
-        # v0.1.6：tool 角色补齐 tool_name / ok / data / error_message
-        # （前端历史重放路径之前看不到这些信息，刷新页面后工具卡片全空）
-        tool_name: str | None = None
-        ok: bool | None = None
-        data: dict[str, Any] | None = None
-        error_message: str | None = None
+        timestamp = _now_iso_utc()
+        base: dict[str, Any] = {
+            "id": str(uuid4()),
+            "sessionId": None,
+            "timestamp": timestamp,
+            "provider": "generic_chat",
+        }
+
+        tool_calls = _extract_field(msg, "tool_calls", default=None)
+        if role == "assistant" and tool_calls:
+            if content:
+                messages.append(
+                    {
+                        **base,
+                        "frame_type": "text",
+                        "role": "assistant",
+                        "content": content,
+                    }
+                )
+            for call in tool_calls:
+                call_id = _extract_field(call, "call_id", default=None)
+                tool_name = _extract_field(call, "tool_name", default=None)
+                arguments = _extract_field(call, "arguments", default=None)
+                messages.append(
+                    {
+                        "id": str(uuid4()),
+                        "sessionId": None,
+                        "timestamp": timestamp,
+                        "provider": "generic_chat",
+                        "frame_type": "tool_use",
+                        "toolId": call_id if isinstance(call_id, str) else str(uuid4()),
+                        "toolName": tool_name if isinstance(tool_name, str) else "unknown",
+                        "toolInput": arguments if isinstance(arguments, dict) else {},
+                    }
+                )
+            continue
+
         if role == "tool":
             raw_name = _extract_field(msg, "name", default=None)
             tool_name = raw_name if isinstance(raw_name, str) else None
             metadata = _extract_field(msg, "metadata", default=None)
+            ok: bool | None = None
+            error_message: str | None = None
             if isinstance(metadata, dict):
                 meta_ok = metadata.get("ok")
                 ok = bool(meta_ok) if isinstance(meta_ok, bool) else None
-                meta_data = metadata.get("data")
-                data = meta_data if isinstance(meta_data, dict) else None
                 meta_err = metadata.get("error_message")
                 error_message = meta_err if isinstance(meta_err, str) else None
-        messages.append(
-            HistoryMessageDTO(
-                role=role,
-                content=content,
-                turn=-1,
-                timestamp_ms=_now_ms(),
-                tool_call_id=tool_call_id if isinstance(tool_call_id, str) else None,
-                tool_name=tool_name,
-                ok=ok,
-                data=data,
-                error_message=error_message,
+            messages.append(
+                {
+                    **base,
+                    "frame_type": "tool_result",
+                    "toolId": tool_call_id if isinstance(tool_call_id, str) else str(uuid4()),
+                    "toolName": tool_name if isinstance(tool_name, str) else "unknown",
+                    "content": content or error_message or "",
+                    "isError": ok is False,
+                }
             )
+            continue
+
+        out_role = role if role in ("user", "assistant") else "assistant"
+        messages.append(
+            {
+                **base,
+                "frame_type": "text",
+                "role": out_role,
+                "content": content,
+            }
         )
 
     frame = ThreadHistoryFrame(messages=messages, timestamp_ms=_now_ms())
