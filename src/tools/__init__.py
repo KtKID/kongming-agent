@@ -28,6 +28,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from core.contracts import EventSink, Tool
+from tools.agent_workflow_tool import AgentWorkflowHandle, build_agent_workflow_tool
 from tools.approval import (
     AutoAllowApproval,
     AutoDenyApproval,
@@ -203,9 +204,18 @@ def register_evolution_write_tool_if_enabled(
     return store
 
 
+def register_agent_workflow_tool(
+    registry: ToolRegistry,
+    handle: AgentWorkflowHandle,
+) -> None:
+    """Register the agent workflow tool with a late-bound manager handle."""
+    registry.register(cast(Tool, build_agent_workflow_tool(handle)))
+
+
 __all__ = [
     "AutoAllowApproval",
     "AutoDenyApproval",
+    "AgentWorkflowHandle",
     "BaseBuiltinTool",
     "InteractiveApproval",
     "ListDirTool",
@@ -219,5 +229,6 @@ __all__ = [
     "build_file_tools",
     "build_shell_tool",
     "register_evolution_write_tool_if_enabled",
+    "register_agent_workflow_tool",
     "register_schedule_tool_if_enabled",
 ]

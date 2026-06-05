@@ -45,14 +45,18 @@ from context import (
 )
 from context.skill_loader import SkillSpec, format_skill_listing, load_skill_specs
 from core.contracts import EventSink, SupportsLLMStream
+from executors.agent_runtime.agent_workflow_manager import AgentWorkflowManager
 from executors.agent_runtime.native_runtime import NativeRuntime
+from executors.agent_runtime.subagent_manager import SubAgentManager, SubAgentTask
 from host.cli_adapter import CLIAdapter, CLIEventSink
 from host.session_bridge import SessionBridge
 from memory import MemoryStore
 from observability import JsonlTraceSink, PromptDebugDumpSink
 from tools import (
+    AgentWorkflowHandle,
     build_default_approval,
     build_default_registry,
+    register_agent_workflow_tool,
     register_evolution_write_tool_if_enabled,
     register_schedule_tool_if_enabled,
 )
@@ -104,6 +108,18 @@ def _generate_cli_session_id() -> str:
     is_flag=True,
     default=False,
     help="最小 smoke：装配一轮 hello 验证 provider 可达，不进入交互",
+)
+@click.option(
+    "--subagent-smoke",
+    is_flag=True,
+    default=False,
+    help="运行一个小型 subagent workflow smoke，不进入交互。",
+)
+@click.option(
+    "--model-preset",
+    "model_preset_id",
+    default=None,
+    help="按 config.web.llm_presets 里的 preset id 覆盖 CLI 模型配置，例如 minimax-m3。",
 )
 @click.option(
     "--instructions-file",
@@ -168,6 +184,8 @@ def main(
     resume_last: bool,
     verbose: bool,
     smoke: bool,
+    subagent_smoke: bool,
+    model_preset_id: str | None,
     instructions_files: tuple[Path, ...],
     no_trace: bool,
     reasoning_effort: str | None,
@@ -186,6 +204,8 @@ def main(
                 resume_last=resume_last,
                 verbose=verbose,
                 smoke=smoke,
+                subagent_smoke=subagent_smoke,
+                model_preset_id=model_preset_id,
                 instructions_files=list(instructions_files),
                 trace_enabled=not no_trace,
                 reasoning_effort=reasoning_effort,
@@ -208,6 +228,8 @@ async def _run(
     resume_last: bool,
     verbose: bool,
     smoke: bool,
+    subagent_smoke: bool,
+    model_preset_id: str | None,
     instructions_files: list[Path],
     trace_enabled: bool,
     reasoning_effort: str | None = None,
@@ -231,11 +253,13 @@ async def _run(
         _chdir_or_exit(workdir)
 
     cfg = _load_config_or_exit(config_path)
+    if model_preset_id:
+        cfg = _apply_model_preset_or_exit(cfg, model_preset_id)
     _validate_session_selection_or_exit(
         session_id=session_id,
         list_sessions=list_sessions,
         resume_last=resume_last,
-        smoke=smoke,
+        smoke=smoke or subagent_smoke,
     )
 
     discovered_sessions, discovered_path = _discover_persistent_sessions(cfg)
@@ -260,6 +284,7 @@ async def _run(
 
     if (
         session_id
+        and not (smoke or subagent_smoke)
         and cfg.session.backend in ("file", "sqlite")
         and find_session_by_id(discovered_sessions, session_id) is None
     ):
@@ -388,6 +413,8 @@ async def _run(
         cfg,
         event_sinks=event_sinks,
     )
+    agent_workflow_handle = AgentWorkflowHandle()
+    register_agent_workflow_tool(registry, agent_workflow_handle)
 
     # approval 按配置模式选：interactive 时让 adapter 提供 prompt_fn，
     # 其它模式（auto_allow / auto_deny）不需要 prompt_fn。
@@ -496,6 +523,13 @@ async def _run(
         prompt_debug_sink=PromptDebugDumpSink() if prompt_debug else None,
         instruction_origins=instruction_origins,
     )
+    subagent_manager = SubAgentManager(runtime)
+    agent_workflow_manager = AgentWorkflowManager(
+        subagents=subagent_manager,
+        config=cfg,
+        workspace_root=Path.cwd(),
+    )
+    agent_workflow_handle.bind(agent_workflow_manager)
 
     # v0.2 cron：scheduler.enabled 时拉起后台 ticker 循环；ticker 自身装配
     # 一份独立的 cron-用 NativeRuntime（fresh agent run 走它），不复用主聊天
@@ -534,6 +568,9 @@ async def _run(
     try:
         if smoke:
             await _run_smoke(runtime, session_id)
+            return
+        if subagent_smoke:
+            await _run_subagent_smoke(agent_workflow_manager, session_id)
             return
 
         resolved_session_id = session_id or _generate_cli_session_id()
@@ -689,6 +726,70 @@ async def _run_smoke(runtime: NativeRuntime, session_id: str | None) -> None:
     raise SystemExit(1)
 
 
+async def _run_subagent_smoke(
+    manager: AgentWorkflowManager,
+    session_id: str | None,
+) -> None:
+    """Run a tiny real-model subagent workflow from the CLI."""
+    parent_session_id = session_id or "subagent-smoke"
+    result = await manager.run_parallel(
+        parent_session_id=parent_session_id,
+        tasks=[
+            SubAgentTask(
+                task_id="calc",
+                task_name="simple calculation",
+                prompt="计算 7 + 5。只输出数字 12 和一句很短的说明。",
+            ),
+            SubAgentTask(
+                task_id="write-note",
+                task_name="write scoped note",
+                prompt=(
+                    "必须调用 write_file 工具，在你的工作目录内创建 result.txt。"
+                    "文件内容必须是：kongming subagent smoke。"
+                    "完成后报告写入的绝对路径。"
+                ),
+                tool_names=("write_file",),
+            ),
+        ],
+    )
+    calc_run = next(run for run in result.runs if run.task.task_id == "calc")
+    write_run = next(run for run in result.runs if run.task.task_id == "write-note")
+    write_dir_raw = write_run.task.metadata.get("working_dir")
+    write_dir = Path(str(write_dir_raw))
+    expected_file = write_dir / "result.txt"
+    if not result.completed:
+        click.echo(
+            f"[subagent-smoke] failed workflow_id={result.workflow_id} dir={result.workflow_dir}",
+            err=True,
+        )
+        raise SystemExit(1)
+    if "12" not in calc_run.content:
+        click.echo(
+            f"[subagent-smoke] calc result missing 12: {calc_run.content!r}",
+            err=True,
+        )
+        raise SystemExit(1)
+    if not expected_file.is_file():
+        click.echo(
+            f"[subagent-smoke] expected file missing: {expected_file}",
+            err=True,
+        )
+        raise SystemExit(1)
+    text = expected_file.read_text(encoding="utf-8")
+    if text != "kongming subagent smoke":
+        click.echo(
+            f"[subagent-smoke] unexpected file content: {text!r}",
+            err=True,
+        )
+        raise SystemExit(1)
+    click.echo(
+        "[subagent-smoke] ok "
+        f"workflow_id={result.workflow_id} "
+        f"workflow_dir={result.workflow_dir} "
+        f"file={expected_file}"
+    )
+
+
 def _resolve_input_paths_before_chdir(
     config_path: Path | None,
     instructions_files: list[Path],
@@ -731,6 +832,30 @@ def _load_config_or_exit(config_path: Path | None) -> Config:
     except (ConfigLoadError, ConfigValidationError) as exc:
         click.echo(f"[config] {type(exc).__name__}: {exc.message}", err=True)
         raise SystemExit(2) from exc
+
+
+def _apply_model_preset_or_exit(cfg: Config, preset_id: str) -> Config:
+    preset = next((item for item in cfg.web.llm_presets if item.id == preset_id), None)
+    if preset is None:
+        known = ", ".join(item.id for item in cfg.web.llm_presets) or "<empty>"
+        click.echo(f"[config] unknown --model-preset {preset_id!r}; available: {known}", err=True)
+        raise SystemExit(2)
+
+    api_key = os.environ.get(preset.api_key_env, "") if preset.api_key_env else ""
+    if preset.api_key_env and not api_key:
+        click.echo(f"[config] env {preset.api_key_env} is required by preset {preset_id}", err=True)
+        raise SystemExit(2)
+
+    model_overrides: dict[str, Any] = {
+        "name": preset.model,
+        "base_url": preset.base_url,
+        "api_key": api_key,
+    }
+    if preset.provider is not None:
+        model_overrides["provider"] = preset.provider
+    if preset.reasoning_effort is not None:
+        model_overrides["reasoning_effort"] = preset.reasoning_effort
+    return cfg.model_copy(update={"model": cfg.model.model_copy(update=model_overrides)})
 
 
 def _validate_session_selection_or_exit(
