@@ -12,9 +12,8 @@
 
 公共枚举（``ErrorCode`` / ``EvictReason`` / ``ApprovalOutcome``）和帧基类
 （``_C2SFrameBase`` / ``_S2CFrameBase``）均从 :mod:`web.protocol._base`
-import，不在本文件重复定义。``ThreadHistoryFrame`` 引用的
-``HistoryMessageDTO`` 由 :mod:`web.protocol.rest_models` 提供（REST 与 WS
-共享同一份历史消息 DTO，避免漂移）。
+import，不在本文件重复定义。``ThreadHistoryFrame`` 引用
+:class:`web.llm_protocol.NormalizedMessage`，与 Claude/Codex 历史形态对齐。
 
 protocol-frame-type-unify-v0.2 取整：所有 wire 协议判别字段统一为
 ``frame_type``（v0.1 已统一 claude / codex 业务协议，本期把 ws_frames 的
@@ -30,6 +29,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, TypeAdapter
 
+from web.llm_protocol import NormalizedMessage
 from web.protocol._base import (
     ApprovalOutcome,
     ErrorCode,
@@ -37,7 +37,7 @@ from web.protocol._base import (
     _C2SFrameBase,
     _S2CFrameBase,
 )
-from web.protocol.rest_models import HistoryMessageDTO, UserInputAttachment
+from web.protocol.rest_models import UserInputAttachment
 
 # ---------------------------------------------------------------------------
 # C2S 帧（浏览器 → 后端,3 个）
@@ -241,7 +241,7 @@ class ThreadHistoryFrame(_S2CFrameBase):
     """连接建立 / resume 后下发的历史消息列表。"""
 
     frame_type: Literal["thread.history"] = "thread.history"
-    messages: list[HistoryMessageDTO]
+    messages: list[NormalizedMessage]
 
 
 class ToolCallEndFrame(_S2CFrameBase):

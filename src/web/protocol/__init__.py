@@ -25,7 +25,7 @@ C2S（浏览器 → 后端）：
 
 S2C（后端 → 浏览器，每帧均含 ``timestamp_ms``）：
 
-- ``thread.history`` —— 建连后下发完整历史；含 ``messages: list[HistoryMessageDTO]``
+- ``thread.history`` —— 建连后下发完整历史；含 ``messages: list[NormalizedMessage]``
 - ``turn.start`` / ``turn.end`` —— 一轮开始 / 结束标记；含 ``turn``
 - ``content.delta`` / ``reasoning.delta`` —— 流式增量；含 ``delta`` / ``turn`` / ``seq``
 - ``assistant.final`` —— 一轮 assistant 输出收尾；含 ``content`` / ``turn``
@@ -44,7 +44,6 @@ REST DTO：
 - ``LoginRequest`` —— POST /api/auth/login body
 - ``CellSummaryDTO`` —— GET /api/manage/cells 返回元素
 - ``ErrorResponseDTO`` —— REST 端通用错误响应
-- ``HistoryMessageDTO`` —— 复用为 ``thread.history`` 帧的 messages 数组元素
 
 公共枚举：
 
@@ -56,7 +55,7 @@ REST DTO：
 
 - :mod:`web.protocol.ws_frames` —— 17 个 WS 帧 + 2 个 union（WSFrameC2S / WSFrameS2C）
   + 2 个 TypeAdapter（WSFrameC2SAdapter / WSFrameS2CAdapter）
-- :mod:`web.protocol.rest_models` —— 8 个 REST DTO（含 HistoryMessageDTO）
+- :mod:`web.protocol.rest_models` —— REST DTO
 """
 
 from __future__ import annotations
@@ -66,6 +65,12 @@ from web.protocol._base import (
     ErrorCode,
     EvictReason,
     HistoryMessageRole,
+)
+from web.protocol.log_dto import (
+    LogFormat,
+    LogLineDTO,
+    LogReadResponseDTO,
+    LogSourceDTO,
 )
 from web.protocol.rest_models import (
     ActiveCellStatusDTO,
@@ -79,7 +84,6 @@ from web.protocol.rest_models import (
     EvolutionDecisionSummaryDTO,
     EvolutionNutrientDTO,
     EvolutionReviewDTO,
-    HistoryMessageDTO,
     ImportClaudeSessionRequest,
     ImportClaudeSessionResponse,
     ImportCodexSessionRequest,
@@ -179,6 +183,10 @@ __all__: list[str] = [
     "WSFrameS2CAdapter",
     # REST DTO
     "ActiveCellStatusDTO",
+    "LogFormat",
+    "LogLineDTO",
+    "LogReadResponseDTO",
+    "LogSourceDTO",
     "CellSummaryDTO",
     "CreateThreadRequest",
     "CreateWhiteboardCardRequest",
@@ -189,7 +197,6 @@ __all__: list[str] = [
     "EvolutionDecisionSummaryDTO",
     "EvolutionNutrientDTO",
     "EvolutionReviewDTO",
-    "HistoryMessageDTO",
     "ImportClaudeSessionRequest",
     "ImportClaudeSessionResponse",
     "ImportCodexSessionRequest",

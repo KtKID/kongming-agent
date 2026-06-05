@@ -70,8 +70,7 @@ EvictReason = Literal[
 ApprovalOutcome = Literal["approved", "rejected", "cancelled"]
 
 
-#: 内部 ``HistoryMessageDTO.role`` 用，不对外 re-export（rest_models 导出真品）。
-#: 这里仅为类型注解时引用方便而声明。
+#: 历史角色字面量，保留给旧文档与辅助类型引用。
 HistoryMessageRole = Literal["user", "assistant", "tool"]
 
 

@@ -1,10 +1,7 @@
 """REST API 请求 / 响应 DTO（v0.1.5 web 宿主壳）。
 
-本文件定义 8 个 Pydantic v2 DTO，覆盖 web 宿主的 REST 端面：
+本文件定义 Pydantic v2 DTO，覆盖 web 宿主的 REST 端面：
 
-- :class:`HistoryMessageDTO`：单条历史消息。本文件**首先**定义，因为
-  :class:`web.protocol.ws_frames.ThreadHistoryFrame` 的 ``messages`` 字段
-  会复用它（非典型的 REST 用法，但避免协议层引入第三个文件）。
 - :class:`ThreadMetadataDTO`：thread 元数据，落 ``.kongming/web/threads/{id}/metadata.json``
   的形态，也是 ``GET /api/threads/{id}`` 的响应体。
 - :class:`CreateThreadRequest` / :class:`RenameThreadRequest`：thread CRUD 请求体。
@@ -33,7 +30,6 @@ from pydantic import Field, field_validator
 from web.path_utils import is_absolute_workspace_path
 from web.protocol._base import (
     ErrorCode,
-    HistoryMessageRole,
     _FrameBase,
 )
 
@@ -47,8 +43,7 @@ class UserInputAttachment(_FrameBase):
     - C2S WS 帧 :class:`web.protocol.ws_frames.UserInputFrame` 的
       ``attachments`` 字段透传一组该 DTO，把用户在 Composer 粘贴的图片
       引用传给后端。
-    - REST :class:`HistoryMessageDTO` 的 ``attachments`` 字段在历史回放时
-      回传同一 DTO 形状，让浏览器刷新后能继续显示缩略图。
+    - C2S WS 帧与 provider route 共享同一 DTO 形状。
 
     字段语义：
 
@@ -80,42 +75,6 @@ class UserInputAttachment(_FrameBase):
     duration_ms: int | None = None
     preview_url: str
     status: Literal["ready", "processing", "failed"]
-
-
-class HistoryMessageDTO(_FrameBase):
-    """单条历史消息 DTO（user / assistant / tool 三类）。
-
-    既用于 ``GET /api/threads/{id}/history`` REST 响应,也作为
-    :class:`web.protocol.ws_frames.ThreadHistoryFrame` 的 ``messages`` 元素。
-
-    ``tool_call_id`` / ``tool_name`` / ``ok`` / ``data`` / ``error_message``
-    仅 ``role == "tool"`` 时有意义，其它角色应为 ``None``。
-
-    v0.1.6 加 ``tool_name`` / ``ok`` / ``data`` / ``error_message`` 字段：
-    之前 DTO 只透传 role/content/turn/tool_call_id，前端从历史重建 tool 卡片时
-    没法显示 toolName / 结果状态 / 结构化数据，刷新页面后用户看不到任何
-    工具产出。Message 内部 ``name`` 字段对应 tool_name，``metadata`` dict
-    含 ok / data / error_message（见 ``runner._build_tool_result_message``），
-    本次把这些信息暴露到 DTO。``arguments`` 仍在 assistant 消息的 tool_calls
-    里，需要跨消息查找，留待后续。
-
-    claude-image-paste-e2e v0.1（contract layer）加 ``attachments`` 字段：
-    历史回放时用户消息携带的图片附件 ref 列表，与 user.input WS 帧的
-    ``attachments`` 共享 :class:`UserInputAttachment` DTO，让浏览器刷新后
-    缩略图能从 ``preview_url`` 直接恢复。``None`` 表示该消息没有附件
-    （绝大多数老消息 / 非 user 消息）。
-    """
-
-    role: HistoryMessageRole
-    content: str
-    turn: int
-    timestamp_ms: int
-    tool_call_id: str | None = None
-    tool_name: str | None = None
-    ok: bool | None = None
-    data: dict[str, Any] | None = None
-    error_message: str | None = None
-    attachments: list[UserInputAttachment] | None = None
 
 
 class CellSummaryDTO(_FrameBase):
@@ -742,7 +701,6 @@ __all__: list[str] = [
     "CreateThreadRequest",
     "CreateWhiteboardCardRequest",
     "ErrorResponseDTO",
-    "HistoryMessageDTO",
     "ImportClaudeSessionRequest",
     "ImportClaudeSessionResponse",
     "LLMPresetDTO",

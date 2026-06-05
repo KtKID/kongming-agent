@@ -16,7 +16,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired
+
+from typing_extensions import TypedDict
 
 # ---------------------------------------------------------------------------
 # 字面量类型
@@ -50,8 +52,8 @@ v0.1 实际产生约 10 种（``text`` / ``thinking`` / ``tool_use`` / ``tool_re
 （思考中 / 生成中 / 调用工具）。
 """
 
-LLMProvider = Literal["claude", "codex", "gemini", "cursor"]
-"""出站消息的 ``provider`` 字段取值集合。v0.1 仅实现 ``claude``。"""
+LLMProvider = Literal["claude", "codex", "gemini", "cursor", "generic_chat"]
+"""出站消息的 ``provider`` 字段取值集合。"""
 
 
 # ---------------------------------------------------------------------------
