@@ -179,6 +179,24 @@ class AgentWorkflowManager:
             )
         return await self.run_parallel(parent_session_id=parent_session_id, tasks=tasks)
 
+    async def run_workflow_specs(
+        self,
+        *,
+        mode: str,
+        parent_session_id: str,
+        task_specs: list[dict[str, object]],
+    ) -> AgentWorkflowResult:
+        """Run a workflow by mode.
+
+        V1 exposes the mode boundary now and implements only ``parallel``.
+        """
+        if mode != "parallel":
+            raise ValueError(f"unsupported agent workflow mode: {mode}")
+        return await self.run_parallel_specs(
+            parent_session_id=parent_session_id,
+            task_specs=task_specs,
+        )
+
     async def _run_one(
         self,
         *,

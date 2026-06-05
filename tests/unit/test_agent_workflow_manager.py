@@ -182,15 +182,18 @@ async def test_parallel_workflow_writes_audit_and_keeps_child_contexts_isolated(
 async def test_agent_workflow_tool_passes_task_specs_to_bound_manager() -> None:
     class _Manager:
         def __init__(self) -> None:
+            self.mode = ""
             self.parent_session_id = ""
             self.task_specs: list[dict[str, object]] = []
 
-        async def run_parallel_specs(
+        async def run_workflow_specs(
             self,
             *,
+            mode: str,
             parent_session_id: str,
             task_specs: list[dict[str, object]],
         ) -> Any:
+            self.mode = mode
             self.parent_session_id = parent_session_id
             self.task_specs = task_specs
 
@@ -221,6 +224,7 @@ async def test_agent_workflow_tool_passes_task_specs_to_bound_manager() -> None:
         ToolContext(run_id="r", session_id="parent-session", turn=1, call_id="c"),
     )
 
+    assert manager.mode == "parallel"
     assert manager.parent_session_id == "parent-session"
     assert manager.task_specs == [
         {

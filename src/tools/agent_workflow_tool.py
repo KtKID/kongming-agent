@@ -46,7 +46,12 @@ class AgentWorkflowTool(BaseBuiltinTool):
                     },
                     "required": ["task_name", "prompt"],
                 },
-            }
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["parallel"],
+                "description": "Workflow orchestration mode. V1 implements parallel.",
+            },
         },
         "required": ["tasks"],
     }
@@ -64,7 +69,11 @@ class AgentWorkflowTool(BaseBuiltinTool):
             raise RuntimeError("agent workflow manager is not bound")
 
         task_specs = _parse_tasks(args["tasks"])
-        result = await manager.run_parallel_specs(
+        mode = args.get("mode", "parallel")
+        if not isinstance(mode, str):
+            raise ValueError("'mode' must be a string")
+        result = await manager.run_workflow_specs(
+            mode=mode,
             parent_session_id=ctx.session_id,
             task_specs=task_specs,
         )
