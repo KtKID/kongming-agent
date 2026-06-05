@@ -41,7 +41,7 @@ import logging
 import re
 import time
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -60,6 +60,7 @@ from web.generic_channel_log import (
     log_generic_channel_event,
     log_generic_channel_exception,
 )
+from web.llm_protocol import NormalizedMessage
 from web.protocol import (
     ErrorFrame,
     PongFrame,
@@ -606,7 +607,7 @@ async def _send_history_frame(websocket: WebSocket, cell: Any) -> None:
       :class:`web.llm_protocol.NormalizedMessage`，与 Claude/Codex history
       形态对齐。
     """
-    messages: list[dict[str, Any]] = []
+    messages: list[NormalizedMessage] = []
     runtime = getattr(cell, "runtime", None)
     thread_id: str = cell.thread_id
 
@@ -658,19 +659,16 @@ async def _send_history_frame(websocket: WebSocket, cell: Any) -> None:
         if not isinstance(content, str):
             content = ""
         timestamp = _now_iso_utc()
-        base: dict[str, Any] = {
-            "id": str(uuid4()),
-            "sessionId": None,
-            "timestamp": timestamp,
-            "provider": "generic_chat",
-        }
 
         tool_calls = _extract_field(msg, "tool_calls", default=None)
         if role == "assistant" and tool_calls:
             if content:
                 messages.append(
                     {
-                        **base,
+                        "id": str(uuid4()),
+                        "sessionId": None,
+                        "timestamp": timestamp,
+                        "provider": "generic_chat",
                         "frame_type": "text",
                         "role": "assistant",
                         "content": content,
@@ -707,7 +705,10 @@ async def _send_history_frame(websocket: WebSocket, cell: Any) -> None:
                 error_message = meta_err if isinstance(meta_err, str) else None
             messages.append(
                 {
-                    **base,
+                    "id": str(uuid4()),
+                    "sessionId": None,
+                    "timestamp": timestamp,
+                    "provider": "generic_chat",
                     "frame_type": "tool_result",
                     "toolId": tool_call_id if isinstance(tool_call_id, str) else str(uuid4()),
                     "toolName": tool_name if isinstance(tool_name, str) else "unknown",
@@ -717,10 +718,15 @@ async def _send_history_frame(websocket: WebSocket, cell: Any) -> None:
             )
             continue
 
-        out_role = role if role in ("user", "assistant") else "assistant"
+        out_role: Literal["user", "assistant"] = "assistant"
+        if role == "user":
+            out_role = "user"
         messages.append(
             {
-                **base,
+                "id": str(uuid4()),
+                "sessionId": None,
+                "timestamp": timestamp,
+                "provider": "generic_chat",
                 "frame_type": "text",
                 "role": out_role,
                 "content": content,

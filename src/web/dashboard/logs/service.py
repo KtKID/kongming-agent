@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from web.dashboard.logs.registry import LogSourceRegistry, ResolvedLogSource
 from web.protocol.log_dto import LogLineDTO, LogReadResponseDTO, LogSourceDTO
@@ -223,7 +224,7 @@ class LogReadService:
         lines = raw_text.splitlines()
         result: list[LogLineDTO] = []
         for i, line in enumerate(lines):
-            parsed: dict | None = None
+            parsed: dict[str, Any] | None = None
             parse_error: str | None = None
             stripped = line.strip()
             if stripped.startswith("{"):
