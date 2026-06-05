@@ -11,7 +11,7 @@ from config_loader.models import Config, LLMPresetConfig, ModelConfig, WebConfig
 from context import SessionBootstrap, build_session
 from core.agent_spec import AgentSpec
 from core.contracts import LLMRequest, LLMResponse, ToolContext
-from core.message import Message
+from core.message import Message, ToolCall
 from core.runner import Runner
 from executors.agent_runtime.agent_workflow_manager import AgentWorkflowManager
 from executors.agent_runtime.native_runtime import NativeRuntime
@@ -38,6 +38,47 @@ class _EchoLLM:
         else:
             content = "done"
         return LLMResponse(message=Message.assistant(content), finish_reason="stop")
+
+
+class _WorkflowLLM:
+    def __init__(self) -> None:
+        self.calls: list[LLMRequest] = []
+
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        self.calls.append(request)
+        tool_names = {tool.name for tool in request.tools}
+        has_workflow_result = any(
+            message.role == "tool" and message.name == "run_parallel_subagents"
+            for message in request.messages
+        )
+        if "run_parallel_subagents" in tool_names and not has_workflow_result:
+            return LLMResponse(
+                message=Message.assistant(
+                    tool_calls=[
+                        ToolCall(
+                            call_id="call-workflow",
+                            tool_name="run_parallel_subagents",
+                            arguments={
+                                "tasks": [
+                                    {"task_name": "alpha", "prompt": "alpha child task"},
+                                    {"task_name": "beta", "prompt": "beta child task"},
+                                ]
+                            },
+                        )
+                    ]
+                ),
+                finish_reason="tool_calls",
+            )
+        user_text = "\n".join(
+            message.content or "" for message in request.messages if message.role == "user"
+        )
+        if "alpha child task" in user_text:
+            return LLMResponse(
+                message=Message.assistant("alpha child result"), finish_reason="stop"
+            )
+        if "beta child task" in user_text:
+            return LLMResponse(message=Message.assistant("beta child result"), finish_reason="stop")
+        return LLMResponse(message=Message.assistant("parent summary"), finish_reason="stop")
 
 
 def _config(tmp_path: Path) -> Config:
@@ -192,6 +233,67 @@ async def test_agent_workflow_tool_passes_task_specs_to_bound_manager() -> None:
     assert "wf-test" in content
     assert data is not None
     assert data["workflow_id"] == "wf-test"
+
+
+@pytest.mark.asyncio
+async def test_parent_agent_can_create_subagents_through_registered_tool(tmp_path: Path) -> None:
+    llm = _WorkflowLLM()
+    cfg = _config(tmp_path)
+    bootstrap = SessionBootstrap(
+        agent_name="test-agent",
+        model_name=cfg.model.name,
+        instruction_sources=[],
+        instruction_text_hash="test",
+        created_at=1.0,
+        cwd=str(tmp_path),
+    )
+
+    def session_factory(sid: str):  # type: ignore[no-untyped-def]
+        return build_session(cfg, sid, bootstrap=bootstrap)
+
+    handle = AgentWorkflowHandle()
+    registry = ToolRegistry([build_agent_workflow_tool(handle)])
+    runtime = NativeRuntime(
+        config=cfg,
+        runner=Runner(),
+        llm=llm,
+        tools=registry,
+        enabled_tool_names=["run_parallel_subagents"],
+        approval=AutoAllowApproval(),
+        session_factory=session_factory,
+        event_sinks=[],
+        agent_spec=AgentSpec(
+            name="parent",
+            instructions="parent instructions",
+            default_model=cfg.model.name,
+            tool_names=("run_parallel_subagents",),
+            max_turns=5,
+        ),
+    )
+    manager = AgentWorkflowManager(
+        subagents=SubAgentManager(runtime),
+        config=cfg,
+        workspace_root=tmp_path,
+    )
+    handle.bind(manager)
+    try:
+        result = await runtime.run("delegate work", session_id="parent-session")
+    finally:
+        await runtime.aclose()
+
+    assert result.status == "completed"
+    assert result.final_message is not None
+    assert result.final_message.content == "parent summary"
+    workflow_roots = list(
+        (Path(cfg.session.file_store_path) / "parent-session").glob("agent-workflows/wf-*")
+    )
+    assert len(workflow_roots) == 1
+    workflow_result = json.loads((workflow_roots[0] / "result.json").read_text(encoding="utf-8"))
+    assert workflow_result["completed"] is True
+    assert {run["content"] for run in workflow_result["runs"]} == {
+        "alpha child result",
+        "beta child result",
+    }
 
 
 def test_apply_model_preset_overrides_cli_model(monkeypatch: pytest.MonkeyPatch) -> None:
