@@ -7,6 +7,9 @@ from typing import Any
 from core.contracts import ToolContext
 from tools.base import BaseBuiltinTool
 
+_SCOPED_WORKDIR_MODE = "scoped_workdir"
+_SCOPED_TOOL_NAMES = frozenset({"read_file", "write_file", "list_dir"})
+
 
 class AgentWorkflowHandle:
     """Mutable binding used by CLI after NativeRuntime is built."""
@@ -43,8 +46,24 @@ class AgentWorkflowTool(BaseBuiltinTool):
                             "items": {"type": "string"},
                             "description": "Optional explicit child-agent tool whitelist.",
                         },
+                        "skill_names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional child-agent skill names recorded in audit.",
+                        },
+                        "permission": {
+                            "type": "object",
+                            "description": "Child-agent permission. V1 only supports scoped_workdir.",
+                            "properties": {
+                                "mode": {
+                                    "type": "string",
+                                    "enum": [_SCOPED_WORKDIR_MODE],
+                                }
+                            },
+                            "required": ["mode"],
+                        },
                     },
-                    "required": ["task_name", "prompt"],
+                    "required": ["task_name", "prompt", "permission"],
                 },
             },
             "mode": {
@@ -149,12 +168,33 @@ def _parse_tasks(raw: Any) -> list[dict[str, object]]:
             isinstance(name, str) for name in tool_names
         ):
             raise ValueError(f"tasks[{index}].tool_names must be a list of strings")
+        normalized_tool_names = [name for name in tool_names if name]
+        invalid_tool_names = sorted(set(normalized_tool_names) - _SCOPED_TOOL_NAMES)
+        if invalid_tool_names:
+            raise ValueError(
+                f"tasks[{index}].tool_names contains unsupported scoped_workdir tools: "
+                f"{invalid_tool_names}"
+            )
+        skill_names = item.get("skill_names", [])
+        if skill_names is None:
+            skill_names = []
+        if not isinstance(skill_names, list) or not all(
+            isinstance(name, str) for name in skill_names
+        ):
+            raise ValueError(f"tasks[{index}].skill_names must be a list of strings")
+        permission = item.get("permission")
+        if not isinstance(permission, dict):
+            raise ValueError(f"tasks[{index}].permission must be an object")
+        if permission.get("mode") != _SCOPED_WORKDIR_MODE:
+            raise ValueError(f"tasks[{index}].permission.mode must be scoped_workdir")
         tasks.append(
             {
                 "task_name": task_name.strip(),
                 "prompt": prompt.strip(),
                 "context": context.strip(),
-                "tool_names": [name for name in tool_names if name],
+                "tool_names": normalized_tool_names,
+                "skill_names": [name for name in skill_names if name],
+                "permission": {"mode": _SCOPED_WORKDIR_MODE},
             }
         )
     return tasks

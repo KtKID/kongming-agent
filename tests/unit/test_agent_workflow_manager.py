@@ -22,6 +22,7 @@ from executors.agent_runtime.native_runtime import NativeRuntime
 from executors.agent_runtime.subagent_manager import SubAgentManager, SubAgentTask
 from tools import AutoAllowApproval, ToolRegistry
 from tools.agent_workflow_tool import AgentWorkflowHandle, build_agent_workflow_tool
+from tools.file_tools import build_file_tools
 
 
 class _EchoLLM:
@@ -64,8 +65,16 @@ class _WorkflowLLM:
                             tool_name="run_parallel_subagents",
                             arguments={
                                 "tasks": [
-                                    {"task_name": "alpha", "prompt": "alpha child task"},
-                                    {"task_name": "beta", "prompt": "beta child task"},
+                                    {
+                                        "task_name": "alpha",
+                                        "prompt": "alpha child task",
+                                        "permission": {"mode": "scoped_workdir"},
+                                    },
+                                    {
+                                        "task_name": "beta",
+                                        "prompt": "beta child task",
+                                        "permission": {"mode": "scoped_workdir"},
+                                    },
                                 ]
                             },
                         )
@@ -85,6 +94,41 @@ class _WorkflowLLM:
         return LLMResponse(message=Message.assistant("parent summary"), finish_reason="stop")
 
 
+class _ToolCallingLLM:
+    def __init__(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        final_content: str = "tool result observed",
+    ) -> None:
+        self.tool_name = tool_name
+        self.arguments = arguments
+        self.final_content = final_content
+        self.calls: list[LLMRequest] = []
+
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        self.calls.append(request)
+        has_tool_result = any(message.role == "tool" for message in request.messages)
+        if has_tool_result:
+            return LLMResponse(
+                message=Message.assistant(self.final_content),
+                finish_reason="stop",
+            )
+        return LLMResponse(
+            message=Message.assistant(
+                tool_calls=[
+                    ToolCall(
+                        call_id="call-child-tool",
+                        tool_name=self.tool_name,
+                        arguments=self.arguments,
+                    )
+                ]
+            ),
+            finish_reason="tool_calls",
+        )
+
+
 def _config(tmp_path: Path) -> Config:
     cfg = Config(
         model=ModelConfig(
@@ -99,7 +143,12 @@ def _config(tmp_path: Path) -> Config:
     return cfg
 
 
-def _runtime(tmp_path: Path, llm: _EchoLLM) -> tuple[Config, NativeRuntime]:
+def _runtime(
+    tmp_path: Path,
+    llm: Any,
+    *,
+    tools: ToolRegistry | None = None,
+) -> tuple[Config, NativeRuntime]:
     cfg = _config(tmp_path)
     bootstrap = SessionBootstrap(
         agent_name="test-agent",
@@ -117,7 +166,7 @@ def _runtime(tmp_path: Path, llm: _EchoLLM) -> tuple[Config, NativeRuntime]:
         config=cfg,
         runner=Runner(),
         llm=llm,
-        tools=ToolRegistry(),
+        tools=tools or ToolRegistry(),
         enabled_tool_names=[],
         approval=AutoAllowApproval(),
         session_factory=session_factory,
@@ -129,6 +178,13 @@ def _runtime(tmp_path: Path, llm: _EchoLLM) -> tuple[Config, NativeRuntime]:
         ),
     )
     return cfg, runtime
+
+
+def _audit_records(workflow_dir: Path) -> list[dict[str, Any]]:
+    return [
+        json.loads(line)
+        for line in (workflow_dir / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
 
 
 @pytest.mark.asyncio
@@ -259,7 +315,7 @@ async def test_parallel_workflow_reports_failed_child_task(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_parallel_workflow_uses_unique_artifact_paths_for_slug_collisions(
+async def test_parallel_workflow_uses_unique_task_run_paths_for_slug_collisions(
     tmp_path: Path,
 ) -> None:
     llm = _EchoLLM()
@@ -292,6 +348,149 @@ async def test_parallel_workflow_uses_unique_artifact_paths_for_slug_collisions(
     report_index = json.loads(result.report_index_path.read_text(encoding="utf-8"))
     assert [report["task_id"] for report in report_index["reports"]] == ["a/b", "a?b"]
     assert len({report["report_path"] for report in report_index["reports"]}) == 2
+
+
+@pytest.mark.asyncio
+async def test_scoped_parallel_workflow_writes_subagent_creation_and_workdir_file(
+    tmp_path: Path,
+) -> None:
+    llm = _ToolCallingLLM(
+        tool_name="write_file",
+        arguments={"path": "result.txt", "content": "scoped ok"},
+    )
+    cfg, runtime = _runtime(tmp_path, llm, tools=ToolRegistry(build_file_tools()))
+    try:
+        manager = AgentWorkflowManager(
+            subagents=SubAgentManager(runtime),
+            config=cfg,
+            workspace_root=tmp_path,
+        )
+        result = await manager.run_workflow_specs(
+            mode="parallel",
+            parent_session_id="parent-session",
+            task_specs=[
+                {
+                    "task_name": "write ok",
+                    "prompt": "write result.txt",
+                    "tool_names": ["write_file"],
+                    "skill_names": ["writer"],
+                    "permission": {"mode": "scoped_workdir"},
+                }
+            ],
+        )
+    finally:
+        await runtime.aclose()
+
+    assert result.completed is True
+    task_run_dir = result.workflow_dir / "agents" / "001-agent-1"
+    working_dir = task_run_dir / "work"
+    assert (working_dir / "result.txt").read_text(encoding="utf-8") == "scoped ok"
+    creation = json.loads((task_run_dir / "subagent.json").read_text(encoding="utf-8"))
+    assert creation["task_run_id"] == "001-agent-1"
+    assert creation["permission"] == {"mode": "scoped_workdir"}
+    assert creation["grant"]["allowed_tools"] == ["write_file"]
+    assert creation["grant"]["allowed_skills"] == ["writer"]
+    assert creation["working_dir"] == str(working_dir)
+    assert Path(result.reports[0].working_dir or "") == working_dir
+
+    records = _audit_records(result.workflow_dir)
+    actions = [record["action"] for record in records]
+    assert "subagent_created" in actions
+    assert "subagent_grant_bound" in actions
+    approval_payload = next(
+        record["payload"] for record in records if record["action"] == "subagent_approval_decided"
+    )
+    assert approval_payload["decision"] == "approved"
+    assert approval_payload["decision_source"] == "grant_allow"
+    assert approval_payload["resolved_path"] == str(working_dir / "result.txt")
+
+
+@pytest.mark.asyncio
+async def test_scoped_parallel_workflow_rejects_outside_write_without_side_effect(
+    tmp_path: Path,
+) -> None:
+    llm = _ToolCallingLLM(
+        tool_name="write_file",
+        arguments={"path": "../outside.txt", "content": "bad"},
+        final_content="write rejected by scoped permission",
+    )
+    cfg, runtime = _runtime(tmp_path, llm, tools=ToolRegistry(build_file_tools()))
+    try:
+        manager = AgentWorkflowManager(
+            subagents=SubAgentManager(runtime),
+            config=cfg,
+            workspace_root=tmp_path,
+        )
+        result = await manager.run_workflow_specs(
+            mode="parallel",
+            parent_session_id="parent-session",
+            task_specs=[
+                {
+                    "task_name": "write denied",
+                    "prompt": "try outside write",
+                    "tool_names": ["write_file"],
+                    "permission": {"mode": "scoped_workdir"},
+                }
+            ],
+        )
+    finally:
+        await runtime.aclose()
+
+    assert result.completed is True
+    task_run_dir = result.workflow_dir / "agents" / "001-agent-1"
+    assert not (task_run_dir / "outside.txt").exists()
+    assert result.reports[0].summary == "write rejected by scoped permission"
+    approval_payload = next(
+        record["payload"]
+        for record in _audit_records(result.workflow_dir)
+        if record["action"] == "subagent_approval_decided"
+    )
+    assert approval_payload["decision"] == "rejected"
+    assert approval_payload["decision_source"] == "scope_deny"
+    assert approval_payload["target_path"] == "../outside.txt"
+
+
+@pytest.mark.asyncio
+async def test_scoped_parallel_workflow_audits_hallucinated_not_registered_tool(
+    tmp_path: Path,
+) -> None:
+    llm = _ToolCallingLLM(
+        tool_name="missing_tool",
+        arguments={"path": "../outside.txt", "x": 1},
+        final_content="missing tool rejected",
+    )
+    cfg, runtime = _runtime(tmp_path, llm, tools=ToolRegistry(build_file_tools()))
+    try:
+        manager = AgentWorkflowManager(
+            subagents=SubAgentManager(runtime),
+            config=cfg,
+            workspace_root=tmp_path,
+        )
+        result = await manager.run_workflow_specs(
+            mode="parallel",
+            parent_session_id="parent-session",
+            task_specs=[
+                {
+                    "task_name": "hallucinated tool",
+                    "prompt": "call a missing tool",
+                    "tool_names": ["write_file"],
+                    "permission": {"mode": "scoped_workdir"},
+                }
+            ],
+        )
+    finally:
+        await runtime.aclose()
+
+    assert result.completed is True
+    approval_payload = next(
+        record["payload"]
+        for record in _audit_records(result.workflow_dir)
+        if record["action"] == "subagent_approval_decided"
+    )
+    assert approval_payload["decision"] == "rejected"
+    assert approval_payload["decision_source"] == "not_registered"
+    assert approval_payload["tool_name"] == "missing_tool"
+    assert approval_payload["raw_args"] == {"path": "../outside.txt", "x": 1}
 
 
 @pytest.mark.asyncio
@@ -363,6 +562,8 @@ async def test_agent_workflow_tool_passes_task_specs_to_bound_manager() -> None:
                     "prompt": "calculate",
                     "context": "only this",
                     "tool_names": ["write_file"],
+                    "skill_names": ["review-docs"],
+                    "permission": {"mode": "scoped_workdir"},
                 }
             ]
         },
@@ -377,6 +578,8 @@ async def test_agent_workflow_tool_passes_task_specs_to_bound_manager() -> None:
             "prompt": "calculate",
             "context": "only this",
             "tool_names": ["write_file"],
+            "skill_names": ["review-docs"],
+            "permission": {"mode": "scoped_workdir"},
         }
     ]
     assert "wf-test" in content
@@ -390,6 +593,26 @@ async def test_agent_workflow_tool_passes_task_specs_to_bound_manager() -> None:
     assert data["report_index_path"] == "/tmp/wf-test/reports/index.json"
     assert data["reports"][0]["summary"] == "calculation complete"
     assert data["reports"][0]["error_message"] is None
+
+
+@pytest.mark.asyncio
+async def test_agent_workflow_tool_requires_permission() -> None:
+    handle = AgentWorkflowHandle()
+    handle.bind(object())
+    tool = build_agent_workflow_tool(handle)
+
+    with pytest.raises(ValueError, match="permission must be an object"):
+        await tool._run(
+            {
+                "tasks": [
+                    {
+                        "task_name": "calc",
+                        "prompt": "calculate",
+                    }
+                ]
+            },
+            ToolContext(run_id="r", session_id="parent-session", turn=1, call_id="c"),
+        )
 
 
 @pytest.mark.asyncio

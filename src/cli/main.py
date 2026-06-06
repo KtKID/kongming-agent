@@ -48,6 +48,7 @@ from core.contracts import EventSink, SupportsLLMStream
 from executors.agent_runtime.agent_workflow_manager import AgentWorkflowManager
 from executors.agent_runtime.native_runtime import NativeRuntime
 from executors.agent_runtime.subagent_manager import SubAgentManager, SubAgentTask
+from executors.agent_runtime.subagent_permissions import SubAgentPermissionSpec
 from host.cli_adapter import CLIAdapter, CLIEventSink
 from host.session_bridge import SessionBridge
 from memory import MemoryStore
@@ -749,6 +750,7 @@ async def _run_subagent_smoke(
                     "完成后报告写入的绝对路径。"
                 ),
                 tool_names=("write_file",),
+                permission=SubAgentPermissionSpec(mode="scoped_workdir"),
             ),
         ],
     )
