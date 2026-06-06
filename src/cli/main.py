@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import uuid
 from datetime import datetime
@@ -56,6 +57,9 @@ from tools import (
     register_evolution_write_tool_if_enabled,
     register_schedule_tool_if_enabled,
 )
+from tools.approval import PromptActionFn
+
+logger = logging.getLogger(__name__)
 
 _CLI_SESSION_ID_HEX_LEN = 12
 
@@ -63,6 +67,66 @@ _CLI_SESSION_ID_HEX_LEN = 12
 def _generate_cli_session_id() -> str:
     """生成默认 CLI session id。"""
     return f"cli-{uuid.uuid4().hex[:_CLI_SESSION_ID_HEX_LEN]}"
+
+
+def _resolve_cli_session_id(
+    session_id: str | None,
+    *,
+    smoke: bool,
+    subagent_smoke: bool,
+) -> str:
+    """在审批和运行时装配前解析 CLI 会话 ID。"""
+    if session_id:
+        return session_id
+    if smoke:
+        return "smoke"
+    if subagent_smoke:
+        return "subagent-smoke"
+    return _generate_cli_session_id()
+
+
+def _build_cli_manager_prompt_fn(session_id: str) -> PromptActionFn:
+    """构造由审批管理器承接的 CLI 终端审批函数。"""
+    from cli.approval import build_cli_action_prompt
+    from cli.approval_manager_sink import CLIApprovalEventSink
+    from safety.approval_manager import get_approval_manager, make_manager_prompt_fn
+    from safety.approval_rules import ApprovalRules
+
+    action_prompt = build_cli_action_prompt()
+    manager = get_approval_manager(
+        rules=ApprovalRules(policy=_build_cli_auto_approval_policy()),
+    )
+    if not manager.has_event_sink_type(CLIApprovalEventSink):
+        manager.register_event_sink(CLIApprovalEventSink(manager, action_prompt))
+    return make_manager_prompt_fn(
+        manager,
+        session_id,
+        channel="cli",
+        default_cwd=str(Path.cwd()),
+    )
+
+
+def _build_cli_auto_approval_policy() -> Any:
+    """为 CLI 构造共享自动审批策略；装配失败时按失败关闭处理。"""
+    try:
+        from safety.auto_approval import (
+            AutoApprovalPolicy,
+            ConfigStore,
+            load_default_rules,
+            materialize_user_rules_yaml,
+        )
+
+        home = get_kongming_home()
+        auto_approval_root = home / "web" / "auto_approval"
+        auto_approval_root.mkdir(parents=True, exist_ok=True)
+        rules_yaml = materialize_user_rules_yaml(home)
+        return AutoApprovalPolicy(
+            load_default_rules(rules_yaml),
+            ConfigStore(auto_approval_root),
+        )
+    except Exception:
+        logger.exception("CLI auto-approval policy setup failed; falling back to ask")
+        return None
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
@@ -272,6 +336,11 @@ async def _run(
         raise SystemExit(2)
 
     cfg = _bind_discovered_session_path(cfg, discovered_path)
+    resolved_session_id = _resolve_cli_session_id(
+        session_id,
+        smoke=smoke,
+        subagent_smoke=subagent_smoke,
+    )
 
     # CLI 参数 --reasoning-effort 覆盖 config 文件里的设置。
     if reasoning_effort is not None:
@@ -389,9 +458,13 @@ async def _run(
         event_sinks=event_sinks,
     )
 
-    # approval 按配置模式选：interactive 时让 adapter 提供 prompt_fn，
+    # approval 按配置模式选：interactive 走 ApprovalManager + CLI sink；
     # 其它模式（auto_allow / auto_deny）不需要 prompt_fn。
-    prompt_fn = adapter.prompt_approval if cfg.approval.mode == "interactive" else None
+    prompt_fn = (
+        _build_cli_manager_prompt_fn(resolved_session_id)
+        if cfg.approval.mode == "interactive"
+        else None
+    )
     approval = build_default_approval(cfg.approval.mode, prompt_fn=prompt_fn)
 
     # instructions 装配：用 InstructionLoader 把 agent_spec 基础文本 + 外部文件
@@ -533,10 +606,9 @@ async def _run(
     # 不上 async context manager 是为了控制改动面：runtime 目前只在这里起止。
     try:
         if smoke:
-            await _run_smoke(runtime, session_id)
+            await _run_smoke(runtime, resolved_session_id)
             return
 
-        resolved_session_id = session_id or _generate_cli_session_id()
         # 流式路径下 CLIStreamSink 已实时打印 content；SessionBridge 不再重复
         # write_output(final.content)。流式实际生效要求：cfg 启用 + provider
         # 实现 SupportsLLMStream（AnthropicMessagesProvider 暂未实现，会自动 fallback）。
