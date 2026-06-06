@@ -8,6 +8,7 @@ their reports to the parent agent.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 import uuid
@@ -23,6 +24,40 @@ WorkflowMode = Literal["parallel"]
 
 
 @dataclass(frozen=True)
+class SubAgentReportDetail:
+    """Auditable child-agent report stored under reports/<task_id>.json."""
+
+    task_id: str
+    task_name: str
+    session_id: str
+    run_id: str
+    status: str
+    summary: str
+    content: str
+    error_message: str | None
+    working_dir: str | None
+    content_digest: str
+    reported_at: str
+
+
+@dataclass(frozen=True)
+class SubAgentReportProjection:
+    """Small report projection returned to the parent agent and future Web views."""
+
+    display_order: int
+    task_id: str
+    task_name: str
+    status: str
+    summary: str
+    error_message: str | None
+    report_path: str
+    working_dir: str | None
+    session_id: str
+    run_id: str
+    reported_at: str
+
+
+@dataclass(frozen=True)
 class AgentWorkflowResult:
     """Final workflow result returned to the caller."""
 
@@ -33,10 +68,18 @@ class AgentWorkflowResult:
     started_at: str
     finished_at: str
     runs: tuple[SubAgentRun, ...]
+    reports: tuple[SubAgentReportProjection, ...]
+    report_index_path: Path
 
     @property
     def completed(self) -> bool:
         return all(run.status == "completed" for run in self.runs)
+
+
+@dataclass(frozen=True)
+class _RunOutcome:
+    run: SubAgentRun
+    report: SubAgentReportProjection
 
 
 class AgentWorkflowManager:
@@ -72,7 +115,12 @@ class AgentWorkflowManager:
         agents_dir.mkdir(parents=True, exist_ok=True)
 
         assigned_tasks = [
-            self._with_agent_workdir(task, agents_dir / _slug(task.task_id)) for task in tasks
+            self._with_agent_workdir(
+                task,
+                agents_dir / _artifact_id(index, task.task_id),
+                session_task_id=_artifact_id(index, task.task_id),
+            )
+            for index, task in enumerate(tasks, 1)
         ]
         self._write_workflow_manifest(
             workflow_dir,
@@ -100,18 +148,30 @@ class AgentWorkflowManager:
                 payload=_task_payload(task),
             )
 
-        runs = await asyncio.gather(
+        outcomes = await asyncio.gather(
             *[
                 self._run_one(
                     workflow_id=workflow_id,
                     parent_session_id=parent_session_id,
                     workflow_dir=workflow_dir,
                     task=task,
+                    display_order=index,
                 )
-                for task in assigned_tasks
+                for index, task in enumerate(assigned_tasks, 1)
             ]
         )
+        runs = tuple(outcome.run for outcome in outcomes)
+        reports = tuple(outcome.report for outcome in outcomes)
         finished_at = _now_iso()
+        completed = all(run.status == "completed" for run in runs)
+        report_index_path = self._write_report_index(
+            workflow_dir,
+            workflow_id=workflow_id,
+            mode="parallel",
+            parent_session_id=parent_session_id,
+            status="completed" if completed else "failed",
+            reports=reports,
+        )
         result = AgentWorkflowResult(
             workflow_id=workflow_id,
             mode="parallel",
@@ -119,7 +179,9 @@ class AgentWorkflowManager:
             workflow_dir=workflow_dir,
             started_at=started_at,
             finished_at=finished_at,
-            runs=tuple(runs),
+            runs=runs,
+            reports=reports,
+            report_index_path=report_index_path,
         )
         self._append_audit(
             workflow_dir,
@@ -129,6 +191,7 @@ class AgentWorkflowManager:
                 "completed": result.completed,
                 "finished_at": finished_at,
                 "run_count": len(runs),
+                "report_index_path": str(report_index_path),
             },
         )
         self._write_workflow_manifest(
@@ -151,6 +214,8 @@ class AgentWorkflowManager:
                 "started_at": started_at,
                 "finished_at": finished_at,
                 "completed": result.completed,
+                "report_index_path": str(report_index_path),
+                "reports": [_report_projection_payload(report) for report in reports],
                 "runs": [_run_payload(run) for run in runs],
             },
         )
@@ -204,23 +269,46 @@ class AgentWorkflowManager:
         parent_session_id: str,
         workflow_dir: Path,
         task: SubAgentTask,
-    ) -> SubAgentRun:
+        display_order: int,
+    ) -> _RunOutcome:
         started = time.perf_counter()
-        run = await self._subagents.run_task(
-            workflow_id=workflow_id,
-            parent_session_id=parent_session_id,
-            task=task,
-        )
+        try:
+            run = await self._subagents.run_task(
+                workflow_id=workflow_id,
+                parent_session_id=parent_session_id,
+                task=task,
+            )
+        except Exception as exc:
+            run = _failed_run(
+                workflow_id=workflow_id,
+                parent_session_id=parent_session_id,
+                task=task,
+                error=exc,
+            )
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         payload = {**_run_payload(run), "elapsed_ms": elapsed_ms}
-        self._append_audit(workflow_dir, action="agent_completed", payload=payload)
-        self._write_json(workflow_dir / "agents" / _slug(task.task_id) / "result.json", payload)
-        return run
+        action = "agent_completed" if run.status == "completed" else "agent_failed"
+        self._append_audit(workflow_dir, action=action, payload=payload)
+        self._write_json(_agent_result_path(workflow_dir, task), payload)
+        report = self._write_subagent_report(
+            workflow_dir,
+            workflow_id=workflow_id,
+            run=run,
+            display_order=display_order,
+        )
+        return _RunOutcome(run=run, report=report)
 
-    def _with_agent_workdir(self, task: SubAgentTask, workdir: Path) -> SubAgentTask:
+    def _with_agent_workdir(
+        self,
+        task: SubAgentTask,
+        workdir: Path,
+        *,
+        session_task_id: str,
+    ) -> SubAgentTask:
         workdir.mkdir(parents=True, exist_ok=True)
         metadata = dict(task.metadata)
         metadata["working_dir"] = str(workdir)
+        metadata["session_task_id"] = session_task_id
         return SubAgentTask(
             task_id=task.task_id,
             task_name=task.task_name,
@@ -265,6 +353,90 @@ class AgentWorkflowManager:
         }
         self._write_json(workflow_dir / "workflow.json", payload)
 
+    def _write_subagent_report(
+        self,
+        workflow_dir: Path,
+        *,
+        workflow_id: str,
+        run: SubAgentRun,
+        display_order: int,
+    ) -> SubAgentReportProjection:
+        reported_at = _now_iso()
+        content = run.content.strip() or (run.error_message or "").strip()
+        digest = _content_digest(content)
+        working_dir = _optional_string(run.task.metadata.get("working_dir"))
+        detail = SubAgentReportDetail(
+            task_id=run.task.task_id,
+            task_name=run.task.task_name,
+            session_id=run.session_id,
+            run_id=run.run_id,
+            status=run.status,
+            summary=_summary(content),
+            content=content,
+            error_message=run.error_message,
+            working_dir=working_dir,
+            content_digest=digest,
+            reported_at=reported_at,
+        )
+        report_path = (
+            workflow_dir / "reports" / f"{_artifact_id(display_order, run.task.task_id)}.json"
+        )
+        self._write_json(report_path, _report_detail_payload(detail))
+        projection = SubAgentReportProjection(
+            display_order=display_order,
+            task_id=detail.task_id,
+            task_name=detail.task_name,
+            status=detail.status,
+            summary=detail.summary,
+            error_message=detail.error_message,
+            report_path=str(report_path),
+            working_dir=detail.working_dir,
+            session_id=detail.session_id,
+            run_id=detail.run_id,
+            reported_at=detail.reported_at,
+        )
+        self._append_audit(
+            workflow_dir,
+            action="subagent_reported",
+            payload={
+                "workflow_id": workflow_id,
+                "task_id": detail.task_id,
+                "session_id": detail.session_id,
+                "run_id": detail.run_id,
+                "status": detail.status,
+                "reported_at": detail.reported_at,
+                "report_path": str(report_path),
+                "content_digest": detail.content_digest,
+                "error_message": detail.error_message,
+            },
+        )
+        return projection
+
+    def _write_report_index(
+        self,
+        workflow_dir: Path,
+        *,
+        workflow_id: str,
+        mode: WorkflowMode,
+        parent_session_id: str,
+        status: str,
+        reports: tuple[SubAgentReportProjection, ...],
+    ) -> Path:
+        reports_dir = workflow_dir / "reports"
+        index_path = reports_dir / "index.json"
+        self._write_json(
+            index_path,
+            {
+                "workflow_id": workflow_id,
+                "parent_session_id": parent_session_id,
+                "mode": mode,
+                "status": status,
+                "reports_dir": str(reports_dir),
+                "reports": [_report_projection_payload(report) for report in reports],
+            },
+        )
+        return index_path
+
     def _append_audit(self, workflow_dir: Path, *, action: str, payload: dict[str, object]) -> None:
         record = {
             "ts": _now_iso(),
@@ -308,6 +480,85 @@ def _run_payload(run: SubAgentRun) -> dict[str, object]:
     }
 
 
+def _report_detail_payload(report: SubAgentReportDetail) -> dict[str, object]:
+    return {
+        "task_id": report.task_id,
+        "task_name": report.task_name,
+        "session_id": report.session_id,
+        "run_id": report.run_id,
+        "status": report.status,
+        "summary": report.summary,
+        "content": report.content,
+        "error_message": report.error_message,
+        "working_dir": report.working_dir,
+        "content_digest": report.content_digest,
+        "reported_at": report.reported_at,
+    }
+
+
+def _report_projection_payload(report: SubAgentReportProjection) -> dict[str, object]:
+    return {
+        "display_order": report.display_order,
+        "task_id": report.task_id,
+        "task_name": report.task_name,
+        "status": report.status,
+        "summary": report.summary,
+        "error_message": report.error_message,
+        "report_path": report.report_path,
+        "working_dir": report.working_dir,
+        "session_id": report.session_id,
+        "run_id": report.run_id,
+        "reported_at": report.reported_at,
+    }
+
+
+def _failed_run(
+    *,
+    workflow_id: str,
+    parent_session_id: str,
+    task: SubAgentTask,
+    error: Exception,
+) -> SubAgentRun:
+    session_id = _build_child_session_id(
+        workflow_id=workflow_id,
+        parent_session_id=parent_session_id,
+        task_id=_session_task_id(task),
+    )
+    return SubAgentRun(
+        task=task,
+        session_id=session_id,
+        run_id=f"run-{session_id}-failed",
+        status="failed",
+        content="",
+        error_message=str(error),
+        turn_count=0,
+    )
+
+
+def _content_digest(content: str) -> str:
+    return f"sha256:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+
+
+def _summary(content: str, *, max_chars: int = 500) -> str:
+    summary = " ".join(content.strip().split())
+    if len(summary) <= max_chars:
+        return summary
+    return summary[: max_chars - 1] + "…"
+
+
+def _optional_string(value: object) -> str | None:
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _agent_result_path(workflow_dir: Path, task: SubAgentTask) -> Path:
+    working_dir = task.metadata.get("working_dir")
+    if isinstance(working_dir, str) and working_dir.strip():
+        return Path(working_dir) / "result.json"
+    return workflow_dir / "agents" / f"{_session_task_id(task)}" / "result.json"
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -318,6 +569,29 @@ def _slug(value: str) -> str:
     return safe or "task"
 
 
+def _artifact_id(display_order: int, task_id: str) -> str:
+    return f"{display_order:03d}-{_slug(task_id)}"
+
+
+def _session_task_id(task: SubAgentTask) -> str:
+    raw = task.metadata.get("session_task_id")
+    if isinstance(raw, str) and raw.strip():
+        return raw
+    return _slug(task.task_id)
+
+
+def _build_child_session_id(
+    *,
+    workflow_id: str,
+    parent_session_id: str,
+    task_id: str,
+) -> str:
+    parent = _slug(parent_session_id)[:32]
+    workflow = _slug(workflow_id)[:32]
+    task = _slug(task_id)[:32]
+    return f"subagent-{parent}-{workflow}-{task}"
+
+
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -326,4 +600,10 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     return True
 
 
-__all__ = ["AgentWorkflowManager", "AgentWorkflowResult", "WorkflowMode"]
+__all__ = [
+    "AgentWorkflowManager",
+    "AgentWorkflowResult",
+    "SubAgentReportDetail",
+    "SubAgentReportProjection",
+    "WorkflowMode",
+]

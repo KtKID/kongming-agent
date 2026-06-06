@@ -82,7 +82,24 @@ class AgentWorkflowTool(BaseBuiltinTool):
             "workflow_id": result.workflow_id,
             "mode": result.mode,
             "workflow_dir": str(result.workflow_dir),
+            "report_index_path": str(result.report_index_path),
             "completed": result.completed,
+            "reports": [
+                {
+                    "display_order": report.display_order,
+                    "task_id": report.task_id,
+                    "task_name": report.task_name,
+                    "status": report.status,
+                    "summary": report.summary,
+                    "error_message": report.error_message,
+                    "report_path": report.report_path,
+                    "working_dir": report.working_dir,
+                    "session_id": report.session_id,
+                    "run_id": report.run_id,
+                    "reported_at": report.reported_at,
+                }
+                for report in result.reports
+            ],
             "runs": [
                 {
                     "task_id": run.task.task_id,
@@ -147,15 +164,24 @@ def _format_result(result: Any) -> str:
     lines = [
         f"workflow_id: {result.workflow_id}",
         f"workflow_dir: {result.workflow_dir}",
+        f"report_index: {result.report_index_path}",
         f"completed: {result.completed}",
         "",
         "subagent reports:",
     ]
-    for run in result.runs:
-        lines.append(f"- {run.task.task_name} [{run.status}] session={run.session_id}")
-        content = (run.content or run.error_message or "").strip()
-        if content:
-            lines.append(f"  {content}")
+    for report in result.reports:
+        lines.append(f"- {report.task_name} [{report.status}] session={report.session_id}")
+        lines.append(f"  summary: {report.summary}")
+        lines.append(f"  error_message: {report.error_message}")
+        lines.append(f"  working_dir: {report.working_dir}")
+        lines.append(f"  report: {report.report_path}")
+    lines.extend(
+        [
+            "",
+            "Use these child-agent reports to synthesize the final answer, "
+            "including successes, failures, and follow-up risks.",
+        ]
+    )
     return "\n".join(lines)
 
 

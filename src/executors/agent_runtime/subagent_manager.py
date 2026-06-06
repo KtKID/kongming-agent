@@ -63,7 +63,7 @@ class SubAgentManager:
         session_id = self._build_child_session_id(
             workflow_id=workflow_id,
             parent_session_id=parent_session_id,
-            task_id=task.task_id,
+            task_id=_session_task_id(task),
         )
         session = self._runtime.session_factory(session_id)
         agent_spec = self._build_child_agent_spec(task)
@@ -154,6 +154,13 @@ def _slug(value: str, *, max_len: int = 48) -> str:
     if not slug:
         slug = "task"
     return slug[:max_len]
+
+
+def _session_task_id(task: SubAgentTask) -> str:
+    raw = task.metadata.get("session_task_id")
+    if isinstance(raw, str) and raw.strip():
+        return raw
+    return task.task_id
 
 
 __all__ = ["SubAgentManager", "SubAgentRun", "SubAgentTask"]
