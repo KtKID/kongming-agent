@@ -18,7 +18,11 @@ from typing import Any
 
 import pytest
 
-from cli.approval import _resolve_cli_manager_deadline_ms, build_cli_action_prompt
+from cli.approval import (
+    _resolve_cli_manager_deadline_ms,
+    _resolve_cli_manager_timeout,
+    build_cli_action_prompt,
+)
 from core.contracts import ApprovalAction, ApprovalRequest
 
 
@@ -62,11 +66,11 @@ def patch_input(monkeypatch: pytest.MonkeyPatch):
 def patch_cli_manager_input(monkeypatch: pytest.MonkeyPatch):
     """提供 CLI manager 两选项输入替身，并记录 deadline。"""
 
-    def _setup(answer: str, *, is_tty: bool = True) -> list[int]:
+    def _setup(answer: str | None, *, is_tty: bool = True) -> list[int]:
         deadlines: list[int] = []
 
-        def fake_readline(deadline_ms: int) -> str:
-            deadlines.append(deadline_ms)
+        def fake_readline(timeout: Any) -> str | None:
+            deadlines.append(timeout.deadline_ms)
             return answer
 
         monkeypatch.setattr(
@@ -267,12 +271,38 @@ async def test_cli_manager_empty_input_rejects(
 
 
 @pytest.mark.asyncio
+async def test_cli_manager_auto_approve_timeout_accepts(
+    patch_cli_manager_input: Any,
+) -> None:
+    """CLI manager 安全路径倒计时到点后自动同意。"""
+    patch_cli_manager_input(None, is_tty=True)
+    prompt = build_cli_action_prompt()
+    action = await prompt(
+        _req(metadata={"approval_channel": "cli", "auto_approve_at_ms": 110_000}),
+    )
+    assert action is ApprovalAction.ACCEPT_ONCE
+
+
+@pytest.mark.asyncio
+async def test_cli_manager_auto_reject_timeout_rejects(
+    patch_cli_manager_input: Any,
+) -> None:
+    """CLI manager 危险路径倒计时到点后自动拒绝。"""
+    patch_cli_manager_input(None, is_tty=True)
+    prompt = build_cli_action_prompt()
+    action = await prompt(
+        _req(metadata={"approval_channel": "cli", "auto_reject_at_ms": 110_000}),
+    )
+    assert action is ApprovalAction.REJECT
+
+
+@pytest.mark.asyncio
 async def test_cli_manager_non_tty_defaults_to_reject(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """CLI manager 非 TTY 直接拒绝，避免后台等待 stdin。"""
 
-    def fail_if_called(_deadline_ms: int) -> str:
+    def fail_if_called(_timeout: Any) -> str:
         raise AssertionError("非 TTY 不应读取 CLI manager 输入")
 
     monkeypatch.setattr(
@@ -289,10 +319,22 @@ async def test_cli_manager_non_tty_defaults_to_reject(
 def test_cli_manager_deadline_caps_terminal_wait_to_ten_seconds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CLI manager 终端等待最多 10 秒；更早的 auto_reject_at_ms 优先。"""
+    """CLI manager 终端等待最多 10 秒；更早的 auto deadline 优先。"""
     monkeypatch.setattr("cli.approval.time.time", lambda: 100.0)
 
     assert _resolve_cli_manager_deadline_ms({"timeout_ms": 60_000}) == 110_000
+    auto_approve = _resolve_cli_manager_timeout(
+        {"timeout_ms": 60_000, "auto_approve_at_ms": 105_000},
+    )
+    assert auto_approve.deadline_ms == 105_000
+    assert auto_approve.default_action is ApprovalAction.ACCEPT_ONCE
+
+    capped_auto_approve = _resolve_cli_manager_timeout(
+        {"timeout_ms": 60_000, "auto_approve_at_ms": 130_000},
+    )
+    assert capped_auto_approve.deadline_ms == 110_000
+    assert capped_auto_approve.default_action is ApprovalAction.ACCEPT_ONCE
+
     assert (
         _resolve_cli_manager_deadline_ms(
             {"timeout_ms": 60_000, "auto_reject_at_ms": 105_000},

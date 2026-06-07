@@ -184,7 +184,6 @@ class ApprovalRules:
             elif channel not in {'generic_chat','cli'}:
                                                      → 默认 ask + 60s
             elif pdec.blocked_by_rule:             → 危险待审 + 超时自动拒绝（matched_rule 透传）
-            elif channel == 'cli' and auto enabled: → 立即批准
             elif pdec.auto_eligible and enabled:   → 自动通过倒计时（timeout 兜底 60s）
             else:                                  → 默认 ask + 60s
 
@@ -289,7 +288,7 @@ class ApprovalRules:
                 timeout_ms=timeout_ms,
             )
 
-        # 5. 总开关开启 + 非危险 + auto_eligible → 按通道自动允许
+        # 5. 总开关开启 + 非危险 + auto_eligible → 自动允许倒计时
         try:
             enabled_for_cwd = self._policy.is_enabled_for(cwd)
         except Exception:
@@ -300,16 +299,6 @@ class ApprovalRules:
             return self._default_decision()
 
         if pdec.auto_eligible and enabled_for_cwd:
-            if channel == "cli":
-                return _RuleDecision(
-                    is_immediate=True,
-                    immediate_outcome="approved",
-                    matched_rule=None,
-                    severity="standard",
-                    auto_approve_at_ms=None,
-                    auto_reject_at_ms=None,
-                    timeout_ms=timeout_ms,
-                )
             now_ms = int(time.time() * 1000)
             return _RuleDecision(
                 is_immediate=False,

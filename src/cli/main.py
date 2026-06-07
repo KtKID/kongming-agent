@@ -73,15 +73,12 @@ def _resolve_cli_session_id(
     session_id: str | None,
     *,
     smoke: bool,
-    subagent_smoke: bool,
 ) -> str:
     """在审批和运行时装配前解析 CLI 会话 ID。"""
     if session_id:
         return session_id
     if smoke:
         return "smoke"
-    if subagent_smoke:
-        return "subagent-smoke"
     return _generate_cli_session_id()
 
 
@@ -339,7 +336,6 @@ async def _run(
     resolved_session_id = _resolve_cli_session_id(
         session_id,
         smoke=smoke,
-        subagent_smoke=subagent_smoke,
     )
 
     # CLI 参数 --reasoning-effort 覆盖 config 文件里的设置。

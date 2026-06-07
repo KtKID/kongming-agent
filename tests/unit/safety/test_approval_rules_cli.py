@@ -32,11 +32,12 @@ class _RaisingPolicy:
         return True
 
 
-# 验证真实规则集下，CLI 安全命令未命中启用规则时直接返回批准。
-def test_cli_safe_command_with_real_policy_returns_immediate_approved(tmp_path: Path) -> None:
+# 验证真实规则集下，CLI 安全命令未命中危险规则时进入自动同意倒计时。
+def test_cli_safe_command_with_real_policy_starts_auto_approve(tmp_path: Path) -> None:
     policy = _real_policy(tmp_path)
     rules = ApprovalRules(policy=policy)
 
+    before_ms = int(time.time() * 1000)
     dec = rules.classify(
         channel="cli",
         thread_id="cli-session",
@@ -44,10 +45,12 @@ def test_cli_safe_command_with_real_policy_returns_immediate_approved(tmp_path: 
         tool_name="run_shell",
         tool_input={"command": "ls"},
     )
+    after_ms = int(time.time() * 1000)
 
-    assert dec.is_immediate is True
-    assert dec.immediate_outcome == "approved"
-    assert dec.auto_approve_at_ms is None
+    assert dec.is_immediate is False
+    assert dec.immediate_outcome is None
+    assert dec.auto_approve_at_ms is not None
+    assert before_ms + 10_000 <= dec.auto_approve_at_ms <= after_ms + 10_000 + 1
     assert dec.auto_reject_at_ms is None
     assert dec.timeout_ms == 10_000
 

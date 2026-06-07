@@ -15,6 +15,7 @@ def _pending(
     *,
     severity: str = "standard",
     matched_rule: str | None = None,
+    auto_approve_at_ms: int | None = None,
     auto_reject_at_ms: int | None = None,
     timeout_ms: int | None = 60_000,
 ) -> _PendingApproval:
@@ -35,7 +36,7 @@ def _pending(
         },
         severity=severity,
         matched_rule=matched_rule,
-        auto_approve_at_ms=None,
+        auto_approve_at_ms=auto_approve_at_ms,
         auto_reject_at_ms=auto_reject_at_ms,
         future=future,
         timeout_ms=timeout_ms,
@@ -68,6 +69,34 @@ async def test_cli_sink_accept_for_session_resolves_as_once_payload() -> None:
     assert captured[0].metadata["cwd"] == "/proj"
     assert captured[0].metadata["approval_channel"] == "cli"
     assert captured[0].metadata["timeout_ms"] == 60_000
+
+
+# 验证 CLI 接收器会把安全路径自动同意 deadline 透传给终端 prompt。
+async def test_cli_sink_projects_auto_approve_metadata() -> None:
+    manager = ApprovalManager(rules=ApprovalRules())
+    captured: list[ApprovalRequest] = []
+
+    async def prompt(request: ApprovalRequest) -> ApprovalAction:
+        captured.append(request)
+        return ApprovalAction.ACCEPT_ONCE
+
+    pending = _pending(
+        asyncio.get_running_loop(),
+        severity="standard",
+        auto_approve_at_ms=54_321,
+        timeout_ms=10_000,
+    )
+    manager._pending[pending.request_id] = pending
+    sink = CLIApprovalEventSink(manager, prompt)
+
+    await sink.emit_approval_required(pending=pending)
+
+    assert pending.future.done()
+    assert pending.future.result().outcome == "approved"
+    assert captured[0].metadata["severity"] == "standard"
+    assert captured[0].metadata["auto_approve_at_ms"] == 54_321
+    assert captured[0].metadata["auto_reject_at_ms"] is None
+    assert captured[0].metadata["timeout_ms"] == 10_000
 
 
 # 验证 CLI 接收器会把危险规则、自动拒绝 deadline 和超时配置透传给终端 prompt。

@@ -35,6 +35,7 @@ import asyncio
 import select
 import sys
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import click
@@ -48,6 +49,14 @@ _PERSIST_CONFIRM_PROMPT = (
     "safety.allow_tools_silent). Confirm? [y/N] "
 )
 _CLI_MANAGER_MAX_WAIT_MS = 10_000
+
+
+@dataclass(frozen=True)
+class _CliManagerTimeout:
+    """CLI manager 倒计时配置。"""
+
+    deadline_ms: int
+    default_action: ApprovalAction
 
 
 def build_cli_action_prompt(
@@ -179,13 +188,22 @@ async def _prompt_cli_manager_two_choice(
     metadata: dict[str, Any],
     is_tty: bool,
 ) -> ApprovalAction:
-    """CLI manager 专用两选项：允许一次 / 拒绝，默认拒绝。"""
+    """CLI manager 专用两选项：允许一次 / 拒绝，超时按规则默认动作处理。"""
+    timeout = _resolve_cli_manager_timeout(metadata)
     if not is_tty:
+        if _has_auto_deadline(metadata):
+            default_text = (
+                "同意" if timeout.default_action is ApprovalAction.ACCEPT_ONCE else "拒绝"
+            )
+            click.echo(f"[approval] CLI 非 TTY 请求将在倒计时后自动{default_text}。", err=True)
+            await _wait_until_deadline(timeout.deadline_ms)
+            return timeout.default_action
         click.echo("[approval] CLI 非 TTY 请求默认拒绝。", err=True)
-        return ApprovalAction.REJECT
+        return timeout.default_action
 
-    deadline_ms = _resolve_cli_manager_deadline_ms(metadata)
-    raw = await _read_cli_manager_choice(deadline_ms=deadline_ms)
+    raw = await _read_cli_manager_choice(timeout=timeout)
+    if raw is None:
+        return timeout.default_action
     answer = (raw or "").strip().lower()
     if answer in {"y", "yes"}:
         return ApprovalAction.ACCEPT_ONCE
@@ -210,12 +228,19 @@ async def _read_line(prompt_text: str) -> str:
         return ""
 
 
-async def _read_cli_manager_choice(*, deadline_ms: int) -> str:
-    """读取 CLI manager 两选项输入；超时 / 中断都返回空字符串。"""
+async def _read_cli_manager_choice(*, timeout: _CliManagerTimeout) -> str | None:
+    """读取 CLI manager 两选项输入；None 表示倒计时到点。"""
     try:
-        return await asyncio.to_thread(_blocking_cli_manager_readline_with_countdown, deadline_ms)
+        return await asyncio.to_thread(_blocking_cli_manager_readline_with_countdown, timeout)
     except (EOFError, KeyboardInterrupt):
         return ""
+
+
+async def _wait_until_deadline(deadline_ms: int) -> None:
+    """非 TTY 路径等待默认动作 deadline。"""
+    now_ms = int(time.time() * 1000)
+    delay_seconds = max(0.0, (deadline_ms - now_ms) / 1000.0)
+    await asyncio.sleep(delay_seconds)
 
 
 def _blocking_readline(prompt_text: str) -> str:
@@ -227,17 +252,23 @@ def _blocking_readline(prompt_text: str) -> str:
     return line.rstrip("\n")
 
 
-def _blocking_cli_manager_readline_with_countdown(deadline_ms: int) -> str:
+def _blocking_cli_manager_readline_with_countdown(timeout: _CliManagerTimeout) -> str | None:
     """单行动态倒计时读取输入，避免每秒刷出新行。"""
     while True:
         now_ms = int(time.time() * 1000)
-        remaining_ms = deadline_ms - now_ms
+        remaining_ms = timeout.deadline_ms - now_ms
         if remaining_ms <= 0:
-            sys.stdout.write("\r\033[K[approval] 自动拒绝。\n")
+            final_text = (
+                "自动同意" if timeout.default_action is ApprovalAction.ACCEPT_ONCE else "自动拒绝"
+            )
+            sys.stdout.write(f"\r\033[K[approval] {final_text}。\n")
             sys.stdout.flush()
-            return ""
+            return None
 
-        prompt_text = _format_cli_manager_prompt(remaining_ms=remaining_ms)
+        prompt_text = _format_cli_manager_prompt(
+            remaining_ms=remaining_ms,
+            default_action=timeout.default_action,
+        )
         sys.stdout.write("\r\033[K" + prompt_text)
         sys.stdout.flush()
 
@@ -259,9 +290,14 @@ def _blocking_cli_manager_readline_with_countdown(deadline_ms: int) -> str:
         return line.rstrip("\n")
 
 
-def _format_cli_manager_prompt(*, remaining_ms: int) -> str:
+def _format_cli_manager_prompt(
+    *,
+    remaining_ms: int,
+    default_action: ApprovalAction,
+) -> str:
     remaining_seconds = max(0, (remaining_ms + 999) // 1000)
-    return f"允许一次？[y]=允许  [n/Enter]=拒绝  自动拒绝 {remaining_seconds}s > "
+    auto_text = "自动同意" if default_action is ApprovalAction.ACCEPT_ONCE else "自动拒绝"
+    return f"允许一次？[y]=允许  [n/Enter]=拒绝  {auto_text} {remaining_seconds}s > "
 
 
 def _stdin_is_tty() -> bool:
@@ -284,8 +320,8 @@ def _metadata_is_elevated(metadata: dict[str, Any]) -> bool:
     )
 
 
-def _resolve_cli_manager_deadline_ms(metadata: dict[str, Any]) -> int:
-    """CLI 等待截止时间：采用规则 deadline，并限制终端最长等待 10 秒。"""
+def _resolve_cli_manager_timeout(metadata: dict[str, Any]) -> _CliManagerTimeout:
+    """CLI 等待截止时间与默认动作。"""
     now_ms = int(time.time() * 1000)
     candidates = [now_ms + _CLI_MANAGER_MAX_WAIT_MS]
     auto_reject_at_ms = _first_int_metadata(
@@ -295,10 +331,42 @@ def _resolve_cli_manager_deadline_ms(metadata: dict[str, Any]) -> int:
     )
     if auto_reject_at_ms is not None:
         candidates.append(auto_reject_at_ms)
+        return _CliManagerTimeout(
+            deadline_ms=min(candidates),
+            default_action=ApprovalAction.REJECT,
+        )
+
+    auto_approve_at_ms = _first_int_metadata(
+        metadata,
+        "auto_approve_at_ms",
+        "autoApproveAtMs",
+    )
+    if auto_approve_at_ms is not None:
+        candidates.append(auto_approve_at_ms)
+        return _CliManagerTimeout(
+            deadline_ms=min(candidates),
+            default_action=ApprovalAction.ACCEPT_ONCE,
+        )
+
     timeout_ms = _first_int_metadata(metadata, "timeout_ms", "timeoutMs")
     if timeout_ms is not None and timeout_ms > 0:
         candidates.append(now_ms + timeout_ms)
-    return min(candidates)
+    return _CliManagerTimeout(
+        deadline_ms=min(candidates),
+        default_action=ApprovalAction.REJECT,
+    )
+
+
+def _resolve_cli_manager_deadline_ms(metadata: dict[str, Any]) -> int:
+    """兼容测试辅助：返回 CLI manager deadline。"""
+    return _resolve_cli_manager_timeout(metadata).deadline_ms
+
+
+def _has_auto_deadline(metadata: dict[str, Any]) -> bool:
+    return (
+        _first_int_metadata(metadata, "auto_reject_at_ms", "autoRejectAtMs") is not None
+        or _first_int_metadata(metadata, "auto_approve_at_ms", "autoApproveAtMs") is not None
+    )
 
 
 def _first_int_metadata(metadata: dict[str, Any], *keys: str) -> int | None:

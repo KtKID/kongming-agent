@@ -96,18 +96,22 @@ def _request(command: str, *, call_id: str = "call-1") -> ApprovalRequest:
 
 
 @pytest.mark.e2e
-# 验证 CLI 自动允许命中时直接批准，并且不触发终端审批提示。
-async def test_cli_auto_allow_executes_without_terminal_prompt(tmp_path: Path) -> None:
+# 验证 CLI 自动允许命中时进入终端提示，并携带自动同意 deadline。
+async def test_cli_auto_allow_projects_auto_approve_metadata(tmp_path: Path) -> None:
     approval, captured = _approval_provider(
         _config(tmp_path),
         policy=_policy(tmp_path, enabled=True),
-        actions=(),
+        actions=(ApprovalAction.ACCEPT_ONCE,),
     )
 
     decision = await approval.decide(_request("ls"))
 
     assert decision.outcome == "approved"
-    assert captured == []
+    assert len(captured) == 1
+    assert captured[0].metadata["approval_channel"] == "cli"
+    assert captured[0].metadata["auto_approve_at_ms"] is not None
+    assert captured[0].metadata["auto_reject_at_ms"] is None
+    assert captured[0].metadata["timeout_ms"] == 10
 
 
 @pytest.mark.e2e

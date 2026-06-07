@@ -71,17 +71,19 @@ async def test_cli_manager_prompt_fn_routes_through_cli_sink(monkeypatch, tmp_pa
     assert captured[0].metadata["cwd"] == str(tmp_path)
 
 
-# 验证 CLI 自动允许命中时直接返回一次性同意，并跳过终端审批函数。
-async def test_cli_manager_prompt_fn_auto_allow_skips_terminal_prompt(
+# 验证 CLI 自动允许命中时会进入 CLI 接收器，并携带自动同意 deadline。
+async def test_cli_manager_prompt_fn_auto_allow_projects_deadline(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     reset_for_testing()
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli_main, "_build_cli_auto_approval_policy", lambda: _AutoAllowPolicy())
+    captured: list[ApprovalRequest] = []
 
-    async def prompt(_request: ApprovalRequest) -> ApprovalAction:
-        raise AssertionError("自动允许路径不应触发终端审批")
+    async def prompt(request: ApprovalRequest) -> ApprovalAction:
+        captured.append(request)
+        return ApprovalAction.ACCEPT_ONCE
 
     prompt.__action_aware__ = True  # type: ignore[attr-defined]
     monkeypatch.setattr(cli.approval, "build_cli_action_prompt", lambda: prompt)
@@ -100,3 +102,7 @@ async def test_cli_manager_prompt_fn_auto_allow_skips_terminal_prompt(
     )
 
     assert action == ApprovalAction.ACCEPT_ONCE
+    assert len(captured) == 1
+    assert captured[0].metadata["approval_channel"] == "cli"
+    assert captured[0].metadata["auto_approve_at_ms"] is not None
+    assert captured[0].metadata["auto_reject_at_ms"] is None
