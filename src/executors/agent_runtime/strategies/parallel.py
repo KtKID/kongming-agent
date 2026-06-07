@@ -11,12 +11,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from executors.agent_runtime.workflow_execution_context import WorkflowExecutionContext
-from executors.agent_runtime.workflow_strategy_description import (
+from executors.agent_runtime.strategies.description import (
     WorkflowStrategyCatalogEntry,
     WorkflowStrategyDescription,
     WorkflowStrategyInputField,
 )
+from executors.agent_runtime.workflow.context import WorkflowExecutionContext
 
 
 class ParallelWorkflowStrategy:

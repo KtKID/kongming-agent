@@ -20,10 +20,15 @@ from pathlib import Path
 from typing import Any, Literal
 
 from config_loader.models import Config
-from executors.agent_runtime.agent_workflow_strategy_manager import (
+from executors.agent_runtime.strategies.base import WorkflowRunRequest
+from executors.agent_runtime.strategies.description import (
+    WorkflowStrategyCatalogEntry,
+    WorkflowStrategyDescription,
+)
+from executors.agent_runtime.strategies.manager import (
     AgentWorkflowStrategyManager,
 )
-from executors.agent_runtime.parallel_workflow_strategy import ParallelWorkflowStrategy
+from executors.agent_runtime.strategies.parallel import ParallelWorkflowStrategy
 from executors.agent_runtime.subagent_manager import SubAgentManager, SubAgentRun, SubAgentTask
 from executors.agent_runtime.subagent_permissions import (
     SubAgentCreationRecord,
@@ -32,12 +37,7 @@ from executors.agent_runtime.subagent_permissions import (
     to_jsonable,
     validate_scoped_tool_names,
 )
-from executors.agent_runtime.workflow_execution_context import WorkflowExecutionContext
-from executors.agent_runtime.workflow_strategy import WorkflowRunRequest
-from executors.agent_runtime.workflow_strategy_description import (
-    WorkflowStrategyCatalogEntry,
-    WorkflowStrategyDescription,
-)
+from executors.agent_runtime.workflow.context import WorkflowExecutionContext
 
 WorkflowMode = Literal["parallel"]
 

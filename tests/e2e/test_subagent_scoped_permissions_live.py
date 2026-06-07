@@ -17,10 +17,10 @@ import pytest
 from cli.main import _apply_model_preset_or_exit
 from config_loader import load_config
 from core.agent_spec import AgentSpec
-from executors.agent_runtime.agent_workflow_manager import AgentWorkflowManager
 from executors.agent_runtime.native_runtime import NativeRuntime
 from executors.agent_runtime.subagent_manager import SubAgentManager, SubAgentTask
 from executors.agent_runtime.subagent_permissions import SubAgentPermissionSpec
+from executors.agent_runtime.workflow.manager import AgentWorkflowManager
 from tools import AutoAllowApproval, ToolRegistry, build_file_tools
 
 pytestmark = pytest.mark.skipif(

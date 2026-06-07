@@ -22,13 +22,13 @@ from core.agent_spec import AgentSpec
 from core.contracts import LLMRequest, LLMResponse, ToolContext
 from core.message import Message, ToolCall
 from core.runner import Runner
-from executors.agent_runtime.agent_workflow_manager import (
+from executors.agent_runtime.native_runtime import NativeRuntime
+from executors.agent_runtime.strategies.base import WorkflowRunRequest, WorkflowStrategyNotFound
+from executors.agent_runtime.subagent_manager import SubAgentManager, SubAgentTask
+from executors.agent_runtime.workflow.manager import (
     AgentWorkflowManager,
     SubAgentReportProjection,
 )
-from executors.agent_runtime.native_runtime import NativeRuntime
-from executors.agent_runtime.subagent_manager import SubAgentManager, SubAgentTask
-from executors.agent_runtime.workflow_strategy import WorkflowRunRequest, WorkflowStrategyNotFound
 from tools import AutoAllowApproval, ToolRegistry
 from tools.agent_workflow_tool import AgentWorkflowHandle, build_agent_workflow_tool
 from tools.file_tools import build_file_tools

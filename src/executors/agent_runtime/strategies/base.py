@@ -12,11 +12,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from executors.agent_runtime.workflow_execution_context import WorkflowExecutionContext
-from executors.agent_runtime.workflow_strategy_description import (
+from executors.agent_runtime.strategies.description import (
     WorkflowStrategyCatalogEntry,
     WorkflowStrategyDescription,
 )
+from executors.agent_runtime.workflow.context import WorkflowExecutionContext
 
 
 @dataclass(frozen=True)

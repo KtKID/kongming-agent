@@ -13,20 +13,20 @@ from pathlib import Path
 import pytest
 
 from config_loader.models import Config, ModelConfig
-from executors.agent_runtime.agent_workflow_manager import AgentWorkflowManager
-from executors.agent_runtime.agent_workflow_strategy_manager import (
-    AgentWorkflowStrategyManager,
-)
-from executors.agent_runtime.workflow_execution_context import WorkflowExecutionContext
-from executors.agent_runtime.workflow_strategy import (
+from executors.agent_runtime.strategies.base import (
     WorkflowRunRequest,
     WorkflowStrategyNotFound,
     WorkflowStrategyNotRunnable,
 )
-from executors.agent_runtime.workflow_strategy_description import (
+from executors.agent_runtime.strategies.description import (
     WorkflowStrategyDescription,
     WorkflowStrategyInputField,
 )
+from executors.agent_runtime.strategies.manager import (
+    AgentWorkflowStrategyManager,
+)
+from executors.agent_runtime.workflow.context import WorkflowExecutionContext
+from executors.agent_runtime.workflow.manager import AgentWorkflowManager
 
 
 class _AuditWriter:

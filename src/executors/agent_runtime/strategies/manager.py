@@ -10,17 +10,17 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from executors.agent_runtime.workflow_execution_context import WorkflowExecutionContext
-from executors.agent_runtime.workflow_strategy import (
+from executors.agent_runtime.strategies.base import (
     WorkflowRunRequest,
     WorkflowStrategy,
     WorkflowStrategyNotFound,
     WorkflowStrategyNotRunnable,
 )
-from executors.agent_runtime.workflow_strategy_description import (
+from executors.agent_runtime.strategies.description import (
     WorkflowStrategyCatalogEntry,
     WorkflowStrategyDescription,
 )
+from executors.agent_runtime.workflow.context import WorkflowExecutionContext
 
 WorkflowContextFactory = Callable[[WorkflowRunRequest], WorkflowExecutionContext]
 

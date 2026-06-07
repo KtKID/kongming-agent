@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import pytest
 
-from executors.agent_runtime.map_reduce_contracts import (
+from executors.agent_runtime.strategies.map_reduce_contracts import (
     MapperOutputValidator,
     MapReduceContractError,
     parse_map_reduce_workflow_spec,
@@ -77,7 +77,7 @@ def _mapper_output_payload(
         "shard_id": "shard-001",
         "status": status,
         "summary": "One architecture finding found.",
-        "files_seen": ["src/executors/agent_runtime/agent_workflow_manager.py"],
+        "files_seen": ["src/executors/agent_runtime/workflow/manager.py"],
         "findings": [
             {
                 "dedupe_key": "agent-workflow-manager:strategy-registry",
@@ -87,7 +87,7 @@ def _mapper_output_payload(
                 "confidence": 0.82,
                 "locations": [
                     {
-                        "path": "src/executors/agent_runtime/agent_workflow_manager.py",
+                        "path": "src/executors/agent_runtime/workflow/manager.py",
                         "line_start": 34,
                         "line_end": 34,
                         "symbol": "WorkflowMode",
@@ -385,7 +385,7 @@ def test_mapper_output_validator_converts_code_findings_envelope_to_dataclasses(
     assert envelope is not None
     assert is_dataclass(envelope)
 
-    assert envelope.files_seen == ("src/executors/agent_runtime/agent_workflow_manager.py",)
+    assert envelope.files_seen == ("src/executors/agent_runtime/workflow/manager.py",)
     finding = envelope.findings[0]
     assert is_dataclass(finding)
     assert finding.severity == "P1"
@@ -393,7 +393,7 @@ def test_mapper_output_validator_converts_code_findings_envelope_to_dataclasses(
 
     location = finding.locations[0]
     assert is_dataclass(location)
-    assert location.path == "src/executors/agent_runtime/agent_workflow_manager.py"
+    assert location.path == "src/executors/agent_runtime/workflow/manager.py"
     assert location.line_start == 34
 
     assert is_dataclass(envelope.coverage)

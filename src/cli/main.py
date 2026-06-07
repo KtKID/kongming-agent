@@ -45,10 +45,10 @@ from context import (
 )
 from context.skill_loader import SkillSpec, format_skill_listing, load_skill_specs
 from core.contracts import EventSink, SupportsLLMStream
-from executors.agent_runtime.agent_workflow_manager import AgentWorkflowManager
 from executors.agent_runtime.native_runtime import NativeRuntime
 from executors.agent_runtime.subagent_manager import SubAgentManager, SubAgentTask
 from executors.agent_runtime.subagent_permissions import SubAgentPermissionSpec
+from executors.agent_runtime.workflow.manager import AgentWorkflowManager
 from host.cli_adapter import CLIAdapter, CLIEventSink
 from host.session_bridge import SessionBridge
 from memory import MemoryStore
