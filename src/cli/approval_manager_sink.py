@@ -55,12 +55,16 @@ class CLIApprovalEventSink:
 
 def _pending_to_request(pending: _PendingApproval) -> ApprovalRequest:
     metadata: dict[str, Any] = dict(pending.metadata or {})
-    metadata.setdefault("cwd", pending.cwd)
-    metadata.setdefault("approval_channel", pending.channel)
-    metadata.setdefault("approval_request_id", pending.request_id)
-    metadata.setdefault("severity", pending.severity)
+    metadata["cwd"] = pending.cwd
+    metadata["approval_channel"] = pending.channel
+    metadata["approval_request_id"] = pending.request_id
+    metadata["severity"] = pending.severity
+    metadata["timeout_ms"] = pending.timeout_ms
+    metadata["auto_approve_at_ms"] = pending.auto_approve_at_ms
+    metadata["auto_reject_at_ms"] = pending.auto_reject_at_ms
     if pending.matched_rule is not None:
-        metadata.setdefault("matched_rule", pending.matched_rule)
+        metadata["matched_rule"] = pending.matched_rule
+        metadata["blocked_by_rule"] = pending.matched_rule
 
     return ApprovalRequest(
         run_id=str(metadata.get("run_id") or ""),
@@ -75,12 +79,12 @@ def _pending_to_request(pending: _PendingApproval) -> ApprovalRequest:
 
 
 def _action_to_manager_payload(action: ApprovalAction) -> dict[str, Any]:
-    if action == ApprovalAction.ACCEPT_ONCE:
+    if action in {
+        ApprovalAction.ACCEPT_ONCE,
+        ApprovalAction.ACCEPT_FOR_SESSION,
+        ApprovalAction.ACCEPT_PERSIST,
+    }:
         return {"allow": True}
-    if action == ApprovalAction.ACCEPT_FOR_SESSION:
-        return {"allow": True, "rememberScope": "session"}
-    if action == ApprovalAction.ACCEPT_PERSIST:
-        return {"allow": True, "rememberScope": "persistent"}
     return {"allow": False}
 
 

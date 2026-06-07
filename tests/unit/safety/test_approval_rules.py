@@ -9,8 +9,8 @@
 1. ``test_classify_fail_closed_when_policy_none`` —— policy=None → 默认人工审批 + 60s。
 2. ``test_classify_returns_default_for_unmanaged_channels`` ——
    claude_code / cron / evolution 通道恒走默认（不调 policy.classify）。
-3. ``test_classify_blocked_forces_human_approval`` —— 策略返回
-   ``blocked_by_rule="bash_rm_any"`` → matched_rule 透传 + auto_approve_at_ms=None。
+3. ``test_classify_blocked_starts_auto_reject_countdown`` —— 策略返回
+   ``blocked_by_rule="bash_rm_any"`` → matched_rule 透传 + auto_reject_at_ms≈now+timeout。
 4. ``test_classify_auto_eligible_and_enabled_starts_auto_approve_countdown``
    —— auto_eligible=True + is_enabled_for(cwd)=True → ``auto_approve_at_ms ≈ now+timeout``。
 5. ``test_classify_auto_eligible_but_disabled_returns_default`` ——
@@ -171,15 +171,15 @@ def test_classify_returns_default_for_unmanaged_channels(
 
 
 # ---------------------------------------------------------------------------
-# 用例 3：blocked_by_rule → 强制人审（matched_rule 透传，不启自动通过）
+# 用例 3：blocked_by_rule → 危险待审 + 超时自动拒绝
 # ---------------------------------------------------------------------------
 
 
-def test_classify_blocked_forces_human_approval(common_input: dict[str, Any]) -> None:
-    """策略返回 blocked_by_rule="bash_rm_any" → 强制人审，``auto_approve_at_ms=None``。
+def test_classify_blocked_starts_auto_reject_countdown(common_input: dict[str, Any]) -> None:
+    """策略返回 blocked_by_rule="bash_rm_any" → 危险待审，并带自动拒绝 deadline。
 
     生产场景：用户在 Zap ON 的 cwd 下跑 ``Bash(rm -rf /tmp/foo)`` → 命中
-    24 规则中 ``bash_rm_any`` → 即使总开关 ON 也必须人审（守护危险操作）。
+    24 规则中 ``bash_rm_any`` → 终端 / Web 展示待审；用户不处理时按规则超时拒绝。
     """
     policy = _FakePolicy(
         next_decision=_FakeDecision(
@@ -191,6 +191,7 @@ def test_classify_blocked_forces_human_approval(common_input: dict[str, Any]) ->
     )
     rules = ApprovalRules(policy=policy)
 
+    before_ms = int(time.time() * 1000)
     dec = rules.classify(
         channel="generic_chat",
         cwd="/proj/foo",
@@ -198,11 +199,13 @@ def test_classify_blocked_forces_human_approval(common_input: dict[str, Any]) ->
         tool_name="Bash",
         tool_input={"command": "rm -rf /tmp/foo"},
     )
+    after_ms = int(time.time() * 1000)
 
     assert dec.matched_rule == "bash_rm_any"
     assert dec.auto_approve_at_ms is None, "阻断规则命中时不得启动自动通过倒计时"
-    assert dec.auto_reject_at_ms is None
-    assert dec.severity == "standard"
+    assert dec.auto_reject_at_ms is not None
+    assert before_ms + 10_000 <= dec.auto_reject_at_ms <= after_ms + 10_000 + 1
+    assert dec.severity == "elevated"
     assert dec.timeout_ms == 10_000  # 用 policy 返回的 timeout
     # is_elevated=False（阶段 1 generic_chat 都按 False）
     assert policy.classify_calls[0]["is_elevated"] is False
@@ -387,11 +390,11 @@ def test_add_session_grant_writes_thread_overrides() -> None:
 def test_add_session_grant_noop_for_unmanaged_channels() -> None:
     """未接入共享自动审批的通道调 ``add_session_grant`` 静默 no-op。
 
-    generic_chat 和 cli 共用审批管理器线程级授权；claude_code 走
-    WebHostAdapter 直调 policy，cron / evolution 后续 task 接入。
+    generic_chat 保留审批管理器线程级授权；CLI 终端只支持单次允许 / 拒绝。
+    claude_code 走 WebHostAdapter 直调 policy，cron / evolution 后续 task 接入。
     """
     rules = ApprovalRules()
-    for channel in ("claude_code", "cron", "evolution", "unknown"):
+    for channel in ("cli", "claude_code", "cron", "evolution", "unknown"):
         rules.add_session_grant(
             channel=channel,
             thread_id="thread-x",
@@ -401,8 +404,8 @@ def test_add_session_grant_noop_for_unmanaged_channels() -> None:
     assert rules._thread_overrides == {}
 
 
-def test_add_session_grant_writes_for_cli() -> None:
-    """CLI 通道调用 ``add_session_grant`` 会写入 ``_thread_overrides``。"""
+def test_add_session_grant_noop_for_cli() -> None:
+    """CLI 通道调用 ``add_session_grant`` 静默 no-op。"""
     rules = ApprovalRules()
 
     rules.add_session_grant(
@@ -412,7 +415,7 @@ def test_add_session_grant_writes_for_cli() -> None:
         tool_name="run_shell",
     )
 
-    assert ("/proj/foo", "run_shell") in rules._thread_overrides["thread-cli"]
+    assert rules._thread_overrides == {}
 
 
 def test_add_session_grant_noop_on_empty_keys() -> None:
@@ -528,12 +531,12 @@ def test_classify_thread_grant_isolation_per_cwd_and_tool() -> None:
     assert dec_tool.is_immediate is False
 
 
-def test_classify_thread_grant_blocked_by_rule_overrides_grant() -> None:
-    """**关键安全证据**：线程级授权命中 + policy.blocked_by_rule → 强制人审。
+def test_classify_thread_grant_blocked_by_rule_starts_auto_reject() -> None:
+    """**关键安全证据**：线程级授权命中 + policy.blocked_by_rule → 超时自动拒绝。
 
     防御 rm 等危险规则被本次会话授权绕过——用户即使对 Bash 点了
     「本次会话都同意」，下次跑 ``rm -rf`` 仍命中 ``bash_rm_any``
-    必须人审，不能走 immediate allow。
+    进入待审，并带自动拒绝 deadline。
     """
     policy = _FakePolicy(
         next_decision=_FakeDecision(
@@ -551,6 +554,7 @@ def test_classify_thread_grant_blocked_by_rule_overrides_grant() -> None:
         tool_name="Bash",
     )
 
+    before_ms = int(time.time() * 1000)
     dec = rules.classify(
         channel="generic_chat",
         thread_id="thread-danger",
@@ -558,15 +562,19 @@ def test_classify_thread_grant_blocked_by_rule_overrides_grant() -> None:
         tool_name="Bash",
         tool_input={"command": "rm -rf /tmp/some"},
     )
+    after_ms = int(time.time() * 1000)
 
     # 关键断言：危险规则优先级最高，本次会话授权不放行
     assert dec.is_immediate is False, (
-        "本次会话授权命中后，命中 blocked_by_rule 必须强制人审；"
-        "否则 rm 之类危险命令会被本次会话授权绕过 → 严重安全漏洞"
+        "本次会话授权命中后，命中 blocked_by_rule 必须进入待审；"
+        "rm 之类危险命令需要继续受自动拒绝 deadline 保护"
     )
     assert dec.immediate_outcome is None
     assert dec.matched_rule == "bash_rm_any"
     assert dec.auto_approve_at_ms is None
+    assert dec.auto_reject_at_ms is not None
+    assert before_ms + 15_000 <= dec.auto_reject_at_ms <= after_ms + 15_000 + 1
+    assert dec.severity == "elevated"
     assert dec.timeout_ms == 15_000  # 用 policy 返回的 timeout
 
 
@@ -598,9 +606,9 @@ def test_classify_thread_grant_fails_closed_when_policy_none() -> None:
 
 
 def test_classify_thread_grant_applies_to_managed_channels_only() -> None:
-    """线程级授权写入 _thread_overrides 后，仅托管通道查得到。
+    """线程级授权写入 _thread_overrides 后，仅 generic_chat 查得到。
 
-    generic_chat 和 cli 接入共享自动审批；其他通道保持隔离。
+    CLI 接入共享自动审批规则，但终端交互不使用 session grant。
     """
     policy = _FakePolicy(
         next_decision=_FakeDecision(auto_eligible=False, blocked_by_rule=None, timeout_ms=10_000),
@@ -609,18 +617,17 @@ def test_classify_thread_grant_applies_to_managed_channels_only() -> None:
     rules = ApprovalRules(policy=policy)
     rules._thread_overrides.setdefault("thread-x", set()).add(("/proj/foo", "Bash"))
 
-    for channel in ("generic_chat", "cli"):
-        dec = rules.classify(
-            channel=channel,
-            thread_id="thread-x",
-            cwd="/proj/foo",
-            tool_name="Bash",
-            tool_input={"command": "ls"},
-        )
-        assert dec.is_immediate is True, f"channel={channel} 应命中 manager grant"
-        assert dec.immediate_outcome == "approved"
+    dec_generic = rules.classify(
+        channel="generic_chat",
+        thread_id="thread-x",
+        cwd="/proj/foo",
+        tool_name="Bash",
+        tool_input={"command": "ls"},
+    )
+    assert dec_generic.is_immediate is True
+    assert dec_generic.immediate_outcome == "approved"
 
-    for channel in ("claude_code", "cron", "evolution"):
+    for channel in ("cli", "claude_code", "cron", "evolution"):
         dec = rules.classify(
             channel=channel,
             thread_id="thread-x",

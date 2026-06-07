@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -51,10 +52,11 @@ def test_cli_safe_command_with_real_policy_returns_immediate_approved(tmp_path: 
     assert dec.timeout_ms == 10_000
 
 
-# 验证真实规则集下，CLI 危险命令命中 ``bash_rm_any`` 后强制进入人工审批。
-def test_cli_blocked_rule_with_real_policy_forces_human_approval(tmp_path: Path) -> None:
+# 验证真实规则集下，CLI 危险命令命中 ``bash_rm_any`` 后进入自动拒绝倒计时。
+def test_cli_blocked_rule_with_real_policy_starts_auto_reject(tmp_path: Path) -> None:
     rules = ApprovalRules(policy=_real_policy(tmp_path))
 
+    before_ms = int(time.time() * 1000)
     dec = rules.classify(
         channel="cli",
         thread_id="cli-session",
@@ -62,17 +64,20 @@ def test_cli_blocked_rule_with_real_policy_forces_human_approval(tmp_path: Path)
         tool_name="run_shell",
         tool_input={"command": "rm -rf tmp"},
     )
+    after_ms = int(time.time() * 1000)
 
     assert dec.is_immediate is False
     assert dec.matched_rule == "bash_rm_any"
     assert dec.auto_approve_at_ms is None
-    assert dec.auto_reject_at_ms is None
+    assert dec.auto_reject_at_ms is not None
+    assert before_ms + 10_000 <= dec.auto_reject_at_ms <= after_ms + 10_000 + 1
+    assert dec.severity == "elevated"
     assert dec.timeout_ms == 10_000
 
 
-# 验证 CLI 本次会话授权只放行普通命令，后续真实危险规则仍会拦住。
-def test_cli_session_grant_still_checks_real_blocked_rule_guard(tmp_path: Path) -> None:
-    rules = ApprovalRules(policy=_real_policy(tmp_path))
+# 验证 CLI 本次会话授权写入为 no-op，后续普通命令仍按开关状态进入人工审批。
+def test_cli_session_grant_is_noop(tmp_path: Path) -> None:
+    rules = ApprovalRules(policy=_real_policy(tmp_path, enabled=False))
     rules.add_session_grant(
         channel="cli",
         thread_id="cli-session",
@@ -88,23 +93,14 @@ def test_cli_session_grant_still_checks_real_blocked_rule_guard(tmp_path: Path) 
         tool_input={"command": "ls"},
     )
 
-    assert allowed.is_immediate is True
-    assert allowed.immediate_outcome == "approved"
-
-    blocked = rules.classify(
-        channel="cli",
-        thread_id="cli-session",
-        cwd="/proj",
-        tool_name="run_shell",
-        tool_input={"command": "rm -rf tmp"},
-    )
-
-    assert blocked.is_immediate is False
-    assert blocked.matched_rule == "bash_rm_any"
-    assert blocked.timeout_ms == 10_000
+    assert allowed.is_immediate is False
+    assert allowed.immediate_outcome is None
+    assert allowed.matched_rule is None
+    assert allowed.timeout_ms == 60_000
+    assert rules._thread_overrides == {}
 
 
-# 验证缺少自动审批策略时，CLI 本次会话授权采用失败关闭并回到人工审批。
+# 验证缺少自动审批策略时，CLI 本次会话授权仍为 no-op，并回到人工审批。
 def test_cli_session_grant_fails_closed_when_policy_missing() -> None:
     rules = ApprovalRules(policy=None)
     rules.add_session_grant(

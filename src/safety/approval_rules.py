@@ -29,6 +29,7 @@ from typing import Any, Protocol
 logger = logging.getLogger(__name__)
 
 _AUTO_APPROVAL_CHANNELS: frozenset[str] = frozenset({"generic_chat", "cli"})
+_SESSION_GRANT_CHANNELS: frozenset[str] = frozenset({"generic_chat"})
 
 
 @dataclass
@@ -43,7 +44,7 @@ class _RuleDecision:
         matched_rule: 命中的规则 ID（如 ``"bash_rm_any"``）；未命中 = None
         severity: ``'standard'`` / ``'elevated'``（用于收件箱载荷 + UI 渲染）
         auto_approve_at_ms: 安全路径倒计时到点 ms；非自动通过路径恒 None
-        auto_reject_at_ms: 危险路径倒计时到点 ms；当前实现恒 None（规则命中改强制人审，不倒计时拒绝）
+        auto_reject_at_ms: 危险路径倒计时到点 ms；非自动拒绝路径恒 None
         timeout_ms: 用户决策的超时阈值；兜底 60_000（与 WebHostAdapter._timeout 默认一致）
     """
 
@@ -182,7 +183,7 @@ class ApprovalRules:
             if policy is None:                     → 失败关闭默认 ask + 60s
             elif channel not in {'generic_chat','cli'}:
                                                      → 默认 ask + 60s
-            elif pdec.blocked_by_rule:             → 强制人审（不启自动通过；matched_rule 透传）
+            elif pdec.blocked_by_rule:             → 危险待审 + 超时自动拒绝（matched_rule 透传）
             elif channel == 'cli' and auto enabled: → 立即批准
             elif pdec.auto_eligible and enabled:   → 自动通过倒计时（timeout 兜底 60s）
             else:                                  → 默认 ask + 60s
@@ -208,9 +209,10 @@ class ApprovalRules:
         #    用户在此 thread 之前点过「本次会话都同意」→ 命中后**仍要查
         #    策略的 blocked_by_rule**，危险规则（rm 等）优先级最高，绝不允许
         #    本次会话授权绕过守护；策略缺失时无法检查危险规则，默认 ask。
-        if channel in _AUTO_APPROVAL_CHANNELS and (cwd, tool_name) in self._thread_overrides.get(
-            thread_id, set()
-        ):
+        if channel in _SESSION_GRANT_CHANNELS and (
+            cwd,
+            tool_name,
+        ) in self._thread_overrides.get(thread_id, set()):
             if self._policy is None:
                 return self._default_decision()
 
@@ -230,15 +232,10 @@ class ApprovalRules:
                 )
                 return self._default_decision()
             if pdec_guard.blocked_by_rule:
-                # 危险规则命中 → 强制人审（即使本次会话授权也不放行）
+                # 危险规则命中 → 等待用户明确允许；超时按规则默认拒绝。
                 timeout_ms_guard = pdec_guard.timeout_ms if pdec_guard.timeout_ms > 0 else 60_000
-                return _RuleDecision(
-                    is_immediate=False,
-                    immediate_outcome=None,
+                return self._blocked_decision(
                     matched_rule=pdec_guard.blocked_by_rule,
-                    severity="standard",
-                    auto_approve_at_ms=None,
-                    auto_reject_at_ms=None,
                     timeout_ms=timeout_ms_guard,
                 )
 
@@ -285,15 +282,10 @@ class ApprovalRules:
         # timeout 兜底：策略返回 ≤0 时降级 60s（用户硬约束）
         timeout_ms = pdec.timeout_ms if pdec.timeout_ms > 0 else 60_000
 
-        # 4. 命中危险规则 → 强制人审（不启 auto-approve）
+        # 4. 命中危险规则 → 等待用户明确允许；超时按规则默认拒绝。
         if pdec.blocked_by_rule:
-            return _RuleDecision(
-                is_immediate=False,
-                immediate_outcome=None,
+            return self._blocked_decision(
                 matched_rule=pdec.blocked_by_rule,
-                severity="standard",
-                auto_approve_at_ms=None,  # 不启自动通过
-                auto_reject_at_ms=None,
                 timeout_ms=timeout_ms,
             )
 
@@ -342,8 +334,8 @@ class ApprovalRules:
     ) -> None:
         """用户点弹卡「本次会话都同意」后调用，向 thread 级覆盖加规则。
 
-        generic_chat / cli 通道共用。claude_code 走 WebHostAdapter 直调 policy；
-        cron / evolution 后续接入时再扩展。
+        仅 generic_chat 写入。CLI 终端交互只支持单次允许 / 拒绝，
+        claude_code 走 WebHostAdapter 直调 policy；cron / evolution 后续接入时再扩展。
 
         语义：``(cwd, tool_name)`` 写入 ``_thread_overrides[thread_id]``；下次
         同 thread + cwd + tool 的 :meth:`classify` 命中此集 → 立即允许
@@ -355,7 +347,7 @@ class ApprovalRules:
             cwd: 触发审批的工作目录
             tool_name: 工具名（如 ``"Bash"`` / ``"Edit"``）
         """
-        if channel not in _AUTO_APPROVAL_CHANNELS:
+        if channel not in _SESSION_GRANT_CHANNELS:
             # 防御性：未接入共享自动审批的通道不写入审批管理器授权
             return
         if not thread_id or not cwd or not tool_name:
@@ -379,6 +371,20 @@ class ApprovalRules:
         return len(self._thread_overrides.pop(thread_id, set()))
 
     # ----- 内部 -----
+
+    @staticmethod
+    def _blocked_decision(*, matched_rule: str, timeout_ms: int) -> _RuleDecision:
+        """危险规则命中：人工可显式允许，超时默认拒绝。"""
+        now_ms = int(time.time() * 1000)
+        return _RuleDecision(
+            is_immediate=False,
+            immediate_outcome=None,
+            matched_rule=matched_rule,
+            severity="elevated",
+            auto_approve_at_ms=None,
+            auto_reject_at_ms=now_ms + timeout_ms,
+            timeout_ms=timeout_ms,
+        )
 
     @staticmethod
     def _default_decision() -> _RuleDecision:

@@ -138,8 +138,8 @@ async def test_cli_ask_path_uses_terminal_prompt(
 
 
 @pytest.mark.e2e
-# 验证真实危险规则命中时，CLI 自动审批仍进入终端提示并可被拒绝。
-async def test_cli_danger_rule_forces_prompt_and_can_reject(tmp_path: Path) -> None:
+# 验证真实危险规则命中时，CLI 自动审批进入终端提示，并携带自动拒绝 deadline。
+async def test_cli_danger_rule_projects_auto_reject_metadata(tmp_path: Path) -> None:
     approval, captured = _approval_provider(
         _config(tmp_path),
         policy=_policy(tmp_path, enabled=True, rule_set=load_default_rules()),
@@ -150,24 +150,27 @@ async def test_cli_danger_rule_forces_prompt_and_can_reject(tmp_path: Path) -> N
 
     assert decision.outcome == "rejected"
     assert len(captured) == 1
+    assert captured[0].metadata["severity"] == "elevated"
+    assert captured[0].metadata["matched_rule"] == "bash_rm_any"
+    assert captured[0].metadata["auto_reject_at_ms"] is not None
+    assert captured[0].metadata["timeout_ms"] == 10
 
 
 @pytest.mark.e2e
-# 验证 CLI 本次会话同意写入审批管理器线程授权，第二次同类调用跳过终端提示。
-async def test_cli_accept_for_session_hits_grant_store_on_second_call(tmp_path: Path) -> None:
+# 验证 CLI 返回本次会话同意时只按单次允许处理，第二次同类调用仍会请求审批。
+async def test_cli_accept_for_session_is_treated_as_once(tmp_path: Path) -> None:
     approval, captured = _approval_provider(
         _config(tmp_path),
         policy=_policy(tmp_path, enabled=False),
-        actions=(ApprovalAction.ACCEPT_FOR_SESSION,),
+        actions=(ApprovalAction.ACCEPT_FOR_SESSION, ApprovalAction.REJECT),
     )
 
     first = await approval.decide(_request("ls", call_id="call-1"))
     second = await approval.decide(_request("ls -la", call_id="call-2"))
 
     assert first.outcome == "approved"
-    assert second.outcome == "approved"
-    assert len(captured) == 1
-    assert second.metadata["decision_source"] == "standard"
+    assert second.outcome == "rejected"
+    assert len(captured) == 2
     assert approval.grant_store.session_grants("cli-session") == ()
 
 
@@ -189,11 +192,12 @@ async def test_cli_session_grant_does_not_skip_blocked_rules(tmp_path: Path) -> 
     assert second.outcome == "rejected"
     assert len(captured) == 2
     assert captured[1].metadata["matched_rule"] == "bash_rm_any"
+    assert captured[1].metadata["auto_reject_at_ms"] is not None
     assert approval.grant_store.session_grants("cli-session") == ()
 
 
 @pytest.mark.e2e
-# 验证缺少自动审批策略时，CLI 本次会话授权采用失败关闭并继续要求人工审批。
+# 验证缺少自动审批策略时，CLI 返回本次会话同意仍只影响本次请求。
 async def test_cli_session_grant_fails_closed_when_policy_missing(tmp_path: Path) -> None:
     approval, captured = _approval_provider(
         _config(tmp_path),
