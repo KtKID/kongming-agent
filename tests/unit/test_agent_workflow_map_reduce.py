@@ -557,6 +557,124 @@ async def test_run_agent_workflow_tool_unwraps_map_reduce_spec_payload() -> None
 
 
 @pytest.mark.asyncio
+async def test_run_agent_workflow_tool_normalizes_minimax_tool_argument_shapes() -> None:
+    """验证 tool 归一化 MiniMax 常见参数形态，输入为字符串数字和 item 包装，输出为规范类型。"""
+
+    class _Manager:
+        """测试用 manager，记录归一化后的 payload。"""
+
+        def __init__(self) -> None:
+            """初始化测试 manager，输入为空，输出为记录 payload 的实例。"""
+            self.payload: dict[str, Any] = {}
+
+        async def run_workflow_payload(
+            self,
+            *,
+            mode: str,
+            parent_session_id: str,
+            payload: dict[str, object],
+        ) -> Any:
+            """记录 workflow payload 调用，输入为 mode/session/payload，输出为 fake 结果。"""
+            del mode, parent_session_id
+            self.payload = dict(payload)
+
+            class _Result:
+                """测试用结果对象，提供 tool 格式化所需字段。"""
+
+                workflow_id = "wf-map"
+                mode = "map_reduce"
+                workflow_dir = Path("/tmp/wf-map")
+                report_index_path = Path("/tmp/wf-map/reports/index.json")
+                completed = True
+                reports: tuple[Any, ...] = ()
+                runs: tuple[Any, ...] = ()
+                data: dict[str, object] = {}
+
+            return _Result()
+
+    payload = _payload()
+    payload["input_source"] = {
+        "kind": "path_glob",
+        "root_dir": "src/executors/agent_runtime",
+        "include": {"item": "**/*.py"},
+        "exclude": {"item": "**/__pycache__/**"},
+        "files": "",
+        "index_provider": "rg",
+        "input_digest": "null",
+    }
+    payload["shard_strategy"] = {
+        "kind": "by_directory",
+        "max_files_per_shard": "6",
+        "max_estimated_tokens_per_shard": "20000",
+        "min_shards": "3",
+        "max_shards": "4",
+        "preserve_directory_boundary": "true",
+        "prefer_dependency_cohesion": "false",
+    }
+    payload["mapper"] = {
+        "name_prefix": "map-agent-runtime",
+        "prompt_template": "code_findings_v0_1",
+        "tool_names": {"item": ["read_file", "list_dir"]},
+        "skill_names": "",
+        "permission_mode": "scoped_workdir",
+        "max_turns": "4",
+        "max_output_chars": "60000",
+    }
+    payload["reducer"] = {
+        "kind": "deterministic",
+        "dedupe_strategy": "exact_dedupe_key",
+        "ranking_strategy": "severity_first",
+        "max_findings": "50",
+        "include_failed_shards": "true",
+        "reducer_prompt_template": "",
+    }
+    payload["limits"] = {
+        "max_concurrency": "3",
+        "workflow_timeout_seconds": "1800",
+        "mapper_timeout_seconds": "480",
+        "reducer_timeout_seconds": "300",
+        "mapper_retries": "1",
+        "validation_repair_retries": "0",
+    }
+    payload["audit_tags"] = {"item": ["user_review_map_reduce", "agent_runtime_overview"]}
+
+    handle = AgentWorkflowHandle()
+    manager = _Manager()
+    handle.bind(manager)
+    tool = build_run_agent_workflow_tool(handle)
+
+    result = await tool.execute(
+        {"mode": "map_reduce", "payload": payload},
+        ToolContext(run_id="r", session_id="parent-session", turn=1, call_id="c"),
+    )
+
+    normalized = manager.payload
+    input_source = normalized["input_source"]
+    shard_strategy = normalized["shard_strategy"]
+    mapper = normalized["mapper"]
+    reducer = normalized["reducer"]
+    limits = normalized["limits"]
+
+    assert result.ok is True
+    assert input_source["include"] == ["**/*.py"]
+    assert input_source["exclude"] == ["**/__pycache__/**"]
+    assert input_source["files"] == []
+    assert input_source["input_digest"] is None
+    assert shard_strategy["max_files_per_shard"] == 6
+    assert shard_strategy["preserve_directory_boundary"] is True
+    assert shard_strategy["prefer_dependency_cohesion"] is False
+    assert mapper["tool_names"] == ["read_file", "list_dir"]
+    assert mapper["skill_names"] == []
+    assert mapper["max_turns"] == 4
+    assert reducer["max_findings"] == 50
+    assert reducer["include_failed_shards"] is True
+    assert reducer["reducer_prompt_template"] is None
+    assert limits["mapper_retries"] == 1
+    assert limits["validation_repair_retries"] == 0
+    assert normalized["audit_tags"] == ["user_review_map_reduce", "agent_runtime_overview"]
+
+
+@pytest.mark.asyncio
 async def test_run_agent_workflow_tool_failure_content_guides_model_in_chinese() -> None:
     """验证 workflow 失败时返回中文提示，输入为 manager 异常，输出为禁止编造的 content。"""
 

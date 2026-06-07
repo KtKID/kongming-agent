@@ -1,4 +1,14 @@
-"""Tool entrypoint for agent workflow orchestration."""
+"""Agent workflow 编排工具入口。
+
+本脚本负责把 LLM tool call 转换为 AgentWorkflowManager 可执行的 workflow 请求。
+作用是向主 agent 暴露 run_agent_workflow 通用策略入口和 run_parallel_subagents
+兼容入口，并在工具层完成参数基础校验、常见模型参数形态归一化和结果格式化。
+关键执行流程：解析 mode/payload，归一化 parallel 或 map_reduce 参数，通过 late-bound
+AgentWorkflowHandle 调用 manager，再把 workflow 产物路径、子 agent 报告和结构化 data
+返回给 runner。
+关键函数：_normalize_workflow_payload 负责策略 payload 归一化，_parse_tasks 负责 parallel
+任务校验，_format_result/_result_data 负责 tool result 投影。
+"""
 
 from __future__ import annotations
 
@@ -21,6 +31,94 @@ _MAP_REDUCE_REQUIRED_PAYLOAD_KEYS = frozenset(
         "output_contract",
     }
 )
+_NULL_STRINGS = frozenset({"", "null", "none"})
+
+_MAP_REDUCE_PAYLOAD_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "map_reduce payload 顶层直接包含这些字段。数组必须写 JSON array，"
+        "整数必须写 number，布尔必须写 true/false，null 必须写 JSON null。"
+    ),
+    "properties": {
+        "mode": {"type": "string", "enum": ["map_reduce"]},
+        "objective": {"type": "string"},
+        "input_source": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["path_glob", "file_list"]},
+                "root_dir": {"type": "string"},
+                "include": {"type": "array", "items": {"type": "string"}},
+                "exclude": {"type": "array", "items": {"type": "string"}},
+                "files": {"type": "array", "items": {"type": "string"}},
+                "index_provider": {"type": ["string", "null"]},
+                "input_digest": {"type": ["string", "null"]},
+            },
+        },
+        "shard_strategy": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["by_directory", "by_file_count"]},
+                "max_files_per_shard": {"type": "integer"},
+                "max_estimated_tokens_per_shard": {"type": "integer"},
+                "min_shards": {"type": "integer"},
+                "max_shards": {"type": "integer"},
+                "preserve_directory_boundary": {"type": "boolean"},
+                "prefer_dependency_cohesion": {"type": "boolean"},
+            },
+        },
+        "mapper": {
+            "type": "object",
+            "properties": {
+                "name_prefix": {"type": "string"},
+                "prompt_template": {"type": "string"},
+                "tool_names": {"type": "array", "items": {"type": "string"}},
+                "skill_names": {"type": "array", "items": {"type": "string"}},
+                "permission_mode": {"type": "string", "enum": [_SCOPED_WORKDIR_MODE]},
+                "max_turns": {"type": "integer"},
+                "max_output_chars": {"type": "integer"},
+            },
+        },
+        "reducer": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["deterministic"]},
+                "dedupe_strategy": {
+                    "type": "string",
+                    "enum": ["exact_dedupe_key", "file_line_title"],
+                },
+                "ranking_strategy": {
+                    "type": "string",
+                    "enum": ["severity_first", "confidence_first", "impact_first"],
+                },
+                "max_findings": {"type": "integer"},
+                "include_failed_shards": {"type": "boolean"},
+                "reducer_prompt_template": {"type": ["string", "null"]},
+            },
+        },
+        "limits": {
+            "type": "object",
+            "properties": {
+                "max_concurrency": {"type": "integer"},
+                "workflow_timeout_seconds": {"type": "integer"},
+                "mapper_timeout_seconds": {"type": "integer"},
+                "reducer_timeout_seconds": {"type": "integer"},
+                "mapper_retries": {"type": "integer"},
+                "validation_repair_retries": {"type": "integer"},
+            },
+        },
+        "output_contract": {"type": "string", "enum": ["code_findings"]},
+        "audit_tags": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "objective",
+        "input_source",
+        "shard_strategy",
+        "mapper",
+        "reducer",
+        "limits",
+        "output_contract",
+    ],
+}
 
 
 class AgentWorkflowHandle:
@@ -174,6 +272,17 @@ class RunAgentWorkflowTool(BaseBuiltinTool):
                     "shard_strategy、mapper、reducer、limits、output_contract。"
                     '不要写成 {"MapReduceWorkflowSpec": {...}}。'
                 ),
+                "properties": {
+                    "task_specs": {
+                        "type": "array",
+                        "description": "parallel 任务规格数组。",
+                    },
+                    "tasks": {
+                        "type": "array",
+                        "description": "parallel 兼容任务数组。",
+                    },
+                    **_MAP_REDUCE_PAYLOAD_SCHEMA["properties"],
+                },
             },
         },
         "required": ["mode", "payload"],
@@ -320,9 +429,132 @@ def _normalize_workflow_payload(mode: str, payload: dict[str, Any]) -> dict[str,
         return {"task_specs": _parse_tasks(raw_tasks)}
     if mode == "map_reduce":
         payload = _unwrap_map_reduce_spec_payload(payload)
+        payload = _normalize_map_reduce_payload(payload)
     normalized = dict(payload)
     normalized.setdefault("mode", mode)
     return normalized
+
+
+def _normalize_map_reduce_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """归一化 map_reduce 参数，输入为模型生成 payload，输出为 parser 友好的 payload。"""
+    normalized = dict(payload)
+    input_source = _object_copy(normalized.get("input_source"))
+    if input_source is not None:
+        for key in ("include", "exclude", "files"):
+            input_source[key] = _coerce_string_array(input_source.get(key))
+        for key in ("index_provider", "input_digest"):
+            input_source[key] = _coerce_nullable_string(input_source.get(key))
+        normalized["input_source"] = input_source
+
+    shard_strategy = _object_copy(normalized.get("shard_strategy"))
+    if shard_strategy is not None:
+        for key in (
+            "max_files_per_shard",
+            "max_estimated_tokens_per_shard",
+            "min_shards",
+            "max_shards",
+        ):
+            shard_strategy[key] = _coerce_int(shard_strategy.get(key))
+        for key in ("preserve_directory_boundary", "prefer_dependency_cohesion"):
+            shard_strategy[key] = _coerce_bool(shard_strategy.get(key))
+        normalized["shard_strategy"] = shard_strategy
+
+    mapper = _object_copy(normalized.get("mapper"))
+    if mapper is not None:
+        for key in ("tool_names", "skill_names"):
+            mapper[key] = _coerce_string_array(mapper.get(key))
+        for key in ("max_turns", "max_output_chars"):
+            mapper[key] = _coerce_int(mapper.get(key))
+        normalized["mapper"] = mapper
+
+    reducer = _object_copy(normalized.get("reducer"))
+    if reducer is not None:
+        reducer["max_findings"] = _coerce_int(reducer.get("max_findings"))
+        reducer["include_failed_shards"] = _coerce_bool(reducer.get("include_failed_shards"))
+        reducer["reducer_prompt_template"] = _coerce_nullable_string(
+            reducer.get("reducer_prompt_template")
+        )
+        normalized["reducer"] = reducer
+
+    limits = _object_copy(normalized.get("limits"))
+    if limits is not None:
+        for key in (
+            "max_concurrency",
+            "workflow_timeout_seconds",
+            "mapper_timeout_seconds",
+            "reducer_timeout_seconds",
+            "mapper_retries",
+            "validation_repair_retries",
+        ):
+            limits[key] = _coerce_int(limits.get(key))
+        normalized["limits"] = limits
+
+    normalized["audit_tags"] = _coerce_string_array(normalized.get("audit_tags"))
+    return normalized
+
+
+def _object_copy(value: Any) -> dict[str, Any] | None:
+    """复制对象字段，输入为任意值，输出为 dict 副本或 None。"""
+    if isinstance(value, dict):
+        return dict(value)
+    return None
+
+
+def _coerce_string_array(value: Any) -> Any:
+    """归一化字符串数组，输入为模型常见数组变体，输出为 list 或原值。"""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, dict) and "item" in value:
+        item = value.get("item")
+        if item is None:
+            return []
+        if isinstance(item, list):
+            return item
+        if isinstance(item, tuple):
+            return list(item)
+        if isinstance(item, str) and item.strip().lower() in _NULL_STRINGS:
+            return []
+        return [item]
+    if isinstance(value, str):
+        if value.strip().lower() in _NULL_STRINGS:
+            return []
+        return [value]
+    return value
+
+
+def _coerce_int(value: Any) -> Any:
+    """归一化整数字段，输入为整数或数字字符串，输出为 int 或原值。"""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit() or (stripped.startswith("-") and stripped[1:].isdigit()):
+            return int(stripped)
+    return value
+
+
+def _coerce_bool(value: Any) -> Any:
+    """归一化布尔字段，输入为 bool 或 true/false 字符串，输出为 bool 或原值。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+    return value
+
+
+def _coerce_nullable_string(value: Any) -> Any:
+    """归一化可空字符串，输入为 null-like 字符串，输出为 None 或原值。"""
+    if isinstance(value, str) and value.strip().lower() in _NULL_STRINGS:
+        return None
+    return value
 
 
 def _unwrap_map_reduce_spec_payload(payload: dict[str, Any]) -> dict[str, Any]:

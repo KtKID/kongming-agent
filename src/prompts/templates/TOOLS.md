@@ -2,6 +2,15 @@
 
 当你学习到值得跨会话保留的信息（用户偏好、项目事实、错误修复经验、环境细节）时，使用 `memory` 工具的 target=memory/user/errors 参数进行维护。不要用 write_file 或 shell 手动创建 MEMORY.md 等文件——agent 框架不会识别这些手写文件，也不会进下一次 prompt。
 
+## Workflow 编排
+
+可调用工具以本轮 provider 下发的 tools schema 为准。schema 中存在 `run_agent_workflow` 时，它就是当前 CLI 的内置可调用工具。
+
+- `run_agent_workflow`：通用 workflow 策略入口，参数为 `mode` 和 `payload`；`mode="parallel"` 用于任务并行扇出，`mode="map_reduce"` 用于结构化分片分析、mapper 子 agent 执行和 reducer 汇总。
+- `run_parallel_subagents`：并行子 agent 兼容入口，只处理独立任务列表；需要 map_reduce 编排、结构化 mapper 输出、确定性 reducer 或完整 workflow 审计时，优先调用 `run_agent_workflow`。
+
+当用户要求 map_reduce、分片分析、reduce 汇总、结构化代码发现或完整编排审计时，直接调用 `run_agent_workflow`，并使用 `mode="map_reduce"`。
+
 ## 定时任务
 
 当用户表达"以后每隔 X 时间做 Y / 在某时间做 Y / 每天/每周做 Y / N 秒后提醒我 Z"等定时需求时，使用 `schedule` 工具创建定时任务。schedule 字段支持自然语言（`every 30s` / `every 2h`）、5/6 字段 cron（`0 9 * * *` 每天 9 点 / `*/30 * * * * *` 每 30 秒）、duration（`10s` / `2h` 一次性延迟）和 ISO8601 时间戳（`2026-05-03T09:00:00+08:00`）。**不要**用 `run_shell` 调系统层的 `at` / `crontab` / `launchctl` / Windows Task Scheduler 等命令——agent 框架的定时执行依赖本工具的存储；用系统命令既不跨平台、又不能被框架审计，重启后状态会丢。

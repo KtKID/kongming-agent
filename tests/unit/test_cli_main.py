@@ -125,6 +125,67 @@ async def test_run_workflow_smoke_approves_and_executes_run_agent_workflow(capsy
     assert "[workflow-smoke] ok" in capsys.readouterr().out
 
 
+async def test_run_exposes_workflow_tools_to_cli_llm(monkeypatch) -> None:
+    """CLI 正常装配时应把通用 workflow 工具和兼容并行工具一起暴露给 LLM。"""
+    captured: dict = {}
+
+    class _DummyBridge:
+        def __init__(
+            self,
+            *,
+            runtime,
+            adapter,
+            session_id: str,
+            echo_final_content: bool = True,
+        ) -> None:
+            del runtime, adapter, echo_final_content
+            self.session_id = session_id
+
+        async def run_loop(self) -> None:
+            return None
+
+    async def _fake_assemble_instructions(_cfg, _files, *, skill_listing=""):
+        del skill_listing
+        return "system", ["agent_spec"], None
+
+    async def _no_skills(*_args, **_kwargs):
+        return []
+
+    def _capture_build(_cfg, **kwargs):
+        captured.update(kwargs)
+        return _DummyRuntime()
+
+    monkeypatch.setattr(cli_main, "_load_config_or_exit", lambda _: _build_cfg())
+    monkeypatch.setattr(cli_main, "_assemble_instructions", _fake_assemble_instructions)
+    monkeypatch.setattr(cli_main, "load_skill_specs", _no_skills)
+    monkeypatch.setattr(cli_main, "format_skill_listing", lambda _specs: "")
+    monkeypatch.setattr(cli_main, "build_default_approval", lambda *_, **__: object())
+    monkeypatch.setattr(cli_main.NativeRuntime, "build", staticmethod(_capture_build))
+    monkeypatch.setattr(cli_main, "SessionBridge", _DummyBridge)
+    monkeypatch.setattr(cli_main, "_generate_cli_session_id", lambda: "cli-workflow-tools")
+    monkeypatch.setattr(cli_main, "_print_banner", lambda *_, **__: None)
+    monkeypatch.setattr(cli_main, "_discover_persistent_sessions", lambda _cfg: ([], None))
+
+    await cli_main._run(
+        config_path=None,
+        session_id=None,
+        list_sessions=False,
+        resume_last=False,
+        verbose=False,
+        smoke=False,
+        instructions_files=[],
+        trace_enabled=False,
+        reasoning_effort=None,
+    )
+
+    enabled_tool_names = captured["enabled_tool_names"]
+    registry = captured["tools"]
+    assert "run_agent_workflow" in enabled_tool_names
+    assert "run_parallel_subagents" in enabled_tool_names
+    assert "run_agent_workflow" in registry
+    assert "run_parallel_subagents" in registry
+
+
 def _build_cfg() -> Config:
     return Config(
         model=ModelConfig(
