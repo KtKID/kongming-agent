@@ -1,3 +1,11 @@
+"""智能体工作流管理器单元测试。
+
+本脚本验证并行子 agent 编排、scoped_workdir 权限审计、workflow tool 入参传递、策略注册分发和模型 preset 覆盖行为。
+作用是确保 AgentWorkflowManager 写入完整审计产物，保持子 agent 上下文隔离，并通过测试文件复现边界输入。
+关键执行流程：构造 fake LLM 和 NativeRuntime，运行 workflow manager 或 agent_workflow_tool，读取 workflow 产物和审计日志进行断言。
+关键函数：_runtime 构造测试 runtime，_audit_records 读取审计日志，各 test_* 函数覆盖并行执行、失败收口、权限隔离、策略分发和 CLI preset。
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -20,16 +28,21 @@ from executors.agent_runtime.agent_workflow_manager import (
 )
 from executors.agent_runtime.native_runtime import NativeRuntime
 from executors.agent_runtime.subagent_manager import SubAgentManager, SubAgentTask
+from executors.agent_runtime.workflow_strategy import WorkflowRunRequest, WorkflowStrategyNotFound
 from tools import AutoAllowApproval, ToolRegistry
 from tools.agent_workflow_tool import AgentWorkflowHandle, build_agent_workflow_tool
 from tools.file_tools import build_file_tools
 
 
 class _EchoLLM:
+    """测试用回声 LLM，根据用户文本返回固定子任务结果。"""
+
     def __init__(self) -> None:
+        """初始化回声 LLM，输入为空，输出为可记录请求的实例。"""
         self.calls: list[LLMRequest] = []
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
+        """完成一次 LLM 请求，输入为 LLMRequest，输出为按文本匹配生成的 LLMResponse。"""
         self.calls.append(request)
         user_text = "\n".join(
             message.content or "" for message in request.messages if message.role == "user"
@@ -46,10 +59,14 @@ class _EchoLLM:
 
 
 class _WorkflowLLM:
+    """测试用 workflow LLM，先请求创建子 agent，再返回父子任务结果。"""
+
     def __init__(self) -> None:
+        """初始化 workflow LLM，输入为空，输出为可记录请求的实例。"""
         self.calls: list[LLMRequest] = []
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
+        """完成 workflow 请求，输入为 LLMRequest，输出为工具调用或固定文本回复。"""
         self.calls.append(request)
         tool_names = {tool.name for tool in request.tools}
         has_workflow_result = any(
@@ -95,6 +112,8 @@ class _WorkflowLLM:
 
 
 class _ToolCallingLLM:
+    """测试用工具调用 LLM，用于驱动子 agent 调用指定工具。"""
+
     def __init__(
         self,
         *,
@@ -102,12 +121,14 @@ class _ToolCallingLLM:
         arguments: dict[str, Any],
         final_content: str = "tool result observed",
     ) -> None:
+        """初始化工具调用 LLM，输入为工具名、参数和最终文本，输出为可记录请求的实例。"""
         self.tool_name = tool_name
         self.arguments = arguments
         self.final_content = final_content
         self.calls: list[LLMRequest] = []
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
+        """完成工具调用请求，输入为 LLMRequest，输出为工具调用或观察后的最终回复。"""
         self.calls.append(request)
         has_tool_result = any(message.role == "tool" for message in request.messages)
         if has_tool_result:
@@ -130,6 +151,7 @@ class _ToolCallingLLM:
 
 
 def _config(tmp_path: Path) -> Config:
+    """构造测试配置，输入为临时目录，输出为 file session 和 auto_allow 审批配置。"""
     cfg = Config(
         model=ModelConfig(
             name="fake-model",
@@ -149,6 +171,7 @@ def _runtime(
     *,
     tools: ToolRegistry | None = None,
 ) -> tuple[Config, NativeRuntime]:
+    """构造测试 runtime，输入为临时目录、fake LLM 和可选工具表，输出为配置和 NativeRuntime。"""
     cfg = _config(tmp_path)
     bootstrap = SessionBootstrap(
         agent_name="test-agent",
@@ -160,6 +183,7 @@ def _runtime(
     )
 
     def session_factory(sid: str):  # type: ignore[no-untyped-def]
+        """构造测试 session，输入为 session ID，输出为 file backend session。"""
         return build_session(cfg, sid, bootstrap=bootstrap)
 
     runtime = NativeRuntime(
@@ -181,6 +205,7 @@ def _runtime(
 
 
 def _audit_records(workflow_dir: Path) -> list[dict[str, Any]]:
+    """读取 workflow 审计日志，输入为 workflow 目录，输出为 audit.jsonl 记录列表。"""
     return [
         json.loads(line)
         for line in (workflow_dir / "audit.jsonl").read_text(encoding="utf-8").splitlines()
@@ -191,6 +216,7 @@ def _audit_records(workflow_dir: Path) -> list[dict[str, Any]]:
 async def test_parallel_workflow_writes_audit_and_keeps_child_contexts_isolated(
     tmp_path: Path,
 ) -> None:
+    """验证并行 workflow 审计和上下文隔离，输入为临时目录，输出为产物与审计断言。"""
     llm = _EchoLLM()
     cfg, runtime = _runtime(tmp_path, llm)
     try:
@@ -268,6 +294,7 @@ async def test_parallel_workflow_writes_audit_and_keeps_child_contexts_isolated(
 
 @pytest.mark.asyncio
 async def test_parallel_workflow_reports_failed_child_task(tmp_path: Path) -> None:
+    """验证失败子任务收口，输入为缺失工具任务，输出为 failed 报告和审计断言。"""
     llm = _EchoLLM()
     cfg, runtime = _runtime(tmp_path, llm)
     try:
@@ -318,6 +345,7 @@ async def test_parallel_workflow_reports_failed_child_task(tmp_path: Path) -> No
 async def test_parallel_workflow_uses_unique_task_run_paths_for_slug_collisions(
     tmp_path: Path,
 ) -> None:
+    """验证 slug 冲突时生成唯一路径，输入为冲突任务 ID，输出为独立 result/report 路径断言。"""
     llm = _EchoLLM()
     cfg, runtime = _runtime(tmp_path, llm)
     try:
@@ -354,6 +382,7 @@ async def test_parallel_workflow_uses_unique_task_run_paths_for_slug_collisions(
 async def test_scoped_parallel_workflow_writes_subagent_creation_and_workdir_file(
     tmp_path: Path,
 ) -> None:
+    """验证 scoped 子 agent 创建记录和工作目录写入，输入为 write_file 任务，输出为授权审计断言。"""
     llm = _ToolCallingLLM(
         tool_name="write_file",
         arguments={"path": "result.txt", "content": "scoped ok"},
@@ -409,6 +438,7 @@ async def test_scoped_parallel_workflow_writes_subagent_creation_and_workdir_fil
 async def test_scoped_parallel_workflow_rejects_outside_write_without_side_effect(
     tmp_path: Path,
 ) -> None:
+    """验证 scoped 权限拒绝越界写入，输入为父目录路径，输出为无副作用和拒绝审计断言。"""
     llm = _ToolCallingLLM(
         tool_name="write_file",
         arguments={"path": "../outside.txt", "content": "bad"},
@@ -454,6 +484,7 @@ async def test_scoped_parallel_workflow_rejects_outside_write_without_side_effec
 async def test_scoped_parallel_workflow_audits_hallucinated_not_registered_tool(
     tmp_path: Path,
 ) -> None:
+    """验证幻觉工具调用审计，输入为未注册工具名，输出为 not_registered 拒绝记录断言。"""
     llm = _ToolCallingLLM(
         tool_name="missing_tool",
         arguments={"path": "../outside.txt", "x": 1},
@@ -494,9 +525,155 @@ async def test_scoped_parallel_workflow_audits_hallucinated_not_registered_tool(
 
 
 @pytest.mark.asyncio
+async def test_run_workflow_specs_rejects_missing_task_fields_with_index(
+    tmp_path: Path,
+) -> None:
+    """验证缺失任务字段报错带索引，输入为空 task spec，输出为 task_name 错误断言。"""
+    llm = _EchoLLM()
+    cfg, runtime = _runtime(tmp_path, llm)
+    try:
+        manager = AgentWorkflowManager(
+            subagents=SubAgentManager(runtime),
+            config=cfg,
+            workspace_root=tmp_path,
+        )
+        with pytest.raises(ValueError, match=r"task_specs\[1\]\.task_name"):
+            await manager.run_workflow_specs(
+                mode="parallel",
+                parent_session_id="parent-session",
+                task_specs=[{}],
+            )
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_run_workflow_specs_rejects_more_than_eight_task_specs(
+    tmp_path: Path,
+) -> None:
+    """验证并行任务数量上限，输入为 9 个 task specs，输出为数量限制错误断言。"""
+    llm = _EchoLLM()
+    cfg, runtime = _runtime(tmp_path, llm)
+    try:
+        manager = AgentWorkflowManager(
+            subagents=SubAgentManager(runtime),
+            config=cfg,
+            workspace_root=tmp_path,
+        )
+        with pytest.raises(ValueError, match="at most 8 task specs"):
+            await manager.run_workflow_specs(
+                mode="parallel",
+                parent_session_id="parent-session",
+                task_specs=[{"task_name": f"task {index}", "prompt": "work"} for index in range(9)],
+            )
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_run_workflow_specs_unknown_mode_uses_strategy_registry(
+    tmp_path: Path,
+) -> None:
+    """验证未知 mode 走策略注册表错误，输入为 missing mode，输出为可用策略列表断言。"""
+    llm = _EchoLLM()
+    cfg, runtime = _runtime(tmp_path, llm)
+    try:
+        manager = AgentWorkflowManager(
+            subagents=SubAgentManager(runtime),
+            config=cfg,
+            workspace_root=tmp_path,
+        )
+        with pytest.raises(WorkflowStrategyNotFound) as exc_info:
+            await manager.run_workflow_specs(
+                mode="missing",
+                parent_session_id="parent-session",
+                task_specs=[{"task_name": "ok", "prompt": "work"}],
+            )
+    finally:
+        await runtime.aclose()
+
+    assert exc_info.value.available_modes == ("parallel",)
+    assert exc_info.value.runnable_modes == ("parallel",)
+    assert exc_info.value.operation == "run"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_specs", "error"),
+    [
+        ([{"task_name": "missing prompt"}], r"task_specs\[1\]\.prompt"),
+        ([{"task_name": "bad context", "prompt": "work", "context": 1}], "context"),
+        ([None], r"task_specs\[1\] must be an object"),
+    ],
+)
+async def test_run_workflow_specs_rejects_invalid_task_spec_shapes(
+    tmp_path: Path,
+    task_specs: list[Any],
+    error: str,
+) -> None:
+    """验证非法 task spec 形状，输入为参数化坏数据，输出为对应 ValueError 断言。"""
+    llm = _EchoLLM()
+    cfg, runtime = _runtime(tmp_path, llm)
+    try:
+        manager = AgentWorkflowManager(
+            subagents=SubAgentManager(runtime),
+            config=cfg,
+            workspace_root=tmp_path,
+        )
+        with pytest.raises(ValueError, match=error):
+            await manager.run_workflow_specs(
+                mode="parallel",
+                parent_session_id="parent-session",
+                task_specs=task_specs,  # type: ignore[arg-type]
+            )
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        ({"task_specs": []}, "non-empty task_specs"),
+        ({"task_specs": "bad"}, "non-empty task_specs"),
+    ],
+)
+async def test_parallel_strategy_rejects_empty_or_non_list_task_specs(
+    tmp_path: Path,
+    payload: dict[str, object],
+    error: str,
+) -> None:
+    """验证 parallel 策略 payload 边界，输入为空或非列表 task_specs，输出为校验错误断言。"""
+    llm = _EchoLLM()
+    cfg, runtime = _runtime(tmp_path, llm)
+    try:
+        manager = AgentWorkflowManager(
+            subagents=SubAgentManager(runtime),
+            config=cfg,
+            workspace_root=tmp_path,
+        )
+        with pytest.raises(ValueError, match=error):
+            await manager.run_workflow(
+                WorkflowRunRequest(
+                    mode="parallel",
+                    parent_session_id="parent-session",
+                    payload=payload,
+                    source="unit-test",
+                )
+            )
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
 async def test_agent_workflow_tool_passes_task_specs_to_bound_manager() -> None:
+    """验证 workflow tool 转发任务规格，输入为工具 payload，输出为 manager 入参和工具结果断言。"""
+
     class _Manager:
+        """测试用 manager，记录 run_workflow_specs 收到的参数。"""
+
         def __init__(self) -> None:
+            """初始化测试 manager，输入为空，输出为可记录调用参数的实例。"""
             self.mode = ""
             self.parent_session_id = ""
             self.task_specs: list[dict[str, object]] = []
@@ -508,11 +685,14 @@ async def test_agent_workflow_tool_passes_task_specs_to_bound_manager() -> None:
             parent_session_id: str,
             task_specs: list[dict[str, object]],
         ) -> Any:
+            """记录 workflow 调用，输入为 mode、父会话和 task_specs，输出为 fake 结果对象。"""
             self.mode = mode
             self.parent_session_id = parent_session_id
             self.task_specs = task_specs
 
             class _Result:
+                """测试用 workflow 结果对象，提供 tool 输出格式化所需字段。"""
+
                 workflow_id = "wf-test"
                 mode = "parallel"
                 workflow_dir = Path("/tmp/wf-test")
@@ -597,6 +777,7 @@ async def test_agent_workflow_tool_passes_task_specs_to_bound_manager() -> None:
 
 @pytest.mark.asyncio
 async def test_agent_workflow_tool_requires_permission() -> None:
+    """验证 workflow tool 要求 permission 对象，输入为缺失 permission 的任务，输出为校验错误断言。"""
     handle = AgentWorkflowHandle()
     handle.bind(object())
     tool = build_agent_workflow_tool(handle)
@@ -617,6 +798,7 @@ async def test_agent_workflow_tool_requires_permission() -> None:
 
 @pytest.mark.asyncio
 async def test_parent_agent_can_create_subagents_through_registered_tool(tmp_path: Path) -> None:
+    """验证父 agent 通过注册工具创建子 agent，输入为父会话请求，输出为工具消息和 workflow 产物断言。"""
     llm = _WorkflowLLM()
     cfg = _config(tmp_path)
     bootstrap = SessionBootstrap(
@@ -629,6 +811,7 @@ async def test_parent_agent_can_create_subagents_through_registered_tool(tmp_pat
     )
 
     def session_factory(sid: str):  # type: ignore[no-untyped-def]
+        """构造父 agent 测试 session，输入为 session ID，输出为 file backend session。"""
         return build_session(cfg, sid, bootstrap=bootstrap)
 
     handle = AgentWorkflowHandle()
@@ -693,6 +876,7 @@ async def test_parent_agent_can_create_subagents_through_registered_tool(tmp_pat
 
 
 def test_apply_model_preset_overrides_cli_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """验证模型 preset 覆盖 CLI 模型，输入为环境变量和 preset ID，输出为更新后的模型配置断言。"""
     monkeypatch.setenv("MINIMAX_API_KEY", "sk-test")
     cfg = Config(
         model=ModelConfig(
