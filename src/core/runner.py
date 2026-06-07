@@ -117,6 +117,7 @@ class Runner:
         run_id: str | None = None,
         enabled_tools: Sequence[Tool] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        lifecycle_hooks: Sequence[LifecycleHook] | None = None,
     ) -> Result:
         """执行一次完整 run。
 
@@ -137,6 +138,7 @@ class Runner:
                 的 ``metadata["attachments"]``，供 InputAssembler / provider
                 组装多模态输入。CLI 路径默认 None，不影响纯文本对话。
                 详见 ``dev-pipeline/tasks/claude-image-paste-e2e/README.md`` §1 / §4。
+            lifecycle_hooks: 本次 run 的临时 lifecycle hook，只作用于当前 run。
 
         Returns:
             :class:`Result`：运行结束的统一结果。
@@ -159,6 +161,10 @@ class Runner:
         # state.run_id 起始为 "" 占位，_seed_messages 写真值后再 emit run.start。
         run_id = run_id or ""
         effective_max_turns = max_turns if max_turns is not None else agent_spec.max_turns
+        effective_lifecycle_hooks = [
+            *self._lifecycle_hooks,
+            *(lifecycle_hooks or ()),
+        ]
 
         state = RunState(run_id=run_id, session_id=session.session_id)
         state.mark_running()
@@ -192,6 +198,7 @@ class Runner:
                 resolved_tools=resolved_tools,
                 approval=approval,
                 max_turns=effective_max_turns,
+                lifecycle_hooks=effective_lifecycle_hooks,
             )
             state.mark_completed()
             result = Result(
@@ -375,6 +382,7 @@ class Runner:
         resolved_tools: list[Tool],
         approval: ApprovalProvider,
         max_turns: int,
+        lifecycle_hooks: Sequence[LifecycleHook],
     ) -> tuple[Message | None, dict[str, Any]]:
         """核心 turn 循环。返回 (最终 assistant 消息, 累计 usage)。"""
         final_assistant: Message | None = None
@@ -389,7 +397,7 @@ class Runner:
 
             state.advance_turn()
             await self._emit(Event(kind="turn.start", run_id=state.run_id, turn=state.turn))
-            await self._run_lifecycle_before_turn(state)
+            await self._run_lifecycle_before_turn(state, lifecycle_hooks)
 
             history = await session.history()
 
@@ -520,7 +528,7 @@ class Runner:
                 if isinstance(val, int):
                     accumulated_usage[key] = accumulated_usage.get(key, 0) + val
 
-            await self._run_lifecycle_after_turn(state, assistant_message)
+            await self._run_lifecycle_after_turn(state, assistant_message, lifecycle_hooks)
             await self._emit(Event(kind="turn.end", run_id=state.run_id, turn=state.turn))
 
             tool_calls = assistant_message.tool_calls or ()
@@ -536,6 +544,7 @@ class Runner:
                 approval=approval,
                 tool_calls=tool_calls,
                 tools_by_name=tools_by_name,
+                lifecycle_hooks=lifecycle_hooks,
             )
             # 回填后继续下一个 turn
 
@@ -754,6 +763,7 @@ class Runner:
         approval: ApprovalProvider,
         tool_calls: Iterable[ToolCall],
         tools_by_name: dict[str, Tool],
+        lifecycle_hooks: Sequence[LifecycleHook],
     ) -> None:
         """串行执行 assistant 消息携带的所有 tool_call，把结果回填到 session。
 
@@ -782,6 +792,7 @@ class Runner:
                     approval=approval,
                     call=call,
                     tools_by_name=tools_by_name,
+                    lifecycle_hooks=lifecycle_hooks,
                 )
             except asyncio.CancelledError:
                 # 1. 当前 call 占位（覆盖本 call 的任何中间 await 被打断的情形）
@@ -811,6 +822,7 @@ class Runner:
         approval: ApprovalProvider,
         call: ToolCall,
         tools_by_name: dict[str, Tool],
+        lifecycle_hooks: Sequence[LifecycleHook],
     ) -> None:
         """执行单个 tool_call。从原 ``_execute_tool_calls`` 循环体抽出。
 
@@ -818,7 +830,7 @@ class Runner:
         统一处理 cancel；同时 lifecycle hook / approval / 执行 / 回填 的顺序
         与原版完全一致，没有行为变化。
         """
-        await self._run_lifecycle_before_tool(state, call)
+        await self._run_lifecycle_before_tool(state, call, lifecycle_hooks)
         await self._emit(
             Event(
                 kind="tool.call.start",
@@ -853,7 +865,7 @@ class Runner:
                     },
                 )
             )
-            await self._run_lifecycle_after_tool(state, call, result_message)
+            await self._run_lifecycle_after_tool(state, call, result_message, lifecycle_hooks)
             return
 
         # 审批：runner 不判 allow/deny，只咨询 ApprovalProvider
@@ -917,7 +929,7 @@ class Runner:
                     },
                 )
             )
-            await self._run_lifecycle_after_tool(state, call, rejected_msg)
+            await self._run_lifecycle_after_tool(state, call, rejected_msg, lifecycle_hooks)
             # 审批拒绝不直接终止 run；把"被拒绝"这条事实喂回模型，
             # 由模型决定下一步。这样 safety 的策略层可以通过文本说明 / reason
             # 让模型调整计划，而不需要立刻结束 run。
@@ -970,7 +982,7 @@ class Runner:
                 },
             )
         )
-        await self._run_lifecycle_after_tool(state, call, result_message)
+        await self._run_lifecycle_after_tool(state, call, result_message, lifecycle_hooks)
 
     async def _finalize_unpaired_call(
         self,
@@ -1072,8 +1084,20 @@ class Runner:
         meta = {"ok": False, "error_message": error_text}
         if metadata:
             meta.update(metadata)
-        # 用 JSON 字符串承载错误文本，给下游 provider / 模型一个明确的结构化信号。
-        content = json.dumps({"error": error_text}, ensure_ascii=False)
+        # 用中文 JSON 字符串承载错误文本，给下游 provider / 模型明确的失败处理约束。
+        content = json.dumps(
+            {
+                "工具执行失败": True,
+                "失败原因": error_text,
+                "后续处理要求": [
+                    "必须先向用户说明工具执行失败和失败原因。",
+                    "禁止声称工具已经成功执行、任务已经完成或产物已经生成。",
+                    "禁止编造工具输出、文件路径、报告、子 agent 结果或审计日志。",
+                    "需要继续时，先修正参数或请求用户补充信息，再重新调用工具。",
+                ],
+            },
+            ensure_ascii=False,
+        )
         return Message.tool_result(
             tool_call_id=call.call_id,
             content=content,
@@ -1085,8 +1109,12 @@ class Runner:
     # Lifecycle hook 调用（异常吞到 trace，不污染主链路）
     # ------------------------------------------------------------------
 
-    async def _run_lifecycle_before_turn(self, state: RunState) -> None:
-        for hook in self._lifecycle_hooks:
+    async def _run_lifecycle_before_turn(
+        self,
+        state: RunState,
+        lifecycle_hooks: Sequence[LifecycleHook],
+    ) -> None:
+        for hook in lifecycle_hooks:
             before = getattr(hook, "before_turn", None)
             if before is None:
                 continue
@@ -1095,8 +1123,13 @@ class Runner:
             except Exception as exc:  # pragma: no cover - 防御式
                 await self._emit_hook_error("before_turn", exc, state)
 
-    async def _run_lifecycle_after_turn(self, state: RunState, message: Message) -> None:
-        for hook in self._lifecycle_hooks:
+    async def _run_lifecycle_after_turn(
+        self,
+        state: RunState,
+        message: Message,
+        lifecycle_hooks: Sequence[LifecycleHook],
+    ) -> None:
+        for hook in lifecycle_hooks:
             after = getattr(hook, "after_turn", None)
             if after is None:
                 continue
@@ -1105,8 +1138,13 @@ class Runner:
             except Exception as exc:  # pragma: no cover - 防御式
                 await self._emit_hook_error("after_turn", exc, state)
 
-    async def _run_lifecycle_before_tool(self, state: RunState, call: ToolCall) -> None:
-        for hook in self._lifecycle_hooks:
+    async def _run_lifecycle_before_tool(
+        self,
+        state: RunState,
+        call: ToolCall,
+        lifecycle_hooks: Sequence[LifecycleHook],
+    ) -> None:
+        for hook in lifecycle_hooks:
             before = getattr(hook, "before_tool", None)
             if before is None:
                 continue
@@ -1116,9 +1154,13 @@ class Runner:
                 await self._emit_hook_error("before_tool", exc, state)
 
     async def _run_lifecycle_after_tool(
-        self, state: RunState, call: ToolCall, result_message: Message
+        self,
+        state: RunState,
+        call: ToolCall,
+        result_message: Message,
+        lifecycle_hooks: Sequence[LifecycleHook],
     ) -> None:
-        for hook in self._lifecycle_hooks:
+        for hook in lifecycle_hooks:
             after = getattr(hook, "after_tool", None)
             if after is None:
                 continue

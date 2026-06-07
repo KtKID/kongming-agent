@@ -396,6 +396,36 @@ async def test_command_unknown_default_standard() -> None:
 
 
 # ---------------------------------------------------------------------------
+# §10b agent workflow 工具 - 已知 workflow 编排工具
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_agent_workflow_tool_standard() -> None:
+    """剧本 10b：run_agent_workflow → standard, matched_rule=agent-workflow-default。"""
+    resolver, fake = _make_resolver()
+    decision = await resolver.evaluate(
+        _req(
+            tool_name="run_agent_workflow",
+            arguments={
+                "mode": "map_reduce",
+                "payload": {"objective": "分析 src/executors"},
+            },
+        ),
+        _approval_zone(),
+        _runtime(),
+    )
+
+    md = decision.metadata
+    assert md[ApprovalMetadataKeys.DECISION_SOURCE] == "standard"
+    assert md[ApprovalMetadataKeys.MATCHED_RULE] == "agent-workflow-default"
+    assert "未知工具" not in md[ApprovalMetadataKeys.REASON]
+    enriched = fake.decided_requests[0]
+    assert enriched.metadata["severity"] == "standard"
+
+
+# ---------------------------------------------------------------------------
 # §11 元数据透传 grant_scope
 # ---------------------------------------------------------------------------
 

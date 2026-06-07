@@ -81,6 +81,7 @@ _READ_TOOLS: frozenset[str] = frozenset({"read_file", "list_dir"})
 _WRITE_TOOLS: frozenset[str] = frozenset({"write_file"})
 _SHELL_TOOLS: frozenset[str] = frozenset({"run_shell"})
 _SKILL_TOOLS: frozenset[str] = frozenset({"skill"})
+_AGENT_WORKFLOW_TOOLS: frozenset[str] = frozenset({"run_agent_workflow", "run_parallel_subagents"})
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +331,14 @@ class ConsentResolver:
         args = request.arguments
         if tool in _SKILL_TOOLS:
             return self._classify_skill(args)
+
+        if tool in _AGENT_WORKFLOW_TOOLS:
+            return _ConsentHit(
+                severity="standard",
+                matched_rule="agent-workflow-default",
+                reason="Agent workflow 编排工具，需用户确认",
+                target_value=tool,
+            )
 
         if tool in _SHELL_TOOLS:
             return self._classify_command(args)

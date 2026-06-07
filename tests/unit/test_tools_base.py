@@ -56,6 +56,8 @@ async def test_missing_required_arg_returns_fail_not_exception():
     assert result.ok is False
     assert "missing required args" in (result.error_message or "")
     assert "msg" in (result.error_message or "")
+    assert "工具执行失败：echo" in result.content
+    assert "禁止声称工具已经成功执行" in result.content
 
 
 @pytest.mark.asyncio
@@ -72,7 +74,8 @@ async def test_run_exception_wrapped_to_fail_result():
     tool = _BoomTool()
     result = await tool.execute({}, _ctx())
     assert result.ok is False
-    assert result.content == ""
+    assert "工具执行失败：boom" in result.content
+    assert "后续处理要求" in result.content
     assert "boom inside" in (result.error_message or "")
 
 
