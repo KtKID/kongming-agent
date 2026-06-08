@@ -20,17 +20,17 @@ v1-mini 第一版只提供 "capability → permission → approval" 三层安全
 
 from __future__ import annotations
 
-from safety.capability_policy import (
-    CapabilityCheck,
-    CapabilityPolicy,
-    CapabilitySet,
-)
-from safety.chain import (
+from safety.approval.chain import (
     SafetyChainError,
     SafetyGatedApproval,
     build_safety_chain,
 )
-from safety.permission_policy import (
+from safety.policies.capability import (
+    CapabilityCheck,
+    CapabilityPolicy,
+    CapabilitySet,
+)
+from safety.policies.permission import (
     PermissionDecision,
     PermissionOutcome,
     PermissionPolicy,

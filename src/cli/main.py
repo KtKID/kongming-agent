@@ -65,6 +65,69 @@ def _generate_cli_session_id() -> str:
     return f"cli-{uuid.uuid4().hex[:_CLI_SESSION_ID_HEX_LEN]}"
 
 
+def _resolve_cli_session_id(
+    session_id: str | None,
+    *,
+    smoke: bool,
+    subagent_smoke: bool,
+    workflow_smoke: bool = False,
+) -> str:
+    """在审批和运行时装配前解析 CLI 会话 ID。"""
+    if session_id:
+        return session_id
+    if smoke:
+        return "smoke"
+    if subagent_smoke:
+        return "subagent-smoke"
+    if workflow_smoke:
+        return "workflow-smoke"
+    return _generate_cli_session_id()
+
+
+def _build_cli_manager_prompt_fn(session_id: str) -> PromptActionFn:
+    """构造由审批管理器承接的 CLI 终端审批函数。"""
+    from cli.approval import build_cli_action_prompt
+    from cli.approval_manager_sink import CLIApprovalEventSink
+    from safety.approval.manager import get_approval_manager, make_manager_prompt_fn
+    from safety.approval.rules import ApprovalRules
+
+    action_prompt = build_cli_action_prompt()
+    manager = get_approval_manager(
+        rules=ApprovalRules(policy=_build_cli_auto_approval_policy()),
+    )
+    if not manager.has_event_sink_type(CLIApprovalEventSink):
+        manager.register_event_sink(CLIApprovalEventSink(manager, action_prompt))
+    return make_manager_prompt_fn(
+        manager,
+        session_id,
+        channel="cli",
+        default_cwd=str(Path.cwd()),
+    )
+
+
+def _build_cli_auto_approval_policy() -> Any:
+    """为 CLI 构造共享自动审批策略；装配失败时按失败关闭处理。"""
+    try:
+        from safety.auto_approval import (
+            AutoApprovalPolicy,
+            ConfigStore,
+            load_default_rules,
+            materialize_user_rules_yaml,
+        )
+
+        home = get_kongming_home()
+        auto_approval_root = home / "web" / "auto_approval"
+        auto_approval_root.mkdir(parents=True, exist_ok=True)
+        rules_yaml = materialize_user_rules_yaml(home)
+        return AutoApprovalPolicy(
+            load_default_rules(rules_yaml),
+            ConfigStore(auto_approval_root),
+        )
+    except Exception:
+        logger.exception("CLI auto-approval policy setup failed; falling back to ask")
+        return None
+
+
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option(
     "--config",

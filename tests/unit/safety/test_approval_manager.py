@@ -25,7 +25,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from core.contracts import ApprovalDecision, ApprovalRequest
-from safety.approval_manager import (
+from safety.approval.manager import (
     ApprovalEventSink,
     ApprovalManager,
     _decision_to_action,
@@ -34,7 +34,7 @@ from safety.approval_manager import (
     make_manager_prompt_fn,
     reset_for_testing,
 )
-from safety.approval_rules import ApprovalRules
+from safety.approval.rules import ApprovalRules
 from tools.runtime.approval import ApprovalAction
 
 # ============ Fixtures ============

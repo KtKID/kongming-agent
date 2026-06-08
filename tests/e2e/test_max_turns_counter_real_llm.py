@@ -33,7 +33,7 @@ from core.session import InMemorySession
 from infrastructure.config import load_config
 from infrastructure.config.paths import get_kongming_home
 from runtime_assembly.native_runtime import NativeRuntime
-from safety.capability_policy import CapabilityPolicy, CapabilitySet
+from safety.policies.capability import CapabilityPolicy, CapabilitySet
 from tools.runtime.approval import AutoAllowApproval
 from tools.runtime.base import BaseBuiltinTool
 from tools.runtime.registry import ToolRegistry

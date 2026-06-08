@@ -14,9 +14,9 @@ from __future__ import annotations
 import pytest
 
 from core.contracts import ApprovalDecision, ApprovalRequest
-from safety.default_rules import DEFAULT_DESTRUCTIVE_ALWAYS_ASK
+from safety.approval.default_rules import DEFAULT_DESTRUCTIVE_ALWAYS_ASK
+from safety.approval.types import BoundaryKind, RuntimeBoundaryContext
 from safety.guards.destructive import DestructiveForceAskGuard
-from safety.types import BoundaryKind, RuntimeBoundaryContext
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -136,7 +136,7 @@ class _StubHardBlock:
 
 class _StubBoundary:
     def resolve(self, request: ApprovalRequest, runtime: RuntimeBoundaryContext):
-        from safety.types import BoundaryDecision, BoundaryZone
+        from safety.approval.types import BoundaryDecision, BoundaryZone
 
         return BoundaryDecision(zone=BoundaryZone.APPROVAL)
 
@@ -172,7 +172,7 @@ class _StubConsent:
 @pytest.mark.asyncio
 async def test_destructive_bypasses_trust_goes_to_consent() -> None:
     """rm -rf 命中第②层 → 跳过 Trust → 直接进 Consent。"""
-    from safety.decision_engine import SafetyDecisionEngine
+    from safety.approval.decision_engine import SafetyDecisionEngine
 
     consent = _StubConsent()
     engine = SafetyDecisionEngine(
@@ -196,7 +196,7 @@ async def test_destructive_bypasses_trust_goes_to_consent() -> None:
 @pytest.mark.asyncio
 async def test_non_destructive_uses_trust() -> None:
     """ls 命令 → 不命中第②层 → 走 Trust → silent_allow。"""
-    from safety.decision_engine import SafetyDecisionEngine
+    from safety.approval.decision_engine import SafetyDecisionEngine
 
     consent = _StubConsent()
     engine = SafetyDecisionEngine(
@@ -220,7 +220,7 @@ async def test_non_destructive_uses_trust() -> None:
 @pytest.mark.asyncio
 async def test_compound_cd_rm_destructive_force_ask() -> None:
     """cd /tmp && rm -rf foo → 第二段命中 → 强制 Consent。"""
-    from safety.decision_engine import SafetyDecisionEngine
+    from safety.approval.decision_engine import SafetyDecisionEngine
 
     consent = _StubConsent()
     engine = SafetyDecisionEngine(

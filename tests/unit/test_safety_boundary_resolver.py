@@ -21,13 +21,13 @@ from typing import TYPE_CHECKING
 import pytest
 
 from core.contracts import ApprovalRequest
-from safety._path_trie import PathTrie
-from safety.boundary_resolver import BoundaryResolver
-from safety.types import (
+from safety.approval.types import (
     BoundaryKind,
     BoundaryZone,
     RuntimeBoundaryContext,
 )
+from safety.boundaries.path_trie import PathTrie
+from safety.boundaries.resolver import BoundaryResolver
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

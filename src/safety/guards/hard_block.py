@@ -40,11 +40,11 @@ from infrastructure.config.models import (
     Config,
     SafetyHardDenyConfig,
 )
-from safety.default_rules import (
+from safety.approval.default_rules import (
     DEFAULT_HARD_DENY_COMMANDS,
     DEFAULT_SENSITIVE_PATHS,
 )
-from safety.types import (
+from safety.approval.types import (
     ApprovalMetadataKeys,
     BoundaryScope,
     HardDenyCommand,

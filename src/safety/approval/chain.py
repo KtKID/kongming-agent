@@ -4,8 +4,8 @@
 
 1. :class:`SafetyGatedApproval` —— v0.1.3 暴露给上游（``tools/`` / ``host/`` /
    ``cli/``）的 :class:`core.contracts.ApprovalProvider` 实现。v0.1.4 起改为
-   薄壳：构造 :class:`safety.types.RuntimeBoundaryContext` → 调
-   :class:`safety.decision_engine.SafetyDecisionEngine` → 装饰
+   薄壳：构造 :class:`safety.approval.types.RuntimeBoundaryContext` → 调
+   :class:`safety.approval.decision_engine.SafetyDecisionEngine` → 装饰
    ``metadata.stage`` 兼容字段后返回。
 2. :func:`build_safety_chain` —— 装配入口。v0.1.4 内部装配新四件套
    （HardBlock / BoundaryResolver / TrustResolver / ConsentResolver）+
@@ -40,21 +40,21 @@ from core.contracts import (
 )
 from core.errors import AgentError
 from infrastructure.config.models import Config
-from safety.boundary_resolver import BoundaryResolver
-from safety.capability_policy import CapabilityPolicy
-from safety.decision_engine import SafetyDecisionEngine, TraceEmitter
-from safety.grant_store import GrantStore, grant_with_now
-from safety.guards.consent import ConsentResolver
-from safety.guards.destructive import DestructiveForceAskGuard
-from safety.guards.hard_block import HardBlockGuard
-from safety.guards.trust import TrustResolver
-from safety.permission_policy import PermissionPolicy
-from safety.types import (
+from safety.approval.decision_engine import SafetyDecisionEngine, TraceEmitter
+from safety.approval.types import (
     ApprovalMetadataKeys,
     BoundaryKind,
     DecisionSource,
     RuntimeBoundaryContext,
 )
+from safety.boundaries.resolver import BoundaryResolver
+from safety.grants.store import GrantStore, grant_with_now
+from safety.guards.consent import ConsentResolver
+from safety.guards.destructive import DestructiveForceAskGuard
+from safety.guards.hard_block import HardBlockGuard
+from safety.guards.trust import TrustResolver
+from safety.policies.capability import CapabilityPolicy
+from safety.policies.permission import PermissionPolicy
 
 if TYPE_CHECKING:
     from core.contracts import Event, EventSink

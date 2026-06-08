@@ -7,9 +7,9 @@
 
 职责范围：
 
-- 消费 :data:`safety.default_rules.DEFAULT_APPROVAL_REQUIRED_COMMANDS` 表
+- 消费 :data:`safety.approval.default_rules.DEFAULT_APPROVAL_REQUIRED_COMMANDS` 表
   + 用户 yaml ``safety.approval_required_commands`` 追加规则
-- 消费 :data:`safety.default_rules.DEFAULT_SENSITIVE_PATHS` 中 ``effect=elevated``
+- 消费 :data:`safety.approval.default_rules.DEFAULT_SENSITIVE_PATHS` 中 ``effect=elevated``
   的条目，识别 read/write 操作的敏感路径
 - ConfigSelfProtection elevated 子集：``CLAUDE.md`` / ``AGENTS.md`` /
   ``.kongming/config*`` / ``.kongming/safety/`` / ``pyproject.toml [tool.kongming.safety]``
@@ -57,12 +57,12 @@ from infrastructure.config.models import (
     SafetySensitivePathConfig,
     SafetySkillCallConfig,
 )
-from safety.default_rules import (
+from safety.approval.default_rules import (
     DEFAULT_APPROVAL_REQUIRED_COMMANDS,
     DEFAULT_SENSITIVE_PATHS,
     DEFAULT_SKILL_CALL_RULES,
 )
-from safety.types import (
+from safety.approval.types import (
     ApprovalMetadataKeys,
     ApprovalRequiredCommand,
     BoundaryDecision,

@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from safety.types import (
+from safety.approval.types import (
     ApprovalRequiredCommand,
     BoundaryScope,
     DestructivePattern,

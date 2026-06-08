@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from safety.approval_manager import (
+from safety.approval.manager import (
     ApprovalManager,
     make_manager_prompt_fn,
     reset_for_testing,

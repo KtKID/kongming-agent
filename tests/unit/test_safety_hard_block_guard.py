@@ -21,12 +21,12 @@ import pytest
 
 from core.contracts import ApprovalRequest
 from infrastructure.config.models import ApprovalConfig, Config, ModelConfig
-from safety.guards.hard_block import HardBlockGuard
-from safety.types import (
+from safety.approval.types import (
     ApprovalMetadataKeys,
     BoundaryKind,
     RuntimeBoundaryContext,
 )
+from safety.guards.hard_block import HardBlockGuard
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers

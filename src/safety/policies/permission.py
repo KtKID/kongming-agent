@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from infrastructure.config.models import Config
-from safety.types import (
+from safety.approval.types import (
     ApprovalRequiredCommand,
     BoundaryScope,
     SensitivePathRule,
@@ -118,7 +118,7 @@ class PermissionPolicy:
         """v0.1.3 ``outcome=allow + path`` 翻译后的 grant 候选元组。
 
         每条形如 ``(capability, path_prefix)``，由装配层（``build_safety_chain``）
-        在创建 :class:`safety.grant_store.GrantStore` 时转为 config grants。
+        在创建 :class:`safety.grants.store.GrantStore` 时转为 config grants。
         """
         return self._migrated_allow_path_grants
 
@@ -135,7 +135,7 @@ class PermissionPolicy:
         raise NotImplementedError(
             "PermissionPolicy.check is removed in v0.1.4; "
             "decisions moved to SafetyDecisionEngine. "
-            "Use safety.chain.build_safety_chain(...) instead."
+            "Use safety.approval.chain.build_safety_chain(...) instead."
         )
 
     async def evaluate(

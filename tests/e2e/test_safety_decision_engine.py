@@ -49,21 +49,21 @@ from infrastructure.config.models import (
     ShellToolConfig,
     ToolConfig,
 )
-from safety.boundary_resolver import BoundaryResolver
-from safety.capability_policy import CapabilityPolicy, CapabilitySet
-from safety.chain import build_safety_chain
-from safety.decision_engine import SafetyDecisionEngine
-from safety.grant_store import GrantStore, grant_with_now
-from safety.guards.consent import ConsentResolver
-from safety.guards.hard_block import HardBlockGuard
-from safety.guards.trust import TrustResolver
-from safety.permission_policy import PermissionPolicy, PermissionRule
-from safety.types import (
+from safety.approval.chain import build_safety_chain
+from safety.approval.decision_engine import SafetyDecisionEngine
+from safety.approval.types import (
     ApprovalMetadataKeys,
     BoundaryKind,
     DecisionSource,
     RuntimeBoundaryContext,
 )
+from safety.boundaries.resolver import BoundaryResolver
+from safety.grants.store import GrantStore, grant_with_now
+from safety.guards.consent import ConsentResolver
+from safety.guards.hard_block import HardBlockGuard
+from safety.guards.trust import TrustResolver
+from safety.policies.capability import CapabilityPolicy, CapabilitySet
+from safety.policies.permission import PermissionPolicy, PermissionRule
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers

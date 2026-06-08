@@ -165,7 +165,7 @@ class WebHostAdapter(HostAdapter):
 
         ``mark_action_aware`` 装饰器告诉 :class:`tools.runtime.approval.InteractiveApproval`
         本回调返回 :class:`ApprovalAction` 而非旧 ``bool``，从而把
-        ``ACCEPT_FOR_SESSION`` 信号传到 :class:`safety.chain.SafetyGatedApproval`
+        ``ACCEPT_FOR_SESSION`` 信号传到 :class:`safety.approval.chain.SafetyGatedApproval`
         触发 GrantStore 写入（per-thread 物理隔离修 P1 bug）。
 
         在 ``self._closed`` 时直接返回 REJECT，避免把请求推到已断连接。
@@ -243,7 +243,7 @@ class WebHostAdapter(HostAdapter):
 
         阶段 1（smart-approval-manager-v0.5）reviewer 必修 #4 新增：除清自身
         ``prompt_approval`` pending（老逻辑，本 adapter 内的 future）外，
-        若 adapter 持有 ``thread_id``，还通知 :class:`safety.approval_manager.ApprovalManager`
+        若 adapter 持有 ``thread_id``，还通知 :class:`safety.approval.manager.ApprovalManager`
         取消该 thread 名下所有 manager 路径的 pending，避免用户关 tab 后 manager pending
         卡 60s timeout / R10 内存泄漏。``cancel_by_thread`` 失败一律吞掉（非主流程）。
         """
@@ -261,7 +261,7 @@ class WebHostAdapter(HostAdapter):
         # 不在这里 cancel 用户关 tab 时 manager pending 卡 60s 才超时。
         if self._thread_id:
             try:
-                from safety.approval_manager import get_approval_manager
+                from safety.approval.manager import get_approval_manager
 
                 manager = get_approval_manager()
                 cancelled = manager.cancel_by_thread(self._thread_id, reason="cell_evict")

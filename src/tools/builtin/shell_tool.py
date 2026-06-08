@@ -7,7 +7,7 @@ async 主链路。
 安全边界（重要）：
 
 - 本模块**不**维护任何 command 黑名单 / 白名单。命令是否允许执行，全部
-  由上层 :mod:`safety.capability_policy` + :mod:`safety.permission_policy` +
+  由上层 :mod:`safety.policies.capability` + :mod:`safety.policies.permission` +
   :class:`core.contracts.ApprovalProvider` 串联决定。
 - 本模块**不 import** ``safety/`` 下任何内部 policy 组件（硬约束，
   import-linter 会红）。

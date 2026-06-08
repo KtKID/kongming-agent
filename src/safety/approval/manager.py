@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from core.contracts import ApprovalAction, ApprovalDecision, ApprovalRequest
-from safety.approval_rules import ApprovalRules
+from safety.approval.rules import ApprovalRules
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ class _PendingApproval:
 class ApprovalEventSink(Protocol):
     """审批事件输出层抽象（manager 内部 Protocol）。
 
-    阶段 1：仅 :class:`safety.inbox_event_sink.InboxEventSink` 一种实现；
+    阶段 1：仅 :class:`safety.inbox.event_sink.InboxEventSink` 一种实现；
     阶段 4：加 ``CLIEventSink``，Protocol 签名必须能覆盖所有可预见通道，
     避免阶段 4 改 Protocol 破坏阶段 1 实现（spec 60-risk R4）。
 
@@ -329,7 +329,7 @@ class ApprovalManager:
     def resolve(self, request_id: str, decision: dict[str, Any]) -> bool:
         """所有 UI 入口的决策回写点。
 
-        被 :class:`safety.inbox_event_sink.InboxEventSink` 注册的 callback /
+        被 :class:`safety.inbox.event_sink.InboxEventSink` 注册的 callback /
         CLIEventSink stdin 回调等调用。本方法只 set_result Future，清理由
         ``request()`` 的 finally 走 :meth:`_cleanup_pending` 完成。
 

@@ -17,7 +17,7 @@
 边界提醒：
 
 - 本模块**不**判断"某次工具调用是否应该进 ask 流程"——那是
-  :mod:`safety.permission_policy` 的事，:class:`ApprovalProvider` 只负责
+  :mod:`safety.policies.permission` 的事，:class:`ApprovalProvider` 只负责
   "在被问到时给一个决定"。
 - 本模块**不 import** ``safety/`` 下任何内部 policy 组件（硬约束）。
 

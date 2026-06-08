@@ -36,8 +36,8 @@ for _mod in _FORBIDDEN_MODULES:
 
 from core.contracts import ApprovalDecision, ApprovalRequest  # noqa: E402
 from infrastructure.config import load_config  # noqa: E402
-from safety.chain import build_safety_chain  # noqa: E402
-from safety.types import ApprovalMetadataKeys  # noqa: E402
+from safety.approval.chain import build_safety_chain  # noqa: E402
+from safety.approval.types import ApprovalMetadataKeys  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SETTING_YAML = _REPO_ROOT / "config" / "setting.yaml"

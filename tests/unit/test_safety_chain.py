@@ -1,4 +1,4 @@
-"""unit：safety.chain v0.1.4 薄壳形态 + build_safety_chain 装配。
+"""unit：safety.approval.chain v0.1.4 薄壳形态 + build_safety_chain 装配。
 
 验证：
 
@@ -17,17 +17,17 @@ import pytest
 
 from core.contracts import ApprovalDecision, ApprovalRequest
 from infrastructure.config.models import ApprovalConfig, Config, ModelConfig
-from safety.capability_policy import CapabilityPolicy, CapabilitySet
-from safety.chain import (
+from safety.approval.chain import (
     SafetyChainError,
     SafetyGatedApproval,
     _decorate_stage_compat,
     build_safety_chain,
 )
-from safety.decision_engine import SafetyDecisionEngine
-from safety.grant_store import GrantStore
-from safety.permission_policy import PermissionPolicy
-from safety.types import ApprovalMetadataKeys, BoundaryKind, DecisionSource
+from safety.approval.decision_engine import SafetyDecisionEngine
+from safety.approval.types import ApprovalMetadataKeys, BoundaryKind, DecisionSource
+from safety.grants.store import GrantStore
+from safety.policies.capability import CapabilityPolicy, CapabilitySet
+from safety.policies.permission import PermissionPolicy
 
 
 class _FixedApproval:
@@ -239,8 +239,8 @@ async def test_build_safety_chain_with_explicit_trace_emitter() -> None:
 @pytest.mark.unit
 def test_safety_decision_engine_directly_wired() -> None:
     """SafetyDecisionEngine 类可被直接构造并注入 SafetyGatedApproval。"""
-    from safety.boundary_resolver import BoundaryResolver
-    from safety.grant_store import GrantStore
+    from safety.boundaries.resolver import BoundaryResolver
+    from safety.grants.store import GrantStore
     from safety.guards.consent import ConsentResolver
     from safety.guards.hard_block import HardBlockGuard
     from safety.guards.trust import TrustResolver

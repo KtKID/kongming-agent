@@ -120,17 +120,20 @@ type = forbidden
 source_modules =
     tools
 forbidden_modules =
-    safety.capability_policy
-    safety.permission_policy
+    safety.policies
+    safety.policies.capability
+    safety.policies.permission
     safety.guards
     safety.guards.hard_block
     safety.guards.consent
     safety.guards.trust
-    safety.boundary_resolver
-    safety._path_trie
-    safety.grant_store
-    safety._grant_persister
-    safety.decision_engine
+    safety.boundaries
+    safety.boundaries.resolver
+    safety.boundaries.path_trie
+    safety.grants
+    safety.grants.store
+    safety.grants.persister
+    safety.approval.decision_engine
 
 ; ---------------------------------------------------------------------------
 ; Contract 5: web.protocol 必须零 sibling 依赖
@@ -252,6 +255,12 @@ ignore_imports =
     web.app -> web.uploads.storage
     web.app -> web.uploads.registry
     web.app -> web.uploads.validation
+; cli-approval-manager-v0.1：web.approvals.auto 仅保留 Web WS/audit 边界和
+; compatibility exports，policy/config/rules 真源迁到 safety.auto_approval。
+; 放行这三条精确 re-export 边，app/routers 继续只通过 web.approvals.auto 入口触达。
+    web.approvals.auto -> safety.auto_approval.config_store
+    web.approvals.auto -> safety.auto_approval.policy
+    web.approvals.auto -> safety.auto_approval.rules
 ; manage-config-tab #6：web.app + dashboard/config/router 都需要触达 manager / writer
 ; / restart / schema 子模块。其中 writer 走 infrastructure.config.{loader,errors} 做
 ; pydantic 校验闭环——``infrastructure.config.errors -> core.errors`` 的传递链触发

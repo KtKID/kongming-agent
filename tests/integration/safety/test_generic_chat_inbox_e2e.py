@@ -28,13 +28,13 @@ import asyncio
 import pytest
 
 from core.contracts import ApprovalAction, ApprovalRequest
-from safety.approval_manager import (
+from safety.approval.manager import (
     ApprovalManager,
     make_manager_prompt_fn,
     reset_for_testing,
 )
-from safety.approval_rules import ApprovalRules
-from safety.inbox_event_sink import InboxEventSink
+from safety.approval.rules import ApprovalRules
+from safety.inbox.event_sink import InboxEventSink
 from web.approvals.global_inbox.broadcaster import (
     ApprovalInboxBroadcaster,
     reset_inbox_broadcaster_for_testing,

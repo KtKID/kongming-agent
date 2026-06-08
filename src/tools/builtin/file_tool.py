@@ -10,7 +10,7 @@ v1-mini 里需要三个最基本的文件工具，让模型能完成"读 → 改
 安全性边界：
 
 - 这一层**不做**路径白名单 / 路径逃逸防护 / 写权限过滤。这些安全策略由
-  :mod:`safety.capability_policy` 和 :mod:`safety.permission_policy` 在装配层
+  :mod:`safety.policies.capability` 和 :mod:`safety.policies.permission` 在装配层
   串到 :class:`core.contracts.ApprovalProvider` 前面去做；tool 本身只专注于
   "能不能把这件事做对"，不兼职安全审判。
 - 路径统一 :meth:`pathlib.Path.resolve` 后落成绝对路径返回，方便上游审计。

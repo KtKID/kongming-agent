@@ -13,7 +13,7 @@ builtin tool（``file_tools.py`` / ``shell_tool.py`` 等）少写一点样板：
 
 - 不做路径白名单 / 命令黑名单（安全策略归 ``safety/``，tools 层不做）
 - 不做审批决策（审批由 :class:`core.contracts.ApprovalProvider` 和装配层串联）
-- 不依赖 :mod:`safety.capability_policy` / :mod:`safety.permission_policy`
+- 不依赖 :mod:`safety.policies.capability` / :mod:`safety.policies.permission`
   （硬约束，import-linter 会红）
 """
 

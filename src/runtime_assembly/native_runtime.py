@@ -471,13 +471,13 @@ class NativeRuntime:
 
     @property
     def grant_store(self):  # type: ignore[no-untyped-def]
-        """暴露底层 :class:`safety.grant_store.GrantStore`（如有）。
+        """暴露底层 :class:`safety.grants.store.GrantStore`（如有）。
 
         web ``thread_manager.evict_cell`` 用 ``runtime.grant_store.clear_session(session_id)``
         清理 thread 私有 grants（修 bug-report-20260427-235232 跨 thread 信任泄漏）。
         approval 不是 ``SafetyGatedApproval``（如 stub / AutoAllow）时返回 ``None``。
 
-        无 type 注解：避免在执行器层 import safety.grant_store（架构边界）。
+        无 type 注解：避免在执行器层 import safety.grants.store（架构边界）。
         """
         return getattr(self._approval, "grant_store", None)
 

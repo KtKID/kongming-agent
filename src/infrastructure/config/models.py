@@ -717,7 +717,7 @@ class SafetySensitivePathConfig(BaseModel):
 class SafetySkillCallConfig(BaseModel):
     """yaml ``safety.skill_call_rules`` 单条配置（v0.1.6 skill-system 模块 C）。
 
-    与 :class:`safety.types.SkillCallRule` 一一对应；BoundaryScope 字段以小写
+    与 :class:`safety.approval.types.SkillCallRule` 一一对应；BoundaryScope 字段以小写
     字符串配置，运行时由 ``SkillCallRule`` 转换为 ``BoundaryScope`` enum。
     """
 

@@ -9,7 +9,7 @@ v0.1.4 变化（任务 #37/#39）：
 
 - **不再做运行时判定**：``check()`` 方法保留签名，方法体改为
   ``raise NotImplementedError``。所有 capability 判定全部下沉到
-  :class:`safety.decision_engine.SafetyDecisionEngine`。
+  :class:`safety.approval.decision_engine.SafetyDecisionEngine`。
 - **保留 `from_config` 作为迁移入口**：v0.1.3 yaml 中的 ``capability allow=...``
   / ``deny=...`` 字段（实际由 ``config.tool.<name>.enabled`` 等推导）翻译为新
   规则表的派生条目（:data:`MIGRATED_HARD_DENY_COMMANDS`）。
@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from infrastructure.config.models import Config
-from safety.types import BoundaryScope, HardDenyCommand
+from safety.approval.types import BoundaryScope, HardDenyCommand
 
 # ---------------------------------------------------------------------------
 # 数据结构（保留供 v0.1.3 调用方导入）
@@ -127,7 +127,7 @@ class CapabilityPolicy:
         raise NotImplementedError(
             "CapabilityPolicy.check is removed in v0.1.4; "
             "decisions moved to SafetyDecisionEngine. "
-            "Use safety.chain.build_safety_chain(...) instead."
+            "Use safety.approval.chain.build_safety_chain(...) instead."
         )
 
     @classmethod

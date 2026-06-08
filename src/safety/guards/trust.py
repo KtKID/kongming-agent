@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from core.contracts import ApprovalDecision, ApprovalRequest
-from safety.types import (
+from safety.approval.types import (
     ApprovalMetadataKeys,
     BoundaryKind,
     BoundaryZone,
@@ -29,8 +29,8 @@ from safety.types import (
 )
 
 if TYPE_CHECKING:
-    from safety.boundary_resolver import BoundaryResolver
-    from safety.grant_store import GrantStore
+    from safety.boundaries.resolver import BoundaryResolver
+    from safety.grants.store import GrantStore
 
 # 工具名 → capability 映射（与 GrantStore.from_config 写入一致）
 _FILE_READ_TOOLS: frozenset[str] = frozenset({"read_file", "list_dir"})
@@ -120,7 +120,7 @@ class TrustResolver:
             if tool_name in _SHELL_TOOLS:
                 cmd = (request.arguments or {}).get("command")
                 if isinstance(cmd, str) and cmd.strip():
-                    from safety.chain import extract_command_base
+                    from safety.approval.chain import extract_command_base
 
                     cmd_base = extract_command_base(cmd)
                     if cmd_base:

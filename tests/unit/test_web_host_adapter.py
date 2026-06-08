@@ -300,8 +300,8 @@ async def test_close_with_thread_id_calls_manager_cancel_by_thread(
     manager_spy = MagicMock()
     manager_spy.cancel_by_thread = MagicMock(return_value=2)  # 假装清掉 2 条 pending
 
-    # 注：源码内是 `from safety.approval_manager import get_approval_manager`（局部 import）
-    import safety.approval_manager as approval_manager_mod
+    # 注：源码内是 `from safety.approval.manager import get_approval_manager`（局部 import）
+    import safety.approval.manager as approval_manager_mod
 
     monkeypatch.setattr(approval_manager_mod, "get_approval_manager", lambda: manager_spy)
 
@@ -323,7 +323,7 @@ async def test_close_without_thread_id_skips_manager_call(
     manager_spy = MagicMock()
     manager_spy.cancel_by_thread = MagicMock()
 
-    import safety.approval_manager as approval_manager_mod
+    import safety.approval.manager as approval_manager_mod
 
     monkeypatch.setattr(approval_manager_mod, "get_approval_manager", lambda: manager_spy)
 

@@ -1,6 +1,6 @@
 """unit：v0.2 agent-cron-module 模块 6 —— ``schedule`` capability 默认规则。
 
-覆盖 :mod:`safety.default_rules` 新增的 :data:`DEFAULT_CONSENT_THEN_TRUST_TOOLS`
+覆盖 :mod:`safety.approval.default_rules` 新增的 :data:`DEFAULT_CONSENT_THEN_TRUST_TOOLS`
 锚点常量与 ``schedule`` tool 走 ConsentResolver 的 standard ask 路径：
 
 1. ``DEFAULT_CONSENT_THEN_TRUST_TOOLS`` 含 ``"memory"`` 与 ``"schedule"``（锚点）
@@ -27,7 +27,7 @@ import pytest
 
 from core.contracts import ApprovalDecision, ApprovalRequest
 from infrastructure.config.models import ApprovalConfig, Config, ModelConfig
-from safety.default_rules import (
+from safety.approval.default_rules import (
     DEFAULT_ALLOW_TOOLS_SILENT,
     DEFAULT_APPROVAL_REQUIRED_COMMANDS,
     DEFAULT_CONSENT_THEN_TRUST_TOOLS,
@@ -35,14 +35,14 @@ from safety.default_rules import (
     DEFAULT_SENSITIVE_PATHS,
     DEFAULT_SKILL_CALL_RULES,
 )
-from safety.guards.consent import ConsentResolver
-from safety.types import (
+from safety.approval.types import (
     ApprovalMetadataKeys,
     BoundaryDecision,
     BoundaryKind,
     BoundaryZone,
     RuntimeBoundaryContext,
 )
+from safety.guards.consent import ConsentResolver
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers（参考 test_safety_consent_resolver.py 风格）
@@ -228,13 +228,13 @@ async def test_schedule_tool_consent_writes_session_grant(tmp_path: Any) -> None
     查询；该缺口与 memory tool 共有，由 trust.py 修复（不在本任务范围）。
     本测试只锁定 grant **写入**正确，不假设 trust 第二轮 silent_allow。
     """
-    from safety.boundary_resolver import BoundaryResolver
-    from safety.chain import SafetyGatedApproval
-    from safety.decision_engine import SafetyDecisionEngine
-    from safety.grant_store import GrantStore
+    from safety.approval.chain import SafetyGatedApproval
+    from safety.approval.decision_engine import SafetyDecisionEngine
+    from safety.approval.types import BoundaryKind, GrantKey
+    from safety.boundaries.resolver import BoundaryResolver
+    from safety.grants.store import GrantStore
     from safety.guards.hard_block import HardBlockGuard
     from safety.guards.trust import TrustResolver
-    from safety.types import BoundaryKind, GrantKey
 
     cfg = _cfg()
     # FakeApproval 模拟用户首次点"本 session 同意"：返回 grant_scope=session

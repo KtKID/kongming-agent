@@ -34,7 +34,7 @@ import warnings
 from io import StringIO
 from pathlib import Path
 
-from safety.types import BoundaryKind, Grant
+from safety.approval.types import BoundaryKind, Grant
 
 # ``allow_writes`` 写入用的 capability 常量（与 grant_store.py 保持同步）
 _FILE_WRITE_CAPABILITY = "file_write"

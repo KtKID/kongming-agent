@@ -22,8 +22,8 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-from safety.default_rules import DEFAULT_DESTRUCTIVE_ALWAYS_ASK
-from safety.types import BoundaryScope, DestructivePattern
+from safety.approval.default_rules import DEFAULT_DESTRUCTIVE_ALWAYS_ASK
+from safety.approval.types import BoundaryScope, DestructivePattern
 
 logger = logging.getLogger(__name__)
 

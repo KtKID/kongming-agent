@@ -1,4 +1,4 @@
-"""unit：safety v0.1.4 M5.2 — :class:`safety.grant_store.GrantStore`。
+"""unit：safety v0.1.4 M5.2 — :class:`safety.grants.store.GrantStore`。
 
 覆盖：
 
@@ -19,17 +19,17 @@ from infrastructure.config.models import (
     ModelConfig,
     SafetyConfig,
 )
-from safety.grant_store import (
-    GrantStore,
-    grant_with_now,
-    normalized_path_matcher,
-    session_grant_from_config_template,
-)
-from safety.types import (
+from safety.approval.types import (
     BoundaryKind,
     DecisionSource,
     Grant,
     GrantKey,
+)
+from safety.grants.store import (
+    GrantStore,
+    grant_with_now,
+    normalized_path_matcher,
+    session_grant_from_config_template,
 )
 
 

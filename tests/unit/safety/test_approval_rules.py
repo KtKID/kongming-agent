@@ -1,4 +1,4 @@
-""":class:`safety.approval_rules.ApprovalRules` 单测（approval-rules-unified 完整重写）。
+""":class:`safety.approval.rules.ApprovalRules` 单测（approval-rules-unified 完整重写）。
 
 覆盖 task `approval-rules-unified` 后的新接口：``ApprovalRules(policy=...)`` 注入
 :class:`_AutoApprovalPolicyProto`，``classify`` 委托 policy 并依据
@@ -31,7 +31,7 @@ from typing import Any
 
 import pytest
 
-from safety.approval_rules import ApprovalRules, _RuleDecision
+from safety.approval.rules import ApprovalRules, _RuleDecision
 
 # ---------------------------------------------------------------------------
 # 测试用 fake：duck typing 匹配 _PolicyDecisionLike + _AutoApprovalPolicyProto
@@ -40,7 +40,7 @@ from safety.approval_rules import ApprovalRules, _RuleDecision
 
 @dataclass
 class _FakeDecision:
-    """duck typing 匹配 :class:`safety.approval_rules._PolicyDecisionLike`。
+    """用鸭子类型匹配 :class:`safety.approval.rules._PolicyDecisionLike`。
 
     字段对齐 :class:`web.approvals.auto.policy.Decision`（仅本层消费 3 字段，
     rule_evaluation audit 快照可省略）。
@@ -53,7 +53,7 @@ class _FakeDecision:
 
 @dataclass
 class _FakePolicy:
-    """duck typing 匹配 :class:`safety.approval_rules._AutoApprovalPolicyProto`。
+    """用鸭子类型匹配 :class:`safety.approval.rules._AutoApprovalPolicyProto`。
 
     构造时配置 ``next_decision`` + ``enabled_cwds``（按 cwd 枚举开关）；
     ``classify_calls`` 记录全部入参用于断言调用契约（is_elevated / cwd / tool）。

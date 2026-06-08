@@ -30,14 +30,14 @@ import pytest
 
 from core.contracts import ApprovalDecision, ApprovalRequest
 from infrastructure.config.models import ApprovalConfig, Config, ModelConfig
-from safety.guards.consent import ConsentResolver
-from safety.types import (
+from safety.approval.types import (
     ApprovalMetadataKeys,
     BoundaryDecision,
     BoundaryKind,
     BoundaryZone,
     RuntimeBoundaryContext,
 )
+from safety.guards.consent import ConsentResolver
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers

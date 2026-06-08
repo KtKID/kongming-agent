@@ -158,7 +158,7 @@ ignore = [
 "src/tools/builtin/schedule_tool.py" = ["RUF012"]
 # 其他风格级提示不是硬错误
 "src/core/runner.py" = ["SIM108"]
-"src/safety/chain.py" = ["SIM103"]
+"src/safety/approval/chain.py" = ["SIM103"]
 "src/infrastructure/config/models.py" = ["SIM103"]
 "src/sessions/session_store.py" = ["SIM108"]
 "src/runtime_assembly/native_runtime.py" = ["SIM108"]

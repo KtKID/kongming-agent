@@ -16,9 +16,7 @@ import time
 import pytest
 
 from core.contracts import ApprovalRequest
-from safety.grant_store import GrantStore
-from safety.guards.trust import TrustResolver
-from safety.types import (
+from safety.approval.types import (
     ApprovalMetadataKeys,
     BoundaryDecision,
     BoundaryKind,
@@ -28,6 +26,8 @@ from safety.types import (
     GrantKey,
     RuntimeBoundaryContext,
 )
+from safety.grants.store import GrantStore
+from safety.guards.trust import TrustResolver
 
 # ---------------------------------------------------------------------------
 # Fixtures

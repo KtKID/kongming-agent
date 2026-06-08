@@ -13,12 +13,12 @@
 
 **强约束**（任务 README）：
 
-- 运行时 ``boundary_kind`` 恒为 :class:`safety.types.BoundaryKind.HOST`；本模块
+- 运行时 ``boundary_kind`` 恒为 :class:`safety.approval.types.BoundaryKind.HOST`；本模块
   不读 ``runtime.boundary_kind`` 做 sandbox 分支
 - 数据结构严格遵守 ``docs/safety-scope-v0.1.4/04-data-and-state.md``：所有 dataclass
-  ``frozen=True``；:class:`safety.types.ResolvedBoundary` 必须含 5 个 trie + runtime
+  ``frozen=True``；:class:`safety.approval.types.ResolvedBoundary` 必须含 5 个 trie + runtime
   + project_root + snapshot_at + git_available
-- 命令工具（``run_shell``）不在本模块管辖范围；返回 :class:`safety.types.BoundaryZone.APPROVAL`
+- 命令工具（``run_shell``）不在本模块管辖范围；返回 :class:`safety.approval.types.BoundaryZone.APPROVAL`
   并由后续 ConsentResolver 接管
 - 仅依赖 stdlib：``subprocess`` / ``pathlib`` / ``time``
 
@@ -41,12 +41,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from infrastructure.config.paths import get_kongming_home
-from safety._path_trie import PathTrie
-from safety.default_rules import (
+from safety.approval.default_rules import (
     DEFAULT_SENSITIVE_PATHS,
     DEFAULT_TRUSTED_WORKDIRS,
 )
-from safety.types import (
+from safety.approval.types import (
     BoundaryDecision,
     BoundaryScope,
     BoundaryZone,
@@ -54,6 +53,7 @@ from safety.types import (
     RuntimeBoundaryContext,
     SensitivePathRule,
 )
+from safety.boundaries.path_trie import PathTrie
 
 if TYPE_CHECKING:
     from core.contracts import ApprovalRequest

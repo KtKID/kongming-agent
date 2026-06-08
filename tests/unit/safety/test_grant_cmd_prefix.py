@@ -14,10 +14,8 @@ import time
 import pytest
 
 from core.contracts import ApprovalDecision, ApprovalRequest
-from safety.chain import extract_command_base
-from safety.grant_store import GrantStore
-from safety.guards.trust import TrustResolver
-from safety.types import (
+from safety.approval.chain import extract_command_base
+from safety.approval.types import (
     BoundaryDecision,
     BoundaryKind,
     BoundaryZone,
@@ -26,6 +24,8 @@ from safety.types import (
     GrantKey,
     RuntimeBoundaryContext,
 )
+from safety.grants.store import GrantStore
+from safety.guards.trust import TrustResolver
 
 # ---------------------------------------------------------------------------
 # extract_command_base 单元测试
@@ -207,9 +207,9 @@ class TestMaybeWriteSessionGrantCommandPrefix:
     @staticmethod
     def _make_gated_approval() -> tuple:
         """构造 SafetyGatedApproval + GrantStore，便于检查 grant 写入。"""
-        from safety.chain import SafetyGatedApproval
-        from safety.decision_engine import SafetyDecisionEngine
-        from safety.grant_store import GrantStore
+        from safety.approval.chain import SafetyGatedApproval
+        from safety.approval.decision_engine import SafetyDecisionEngine
+        from safety.grants.store import GrantStore
 
         store = GrantStore()
 
@@ -220,7 +220,7 @@ class TestMaybeWriteSessionGrantCommandPrefix:
 
         class _StubBoundary:
             def resolve(self, req, rt):
-                from safety.types import BoundaryDecision, BoundaryZone
+                from safety.approval.types import BoundaryDecision, BoundaryZone
 
                 return BoundaryDecision(zone=BoundaryZone.APPROVAL)
 

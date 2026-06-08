@@ -31,16 +31,16 @@ import contextlib
 from typing import TYPE_CHECKING, Protocol
 
 from core.contracts import ApprovalDecision
-from safety.types import ApprovalMetadataKeys
+from safety.approval.types import ApprovalMetadataKeys
 
 if TYPE_CHECKING:
     from core.contracts import ApprovalRequest
-    from safety.boundary_resolver import BoundaryResolver
+    from safety.approval.types import RuntimeBoundaryContext
+    from safety.boundaries.resolver import BoundaryResolver
     from safety.guards.consent import ConsentResolver
     from safety.guards.destructive import DestructiveForceAskGuard
     from safety.guards.hard_block import HardBlockGuard
     from safety.guards.trust import TrustResolver
-    from safety.types import RuntimeBoundaryContext
 
 
 class TraceEmitter(Protocol):
@@ -49,7 +49,7 @@ class TraceEmitter(Protocol):
     ``event_kind`` ∈ ``{"tool.denied", "tool.silently_allowed",
     "tool.approval_required"}``（见 :class:`core.contracts.EventKind`）。
 
-    ``trace_emitter`` 是同步回调；装配层（:func:`safety.chain.build_safety_chain`）
+    ``trace_emitter`` 是同步回调；装配层（:func:`safety.approval.chain.build_safety_chain`）
     内部把它包装成 EventSink fan-out 的同步代理，避免在主决策路径上引入异步 await。
     """
 
@@ -65,7 +65,7 @@ class SafetyDecisionEngine:
     """主决策链装配中枢。
 
     构造时显式注入五个 guard，便于测试 stub；生产装配走
-    :func:`safety.chain.build_safety_chain`。
+    :func:`safety.approval.chain.build_safety_chain`。
 
     Attributes:
         _hard_block: 第一道防线，命中即拒绝。

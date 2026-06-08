@@ -27,10 +27,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from safety.inbox_helpers import emit_remove_safe, to_inbox_payload
+from safety.inbox.helpers import emit_remove_safe, to_inbox_payload
 
 if TYPE_CHECKING:
-    from safety.approval_manager import ApprovalManager, _PendingApproval
+    from safety.approval.manager import ApprovalManager, _PendingApproval
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ class _BroadcasterProto(Protocol):
 
 
 class InboxEventSink:
-    """实现 ``safety.approval_manager.ApprovalEventSink`` Protocol。
+    """实现 ``safety.approval.manager.ApprovalEventSink`` Protocol。
 
     把 manager 事件转发到 broadcaster（add / remove 帧），同时把 manager.resolve
     callback 注册到 broadcaster，让前端通过 inbox.resolve 帧能路由回 manager。
@@ -162,7 +162,7 @@ class InboxEventSink:
     ) -> None:
         """fan-out remove 帧到所有 ws。
 
-        通过 :func:`safety.inbox_helpers.emit_remove_safe` 调
+        通过 :func:`safety.inbox.helpers.emit_remove_safe` 调
         ``broadcaster.emit_remove``（该 helper 已吞所有异常）。
 
         Args:

@@ -1,6 +1,6 @@
 """generic_chat per-cwd 自动通过倒计时端到端集成测（approval-rules-unified 重构）。
 
-覆盖 :class:`safety.approval_manager.ApprovalManager._handle_auto_approve` 的
+覆盖 :class:`safety.approval.manager.ApprovalManager._handle_auto_approve` 的
 完整生命周期 + 三退出路径 cancel 防护 + race fail-safe + rm 危险规则保护：
 
 1. ``test_auto_approve_resolves_when_cwd_enabled`` ——
@@ -55,11 +55,11 @@ from typing import Any
 import pytest
 
 from core.contracts import ApprovalDecision
-from safety.approval_manager import (
+from safety.approval.manager import (
     ApprovalManager,
     reset_for_testing,
 )
-from safety.approval_rules import ApprovalRules
+from safety.approval.rules import ApprovalRules
 from web.approvals.auto.config_store import ConfigStore, ProjectConfig
 
 pytestmark = pytest.mark.asyncio
@@ -80,7 +80,7 @@ def _reset_singletons() -> Iterator[None]:
 
 @dataclass
 class _FakeDecision:
-    """duck typing 匹配 :class:`safety.approval_rules._PolicyDecisionLike`。"""
+    """duck typing 匹配 :class:`safety.approval.rules._PolicyDecisionLike`。"""
 
     auto_eligible: bool
     blocked_by_rule: str | None
@@ -89,7 +89,7 @@ class _FakeDecision:
 
 @dataclass
 class _FakePolicy:
-    """duck typing 匹配 :class:`safety.approval_rules._AutoApprovalPolicyProto`。
+    """duck typing 匹配 :class:`safety.approval.rules._AutoApprovalPolicyProto`。
 
     构造时注入静态 decision + cwd 启用集合；满足集成测用例 1-6 + race fail-safe
     场景需求（不依赖完整 RuleSet 加载）。

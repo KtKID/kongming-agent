@@ -97,7 +97,7 @@ class _AutoApprovalPolicyProto(Protocol):
             is_elevated: bool,
         ) -> Decision: ...
 
-    与 :class:`safety.inbox_event_sink._BroadcasterProto` 同款解耦模式
+    与 :class:`safety.inbox.event_sink._BroadcasterProto` 同款解耦模式
     （stage1 任务沿用至今）。
     """
 

@@ -136,9 +136,9 @@ def _build_manager_and_inbox_sink(*, app: Any) -> Any:
             必须已就绪，由 create_app lifespan 装配；缺失时 policy=None，
             fail-safe 降级到「所有 cwd 默认 ask + 60s」行为）。
     """
-    from safety.approval_manager import get_approval_manager
-    from safety.approval_rules import ApprovalRules
-    from safety.inbox_event_sink import InboxEventSink
+    from safety.approval.manager import get_approval_manager
+    from safety.approval.rules import ApprovalRules
+    from safety.inbox.event_sink import InboxEventSink
     from web.approvals.global_inbox import get_inbox_broadcaster
 
     broadcaster = get_inbox_broadcaster()
@@ -225,7 +225,7 @@ def _make_runtime_factory(cfg: object) -> object:
     from prompting.instructions.instruction_loader import assemble_instructions
     from prompting.skills.skill_loader import format_skill_listing, load_skill_specs
     from runtime_assembly.native_runtime import NativeRuntime
-    from safety.approval_manager import make_manager_prompt_fn
+    from safety.approval.manager import make_manager_prompt_fn
     from sessions import SessionBootstrap, build_session
     from tools import (
         ToolRegistry,

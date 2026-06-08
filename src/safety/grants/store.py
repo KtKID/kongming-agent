@@ -6,7 +6,7 @@
 - ``session`` grants：``dict[GrantKey, Grant]``，session 结束失效。
 - ``config`` grants：启动时从 ``Config.safety.allow_writes`` /
   ``allow_tools_silent`` 转换为 :class:`Grant`；写回由模块 5.5 的
-  :func:`safety._grant_persister.persist_grant` 完成（本类只标记）。
+  :func:`safety.grants.persister.persist_grant` 完成（本类只标记）。
 
 设计要点：
 
@@ -35,7 +35,7 @@ from dataclasses import replace
 from pathlib import PurePosixPath
 
 from infrastructure.config.models import Config
-from safety.types import (
+from safety.approval.types import (
     BoundaryKind,
     DecisionSource,
     Grant,
@@ -239,7 +239,7 @@ class GrantStore:
         """标记 grant 为待持久化。
 
         本方法只更新内存 ``_config_grants`` + 入队 ``_pending_persist``；
-        真正写盘由 ``safety._grant_persister.persist_grant`` 承担（拆开是
+        真正写盘由 ``safety.grants.persister.persist_grant`` 承担（拆开是
         为了把 yaml IO 与 store 状态隔离，方便测试）。
 
         强制 ``grant.key.boundary_kind == HOST`` 与 ``grant.scope == "config"``。

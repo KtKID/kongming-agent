@@ -24,7 +24,7 @@ from infrastructure.config.models import (
     SafetyHardDenyConfig,
     SafetySensitivePathConfig,
 )
-from safety.default_rules import (
+from safety.approval.default_rules import (
     DEFAULT_ALLOW_TOOLS_SILENT,
     DEFAULT_ALLOW_WRITES,
     DEFAULT_APPROVAL_REQUIRED_COMMANDS,
@@ -32,7 +32,7 @@ from safety.default_rules import (
     DEFAULT_SENSITIVE_PATHS,
     DEFAULT_TRUSTED_WORKDIRS,
 )
-from safety.types import (
+from safety.approval.types import (
     ApprovalMetadataKeys,
     ApprovalRequiredCommand,
     BoundaryDecision,
