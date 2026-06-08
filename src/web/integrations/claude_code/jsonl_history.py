@@ -9,7 +9,7 @@ SDK 落盘的原始 entry 流翻译成 :class:`NormalizedMessage` 形态的 dict
 
 - 与 :mod:`web.integrations.claude_code.normalizer`（live 流翻译器）**独立实现**——live
   消费 SDK 类型实例，本 parser 消费纯 JSON dict，复用没价值
-- 模块只 import 标准库 + :mod:`web.llm_protocol`（拿 :class:`NormalizedMessage`
+- 模块只 import 标准库 + :mod:`web.app_support.llm_protocol`（拿 :class:`NormalizedMessage`
   类型定义） + :mod:`web.integrations.claude_code._content_filter`（共享前缀过滤规则，
   保证 live 与 history 对 CLI 注入的过滤行为对齐）；**不能**
   import ``claude_agent_sdk``——历史 parser 不依赖 SDK 运行时
@@ -51,7 +51,7 @@ from web.integrations.claude_code._content_filter import is_internal_content
 
 if TYPE_CHECKING:
     # 仅用于类型注释——返回 dict 与 NormalizedMessage TypedDict 形态对齐。
-    from web.llm_protocol import NormalizedMessage  # noqa: F401
+    from web.app_support.llm_protocol import NormalizedMessage  # noqa: F401
 
 __all__ = ["encode_cwd", "jsonl_path_for", "parse_jsonl_history"]
 

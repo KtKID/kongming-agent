@@ -52,7 +52,7 @@ from web.approvals.auto.ws_handlers import (
     handle_auto_approval_query,
     handle_auto_approval_toggle,
 )
-from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
+from web.auth.middleware import SESSION_COOKIE_NAME, verify_session_cookie
 from web.protocol import (
     ErrorFrame,
     HistoryMessageDTO,

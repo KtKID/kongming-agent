@@ -157,12 +157,12 @@ forbidden_modules =
 ; Contract 6: web 应用层（app shell）不可 import 跨支柱模块
 ;             web.app / web.routers / web.websocket.routes / web.auth* / web.static / web.errors
 ;             / web.rate_limit 必须只依赖 web.protocol / web.threads.manager /
-;             web.host_adapter / web.websocket.event_sink / web.threads.cell /
+;             web.app_support.host_adapter / web.websocket.event_sink / web.threads.cell /
 ;             web.threads.metadata / web.threads.types / config_loader / 外部库。
 ;             不可 import core / tools / executors / safety / host / cli /
 ;             sessions / prompting / observability / memory / prompts。
 ;
-;             v0.1.5 取舍：web.run / web.threads.manager / web.host_adapter
+;             v0.1.5 取舍：web.run / web.threads.manager / web.app_support.host_adapter
 ;             / web.websocket.event_sink / web.threads.cell 之类 **装配 entrypoint** 与
 ;             已存在的 thread_manager 联动模块允许跨支柱（如 thread_cell 需要
 ;             import core.contracts / executors.agent_runtime / host.session_bridge）；
@@ -178,8 +178,8 @@ name = web app shell must not import core/tools/executors/safety/host/cli/sessio
 type = forbidden
 source_modules =
     web.app
-    web.auth
-    web.auth_secrets
+    web.auth.middleware
+    web.auth.secrets
     web.errors
     web.rate_limit
     web.static
@@ -198,10 +198,10 @@ forbidden_modules =
     observability
     memory
     prompts
-; web.slash_candidates_loader 是装配期 loader（同 web.run），
+; web.app_support.slash_candidates_loader 是装配期 loader（同 web.run），
 ; 仅在 lifespan startup 懒 import，允许触达 prompting / commands。
 ignore_imports =
-    web.app -> web.slash_candidates_loader
+    web.app -> web.app_support.slash_candidates_loader
     web.app -> scheduler.runtime_factory
     web.app -> scheduler.store
     web.app -> scheduler.ticker
@@ -322,7 +322,7 @@ ignore_imports =
 [importlinter:contract:usage-token-encapsulation]
 name = Only UsageTokenManager v2 and public DTOs exposed; derivers and private models are forbidden
 type = forbidden
-; allow_indirect_imports=True：只禁直接 import；透过公共入口 web.usage_token_v2 →
+; allow_indirect_imports=True：只禁直接 import；透过公共入口 web.usage.usage_token_v2 →
 ; manager.py 间接接触内部模型是合法的（manager 内部消费自家私有 helper）。
 allow_indirect_imports = True
 source_modules =
@@ -335,7 +335,7 @@ source_modules =
     executors
     web.app
     web.routers
-    web.cron_delivery
+    web.app_support.cron_delivery
     web.websocket.cron
     web.websocket.routes
     web.websocket.event_sink
@@ -344,11 +344,11 @@ source_modules =
     web.integrations.codex
     web.protocol
 forbidden_modules =
-    web.usage_token_v2._derive_claude
-    web.usage_token_v2._derive_codex
-    web.usage_token_v2._derive_generic
-    web.usage_token_v2._models
-    web.usage_token_v2._model_context_table
+    web.usage.usage_token_v2._derive_claude
+    web.usage.usage_token_v2._derive_codex
+    web.usage.usage_token_v2._derive_generic
+    web.usage.usage_token_v2._models
+    web.usage.usage_token_v2._model_context_table
 ; web.threads.manager 是装配层，允许构造 v2 manager + 注入 locator；
 ; 但仍禁止直接 import 派生器（manager 内部消费）。
 

@@ -456,7 +456,7 @@ class ApprovalManager:
         """timeout task 主体：等 N 秒后把 pending future set_result(rejected)。
 
         reviewer 必修 #3：timeout 返回 fail-closed 拒绝
-        （与 :meth:`web.host_adapter.WebHostAdapter.prompt_approval` 的 TimeoutError
+        （与 :meth:`web.app_support.host_adapter.WebHostAdapter.prompt_approval` 的 TimeoutError
         分支行为一致）。
 
         被 cancel 时（``task.cancel()``）静默退出，不动 future。
@@ -609,7 +609,7 @@ def make_manager_prompt_fn(
 ) -> Callable[[ApprovalRequest], Awaitable[ApprovalAction]]:
     """生成 prompt_fn，内部调 ``manager.request``；返回值映射成 :class:`ApprovalAction`。
 
-    替代现有 :meth:`web.host_adapter.WebHostAdapter.prompt_approval`
+    替代现有 :meth:`web.app_support.host_adapter.WebHostAdapter.prompt_approval`
     （推 per-thread WS 旧模态）。``src/web/run.py`` 装配点用法：
 
     .. code-block:: python

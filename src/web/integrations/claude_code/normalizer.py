@@ -57,11 +57,11 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
+from web.app_support.llm_protocol import NormalizedMessage
 from web.integrations.claude_code._content_filter import (
     INTERNAL_CONTENT_PREFIXES,
     is_internal_content,
 )
-from web.llm_protocol import NormalizedMessage
 
 # ---------------------------------------------------------------------------
 # 内部 system 文本前缀已迁移到 ``web.integrations.claude_code._content_filter``

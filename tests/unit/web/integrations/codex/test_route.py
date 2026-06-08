@@ -22,9 +22,9 @@ from fastapi.testclient import TestClient
 
 from config_loader.models import Config
 from tests.unit.test_web_app_lifespan import FakeThreadManager, _seed_password
-from web._shared.session_manager import SessionManager
 from web.app import create_app
-from web.auth import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
+from web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
+from web.shared.session_manager import SessionManager
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 

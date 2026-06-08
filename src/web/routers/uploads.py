@@ -16,9 +16,9 @@
   :class:`web.uploads.validation.MediaUploadValidator` 三件套。新增视频上传时
   只在 validator 加 ``validate_video_upload`` + 这里加 ``POST /videos`` 路由，
   storage/registry 不动。
-- **登录态**：受保护 ``/api/*`` 由全局 :class:`web.auth.AuthMiddleware` 兜底，
+- **登录态**：受保护 ``/api/*`` 由全局 :class:`web.auth.middleware.AuthMiddleware` 兜底，
   路由函数不再重复 Depends；middleware 已经把
-  :class:`web.auth.SessionTokenPayload` 写到 ``request.state.session_payload``，
+  :class:`web.auth.middleware.SessionTokenPayload` 写到 ``request.state.session_payload``，
   本路由透传 ``payload.user_id`` 作为 ``user_email`` 入参（v0.1.5 单用户
   ``user_id="default"``；validator 在没有 owner 字段时自动跳过归属判断）。
 - **依赖单例**：``AssetStorage`` / ``AssetRegistry`` / ``MediaUploadValidator``
@@ -55,7 +55,7 @@ from web.uploads.validation import (
 )
 
 if TYPE_CHECKING:
-    from web.auth import SessionTokenPayload
+    from web.auth.middleware import SessionTokenPayload
     from web.threads.types import ThreadManagerProtocol
 
 logger = logging.getLogger(__name__)

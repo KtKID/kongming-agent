@@ -11,7 +11,7 @@
   :meth:`SessionManager.replace_writer` + send ``session-status``
 - 其他                       → ``frame_type:error`` 帧
 
-鉴权：复用现有 ``src/web/auth.py`` 的 cookie ``kongming_session`` →
+鉴权：复用现有 ``src/web/auth/middleware.py`` 的 cookie ``kongming_session`` →
 ``verify_session_cookie``，与 ``/ws/claude-code`` 同款。
 
 依赖装配（per-connection）：
@@ -32,7 +32,7 @@
 
 import 边界：
 
-- 本文件可 import ``web.integrations.codex.*`` / ``web._shared.*`` / ``web.auth``
+- 本文件可 import ``web.integrations.codex.*`` / ``web.shared.*`` / ``web.auth``
 - **不可** import ``web.integrations.claude_code.*``（CLAUDE.md 第 11 条：route 不感知厂商内部）
 """
 
@@ -46,11 +46,11 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from network.network_log import log_network_event, log_network_exception
-from web._shared.reconnectable_writer import ReconnectableWebSocketWriter
-from web._shared.session_manager import SessionManager
-from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
+from web.auth.middleware import SESSION_COOKIE_NAME, verify_session_cookie
 from web.integrations.codex.service import CodexService
 from web.protocol.rest_models import UserInputAttachment
+from web.shared.reconnectable_writer import ReconnectableWebSocketWriter
+from web.shared.session_manager import SessionManager
 
 if TYPE_CHECKING:
     from itsdangerous import URLSafeTimedSerializer

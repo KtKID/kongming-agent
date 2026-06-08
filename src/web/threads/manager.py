@@ -40,7 +40,7 @@ from config_loader.models import Config, LLMPresetConfig
 from core.contracts import ApprovalAction
 from core.message import Message
 from network.network_log import log_network_exception
-from web.host_adapter import WebHostAdapter
+from web.app_support.host_adapter import WebHostAdapter
 from web.integrations.claude_code.jsonl_history import jsonl_path_for
 from web.integrations.codex.projects_scanner import list_codex_projects
 from web.protocol import CellEvictedFrame, CellSummaryDTO, EvictReason
@@ -54,7 +54,7 @@ from web.threads.metadata import (
     write_thread_metadata,
 )
 from web.uploads.storage import AssetStorage
-from web.usage_token_v2 import (
+from web.usage.usage_token_v2 import (
     ClaudeJsonlLocator,
     CodexRolloutLocator,
     ProviderKind,

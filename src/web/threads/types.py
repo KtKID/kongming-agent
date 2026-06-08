@@ -124,17 +124,17 @@ class ThreadManagerProtocol(Protocol):
         cwd: str,
     ) -> ThreadMetadata: ...
 
-    # usage-token-v2-bigbang：``usage_manager`` 是 :class:`web.usage_token_v2.
+    # usage-token-v2-bigbang：``usage_manager`` 是 :class:`web.usage.usage_token_v2.
     # UsageTokenManager` 实例，唯一公共方法 ``get_thread_usage(thread_id)``。
     # v1 的 record_run_usage / set_last_assistant_usage / get_thread_summary
     # 等方法全部删除。
 
     @property
     def usage_manager(self) -> Any:
-        """:class:`web.usage_token_v2.UsageTokenManager` 实例（v2 无状态门面）。
+        """:class:`web.usage.usage_token_v2.UsageTokenManager` 实例（v2 无状态门面）。
 
         ``Any`` 而非具体类型——避免 ``web.threads.types`` Protocol 文件 import
-        ``web.usage_token_v2``（保持 types.py 零运行时依赖）。具体类型由
+        ``web.usage.usage_token_v2``（保持 types.py 零运行时依赖）。具体类型由
         ``web.threads.manager.ThreadManager.usage_manager`` 提供。
         """
         ...

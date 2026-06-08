@@ -32,7 +32,7 @@ from scheduler.domain import (
     TaskTarget,
     TriggerType,
 )
-from web.cron_delivery import WebDeliverySink
+from web.app_support.cron_delivery import WebDeliverySink
 from web.websocket.cron import CronWSBroker, get_broker, reset_broker_for_testing
 
 # ---------------------------------------------------------------------------

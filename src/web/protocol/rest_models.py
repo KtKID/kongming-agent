@@ -30,7 +30,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator
 
-from web.path_utils import is_absolute_workspace_path
+from web.app_support.path_utils import is_absolute_workspace_path
 from web.protocol._base import (
     ErrorCode,
     HistoryMessageRole,

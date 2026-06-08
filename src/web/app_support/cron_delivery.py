@@ -44,7 +44,7 @@ class WebDeliverySink(DeliverySink):
     使用方式（web/run.py 装配）::
 
         from web.websocket.cron import get_broker
-        from web.cron_delivery import WebDeliverySink
+        from web.app_support.cron_delivery import WebDeliverySink
         from scheduler.delivery import DeliveryDispatcher
 
         web_sink = WebDeliverySink(get_broker())

@@ -14,7 +14,7 @@
 
 - ``app.state.scheduler_store``：由 :func:`web.app.create_app` 在 lifespan 启动 ticker
   时挂入；测试可在创建 app 后直接覆写为 :class:`scheduler.store.Store(tmp_path)`。
-- 全局 :class:`web.auth.AuthMiddleware` 已挡掉未带合法 cookie 的请求；本路由不再
+- 全局 :class:`web.auth.middleware.AuthMiddleware` 已挡掉未带合法 cookie 的请求；本路由不再
   显式 :func:`Depends`。
 
 设计要点：

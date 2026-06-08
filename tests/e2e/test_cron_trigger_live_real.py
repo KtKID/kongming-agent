@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from web.auth import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
+from web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SHANGHAI_TZ = timezone(timedelta(hours=8))

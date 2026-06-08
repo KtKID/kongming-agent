@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from web._shared.session_manager import SessionManager, SessionRecord
 from web.integrations.claude_code.route import router
+from web.shared.session_manager import SessionManager, SessionRecord
 
 __all__ = ["SessionManager", "SessionRecord", "router"]

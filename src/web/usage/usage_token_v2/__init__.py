@@ -1,4 +1,4 @@
-"""``web.usage_token_v2`` —— Token 用量唯一访问入口（v2 façade 模式）。
+"""``web.usage.usage_token_v2`` —— Token 用量唯一访问入口（v2 façade 模式）。
 
 ### 5 大硬性约束（``.importlinter`` Contract 9 强制）
 
@@ -34,7 +34,7 @@ manager + 注入 Protocol（装配层用）：
 设计依据：[`docs/usage-token-v2/`](../../../docs/usage-token-v2/README.md)
 """
 
-from web.usage_token_v2._models import (
+from web.usage.usage_token_v2._models import (
     ClaudeCacheCreation,
     ClaudeUsage,
     CodexRateLimits,
@@ -45,7 +45,7 @@ from web.usage_token_v2._models import (
     GenericChatOpenAIUsage,
     ThreadUsage,
 )
-from web.usage_token_v2.manager import (
+from web.usage.usage_token_v2.manager import (
     ClaudeJsonlLocator,
     CodexRolloutLocator,
     GenericChatSessionLocator,

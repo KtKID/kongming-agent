@@ -13,8 +13,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from web._shared.session_manager import SessionManager
 from web.integrations.codex.service import CodexService
+from web.shared.session_manager import SessionManager
 
 
 class _MockStdout:

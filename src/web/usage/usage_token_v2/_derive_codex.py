@@ -1,6 +1,6 @@
 """Codex 通道派生器：从 rollout jsonl 取最后一条非空 token_count → CodexUsage。
 
-⚠️ **架构边界**：本模块是 ``web.usage_token_v2`` 包私有，外部禁止 import
+⚠️ **架构边界**：本模块是 ``web.usage.usage_token_v2`` 包私有，外部禁止 import
 （``.importlinter`` Contract 9 强制）；只能通过 ``UsageTokenManager`` 间接消费。
 
 设计要点：
@@ -21,7 +21,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from web.usage_token_v2._models import (
+from web.usage.usage_token_v2._models import (
     CodexRateLimits,
     CodexRateLimitWindow,
     CodexTokenBreakdown,

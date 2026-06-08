@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 from config_loader.models import Config
 from tests.unit.test_web_app_lifespan import _seed_password
 from web.app import create_app
-from web.auth import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
+from web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
 from web.threads.cell import ThreadCell
 from web.threads.metadata import ThreadMetadata, read_thread_metadata, write_thread_metadata
 

@@ -64,7 +64,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from web.path_utils import is_absolute_workspace_path
+from web.app_support.path_utils import is_absolute_workspace_path
 from web.threads.metadata import list_thread_metadata
 
 logger = logging.getLogger(__name__)

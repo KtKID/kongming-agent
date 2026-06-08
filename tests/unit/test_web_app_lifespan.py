@@ -137,7 +137,7 @@ class FakeThreadManager:
 
 def _seed_password(home: Path, password: str = "test-password") -> None:
     """提前在 home/web/password.hash 落 hash，避免装配时抛 WebAuthNotConfiguredError。"""
-    from web.auth_secrets import hash_password
+    from web.auth.secrets import hash_password
 
     web_dir = home / "web"
     web_dir.mkdir(parents=True, exist_ok=True)

@@ -17,10 +17,10 @@ import pytest
 from claude_agent_sdk.types import ToolPermissionContext
 from fastapi.testclient import TestClient
 
-from web._shared.session_manager import SessionManager
 from web.approvals.global_inbox.broadcaster import get_inbox_broadcaster
 from web.integrations.claude_code.approval import ApprovalBridge
 from web.integrations.claude_code.normalizer import ClaudeNormalizer
+from web.shared.session_manager import SessionManager
 
 
 def _drain_snapshot(ws: Any) -> dict[str, Any]:

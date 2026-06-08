@@ -15,7 +15,7 @@
 
 鉴权：
 
-- 路径前缀 ``/api/`` 自动落入 :class:`web.auth.AuthMiddleware` 保护范围 —— 未登录
+- 路径前缀 ``/api/`` 自动落入 :class:`web.auth.middleware.AuthMiddleware` 保护范围 —— 未登录
   请求会被中间件拦截并返回 401，本模块不需要再写 ``Depends``。
 - 这是必须的：未鉴权暴露会让任何访问者列出本机所有 SDK session（隐私问题）。
 

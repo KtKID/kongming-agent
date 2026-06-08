@@ -24,9 +24,9 @@ def main() -> int:
 
     from config_loader import load_config
     from config_loader.paths import get_kongming_home
-    from web._app_lock import acquire_app_instance_lock, release_app_instance_lock
     from web.app import create_app
-    from web.startup_progress import StartupProgress
+    from web.app_support.app_lock import acquire_app_instance_lock, release_app_instance_lock
+    from web.app_support.startup_progress import StartupProgress
     from web.threads.manager import ThreadManager
 
     home = get_kongming_home()
@@ -116,7 +116,7 @@ def _build_manager_and_inbox_sink(*, app: Any) -> Any:
     approval-rules-unified（破坏性改造）：
 
     - 删除 ``default_timeout_ms`` 参数。manager 走默认 60s 即可（与
-      :attr:`web.host_adapter.WebHostAdapter._timeout` 默认对齐）；
+      :attr:`web.app_support.host_adapter.WebHostAdapter._timeout` 默认对齐）；
       ``cfg.web.pending_approval_timeout_seconds`` 仍归 host_adapter 用，
       不再串通到 manager / ApprovalRules。
     - :class:`ApprovalRules` 注入 ``app.state.auto_approval_policy`` 完整实例
@@ -289,7 +289,7 @@ def _make_runtime_factory(cfg: object) -> object:
             cron_dispatcher = None
             if real_cfg.scheduler.enabled:
                 from scheduler.delivery import DeliveryDispatcher
-                from web.cron_delivery import WebDeliverySink
+                from web.app_support.cron_delivery import WebDeliverySink
                 from web.websocket.cron import get_broker
 
                 cron_dispatcher = DeliveryDispatcher(

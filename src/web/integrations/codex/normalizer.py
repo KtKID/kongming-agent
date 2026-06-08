@@ -44,7 +44,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from web.llm_protocol import MessageKind, NormalizedMessage
+from web.app_support.llm_protocol import MessageKind, NormalizedMessage
 
 # ---------------------------------------------------------------------------
 # 内部 system 文本前缀（不泄漏给前端）

@@ -40,10 +40,10 @@ from claude_agent_sdk.types import (
 )
 
 from network.network_log import log_network_exception
-from web._shared.session_manager import SessionManager
 from web.approvals.auto import AuditLogger, AutoApprovalPolicy
 from web.approvals.global_inbox import ApprovalInboxBroadcaster
 from web.integrations.claude_code.normalizer import ClaudeNormalizer
+from web.shared.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)
 

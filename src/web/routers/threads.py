@@ -47,9 +47,9 @@ from evolution.models import (
 )
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore, resolve_evolution_root
+from web.app_support.path_utils import is_absolute_workspace_path
 from web.errors import InvalidThreadIdError, ThreadNotFoundError
 from web.integrations.claude_code.jsonl_history import jsonl_path_for, parse_jsonl_history
-from web.path_utils import is_absolute_workspace_path
 from web.protocol import (
     CreateThreadRequest,
     EvolutionDecisionItemDTO,
@@ -329,7 +329,7 @@ async def import_claude_session(
     archive-metadata-source.md``）。
 
     校验：DTO 已强制 ``cwd`` 必须以 ``/`` 开头、``name`` / ``claude_thread_id``
-    长度上限。鉴权由全局 :class:`web.auth.AuthMiddleware` 兜底。
+    长度上限。鉴权由全局 :class:`web.auth.middleware.AuthMiddleware` 兜底。
     """
     tm: ThreadManagerProtocol = request.app.state.thread_manager
     meta, imported = await tm.create_and_bind_claude_thread(

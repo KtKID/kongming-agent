@@ -40,7 +40,7 @@ class ReconnectableWebSocketWriter:
                 await close_call
         except Exception as exc:
             log_network_exception(
-                "web._shared.reconnectable_writer",
+                "web.shared.reconnectable_writer",
                 "close_ws_failed",
                 exc,
             )

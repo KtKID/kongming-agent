@@ -15,7 +15,7 @@ duck typing 边界（safety 不直接 import web）：
 注入 :class:`AutoApprovalPolicy` 实例，import-linter Contract 强制
 ``safety → web`` 跨层 import 不存在；装配点在 ``src/web/run.py``。
 
-claude_code 通道仍走 :meth:`web.host_adapter.WebHostAdapter.prompt_approval`
+claude_code 通道仍走 :meth:`web.app_support.host_adapter.WebHostAdapter.prompt_approval`
 直调 policy，**不经** ApprovalRules；本模块仅服务 generic_chat 路径。
 """
 

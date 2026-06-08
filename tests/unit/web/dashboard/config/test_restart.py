@@ -54,6 +54,7 @@ def test_find_start_script_raises_when_missing(tmp_path: Path) -> None:
     assert "not found" in str(excinfo.value)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows chmod has no POSIX executable bit")
 def test_find_start_script_raises_when_not_executable(tmp_path: Path) -> None:
     script = tmp_path / "start.sh"
     script.write_text("#!/bin/sh\n")
@@ -102,6 +103,7 @@ def test_trigger_restart_raises_when_script_missing(tmp_path: Path) -> None:
     popen.assert_not_called()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows chmod has no POSIX executable bit")
 def test_trigger_restart_raises_when_script_not_executable(tmp_path: Path) -> None:
     script = tmp_path / "start.sh"
     script.write_text("#!/bin/sh\n")

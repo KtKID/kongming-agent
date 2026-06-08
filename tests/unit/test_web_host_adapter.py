@@ -1,6 +1,6 @@
 """WebHostAdapter 单测（Phase 1 #6）。
 
-覆盖 :class:`web.host_adapter.WebHostAdapter` 的全部公开行为：
+覆盖 :class:`web.app_support.host_adapter.WebHostAdapter` 的全部公开行为：
 
 - ``write_output`` / ``notify_event`` 行为
 - ``prompt_approval`` 三路径：成功 ack / 超时 / cell evict cancel
@@ -12,7 +12,7 @@
 - 重复 ``call_id`` 抛 RuntimeError（保护安全链路）
 
 stub WS：用 ``unittest.mock.AsyncMock`` 的 ``send_json`` / ``close``，
-满足 :class:`web.host_adapter._WSSendable` Protocol。
+满足 :class:`web.app_support.host_adapter._WSSendable` Protocol。
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.contracts import ApprovalAction, ApprovalRequest, Event
-from web.host_adapter import WebHostAdapter
+from web.app_support.host_adapter import WebHostAdapter
 
 
 def _make_ws() -> AsyncMock:

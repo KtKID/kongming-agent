@@ -1,6 +1,6 @@
 """Claude 通道派生器：从 SDK jsonl 取最后一条 assistant.message.usage → ClaudeUsage。
 
-⚠️ **架构边界**：本模块是 ``web.usage_token_v2`` 包私有，外部禁止 import
+⚠️ **架构边界**：本模块是 ``web.usage.usage_token_v2`` 包私有，外部禁止 import
 （``.importlinter`` Contract 9 强制）；只能通过 ``UsageTokenManager`` 间接消费。
 
 设计要点：
@@ -21,8 +21,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from web.usage_token_v2._model_context_table import lookup_context_window
-from web.usage_token_v2._models import ClaudeCacheCreation, ClaudeUsage
+from web.usage.usage_token_v2._model_context_table import lookup_context_window
+from web.usage.usage_token_v2._models import ClaudeCacheCreation, ClaudeUsage
 
 logger = logging.getLogger(__name__)
 

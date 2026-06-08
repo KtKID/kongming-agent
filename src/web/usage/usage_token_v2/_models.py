@@ -1,6 +1,6 @@
 """通道 DTO 真源（v2）。
 
-⚠️ **架构边界**：本模块是 ``web.usage_token_v2`` 包私有，外部禁止 import
+⚠️ **架构边界**：本模块是 ``web.usage.usage_token_v2`` 包私有，外部禁止 import
 （``.importlinter`` Contract 9 强制）；只能通过 ``UsageTokenManager`` 接收
 DTO 实例，**不可主动构造**。
 

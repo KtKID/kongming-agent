@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from tests.unit.web.test_workspace_context_endpoint import FakeTM, _login_client
-from web.auth import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
+from web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
 from web.threads.metadata import ThreadMetadata
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}

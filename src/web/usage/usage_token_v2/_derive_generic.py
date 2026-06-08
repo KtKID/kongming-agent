@@ -1,6 +1,6 @@
 """generic_chat 通道派生器：从 FileSession messages.jsonl 派生。
 
-⚠️ **架构边界**：本模块是 ``web.usage_token_v2`` 包私有，外部禁止 import
+⚠️ **架构边界**：本模块是 ``web.usage.usage_token_v2`` 包私有，外部禁止 import
 （``.importlinter`` Contract 9 强制）；只能通过 ``UsageTokenManager`` 间接消费。
 
 设计要点（D-1/D-2/D-3 决策已敲死，详见任务 README）：
@@ -25,8 +25,8 @@ import logging
 from pathlib import Path
 from typing import Any, Literal
 
-from web.usage_token_v2._model_context_table import lookup_context_window
-from web.usage_token_v2._models import (
+from web.usage.usage_token_v2._model_context_table import lookup_context_window
+from web.usage.usage_token_v2._models import (
     ClaudeCacheCreation,
     CodexTokenBreakdown,
     GenericChatAnthropicUsage,

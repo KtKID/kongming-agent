@@ -157,7 +157,7 @@ class CLIAdapter(HostAdapter):
     # ``Callable[[ApprovalRequest], Awaitable[ApprovalAction]]``，与方法的
     # ``Callable[[Self, ApprovalRequest], ...]`` 不兼容，会触发 mypy arg-type
     # 错误。属性赋值在运行时和装饰器等价，绕过 mypy 静态检查。
-    # 与 ``web.host_adapter.WebHostAdapter`` 同模式。
+    # 与 ``web.app_support.host_adapter.WebHostAdapter`` 同模式。
     prompt_approval.__action_aware__ = True  # type: ignore[attr-defined]
 
     async def close(self) -> None:

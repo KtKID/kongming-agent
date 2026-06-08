@@ -36,16 +36,16 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI
 
 from config_loader.paths import get_kongming_home
-from web.auth import AuthMiddleware, CSRFMiddleware, make_serializer
-from web.auth_secrets import (
+from web.app_support.startup_progress import StartupProgress
+from web.auth.middleware import AuthMiddleware, CSRFMiddleware, make_serializer
+from web.auth.secrets import (
     WebAuthNotConfiguredError as _SecretsAuthNotConfigured,
 )
-from web.auth_secrets import (
+from web.auth.secrets import (
     load_or_init_password_hash,
     load_or_init_session_secret,
 )
 from web.errors import KongmingWebError, kongming_error_handler
-from web.startup_progress import StartupProgress
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -225,7 +225,7 @@ def create_app(
             logger.info("ThreadManager started")
 
             try:
-                from web.slash_candidates_loader import load_slash_candidates
+                from web.app_support.slash_candidates_loader import load_slash_candidates
 
                 app.state.slash_candidates = await load_slash_candidates()
                 logger.info("slash candidates loaded: %d items", len(app.state.slash_candidates))
@@ -264,7 +264,7 @@ def create_app(
                 from scheduler.runtime_factory import build_cron_execution_bridge
                 from scheduler.store import Store
                 from scheduler.ticker import run_ticker_loop
-                from web.cron_delivery import WebDeliverySink
+                from web.app_support.cron_delivery import WebDeliverySink
                 from web.websocket.cron import get_broker
 
                 cron_home = (
@@ -276,7 +276,7 @@ def create_app(
                 # 用户侧没有任何感知（修复 R2 round 1 P0-1）。
                 # broker 走模块级单例（与 /ws/cron endpoint + run.py 装配的
                 # WebDeliverySink 共享同一个实例）。
-                from web.cron_delivery import ThreadTargetSink
+                from web.app_support.cron_delivery import ThreadTargetSink
 
                 lifespan_cron_dispatcher = DeliveryDispatcher(
                     web_sink=WebDeliverySink(get_broker()),
@@ -442,8 +442,8 @@ def create_app(
     )
 
     # 5. app.state 注入
-    from web._shared.session_manager import SessionManager as _SharedSessionManager
     from web.integrations.codex import CodexService
+    from web.shared.session_manager import SessionManager as _SharedSessionManager
     from web.whiteboard.manager import WhiteboardManager
 
     app.state.config = cfg

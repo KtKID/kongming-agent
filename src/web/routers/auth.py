@@ -4,15 +4,15 @@
 
 - ``POST /api/auth/login`` — body :class:`web.protocol.LoginRequest`
 - ``POST /api/auth/logout`` — 无 body
-- ``GET /api/auth/me`` — 已通过 :class:`web.auth.AuthMiddleware`，到这里必然认证
+- ``GET /api/auth/me`` — 已通过 :class:`web.auth.middleware.AuthMiddleware`，到这里必然认证
 
 设计要点：
 
 - 登录限流：``request.client.host`` 取 IP；不信任 ``X-Forwarded-For``（部署侧
   反代时由 nginx trust proxy 配置；v0.1.5 默认本地直连）。
 - 登录成功必须同步 ``rate_limiter.record_success(ip)`` 清失败计数。
-- ``/api/auth/login`` 是 :class:`web.auth.AuthMiddleware` 白名单（cookie 可缺）；
-  但 :class:`web.auth.CSRFMiddleware` 不豁免 —— 浏览器统一在 axios interceptor
+- ``/api/auth/login`` 是 :class:`web.auth.middleware.AuthMiddleware` 白名单（cookie 可缺）；
+  但 :class:`web.auth.middleware.CSRFMiddleware` 不豁免 —— 浏览器统一在 axios interceptor
   加 ``X-Requested-With``。
 - ``/api/auth/logout`` 同 login 白名单（cookie 已过期时也允许调）。
 """
@@ -24,12 +24,12 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Request, Response
 
-from web.auth import (
+from web.auth.middleware import (
     clear_session_cookie,
     issue_session_cookie,
     verify_session_cookie,
 )
-from web.auth_secrets import hash_password, verify_password
+from web.auth.secrets import hash_password, verify_password
 from web.errors import (
     AuthFailedError,
     NotAuthenticatedError,
@@ -111,7 +111,7 @@ async def logout(response: Response) -> dict[str, bool]:
 async def me(request: Request) -> dict[str, object]:
     """当前用户信息（v0.1.5 单用户：``user_id="default"``）。
 
-    实现注意：``/api/auth/me`` **不在** :class:`web.auth.AuthMiddleware` 白名单，
+    实现注意：``/api/auth/me`` **不在** :class:`web.auth.middleware.AuthMiddleware` 白名单，
     middleware 已挡掉缺 cookie 的请求；这里只在 middleware 跳过（如 dev_mode
     / 测试场景）时做兜底校验。
     """
@@ -142,7 +142,7 @@ async def reset_password(
     request.app.state.password_hash = new_hash
 
     # 写回 app 当前使用的 kongming_home，保证启动读源与重置写源一致。
-    from web.auth_secrets import PASSWORD_HASH_FILENAME, _ensure_web_dir, _write_secret_text
+    from web.auth.secrets import PASSWORD_HASH_FILENAME, _ensure_web_dir, _write_secret_text
 
     home = request.app.state.kongming_home
     _ensure_web_dir(home)

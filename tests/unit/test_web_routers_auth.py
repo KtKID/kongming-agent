@@ -18,12 +18,12 @@ from fastapi.testclient import TestClient
 from config_loader.models import Config
 from tests.unit.test_web_app_lifespan import FakeThreadManager, _seed_password
 from web.app import create_app
-from web.auth import (
+from web.auth.middleware import (
     CSRF_HEADER_NAME,
     CSRF_HEADER_VALUE,
     SESSION_COOKIE_NAME,
 )
-from web.auth_secrets import ENV_WEB_PASSWORD
+from web.auth.secrets import ENV_WEB_PASSWORD
 from web.rate_limit import LoginRateLimiter
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}

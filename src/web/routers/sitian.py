@@ -9,7 +9,7 @@
 - ``request.app.state.config``：由 :func:`web.app.create_app` 在 lifespan 启动
   时挂入，供路由解析司天产物目录（``cfg.sitian.output_subdir`` 支持单 channel
   分仓，如 ``"claude"`` → ``<root>/claude/`` ）
-- 走默认 :class:`web.auth.AuthMiddleware` 与 :class:`web.csrf.CSRFMiddleware`；
+- 走默认 :class:`web.auth.middleware.AuthMiddleware` 与 :class:`web.csrf.CSRFMiddleware`；
   未登录访问由中间件统一返 401，**本路由不再显式 Depends**
 - 出错语义：
     - 报告文件不存在 → ``404`` + ``{"error": "no_report"}``

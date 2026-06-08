@@ -119,7 +119,7 @@ class FakeThreadManager:
 
 
 def _seed_password(home: Path, password: str = "test-password") -> None:
-    from web.auth_secrets import hash_password
+    from web.auth.secrets import hash_password
 
     web_dir = home / "web"
     web_dir.mkdir(parents=True, exist_ok=True)

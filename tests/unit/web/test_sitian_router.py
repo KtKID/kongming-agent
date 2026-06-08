@@ -137,7 +137,7 @@ def _login_client(
 
     # CSRF：GET 不需要 CSRF header，且 login POST 在其它 router 测试里证实
     # 不需要单独发 csrf header。直接登录即可。
-    from web.auth import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
+    from web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
 
     resp = client.post(
         "/api/auth/login",

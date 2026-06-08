@@ -298,7 +298,7 @@ class UsageFrame(_S2CFrameBase):
     / ``GenericChatOpenAIUsage`` 之一的 ``model_dump()`` 输出），自带
     ``provider`` discriminator 字段。前端按 ``usage.provider`` narrowing。
 
-    ``web.protocol`` 不允许 import ``web.usage_token_v2`` 内部类型
+    ``web.protocol`` 不允许 import ``web.usage.usage_token_v2`` 内部类型
     （Contract 5 / web-protocol-no-deps），所以这一层用透明 ``dict`` 透传，
     前端 ``protocol.ts`` 用 strict union interface 描述。
 

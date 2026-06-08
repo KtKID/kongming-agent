@@ -24,9 +24,13 @@ load_dotenv(_REPO_ROOT / ".env")
 
 from config_loader import load_config  # noqa: E402
 from config_loader.paths import get_kongming_home  # noqa: E402
-from web.auth import SESSION_COOKIE_NAME, SessionTokenPayload, make_serializer  # noqa: E402
-from web.auth_secrets import load_or_init_session_secret  # noqa: E402
-from web.startup_progress import StartupProgress  # noqa: E402
+from web.app_support.startup_progress import StartupProgress  # noqa: E402
+from web.auth.middleware import (  # noqa: E402
+    SESSION_COOKIE_NAME,
+    SessionTokenPayload,
+    make_serializer,
+)
+from web.auth.secrets import load_or_init_session_secret  # noqa: E402
 
 _PID_FILE = _REPO_ROOT / ".kongming" / "web" / "server.pid"
 _LOG_FILE = _REPO_ROOT / ".kongming" / "web" / "server.log"

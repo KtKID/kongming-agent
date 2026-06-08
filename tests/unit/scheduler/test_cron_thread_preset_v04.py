@@ -310,7 +310,7 @@ class TestWebDeliverySinkDeliveryTarget:
     async def test_web_delivery_sink_broadcast_includes_delivery_target(self) -> None:
         """task.delivery.target 非空时，broadcast payload 携带 delivery_target。"""
         from scheduler.domain import RunStatus
-        from web.cron_delivery import WebDeliverySink
+        from web.app_support.cron_delivery import WebDeliverySink
 
         # mock broker
         broker = MagicMock()
@@ -353,7 +353,7 @@ class TestWebDeliverySinkDeliveryTarget:
     async def test_web_delivery_sink_broadcast_delivery_target_none(self) -> None:
         """task.delivery.target 为 None 时，broadcast payload 中 delivery_target 为 None。"""
         from scheduler.domain import RunStatus
-        from web.cron_delivery import WebDeliverySink
+        from web.app_support.cron_delivery import WebDeliverySink
 
         broker = MagicMock()
         broker.broadcast = AsyncMock()

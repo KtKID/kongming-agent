@@ -89,7 +89,7 @@ def make_serializer(secret: bytes) -> URLSafeTimedSerializer:
     """构造 itsdangerous URLSafeTimedSerializer。
 
     Args:
-        secret: 32 字节裸 secret（来自 :func:`web.auth_secrets.load_or_init_session_secret`）。
+        secret: 32 字节裸 secret（来自 :func:`web.auth.secrets.load_or_init_session_secret`）。
 
     Returns:
         :class:`URLSafeTimedSerializer` 实例；签名 / 校验都通过它。

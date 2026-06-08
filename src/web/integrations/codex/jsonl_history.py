@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING, Any
 from web.integrations.codex.normalizer import _PAIRED_BLOCK_RE, INTERNAL_CONTENT_PREFIXES
 
 if TYPE_CHECKING:
-    from web.llm_protocol import NormalizedMessage  # noqa: F401
+    from web.app_support.llm_protocol import NormalizedMessage  # noqa: F401
 
 __all__ = ["parse_codex_rollout", "read_session_meta"]
 

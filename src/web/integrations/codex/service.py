@@ -33,10 +33,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from network.network_log import log_network_exception
-from web._shared.session_manager import SessionManager
 from web.integrations.codex._image_cli_args import CodexImageCliArgsBuilder
 from web.integrations.codex.approval import map_permission_mode
 from web.integrations.codex.normalizer import normalize
+from web.shared.session_manager import SessionManager
 from web.websocket.thread_status import get_broadcaster
 
 if TYPE_CHECKING:

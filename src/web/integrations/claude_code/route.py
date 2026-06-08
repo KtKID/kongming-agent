@@ -42,18 +42,18 @@ from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 from network import get_network_manager
 from network.keepalive_log import append_keepalive_log
 from network.network_log import log_network_event, log_network_exception
-from web._shared.reconnectable_writer import ReconnectableWebSocketWriter
-from web._shared.session_manager import SessionManager
 from web.approvals.auto.ws_handlers import (
     build_auto_approval_state_msg,
     handle_auto_approval_query,
     handle_auto_approval_toggle,
 )
-from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
+from web.auth.middleware import SESSION_COOKIE_NAME, verify_session_cookie
 from web.integrations.claude_code.approval import ApprovalBridge
 from web.integrations.claude_code.normalizer import ClaudeNormalizer
 from web.integrations.claude_code.service import ClaudeCodeService
 from web.protocol.rest_models import UserInputAttachment
+from web.shared.reconnectable_writer import ReconnectableWebSocketWriter
+from web.shared.session_manager import SessionManager
 
 if TYPE_CHECKING:
     from itsdangerous import URLSafeTimedSerializer

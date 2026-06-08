@@ -32,7 +32,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from web.auth import SessionTokenPayload
+from web.auth.middleware import SessionTokenPayload
 from web.routers.uploads import router as uploads_router
 from web.threads.metadata import ThreadMetadata
 from web.uploads.registry import EXT_BY_MIME, AssetRegistry, compute_sha256
@@ -376,7 +376,7 @@ class TestMediaUploadValidator:
 
 
 class _FakeAuthMiddleware(BaseHTTPMiddleware):
-    """简化 :class:`web.auth.AuthMiddleware`：
+    """简化 :class:`web.auth.middleware.AuthMiddleware`：
 
     - ``authenticated=True``  → 给 ``request.state.session_payload`` 塞合法
       :class:`SessionTokenPayload`

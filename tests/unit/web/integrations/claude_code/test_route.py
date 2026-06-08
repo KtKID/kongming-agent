@@ -33,7 +33,7 @@ from starlette.websockets import WebSocketDisconnect
 from config_loader.models import Config
 from tests.unit.test_web_app_lifespan import FakeThreadManager, _seed_password
 from web.app import create_app
-from web.auth import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
+from web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 
@@ -343,7 +343,7 @@ def test_invalid_command_field_types(app_client: TestClient) -> None:
 
 def test_session_manager_attached_to_app_state(tmp_path: Path) -> None:
     """app.state.claude_session_manager 已挂载。"""
-    from web._shared.session_manager import SessionManager
+    from web.shared.session_manager import SessionManager
 
     _seed_password(tmp_path, "pwd")
     cfg = _make_cfg()

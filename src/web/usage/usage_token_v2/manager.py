@@ -1,6 +1,6 @@
 """UsageTokenManager v2 —— 无状态门面，唯一公共入口。
 
-⚠️ **本模块是 ``web.usage_token_v2`` 包内仅有的对外暴露入口**。外部模块禁止：
+⚠️ **本模块是 ``web.usage.usage_token_v2`` 包内仅有的对外暴露入口**。外部模块禁止：
 
 - 直接 import 内部派生器（``_derive_claude`` / ``_derive_codex`` / ``_derive_generic``）
 - 直接 import 私有模型（``_models`` / ``_model_context_table``）
@@ -24,12 +24,12 @@ import logging
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from web.usage_token_v2._derive_claude import derive_from_jsonl as _derive_claude
-from web.usage_token_v2._derive_codex import derive_from_rollout as _derive_codex
-from web.usage_token_v2._derive_generic import (
+from web.usage.usage_token_v2._derive_claude import derive_from_jsonl as _derive_claude
+from web.usage.usage_token_v2._derive_codex import derive_from_rollout as _derive_codex
+from web.usage.usage_token_v2._derive_generic import (
     derive_from_session as _derive_generic,
 )
-from web.usage_token_v2._models import ThreadUsage
+from web.usage.usage_token_v2._models import ThreadUsage
 
 logger = logging.getLogger(__name__)
 

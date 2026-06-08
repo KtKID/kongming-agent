@@ -11,7 +11,7 @@
   等启动副作用。本文件直接走 ``Path(__file__).resolve().parents[3]``：
   ``src/web/routers/server_info.py`` → parents[3] = 项目根。
 - DTO 走 :class:`web.protocol.rest_models.ServerInfoResponse`，与协议层保持一致。
-- 鉴权交给全局 ``web.auth.AuthMiddleware`` 兜底，本路由不自持 Depends。
+- 鉴权交给全局 ``web.auth.middleware.AuthMiddleware`` 兜底，本路由不自持 Depends。
 """
 
 from __future__ import annotations

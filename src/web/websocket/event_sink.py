@@ -12,7 +12,7 @@
   加几个流式相关），sink 不识别的直接 return，避免每加一个 kind 都要
   改 sink。
 - **不重复推 ``approval.request``**：runner 发出 ``approval.request``
-  Event 时，:class:`web.host_adapter.WebHostAdapter.prompt_approval`
+  Event 时，:class:`web.app_support.host_adapter.WebHostAdapter.prompt_approval`
   已经推了 ``ApprovalRequestFrame``；sink 这里识别但不推（避免双发）。
 - **不推 ``thread.history`` / ``assistant.final`` / ``cell.evicted``**：
   - ``thread.history``：建连时 ThreadManager 单独推（不走 Event）

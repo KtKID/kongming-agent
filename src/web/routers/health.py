@@ -7,7 +7,7 @@
 
 设计要点：
 
-- **公开访问**：必须在 :func:`web.auth._is_path_allowlisted` 中加白名单。
+- **公开访问**：必须在 :func:`web.auth.middleware._is_path_allowlisted` 中加白名单。
   重启后 cookie 可能仍有效，但前端在 lifespan 完成前轮询时若被中间件挡掉
   会拿到 401，永远不会自动 reload。
 - **零依赖**：lifespan 未跑完时 ``app.state.serializer`` / ``thread_manager``

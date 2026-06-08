@@ -362,7 +362,7 @@ class WebHostAdapter(HostAdapter):
                 exc,
             )
             log_network_exception(
-                "web.host_adapter",
+                "web.app_support.host_adapter",
                 "safe_send_failed",
                 exc,
             )
@@ -374,7 +374,7 @@ class WebHostAdapter(HostAdapter):
                     await close_call
             except Exception as close_exc:
                 log_network_exception(
-                    "web.host_adapter",
+                    "web.app_support.host_adapter",
                     "safe_send_close_failed",
                     close_exc,
                 )
