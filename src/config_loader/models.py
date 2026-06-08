@@ -478,7 +478,7 @@ class StreamConfig(BaseModel):
 class CompactorConfig(BaseModel):
     """历史压缩策略参数。
 
-    对应 :mod:`prompting.history_compactor` 的同名 dataclass，这里用 pydantic
+    对应 :mod:`prompting.compaction.history_compactor` 的同名 dataclass，这里用 pydantic
     模型做校验，装配层按需转成 dataclass 传给 HistoryCompactor。
 
     **默认关闭**：当前压缩仅做消息数 FIFO，语义和 LLM summarize 式压缩（参考

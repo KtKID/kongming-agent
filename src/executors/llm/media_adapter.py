@@ -194,7 +194,7 @@ def collect_media_parts_from_messages(
     provider 侧只消费 ``list[MediaPart]``，不再感知 metadata key 名。
 
     Args:
-        messages: 已装配的消息列表（通常来自 :class:`prompting.input_assembler.AssembledInput.messages`）。
+        messages: 已装配的消息列表（通常来自 :class:`prompting.assembly.input_assembler.AssembledInput.messages`）。
         storage: 资产 IO 抽象，注入到每个 MediaPart 中用于 lazy 读 bytes。
         thread_id: 当前 thread id（attachments dict 自身不含 thread_id，
             按"一轮对话 = 单 thread"的语义由调用方传入）。

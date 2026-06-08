@@ -17,8 +17,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-import prompting.runtime_context as runtime_context_mod
-from prompting.instruction_loader import InstructionLoader, InstructionSource, assemble_instructions
+import prompting.assembly.runtime_context as runtime_context_mod
+from prompting.instructions.instruction_loader import (
+    InstructionLoader,
+    InstructionSource,
+    assemble_instructions,
+)
 
 # ---------------------------------------------------------------------------
 # 辅助工具
@@ -338,7 +342,7 @@ def _patch_assemble_deps(monkeypatch: pytest.MonkeyPatch) -> None:
     因此 patch 目标是各自源模块。
     """
     monkeypatch.setattr(
-        "prompting.prompts_loader.materialize_and_load_prompts",
+        "prompting.instructions.prompts_loader.materialize_and_load_prompts",
         AsyncMock(return_value="base prompt"),
     )
     monkeypatch.setattr(

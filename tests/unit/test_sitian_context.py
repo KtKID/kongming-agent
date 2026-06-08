@@ -24,8 +24,11 @@ from unittest.mock import patch
 
 import pytest
 
-import prompting.sitian_context as sitian_context_mod
-from prompting.sitian_context import MAX_ITEMS_PER_CHANNEL, build_sitian_context_text
+import prompting.context_sources.sitian_context as sitian_context_mod
+from prompting.context_sources.sitian_context import (
+    MAX_ITEMS_PER_CHANNEL,
+    build_sitian_context_text,
+)
 
 # ---------------------------------------------------------------------------
 # helpers

@@ -21,8 +21,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from core.message import Message
-from prompting.input_assembler import InputAssembler
-from prompting.instruction_loader import InstructionSource
+from prompting.assembly.input_assembler import InputAssembler
+from prompting.instructions.instruction_loader import InstructionSource
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DUMP_DIR = _REPO_ROOT / ".kongming/debug/tests"
@@ -30,7 +30,7 @@ _DUMP_DIR = _REPO_ROOT / ".kongming/debug/tests"
 
 def _dump_assemble_result(test_name: str, result: object, sources: list[InstructionSource]) -> None:
     """把 assemble 结果落盘为时间戳命名的 JSON 文件。"""
-    from prompting.input_assembler import AssembledInput
+    from prompting.assembly.input_assembler import AssembledInput
 
     assert isinstance(result, AssembledInput)
     _DUMP_DIR.mkdir(parents=True, exist_ok=True)

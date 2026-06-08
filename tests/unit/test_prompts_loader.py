@@ -1,4 +1,4 @@
-"""unit：prompting.prompts_loader 装配器覆盖。
+"""unit：prompting.instructions.prompts_loader 装配器覆盖。
 
 模块 3 / task prompt-modules-v0.1.3。覆盖启动物化、HTML 注释剔除、
 空白段跳过、用户编辑保留、异常冒泡等全部分支。
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from prompting.prompts_loader import (
+from prompting.instructions.prompts_loader import (
     TEMPLATE_FILENAMES,
     _strip_html_comments,
     materialize_and_load_prompts,

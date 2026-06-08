@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-from prompting.history_compactor import CompactorConfig, HistoryCompactor
-from prompting.input_assembler import AssembledInput, InputAssembler
-from prompting.instruction_loader import InstructionLoader, InstructionSource, assemble_instructions
-from prompting.prompts_loader import TEMPLATE_FILENAMES, materialize_and_load_prompts
-from prompting.runtime_context import build_runtime_context_text
-from prompting.sitian_context import MAX_ITEMS_PER_CHANNEL, build_sitian_context_text
-from prompting.skill_loader import SkillSpec, format_skill_listing, load_skill_specs
+from prompting.assembly.input_assembler import AssembledInput, InputAssembler
+from prompting.assembly.runtime_context import build_runtime_context_text
+from prompting.compaction.history_compactor import CompactorConfig, HistoryCompactor
+from prompting.context_sources.sitian_context import (
+    MAX_ITEMS_PER_CHANNEL,
+    build_sitian_context_text,
+)
+from prompting.instructions.instruction_loader import (
+    InstructionLoader,
+    InstructionSource,
+    assemble_instructions,
+)
+from prompting.instructions.prompts_loader import TEMPLATE_FILENAMES, materialize_and_load_prompts
+from prompting.skills.skill_loader import SkillSpec, format_skill_listing, load_skill_specs
 
 __all__ = [
     "AssembledInput",

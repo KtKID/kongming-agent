@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from core.message import Message
-from prompting.input_assembler import InputAssembler
+from prompting.assembly.input_assembler import InputAssembler
 
 
 def _make_ref(

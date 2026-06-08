@@ -397,7 +397,7 @@ async def test_prompt_debug_mode_dumps_runtime_prompt_snapshot(
 
 def test_instruction_render_hash_is_reproducible() -> None:
     """The same rendered instruction text should produce a stable sha256."""
-    from prompting.instruction_loader import InstructionSource
+    from prompting.instructions.instruction_loader import InstructionSource
 
     sources = [
         InstructionSource(origin="agent_spec", content="Be helpful"),

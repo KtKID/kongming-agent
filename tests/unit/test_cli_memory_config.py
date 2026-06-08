@@ -210,7 +210,7 @@ async def test_default_agent_instructions_mentions_memory_tool(tmp_path) -> None
     这里让装配器把 tmp_path 当 home，跑一次启动物化 + 读取，断言关键中文
     关键词仍然在渲染结果里。
     """
-    from prompting.prompts_loader import materialize_and_load_prompts
+    from prompting.instructions.prompts_loader import materialize_and_load_prompts
 
     text = await materialize_and_load_prompts(tmp_path)
     assert "memory" in text

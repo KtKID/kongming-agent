@@ -41,7 +41,7 @@ from host.session_bridge import SessionBridge
 from memory import MemoryStore
 from observability import JsonlTraceSink, PromptDebugDumpSink
 from prompting import assemble_instructions
-from prompting.skill_loader import SkillSpec, format_skill_listing, load_skill_specs
+from prompting.skills.skill_loader import SkillSpec, format_skill_listing, load_skill_specs
 from sessions import (
     SessionSummary,
     build_session,

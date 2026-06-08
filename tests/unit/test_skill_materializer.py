@@ -8,7 +8,7 @@ import pytest
 
 from evolution.models import EvolutionNutrient
 from evolution.skill_materializer import materialize_skill
-from prompting.skill_loader import load_skill_specs
+from prompting.skills.skill_loader import load_skill_specs
 
 
 def _nutrient(

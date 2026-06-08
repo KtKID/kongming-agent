@@ -40,7 +40,7 @@ from tools.builtin.skill_tool import (
 
 @dataclass(frozen=True)
 class _FakeSpec:
-    """duck-type :class:`prompting.skill_loader.SkillSpec`：仅 SkillTool 用到的字段。"""
+    """duck-type :class:`prompting.skills.skill_loader.SkillSpec`：仅 SkillTool 用到的字段。"""
 
     name: str
     source: Literal["home", "workspace"]

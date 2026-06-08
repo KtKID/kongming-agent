@@ -1,7 +1,7 @@
 """kongming-agent 内置 system prompt 模板。
 
 本 package 存放 AGENT / TOOLS / USER 三段默认模板；启动时由
-`prompting.prompts_loader.materialize_and_load_prompts()` 复制到用户目录
+`prompting.instructions.prompts_loader.materialize_and_load_prompts()` 复制到用户目录
 `.kongming/prompts/` 下。用户可编辑自己目录下的文件；项目内模板仅作 fallback 源。
 
 严格约束：

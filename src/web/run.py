@@ -220,8 +220,8 @@ def _make_runtime_factory(cfg: object) -> object:
     from executors.agent_runtime.native_runtime import NativeRuntime
     from host.session_bridge import SessionBridge
     from observability import JsonlTraceSink
-    from prompting.instruction_loader import assemble_instructions
-    from prompting.skill_loader import format_skill_listing, load_skill_specs
+    from prompting.instructions.instruction_loader import assemble_instructions
+    from prompting.skills.skill_loader import format_skill_listing, load_skill_specs
     from safety.approval_manager import make_manager_prompt_fn
     from sessions import SessionBootstrap, build_session
     from tools import (

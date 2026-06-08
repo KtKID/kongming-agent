@@ -14,7 +14,7 @@ v0.1.6 范围（详见 ``docs/skill-system-v0.1.6/``）：
 
 设计与依赖约束：
 
-- 与 :mod:`prompting.prompts_loader` 同层：纯装配期 loader，所有 I/O 走
+- 与 :mod:`prompting.instructions.prompts_loader` 同层：纯装配期 loader，所有 I/O 走
   :func:`asyncio.to_thread`，对外暴露异步入口。
 - :class:`SkillSpec` 用 ``dataclass(frozen=True)`` 保证多线程共享安全。
 - 错误分级：缺目录静默 / 权限错误冒泡 / 单 skill 解析失败跳过单条 + emit
@@ -226,7 +226,7 @@ def _scan_source_sync(
     错误处理：
 
     - 根目录不存在 / 不是目录 → 静默返回空（用户没装 skill 是常态）；
-    - :class:`PermissionError` 让其冒泡（与 :mod:`prompting.prompts_loader`
+    - :class:`PermissionError` 让其冒泡（与 :mod:`prompting.instructions.prompts_loader`
       一致，明确失败优于静默 degrade）；
     - 单个 SKILL.md 读取或解析失败 → 跳过该条 + emit ``skill.parse_failed``，
       不影响其他 skill 加载；

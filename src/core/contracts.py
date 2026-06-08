@@ -549,7 +549,7 @@ class EventSink(Protocol):
 class MessageCompactor(Protocol):
     """runner 在每个 turn 把 history 送给 LLM 之前的加工钩子。
 
-    实现类在 ``prompting.history_compactor.HistoryCompactor``；core 只定义接口，
+    实现类在 ``prompting.compaction.history_compactor.HistoryCompactor``；core 只定义接口，
     不持有实现。命名刻意和实现类错开（Protocol = ``MessageCompactor``，实现 =
     ``HistoryCompactor``），避免 ``from core.contracts import HistoryCompactor``
     和 ``from prompting import HistoryCompactor`` 同名歧义。
@@ -596,7 +596,7 @@ class AssembledInput:
 class PromptSource(Protocol):
     """指令来源的最小 Protocol，runner 用于传给 assembler。
 
-    具体实现（``prompting.instruction_loader.InstructionSource``）是 frozen
+    具体实现（``prompting.instructions.instruction_loader.InstructionSource``）是 frozen
     dataclass，满足此 Protocol。runner 只需知道 origin 和 content 两个属性。
     """
 
@@ -610,7 +610,7 @@ class PromptSource(Protocol):
 class PromptAssembler(Protocol):
     """prompt build 的统一入口协议（runner 对 InputAssembler 的视图）。
 
-    实现类在 ``prompting.input_assembler.InputAssembler``；core 只定义接口，
+    实现类在 ``prompting.assembly.input_assembler.InputAssembler``；core 只定义接口，
     不持有实现。runner 只调用 :meth:`assemble`，不关心内部如何做 compact /
     system 注入。
 

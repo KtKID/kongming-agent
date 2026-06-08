@@ -80,9 +80,9 @@ containers =
 ignore_imports =
     executors.agent_runtime.native_runtime -> safety
     executors.agent_runtime.native_runtime -> prompting
-    executors.agent_runtime.native_runtime -> prompting.history_compactor
-    executors.agent_runtime.native_runtime -> prompting.input_assembler
-    executors.agent_runtime.native_runtime -> prompting.instruction_loader
+    executors.agent_runtime.native_runtime -> prompting.compaction.history_compactor
+    executors.agent_runtime.native_runtime -> prompting.assembly.input_assembler
+    executors.agent_runtime.native_runtime -> prompting.instructions.instruction_loader
     scheduler.runtime_factory -> executors.agent_runtime.native_runtime
     scheduler.runtime_factory -> sessions
     scheduler.execution_bridge -> executors.llm.provider_factory

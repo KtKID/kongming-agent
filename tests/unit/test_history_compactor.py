@@ -1,4 +1,4 @@
-"""unit：prompting.history_compactor 纯逻辑覆盖。
+"""unit：prompting.compaction.history_compactor 纯逻辑覆盖。
 
 B4 / CR 报告 cr-report-20260424-202744.md。覆盖：
 
@@ -16,7 +16,11 @@ from __future__ import annotations
 import pytest
 
 from core.message import Message, ToolCall
-from prompting.history_compactor import _TRUNCATED_SUFFIX, CompactorConfig, HistoryCompactor
+from prompting.compaction.history_compactor import (
+    _TRUNCATED_SUFFIX,
+    CompactorConfig,
+    HistoryCompactor,
+)
 
 
 def _user(i: int) -> Message:

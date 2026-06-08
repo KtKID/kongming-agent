@@ -174,8 +174,8 @@ async def assemble_instructions(
     Returns:
         ``(rendered_text, origins)`` — merged system prompt text and origin label list.
     """
-    from .prompts_loader import materialize_and_load_prompts
-    from .runtime_context import build_runtime_context_text
+    from prompting.assembly.runtime_context import build_runtime_context_text
+    from prompting.instructions.prompts_loader import materialize_and_load_prompts
 
     base = await materialize_and_load_prompts(kongming_home)
 
@@ -189,7 +189,7 @@ async def assemble_instructions(
     sources.insert(0, InstructionSource(origin="runtime", content=runtime_text))
 
     if sitian_root is not None:
-        from .sitian_context import build_sitian_context_text
+        from prompting.context_sources.sitian_context import build_sitian_context_text
 
         sitian_text = build_sitian_context_text(sitian_root)
         if sitian_text:

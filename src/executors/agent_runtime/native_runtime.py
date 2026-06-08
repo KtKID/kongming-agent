@@ -61,9 +61,9 @@ from core.session import InMemorySession
 from executors.llm.anthropic_messages import AnthropicMessagesProvider
 from executors.llm.openai_responses import OpenAIResponsesProvider
 from prompting import HistoryCompactor
-from prompting.history_compactor import CompactorConfig
-from prompting.input_assembler import InputAssembler
-from prompting.instruction_loader import InstructionSource
+from prompting.assembly.input_assembler import InputAssembler
+from prompting.compaction.history_compactor import CompactorConfig
+from prompting.instructions.instruction_loader import InstructionSource
 from safety import (
     CapabilityPolicy,
     PermissionPolicy,

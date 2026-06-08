@@ -2,9 +2,9 @@
 
 v1-mini 的装配职责：
 
-1. 把 :class:`prompting.instruction_loader.InstructionSource` 渲染成一条 ``system``
+1. 把 :class:`prompting.instructions.instruction_loader.InstructionSource` 渲染成一条 ``system``
    消息（若历史里还没 system）
-2. 调用 :class:`prompting.history_compactor.HistoryCompactor` 做历史裁剪
+2. 调用 :class:`prompting.compaction.history_compactor.HistoryCompactor` 做历史裁剪
 3. 把 system + 压缩后 history 合并成最终的 messages 序列
 4. 在 metadata 里记下原始 / 压缩后长度、是否追加了 system，便于 trace 和调试
 
@@ -36,8 +36,8 @@ from typing import Any
 
 from core.contracts import AssembledInput, MessageCompactor
 from core.message import Message
-from prompting.history_compactor import HistoryCompactor
-from prompting.instruction_loader import InstructionLoader, InstructionSource
+from prompting.compaction.history_compactor import HistoryCompactor
+from prompting.instructions.instruction_loader import InstructionLoader, InstructionSource
 
 
 class InputAssembler:
