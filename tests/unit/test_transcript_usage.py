@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from web.claude_code.transcript_usage import TranscriptUsage, parse_transcript_usage
+from web.integrations.claude_code.transcript_usage import TranscriptUsage, parse_transcript_usage
 
 # ---------- helpers ----------
 

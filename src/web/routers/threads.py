@@ -47,8 +47,8 @@ from evolution.models import (
 )
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore, resolve_evolution_root
-from web.claude_code.jsonl_history import jsonl_path_for, parse_jsonl_history
 from web.errors import InvalidThreadIdError, ThreadNotFoundError
+from web.integrations.claude_code.jsonl_history import jsonl_path_for, parse_jsonl_history
 from web.path_utils import is_absolute_workspace_path
 from web.protocol import (
     CreateThreadRequest,

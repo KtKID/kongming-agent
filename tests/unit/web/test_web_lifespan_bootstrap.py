@@ -18,16 +18,16 @@ from pathlib import Path
 import pytest
 
 from web.app import _bootstrap_projects_registry
-from web.claude_code.projects_registry import (
+from web.integrations.claude_code.projects_registry import (
     claude_projects_path,
 )
-from web.claude_code.projects_registry import (
+from web.integrations.claude_code.projects_registry import (
     load_registry as load_claude_registry,
 )
-from web.codex.projects_registry import (
+from web.integrations.codex.projects_registry import (
     codex_projects_path,
 )
-from web.codex.projects_registry import (
+from web.integrations.codex.projects_registry import (
     load_registry as load_codex_registry,
 )
 from web.threads.metadata import ThreadMetadata, write_thread_metadata
@@ -176,7 +176,7 @@ class TestIsolationBetweenClaudeAndCodex:
 
         # 在 _bootstrap_projects_registry 函数内部 import 之前替换源模块属性。
         monkeypatch.setattr(
-            "web.claude_code.projects_registry.bootstrap_register_self",
+            "web.integrations.claude_code.projects_registry.bootstrap_register_self",
             _boom,
         )
 
@@ -218,11 +218,11 @@ class TestMigrateFailureDoesNotBlockBootstrap:
 
         # 替换两个 registry 的 migrate（两个独立 try/except，但都应被容错）
         monkeypatch.setattr(
-            "web.claude_code.projects_registry.migrate_from_thread_metadata",
+            "web.integrations.claude_code.projects_registry.migrate_from_thread_metadata",
             _boom,
         )
         monkeypatch.setattr(
-            "web.codex.projects_registry.migrate_from_thread_metadata",
+            "web.integrations.codex.projects_registry.migrate_from_thread_metadata",
             _boom,
         )
 
@@ -261,7 +261,7 @@ class TestMigrateFailureDoesNotBlockBootstrap:
             raise RuntimeError("simulated claude migrate failure")
 
         monkeypatch.setattr(
-            "web.claude_code.projects_registry.migrate_from_thread_metadata",
+            "web.integrations.claude_code.projects_registry.migrate_from_thread_metadata",
             _boom_claude,
         )
 

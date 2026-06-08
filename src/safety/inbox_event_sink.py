@@ -10,7 +10,7 @@ fan-out / 重连补包 / 协议帧等逻辑。
 - safety 包按 ``.importlinter`` 规则不直接 import web；``broadcaster`` 实例通过 DI
   （构造函数）传入。本模块只引入一个本地 ``Protocol`` 描述 broadcaster 的最小接口
   （duck typing），运行期由 ``src/web/run.py`` 装配点把
-  ``web.global_approvals.broadcaster.ApprovalInboxBroadcaster`` 实例注进来——
+  ``web.approvals.global_inbox.broadcaster.ApprovalInboxBroadcaster`` 实例注进来——
   结构匹配，零反向 import。
 - ``src/web/run.py`` 装配时实例化
   ``InboxEventSink(broadcaster=get_inbox_broadcaster(), manager=mgr)``
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 class _BroadcasterProto(Protocol):
     """broadcaster 的最小接口（duck typing，避免 safety → web 反向 import）。
 
-    实际类是 ``web.global_approvals.broadcaster.ApprovalInboxBroadcaster``，
+    实际类是 ``web.approvals.global_inbox.broadcaster.ApprovalInboxBroadcaster``，
     结构匹配本 Protocol，无需显式继承。
     """
 

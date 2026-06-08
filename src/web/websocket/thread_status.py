@@ -256,7 +256,7 @@ async def _thread_status_ws_handler(websocket: WebSocket) -> None:
     - 其他 → 静默丢弃
     """
     # 延迟 import 避免循环依赖（thread_status_ws 是基础模块，被多处依赖）
-    from web.global_approvals import get_inbox_broadcaster
+    from web.approvals.global_inbox import get_inbox_broadcaster
 
     # 1. cookie 鉴权
     serializer = getattr(websocket.app.state, "serializer", None)

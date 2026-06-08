@@ -1,6 +1,6 @@
 """共享 LLM 协议定义（v0.1）。
 
-跨 ``src/web/claude_code/`` 与未来的 ``src/web/codex/`` / ``src/web/gemini/``
+跨 ``src/web/integrations/claude_code/`` 与未来的 ``src/web/integrations/codex/`` / ``src/web/gemini/``
 模块共享的 wire 协议——前端 → 后端 4 类入站命令 + 后端 → 前端
 :class:`NormalizedMessage` 字典。
 

@@ -40,9 +40,9 @@ from config_loader.models import Config, LLMPresetConfig
 from core.contracts import ApprovalAction
 from core.message import Message
 from network.network_log import log_network_exception
-from web.claude_code.jsonl_history import jsonl_path_for
-from web.codex.projects_scanner import list_codex_projects
 from web.host_adapter import WebHostAdapter
+from web.integrations.claude_code.jsonl_history import jsonl_path_for
+from web.integrations.codex.projects_scanner import list_codex_projects
 from web.protocol import CellEvictedFrame, CellSummaryDTO, EvictReason
 from web.threads.cell import ThreadCell
 from web.threads.metadata import (

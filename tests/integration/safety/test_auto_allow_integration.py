@@ -60,7 +60,7 @@ from safety.approval_manager import (
     reset_for_testing,
 )
 from safety.approval_rules import ApprovalRules
-from web.auto_approval.config_store import ConfigStore, ProjectConfig
+from web.approvals.auto.config_store import ConfigStore, ProjectConfig
 
 pytestmark = pytest.mark.asyncio
 
@@ -381,8 +381,8 @@ async def test_policy_shared_across_channels() -> None:
     2. ``policy.set_enabled(cwd, True)`` 写盘 → ``ApprovalRules.classify(...)``
        立即读到新值（ConfigStore 不缓存，每次 ``get`` 读盘；保证多通道一致性）。
     """
-    from web.auto_approval.policy import AutoApprovalPolicy
-    from web.auto_approval.rules import RuleSet
+    from web.approvals.auto.policy import AutoApprovalPolicy
+    from web.approvals.auto.rules import RuleSet
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         store = ConfigStore(Path(tmp_dir))
@@ -446,8 +446,8 @@ async def test_real_policy_drives_manager_auto_approve() -> None:
     与用例 1 的差异：用真实 AutoApprovalPolicy 而非 _FakePolicy，验证
     duck typing 在生产对象上确实匹配 _AutoApprovalPolicyProto（避免 Protocol 漂移）。
     """
-    from web.auto_approval.policy import AutoApprovalPolicy
-    from web.auto_approval.rules import RuleSet
+    from web.approvals.auto.policy import AutoApprovalPolicy
+    from web.approvals.auto.rules import RuleSet
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         store = ConfigStore(Path(tmp_dir))
@@ -610,8 +610,8 @@ async def test_bash_rm_blocked_forces_human_approval_even_when_zap_on() -> None:
     - 不创建 auto-approve task（``auto_approve_task_count == 0`` during pending）
     - timeout 触发后 outcome=rejected, source=manager_timeout（不是 rule_auto_allow）
     """
-    from web.auto_approval.policy import AutoApprovalPolicy
-    from web.auto_approval.rules import load_default_rules
+    from web.approvals.auto.policy import AutoApprovalPolicy
+    from web.approvals.auto.rules import load_default_rules
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         store = ConfigStore(Path(tmp_dir))

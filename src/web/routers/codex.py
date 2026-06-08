@@ -4,7 +4,7 @@
 并在 v0.1 web-projects-registry 引入 cwd registry 的 add/remove/refresh
 端点（与 ``src/web/routers/claude.py`` 完全对称，仅模块路径与字段差异）。
 
-与 ``src/web/codex/route.py``（WebSocket 端点）平级；
+与 ``src/web/integrations/codex/route.py``（WebSocket 端点）平级；
 本文件只做 REST，不做 WebSocket。
 
 鉴权：
@@ -14,11 +14,11 @@
 
 实现：
 
-- :func:`web.codex.projects_scanner.list_codex_projects` 是同步扫盘 IO，用
+- :func:`web.integrations.codex.projects_scanner.list_codex_projects` 是同步扫盘 IO，用
   :func:`asyncio.to_thread` 隔离事件循环。
 - ``CodexProjectSummary`` / ``CodexSessionSummary`` 是 ``frozen=True`` dataclass ——
   显式 dict 字面量映射成响应 JSON。
-- registry 读 / 写均通过 :mod:`web.codex.projects_registry`，由调用方注入
+- registry 读 / 写均通过 :mod:`web.integrations.codex.projects_registry`，由调用方注入
   ``request.app.state.kongming_home``，确保 worktree 隔离。
 """
 
@@ -35,13 +35,13 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from web.codex.jsonl_history import parse_codex_rollout, read_session_meta
-from web.codex.projects_registry import (
+from web.integrations.codex.jsonl_history import parse_codex_rollout, read_session_meta
+from web.integrations.codex.projects_registry import (
     add_project,
     load_registry,
     remove_project,
 )
-from web.codex.projects_scanner import CodexProjectSummary, list_codex_projects
+from web.integrations.codex.projects_scanner import CodexProjectSummary, list_codex_projects
 from web.protocol.rest_models import AddProjectRequest, ProjectRegistryEntryDTO
 
 _logger = logging.getLogger(__name__)

@@ -11,7 +11,7 @@ from typing import Any
 
 # 注：broadcaster 类型用 Any 避免 safety→web 跨层 import（.importlinter Contract 3
 # layered-dependency 禁 safety→web）。运行期实际传入的是
-# web.global_approvals.broadcaster.ApprovalInboxBroadcaster（duck typing）。
+# web.approvals.global_inbox.broadcaster.ApprovalInboxBroadcaster（duck typing）。
 # 同款解耦在 inbox_event_sink.py 用 _BroadcasterProto Protocol。
 
 logger = logging.getLogger(__name__)

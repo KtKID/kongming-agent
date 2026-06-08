@@ -3,8 +3,8 @@
 manager 调 ``classify(channel, thread_id, cwd, tool_name, tool_input)`` 拿初步决策。
 
 设计目标：**一份 rule，多通道共用**——让 generic_chat 通道完全复用 claude_code
-已有的成熟 :class:`web.auto_approval.policy.AutoApprovalPolicy` + ``default_rules.yaml``
-+ per-cwd :class:`web.auto_approval.config_store.ConfigStore`，**不再两套并存**。
+已有的成熟 :class:`web.approvals.auto.policy.AutoApprovalPolicy` + ``default_rules.yaml``
++ per-cwd :class:`web.approvals.auto.config_store.ConfigStore`，**不再两套并存**。
 
 设计真源：
 - ``dev-pipeline/tasks/approval-rules-unified/README.md`` — 技术设计 + DoD
@@ -60,12 +60,12 @@ class _RuleDecision:
 
 
 class _PolicyDecisionLike(Protocol):
-    """对 :class:`web.auto_approval.policy.Decision` 的 duck typing 协议。
+    """对 :class:`web.approvals.auto.policy.Decision` 的 duck typing 协议。
 
     仅消费 ``auto_eligible`` / ``blocked_by_rule`` / ``timeout_ms`` 三字段
     （``rule_evaluation`` audit 快照本层不消费）。
 
-    实际真源签名：``src/web/auto_approval/policy.py:33-46`` —— ``Decision`` 是
+    实际真源签名：``src/web/approvals/auto/policy.py:33-46`` —— ``Decision`` 是
     ``@dataclass(frozen=True, slots=True)``，字段以 attribute 暴露，duck-typing
     匹配本 Protocol 即可（无需显式继承）。
     """
@@ -81,12 +81,12 @@ class _PolicyDecisionLike(Protocol):
 
 
 class _AutoApprovalPolicyProto(Protocol):
-    """对 :class:`web.auto_approval.policy.AutoApprovalPolicy` 的 duck typing 协议。
+    """对 :class:`web.approvals.auto.policy.AutoApprovalPolicy` 的 duck typing 协议。
 
     仅消费 ``classify`` + ``is_enabled_for`` 两方法（``set_enabled`` / ``get_config``
     等 UI 写入路径不在 safety 层使用）。
 
-    实际真源签名：``src/web/auto_approval/policy.py:107-114``::
+    实际真源签名：``src/web/approvals/auto/policy.py:107-114``::
 
         def classify(
             self,
@@ -147,7 +147,7 @@ class ApprovalRules:
 
         Args:
             policy: 智能审批决策器实例（duck-typed 真源
-                :class:`web.auto_approval.policy.AutoApprovalPolicy`）；
+                :class:`web.approvals.auto.policy.AutoApprovalPolicy`）；
                 ``None`` = fail-closed 走默认 ask（test 环境 / app.state 未就绪时
                 的安全网）。
         """

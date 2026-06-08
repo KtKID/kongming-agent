@@ -75,7 +75,7 @@ def test_lint_imports_exit_code_zero() -> None:
 # ---------------------------------------------------------------------------
 # fix-network-log-misplacement: 旧路径运行期不可 import（负向验证）
 #
-# `observability.network_log` 与 `web.claude_code.keepalive_log` 已搬到
+# `observability.network_log` 与 `web.integrations.claude_code.keepalive_log` 已搬到
 # `network/` 包。这两条旧 import path 必须从运行期消失（不留 deprecation
 # shim），任何漏改的调用方应在 import 阶段立即 raise ModuleNotFoundError。
 # ---------------------------------------------------------------------------
@@ -91,9 +91,9 @@ def test_legacy_observability_network_log_path_removed() -> None:
 
 
 def test_legacy_claude_code_keepalive_log_path_removed() -> None:
-    """旧路径 ``web.claude_code.keepalive_log`` 必须 raise ModuleNotFoundError。
+    """旧路径 ``web.integrations.claude_code.keepalive_log`` 必须 raise ModuleNotFoundError。
 
     搬迁后 ``keepalive_log`` 唯一真源 = ``network.keepalive_log``。
     """
     with pytest.raises(ModuleNotFoundError):
-        __import__("web.claude_code.keepalive_log")
+        __import__("web.integrations.claude_code.keepalive_log")

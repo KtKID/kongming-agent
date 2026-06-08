@@ -42,7 +42,7 @@ from safety.approval_rules import ApprovalRules, _RuleDecision
 class _FakeDecision:
     """duck typing 匹配 :class:`safety.approval_rules._PolicyDecisionLike`。
 
-    字段对齐 :class:`web.auto_approval.policy.Decision`（仅本层消费 3 字段，
+    字段对齐 :class:`web.approvals.auto.policy.Decision`（仅本层消费 3 字段，
     rule_evaluation audit 快照可省略）。
     """
 

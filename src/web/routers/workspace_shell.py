@@ -14,7 +14,7 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from network.network_log import log_network_event, log_network_exception
 from web.auth import SESSION_COOKIE_NAME, verify_session_cookie
-from web.claude_code.jsonl_history import jsonl_path_for
+from web.integrations.claude_code.jsonl_history import jsonl_path_for
 from web.workspace.model import WorkspaceError, get_thread_meta, require_workspace_root
 
 try:

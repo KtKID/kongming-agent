@@ -18,7 +18,7 @@ worktree 隔离硬约束：用 ``tmp_path`` 当 ``kongming_home`` + ``codex_home
 
 与 ``test_claude_router_projects.py`` 的差异：
 
-1. registry 模块换 ``web.codex.projects_registry`` + 路径字段 ``codex_projects.json``
+1. registry 模块换 ``web.integrations.codex.projects_registry`` + 路径字段 ``codex_projects.json``
 2. POST/DELETE 路径前缀 ``/api/codex/projects``
 3. **codex jsonl 结构不同**：codex 不按 cwd 编码目录名，而是
    ``sessions/<Y>/<M>/<D>/rollout-<ISO>-<UUID>.jsonl``，cwd 真值在 jsonl 第一行
@@ -45,7 +45,7 @@ from tests.unit.test_web_routers_threads import (
     _make_cfg,
 )
 from web.app import create_app
-from web.codex.projects_registry import (
+from web.integrations.codex.projects_registry import (
     add_project,
     codex_projects_path,
     load_registry,

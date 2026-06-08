@@ -93,7 +93,7 @@ ignore_imports =
     tools.builtin.schedule_tool -> scheduler.schedule_parser
     tools.builtin.schedule_tool -> scheduler.timing
     scheduler.runtime_factory -> sessions.session_bootstrap
-    evolution.claude_evidence_selector -> web.claude_code.jsonl_history
+    evolution.claude_evidence_selector -> web.integrations.claude_code.jsonl_history
     executors.agent_runtime.native_runtime -> evolution
 ; claude-image-paste-e2e §4/§5：MediaPart Protocol + ImageMediaPart 需要
 ; 引用 ``web.uploads.storage::AssetStorage`` (IO 抽象) 与
@@ -214,9 +214,9 @@ ignore_imports =
     web.routers.threads -> evolution.store
     web.websocket.routes -> evolution.state_store
     web.websocket.routes -> evolution.store
-    web.claude_code.route -> web.websocket.event_sink
-    web.claude_code.route -> evolution.claude_transcript_provider
-    web.claude_code.route -> core.contracts
+    web.integrations.claude_code.route -> web.websocket.event_sink
+    web.integrations.claude_code.route -> evolution.claude_transcript_provider
+    web.integrations.claude_code.route -> core.contracts
 ; web.routers.uploads -> web.uploads.{storage,registry,validation}：
 ; routers/uploads.py 作为 media-upload-shell controller，必须直接消费 storage
 ; / registry / validator 三件套。web.uploads 子模块自身依赖 config_loader
@@ -232,15 +232,15 @@ ignore_imports =
 ; service.py / _attachment_prefix.py 需要消费 AssetStorage（路径反推） +
 ; EXT_BY_MIME（mime→ext 白名单单点真源）。同 routers/uploads.py 通过
 ; ``config_loader.errors -> core.errors`` 传递触发 Contract 6，单点放行。
-    web.claude_code.service -> web.uploads.storage
-    web.claude_code._attachment_prefix -> web.uploads.storage
+    web.integrations.claude_code.service -> web.uploads.storage
+    web.integrations.claude_code._attachment_prefix -> web.uploads.storage
 ; codex-channel-image-paste §3：codex 通道 service + _image_cli_args 消费
 ; AssetStorage (路径反推) + EXT_BY_MIME (mime→ext 白名单)。同 claude_code 通过
 ; ``config_loader.errors -> core.errors`` 传递触发 Contract 6，单点放行。
-    web.codex.service -> web.uploads.storage
-    web.codex._image_cli_args -> web.uploads.storage
-    web.codex._image_cli_args -> web.uploads.registry
-    web.claude_code._attachment_prefix -> web.uploads.registry
+    web.integrations.codex.service -> web.uploads.storage
+    web.integrations.codex._image_cli_args -> web.uploads.storage
+    web.integrations.codex._image_cli_args -> web.uploads.registry
+    web.integrations.claude_code._attachment_prefix -> web.uploads.registry
 ; web.app -> web.uploads.{storage,registry,validation}：
 ; app.py 装配期注入单例到 ``app.state.*``（asset_storage / asset_registry
 ; / upload_validator），让 routers/uploads.py 优先消费注入的单例而不是
@@ -283,7 +283,7 @@ ignore_imports =
 ; ---------------------------------------------------------------------------
 ; Contract 8: evolution 不允许 import web 模块
 ;             evolution 通过 TranscriptProvider Protocol 与频道层解耦；
-;             唯一例外：claude_evidence_selector -> web.claude_code.jsonl_history
+;             唯一例外：claude_evidence_selector -> web.integrations.claude_code.jsonl_history
 ;             （单点白名单，借 jsonl 解析能力）。
 ; ---------------------------------------------------------------------------
 
@@ -295,7 +295,7 @@ source_modules =
 forbidden_modules =
     web
 ignore_imports =
-    evolution.claude_evidence_selector -> web.claude_code.jsonl_history
+    evolution.claude_evidence_selector -> web.integrations.claude_code.jsonl_history
 ; claude-image-paste-e2e §5：evolution.evolution_manager → native_runtime
 ; → executors.llm.anthropic_messages → executors.llm.media_adapter
 ; → web.uploads.{storage,registry} 是传递链(已在 Contract 3 白名单)。
@@ -340,8 +340,8 @@ source_modules =
     web.websocket.routes
     web.websocket.event_sink
     web.threads.metadata
-    web.claude_code
-    web.codex
+    web.integrations.claude_code
+    web.integrations.codex
     web.protocol
 forbidden_modules =
     web.usage_token_v2._derive_claude

@@ -31,8 +31,8 @@ from tests.unit.test_web_routers_threads import (
     _make_cfg,
 )
 from web.app import create_app
-from web.claude_code.jsonl_history import encode_cwd
-from web.claude_code.projects_registry import (
+from web.integrations.claude_code.jsonl_history import encode_cwd
+from web.integrations.claude_code.projects_registry import (
     add_project,
     claude_projects_path,
     load_registry,

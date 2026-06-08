@@ -534,7 +534,7 @@ def test_ws_interrupt_cancels_active_run_task(tmp_path: Path) -> None:
 def _wait_for_frame_type(ws: Any, frame_type: str, max_msgs: int = 10) -> dict[str, Any]:
     """等收到指定 frame_type 的 frame；最多读 max_msgs 个消息。
 
-    跟 ``tests/unit/web/claude_code/test_route_smart_approval.py::_wait_for_kind``
+    跟 ``tests/unit/web/integrations/claude_code/test_route_smart_approval.py::_wait_for_kind``
     行为对齐，单独在本文件留一份避免跨包 import。
     """
     for _ in range(max_msgs):

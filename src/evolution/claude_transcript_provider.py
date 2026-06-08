@@ -1,7 +1,7 @@
 """ClaudeTranscriptProvider — claude 频道的 TranscriptProvider 实现。
 
 内部调 ``claude_evidence_selector.build_claude_transcript_window`` 读 jsonl。
-是 evolution 模块向 ``web.claude_code.jsonl_history`` 借数据的唯一桥。
+是 evolution 模块向 ``web.integrations.claude_code.jsonl_history`` 借数据的唯一桥。
 """
 
 from __future__ import annotations

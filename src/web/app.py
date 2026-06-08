@@ -86,16 +86,16 @@ def _bootstrap_projects_registry(home: Path, repo_root: str) -> None:
             或 ``create_app(home_dir=...)`` 注入）。
         repo_root: 当前 web server 进程对应的项目根绝对路径。
     """
-    from web.claude_code.projects_registry import (
+    from web.integrations.claude_code.projects_registry import (
         bootstrap_register_self as bootstrap_claude,
     )
-    from web.claude_code.projects_registry import (
+    from web.integrations.claude_code.projects_registry import (
         migrate_from_thread_metadata as migrate_claude,
     )
-    from web.codex.projects_registry import (
+    from web.integrations.codex.projects_registry import (
         bootstrap_register_self as bootstrap_codex,
     )
-    from web.codex.projects_registry import (
+    from web.integrations.codex.projects_registry import (
         migrate_from_thread_metadata as migrate_codex,
     )
 
@@ -443,7 +443,7 @@ def create_app(
 
     # 5. app.state 注入
     from web._shared.session_manager import SessionManager as _SharedSessionManager
-    from web.codex import CodexService
+    from web.integrations.codex import CodexService
     from web.whiteboard.manager import WhiteboardManager
 
     app.state.config = cfg
@@ -478,7 +478,7 @@ def create_app(
     # - audit 单文件 JSONL 追加（O_APPEND 并发安全）
     # - 启动时把内置 default_rules.yaml 物化到 <home>/web/auto_approval/rules.yaml
     #   （用户编辑这份；首次启动复制，已存在则保留用户改动）
-    from web.auto_approval import (
+    from web.approvals.auto import (
         AuditLogger,
         AutoApprovalPolicy,
         ConfigStore,
@@ -498,7 +498,7 @@ def create_app(
     # smart-approval-v2-inbox：全局审批 inbox broadcaster（per-process 单例）
     # 复用 /ws/thread-status 端点 fan-out approval.inbox.* 帧；
     # 维护 pending snapshot dict（重连补包用）+ bridge_registry（路由 resolve）
-    from web.global_approvals import get_inbox_broadcaster
+    from web.approvals.global_inbox import get_inbox_broadcaster
 
     app.state.approval_inbox_broadcaster = get_inbox_broadcaster()
 
@@ -557,9 +557,10 @@ def create_app(
     app.add_exception_handler(KongmingWebError, kongming_error_handler)
 
     # 8. routers
-    from web.claude_code import router as claude_code_router
-    from web.codex import router as codex_router
     from web.dashboard.config import router as dashboard_config_router
+    from web.dashboard.logs.router import router as logs_router
+    from web.integrations.claude_code import router as claude_code_router
+    from web.integrations.codex import router as codex_router
     from web.routers.auth import router as auth_router
     from web.routers.claude import router as claude_router
     from web.routers.codex import router as codex_rest_router

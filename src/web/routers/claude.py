@@ -21,11 +21,11 @@
 
 实现：
 
-- :func:`web.claude_code.projects_scanner.list_projects` 是同步扫盘 IO，用
+- :func:`web.integrations.claude_code.projects_scanner.list_projects` 是同步扫盘 IO，用
   :func:`asyncio.to_thread` 隔离事件循环（与 ``threads.list_threads`` 同款）。
 - ``ProjectSummary`` / ``SessionSummary`` 是 ``frozen=True`` dataclass —— FastAPI
   默认不会原样序列化 frozen dataclass，因此显式 dict 字面量映射成响应 JSON。
-- registry 读 / 写均通过 :mod:`web.claude_code.projects_registry`，由调用方注入
+- registry 读 / 写均通过 :mod:`web.integrations.claude_code.projects_registry`，由调用方注入
   ``request.app.state.kongming_home``，确保 worktree 隔离。
 """
 
@@ -41,12 +41,12 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 
-from web.claude_code.projects_registry import (
+from web.integrations.claude_code.projects_registry import (
     add_project,
     load_registry,
     remove_project,
 )
-from web.claude_code.projects_scanner import ProjectSummary, list_projects
+from web.integrations.claude_code.projects_scanner import ProjectSummary, list_projects
 from web.protocol.rest_models import AddProjectRequest, ProjectRegistryEntryDTO
 from web.threads.metadata import ThreadMetadata
 

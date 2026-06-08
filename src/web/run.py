@@ -139,7 +139,7 @@ def _build_manager_and_inbox_sink(*, app: Any) -> Any:
     from safety.approval_manager import get_approval_manager
     from safety.approval_rules import ApprovalRules
     from safety.inbox_event_sink import InboxEventSink
-    from web.global_approvals import get_inbox_broadcaster
+    from web.approvals.global_inbox import get_inbox_broadcaster
 
     broadcaster = get_inbox_broadcaster()
     policy = getattr(app.state, "auto_approval_policy", None) if app is not None else None
