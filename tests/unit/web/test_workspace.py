@@ -1,4 +1,4 @@
-"""``src/web/workspace.py`` 纯 helper 单元测试。
+"""``src/web/workspace/model.py`` 纯 helper 单元测试。
 
 覆盖 ``resolve_workspace_cwd`` 与 ``require_workspace_root`` 的
 ``fallback_to`` 行为；与 endpoint 集成测试分离，确保 helper 在不起 FastAPI
@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from web.threads.metadata import ThreadMetadata
-from web.workspace import (
+from web.workspace.model import (
     WorkspaceError,
     require_workspace_root,
     resolve_workspace_cwd,
@@ -49,7 +49,7 @@ def test_resolve_workspace_cwd_empty_falls_back(tmp_path: Path) -> None:
     meta = _make_meta("")
     server_root = tmp_path / "srv"
     server_root.mkdir()
-    assert resolve_workspace_cwd(meta, server_root) == str(server_root)
+    assert resolve_workspace_cwd(meta, server_root) == server_root.as_posix()
 
 
 def test_resolve_workspace_cwd_whitespace_falls_back(tmp_path: Path) -> None:
@@ -57,7 +57,7 @@ def test_resolve_workspace_cwd_whitespace_falls_back(tmp_path: Path) -> None:
     meta = _make_meta("   ")
     server_root = tmp_path / "srv"
     server_root.mkdir()
-    assert resolve_workspace_cwd(meta, server_root) == str(server_root)
+    assert resolve_workspace_cwd(meta, server_root) == server_root.as_posix()
 
 
 # ---- require_workspace_root ---------------------------------------------

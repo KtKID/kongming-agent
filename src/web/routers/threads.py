@@ -70,7 +70,7 @@ from web.protocol import (
     WorkspaceTreeDTO,
     WorkspaceTreeNodeDTO,
 )
-from web.workspace import (
+from web.workspace.model import (
     WorkspaceError,
     get_thread_meta,
     list_workspace_entries,

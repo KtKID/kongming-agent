@@ -4,9 +4,9 @@
 解析：``meta.cwd`` 为空串时只读 global 白板，``scope="project"`` 的写操作会被
 :class:`WhiteboardScopeError` 拒绝（router 转 422）。
 
-数据访问统一走 :class:`web.whiteboard_manager.WhiteboardManager`——
+数据访问统一走 :class:`web.whiteboard.manager.WhiteboardManager`——
 ``.importlinter`` Contract 10 强制 router 不可直接 import
-``web.whiteboard_store``，所有 store 类型（``WhiteboardLayoutUpdate`` /
+``web.whiteboard.store``，所有 store 类型（``WhiteboardLayoutUpdate`` /
 ``WhiteboardInvalidLayoutError`` / ``WhiteboardContentConflictError``）由 manager
 re-export。
 """
@@ -29,7 +29,7 @@ from web.protocol import (
     WhiteboardDTO,
 )
 from web.routers.threads import THREAD_ID_RE
-from web.whiteboard_manager import (
+from web.whiteboard.manager import (
     ScopedCardRecord,
     ScopedWhiteboardSnapshot,
     WhiteboardContentConflictError,

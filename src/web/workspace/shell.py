@@ -236,7 +236,7 @@ class WorkspaceShellProcess:
                 await self._wait_task
             except Exception as exc:
                 log_network_exception(
-                    "web.workspace_shell",
+                    "web.workspace.shell",
                     "wait_task_failed",
                     exc,
                 )

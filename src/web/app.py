@@ -444,7 +444,7 @@ def create_app(
     # 5. app.state 注入
     from web._shared.session_manager import SessionManager as _SharedSessionManager
     from web.codex import CodexService
-    from web.whiteboard_manager import WhiteboardManager
+    from web.whiteboard.manager import WhiteboardManager
 
     app.state.config = cfg
     app.state.serializer = serializer
@@ -557,9 +557,6 @@ def create_app(
     app.add_exception_handler(KongmingWebError, kongming_error_handler)
 
     # 8. routers
-    # workspace_shell 依赖 fcntl/termios（Unix 专属），Windows 上跳过
-    import sys
-
     from web.claude_code import router as claude_code_router
     from web.codex import router as codex_router
     from web.dashboard.config import router as dashboard_config_router
@@ -579,9 +576,7 @@ def create_app(
     from web.routers.uploads import router as uploads_router
     from web.routers.whiteboard import router as whiteboard_router
     from web.routers.workspace_git import router as workspace_git_router
-
-    if sys.platform != "win32":
-        from web.routers.workspace_shell import router as workspace_shell_router
+    from web.routers.workspace_shell import router as workspace_shell_router
 
     app.include_router(auth_router)
     app.include_router(threads_router)
@@ -597,8 +592,7 @@ def create_app(
     app.include_router(codex_rest_router)
     app.include_router(claude_router)
     app.include_router(workspace_git_router)
-    if sys.platform != "win32":
-        app.include_router(workspace_shell_router)
+    app.include_router(workspace_shell_router)
     app.include_router(slash_candidates_router)
     app.include_router(cron_router)
     app.include_router(sitian_router)

@@ -7,7 +7,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from web.workspace import normalize_relative_path, resolve_workspace_path
+from web.workspace.model import normalize_relative_path, resolve_workspace_path
 
 WORKSPACE_GIT_LOG_LIMIT = 30
 

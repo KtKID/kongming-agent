@@ -186,7 +186,7 @@ def test_workspace_context_empty_cwd_falls_back_to_server_cwd(tmp_path: Path) ->
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body["workspace_root"] == str(tmp_path)
+        assert body["workspace_root"] == tmp_path.as_posix()
         assert body["files_available"] is True
         assert body["shell_available"] is True
         # generic_chat thread 走 system_shell（非 claude_code）

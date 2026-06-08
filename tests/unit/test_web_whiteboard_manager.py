@@ -9,14 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from web.whiteboard_manager import (
+from web.whiteboard.manager import (
     ScopedCardRecord,
     ScopedWhiteboardSnapshot,
     WhiteboardManager,
     WhiteboardScopeError,
     encode_project_dir,
 )
-from web.whiteboard_store import (
+from web.whiteboard.store import (
     WhiteboardContentConflictError,
     WhiteboardLayoutUpdate,
 )

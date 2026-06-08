@@ -27,7 +27,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from web.whiteboard_store import (
+from web.whiteboard.store import (
     DEFAULT_CARD_HEIGHT,
     DEFAULT_CARD_TITLE,
     DEFAULT_CARD_X,

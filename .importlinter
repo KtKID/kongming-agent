@@ -364,7 +364,7 @@ type = forbidden
 source_modules =
     web.routers.whiteboard
 forbidden_modules =
-    web.whiteboard_store
+    web.whiteboard.store
 ; router → manager → store 是合法链路，只禁直接 import
 allow_indirect_imports = True
 

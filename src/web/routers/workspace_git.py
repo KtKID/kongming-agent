@@ -24,8 +24,7 @@ from web.protocol import (
     WorkspaceGitStatusDTO,
 )
 from web.routers.threads import THREAD_ID_RE
-from web.workspace import WorkspaceError, require_workspace_root
-from web.workspace_git import (
+from web.workspace.git import (
     WorkspaceGitError,
     checkout_git_branch,
     commit_git,
@@ -37,6 +36,7 @@ from web.workspace_git import (
     stage_git_paths,
     unstage_git_paths,
 )
+from web.workspace.model import WorkspaceError, require_workspace_root
 
 router = APIRouter(prefix="/api/threads", tags=["workspace-git"])
 

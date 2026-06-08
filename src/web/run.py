@@ -160,7 +160,7 @@ def _resolve_default_cwd_for_thread(app: Any, thread_id: str) -> str:
     优先级：
 
     1. 通过 ``app.state.thread_manager.list_threads()`` 反查 metadata，
-       命中后走 :func:`web.workspace.resolve_workspace_cwd`：
+       命中后走 :func:`web.workspace.model.resolve_workspace_cwd`：
        ``meta.cwd`` 非空直接返回，空时 fallback 到 server 启动目录
        （``app.state.workspace_root``）。
     2. ``app`` 未注入 / thread_manager 缺失 / list_threads 抛错 / metadata
@@ -178,7 +178,7 @@ def _resolve_default_cwd_for_thread(app: Any, thread_id: str) -> str:
     Returns:
         非空字符串：thread.cwd / server cwd / 进程 cwd 三级兜底。
     """
-    from web.workspace import resolve_workspace_cwd
+    from web.workspace.model import resolve_workspace_cwd
 
     def _cwd_string(path: Path) -> str:
         return path.as_posix()
