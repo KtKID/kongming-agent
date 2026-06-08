@@ -24,6 +24,8 @@ from tools.agent_workflow_tool import (
     build_run_agent_workflow_tool,
 )
 
+_FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "agent_workflows" / "map_reduce"
+
 
 class _FakeSubAgentManager:
     """测试用子 agent manager，按 shard metadata 返回结构化 mapper JSON。"""
@@ -165,6 +167,12 @@ def _payload() -> dict[str, Any]:
         },
         "audit_tags": ["unit", "task:map-reduce-strategy-integration-v0.1"],
     }
+
+
+def _load_map_reduce_fixture(name: str) -> dict[str, Any]:
+    """读取 map_reduce fixture，输入为文件名，输出为 JSON 对象。"""
+    path = _FIXTURE_ROOT / name
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _mapper_output(*, shard_id: str, files: list[str]) -> dict[str, Any]:
@@ -763,7 +771,9 @@ async def test_run_agent_workflow_tool_normalizes_cli_session_map_reduce_payload
 async def test_run_agent_workflow_tool_runs_inline_raw_text_map_reduce(
     tmp_path: Path,
 ) -> None:
-    """验证零文件编排测试，输入为 noop inline，输出为 3 个 raw_text mapper 报告。"""
+    """验证 CLI 失败 fixture 回放，输入为 noop inline，输出为 3 个 raw_text mapper 报告。"""
+    fixture = _load_map_reduce_fixture("cli-5f68e28fc030-inline-noop.json")
+    expected = fixture["expected_after_fix"]
     subagents = _RawTextSubAgentManager()
     manager = AgentWorkflowManager(
         subagents=subagents,  # type: ignore[arg-type]
@@ -774,48 +784,22 @@ async def test_run_agent_workflow_tool_runs_inline_raw_text_map_reduce(
     handle.bind(manager)
     tool = build_run_agent_workflow_tool(handle)
 
-    payload = {
-        "mode": "map_reduce",
-        "objective": "让 3 个独立子 agent 各自生成一个 1-100 的随机整数并说出来。",
-        "input_source": {"kind": "file_list", "files": ["noop://inline"]},
-        "shard_strategy": {
-            "kind": "by_file_count",
-            "max_files_per_shard": 1,
-            "min_shards": 3,
-            "max_shards": 3,
-        },
-        "mapper": {
-            "name_prefix": "random_drawer",
-            "prompt_template": "数字: <N>\n宣言: <一句中文>",
-            "max_turns": 2,
-            "max_output_chars": 300,
-        },
-        "reducer": {
-            "kind": "deterministic",
-            "dedupe_strategy": "exact_dedupe_key",
-            "ranking_strategy": "confidence_first",
-            "max_findings": 3,
-        },
-        "limits": {
-            "max_concurrency": 3,
-            "workflow_timeout_seconds": 120,
-            "mapper_timeout_seconds": 60,
-            "reducer_timeout_seconds": 60,
-        },
-        "output_contract": "code_findings",
-    }
-
     result = await tool.execute(
-        {"mode": "map_reduce", "payload": payload},
-        ToolContext(run_id="r", session_id="parent-session", turn=1, call_id="inline-call"),
+        fixture["arguments"],
+        ToolContext(run_id="r", session_id=fixture["session_id"], turn=1, call_id="inline-call"),
     )
 
     assert result.ok is True
     assert result.data is not None
-    assert result.data["completed"] is True
-    assert len(subagents.tasks) == 3
-    assert result.data["map_reduce"]["reducer_output"]["output_contract"] == "raw_text"
-    assert result.data["map_reduce"]["reducer_output"]["completed_shards"] == 3
+    assert result.data["completed"] == expected["completed"]
+    assert len(subagents.tasks) == expected["report_count"]
+    assert (
+        result.data["map_reduce"]["reducer_output"]["output_contract"]
+        == expected["output_contract"]
+    )
+    assert (
+        result.data["map_reduce"]["reducer_output"]["completed_shards"] == expected["report_count"]
+    )
     summaries = [report["summary"] for report in result.data["reports"]]
     assert summaries == [
         "数字: 11 宣言: 我抽到了 11",
