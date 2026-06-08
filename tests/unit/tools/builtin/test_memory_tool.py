@@ -9,7 +9,7 @@ from pathlib import Path
 
 from core.contracts import ToolContext, ToolResult
 from memory.store import MemoryStore
-from tools.memory_tool import build_memory_tool
+from tools.builtin.memory_tool import build_memory_tool
 
 
 def _ctx() -> ToolContext:

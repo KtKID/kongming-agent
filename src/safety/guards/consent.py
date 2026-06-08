@@ -225,7 +225,7 @@ class ConsentResolver:
         Args:
             config: 全局配置实例。
             interactive_approval: 真正承担人机交互的 ApprovalProvider 实现
-                （生产环境为 :class:`tools.approval.InteractiveApproval` 的 M5
+                （生产环境为 :class:`tools.runtime.approval.InteractiveApproval` 的 M5
                 升级版本；测试可注入 stub）。
         """
         user_approval_required = _normalize_user_approval_required_commands(

@@ -423,7 +423,7 @@ class HostConfig(BaseModel):
 class ApprovalConfig(BaseModel):
     """审批模式配置。
 
-    ``interactive`` 走 ``tools/approval.py`` 的交互实现；``auto_allow`` /
+    ``interactive`` 走 ``tools/runtime/approval.py`` 的交互实现；``auto_allow`` /
     ``auto_deny`` 预留给自动化测试。具体策略由装配层按此配置选择实现，
     核心协议只认 :class:`core.contracts.ApprovalProvider`。
     """

@@ -7,7 +7,7 @@
 
 设计要点：
 
-- **不继承** :class:`tools.base.BaseBuiltinTool`：基类的统一异常包装会把读盘
+- **不继承** :class:`tools.runtime.base.BaseBuiltinTool`：基类的统一异常包装会把读盘
   失败 / ``!command`` 拒绝吞成 ``ok=False``，runner 之上再无法区分失败原因。
   本类在 :meth:`execute` 内自管 try/except，同时配套 emit ``skill.failed``。
 - **三事件 emit**：``skill.invoked`` 在参数校验通过后立即 emit；
@@ -179,7 +179,7 @@ class SkillTool:
         event_sinks: 运行时事件 sink 列表。空元组 = 不 emit。
             sink 抛异常不污染主链路（per-sink try/except）。
 
-    不继承 :class:`tools.base.BaseBuiltinTool` 的原因见模块 docstring。
+    不继承 :class:`tools.runtime.base.BaseBuiltinTool` 的原因见模块 docstring。
     """
 
     name: Final[str] = "skill"

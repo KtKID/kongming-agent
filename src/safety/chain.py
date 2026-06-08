@@ -266,8 +266,8 @@ def build_safety_chain(
     Args:
         config: 统一 :class:`Config`。三张规则表 + grant 配置都从这里读。
         interactive_approval: 底层 :class:`ApprovalProvider`（通常是
-            :class:`tools.approval.InteractiveApproval` 或
-            :class:`tools.approval.AutoAllowApproval` 等）。
+            :class:`tools.runtime.approval.InteractiveApproval` 或
+            :class:`tools.runtime.approval.AutoAllowApproval` 等）。
         capability_policy: v0.1.3 兼容字段；本次实现仅作占位保留，规则迁移
             通过 ``CapabilityPolicy.from_config`` 在运行时返回的对象只影响
             内部 ``hard_deny_commands`` 增量（HardBlockGuard 已合并）。

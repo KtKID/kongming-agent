@@ -415,7 +415,7 @@ async def _run(
 
     # 仅当 memory 启用时才注册 memory tool + 装 MemoryRefreshSink。
     if memory_store is not None:
-        from tools.memory_tool import build_memory_tool
+        from tools.builtin.memory_tool import build_memory_tool
 
         registry.register(
             build_memory_tool(

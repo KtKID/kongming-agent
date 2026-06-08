@@ -1,4 +1,4 @@
-"""unit：safety v0.1.4 M5.3 — :class:`tools.approval.InteractiveApproval`
+"""unit：safety v0.1.4 M5.3 — :class:`tools.runtime.approval.InteractiveApproval`
 对 :class:`core.contracts.ApprovalAction` 协议的支持。
 
 覆盖：
@@ -22,7 +22,7 @@ from core.contracts import (
     ApprovalDecision,
     ApprovalRequest,
 )
-from tools.approval import (
+from tools.runtime.approval import (
     InteractiveApproval,
     PromptActionFn,
     _is_action_aware,
@@ -192,7 +192,7 @@ class TestEdgeCases:
 
 class TestBuildDefaultApproval:
     async def test_action_aware_prompt_works_via_factory(self) -> None:
-        from tools.approval import build_default_approval
+        from tools.runtime.approval import build_default_approval
 
         @mark_action_aware
         async def prompt(req: ApprovalRequest) -> ApprovalAction:
@@ -205,7 +205,7 @@ class TestBuildDefaultApproval:
         assert decision.metadata.get("grant_scope") == "session"
 
     def test_factory_rejects_interactive_without_prompt(self) -> None:
-        from tools.approval import build_default_approval
+        from tools.runtime.approval import build_default_approval
 
         with pytest.raises(ValueError, match="prompt_fn"):
             build_default_approval("interactive")

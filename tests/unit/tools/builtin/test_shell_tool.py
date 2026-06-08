@@ -142,7 +142,7 @@ async def test_shell_cancel_kills_subprocess_and_raises(
         return proc
 
     monkeypatch.setattr(
-        "tools.shell_tool.asyncio.create_subprocess_shell",
+        "tools.builtin.shell_tool.asyncio.create_subprocess_shell",
         _capturing_create,
     )
 

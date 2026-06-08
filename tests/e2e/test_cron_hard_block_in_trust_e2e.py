@@ -31,7 +31,7 @@ from core.contracts import (
 from scheduler.domain import ApprovalMode
 from scheduler.execution_bridge import ExecutionBridge
 from scheduler.store import Store
-from tools.schedule_tool import build_schedule_tool
+from tools.builtin.schedule_tool import build_schedule_tool
 
 
 @dataclass

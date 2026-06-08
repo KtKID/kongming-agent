@@ -18,7 +18,7 @@
 :class:`LLMResponse` / :class:`Event`）。
 
 :class:`ToolLookup` 是 runner 对外拿工具的抽象面：runner 不需要知道具体的
-``tools/registry.py`` 类，只要拿到一个能按名查工具的对象即可。
+``tools/runtime/registry.py`` 类，只要拿到一个能按名查工具的对象即可。
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ class Tool(Protocol):
 class ToolLookup(Protocol):
     """工具查找面。
 
-    runner 只依赖这一层，不依赖具体 ``tools/registry.py``。
+    runner 只依赖这一层，不依赖具体 ``tools/runtime/registry.py``。
     ``Mapping[str, Tool]`` 天然满足此 Protocol（因为 ``__getitem__`` 和
     ``__contains__`` 都在），所以测试里可以直接传 dict。
     """
@@ -181,7 +181,7 @@ class ApprovalDecision:
 class ApprovalProvider(Protocol):
     """审批入口协议。
 
-    第一批默认实现是 ``tools/approval.py`` 里的 ``InteractiveApproval``；
+    第一批默认实现是 ``tools/runtime/approval.py`` 里的 ``InteractiveApproval``；
     后续 safety 模块会基于策略返回决定。核心约束：
     **不改变协议形状，只新增实现**。
     """

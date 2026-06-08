@@ -30,7 +30,7 @@ from scheduler.domain import (
     TriggerType,
 )
 from scheduler.store import Store, _dict_to_task, _task_to_dict
-from tools.schedule_tool import build_schedule_tool
+from tools.builtin.schedule_tool import build_schedule_tool
 
 # ---------------------------------------------------------------------------
 # 测试辅助

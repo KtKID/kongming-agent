@@ -8,7 +8,7 @@ from typing import Any
 from core.contracts import EventSink, ToolContext
 from evolution.models import ReviewResult, ReviewWritePayload
 from evolution.store import EvolutionStore
-from tools.base import BaseBuiltinTool
+from tools.runtime.base import BaseBuiltinTool
 
 
 class EvolutionWriteTool(BaseBuiltinTool):

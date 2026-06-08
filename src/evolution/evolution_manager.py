@@ -70,7 +70,7 @@ class EvolutionManager:
         self._mini_registry = ToolRegistry()
 
         if self._learning.enabled:
-            from tools.evolution_write_tool import build_evolution_write_tool
+            from tools.builtin.evolution_write_tool import build_evolution_write_tool
 
             tool = build_evolution_write_tool(
                 self._evolution_store,

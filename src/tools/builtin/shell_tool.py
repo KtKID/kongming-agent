@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from core.contracts import Tool, ToolContext
-from tools.base import BaseBuiltinTool
+from tools.runtime.base import BaseBuiltinTool
 
 # 默认参数统一收到这里，便于测试/调试时一眼看清。
 _DEFAULT_TIMEOUT_SECONDS = 30.0

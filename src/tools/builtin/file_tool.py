@@ -15,7 +15,7 @@ v1-mini 里需要三个最基本的文件工具，让模型能完成"读 → 改
   "能不能把这件事做对"，不兼职安全审判。
 - 路径统一 :meth:`pathlib.Path.resolve` 后落成绝对路径返回，方便上游审计。
 
-这些工具遵守 :class:`tools.base.BaseBuiltinTool` 的约定：抛出任何异常都会被
+这些工具遵守 :class:`tools.runtime.base.BaseBuiltinTool` 的约定：抛出任何异常都会被
 基类转成 ``ToolResult(ok=False, error_message=...)``，runner 不会拿到裸异常。
 """
 
@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from core.contracts import Tool, ToolContext
-from tools.base import BaseBuiltinTool
+from tools.runtime.base import BaseBuiltinTool
 
 # 默认读取上限：64KiB，超过截断并在 content 里明确标注。
 # 这不是安全限制（安全归 safety 层），只是避免一次 tool call 把模型上下文打爆。
@@ -263,7 +263,7 @@ def build_file_tools(
         read_max_bytes: ReadFileTool 默认读取上限字节数。
 
     Returns:
-        可以直接塞进 :class:`tools.registry.ToolRegistry` 的工具列表。
+        可以直接塞进 :class:`tools.runtime.registry.ToolRegistry` 的工具列表。
     """
     if not enabled:
         return []

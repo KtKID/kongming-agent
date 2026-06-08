@@ -629,7 +629,7 @@ def make_manager_prompt_fn(
          理论上不会触发此分支；留 TODO 标 stage 5 协议演进时接 GrantStore.put_session
 
     返回的 prompt_fn 通过 ``__action_aware__`` 属性自动被
-    :class:`tools.approval.InteractiveApproval` 识别为 action-aware
+    :class:`tools.runtime.approval.InteractiveApproval` 识别为 action-aware
     （返回 ApprovalAction 而非 bool）。
 
     cwd 解析优先级（thread-cwd-fallback 任务 #3）:

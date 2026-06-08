@@ -99,7 +99,7 @@ _DISALLOWED_TOOL_PREFIXES: tuple[str, ...] = ("schedule.", "cron.")
 _DISALLOWED_TOOL_NAMES: frozenset[str] = frozenset({"schedule", "cron"})
 """cron run 装配期裁掉的单字工具名（防递归创建任务）。
 
-v0.2 新增 :class:`tools.schedule_tool.ScheduleTool`，其 ``name`` 是单字
+v0.2 新增 :class:`tools.builtin.schedule_tool.ScheduleTool`，其 ``name`` 是单字
 ``"schedule"``——既不带 ``.`` 也不命中现有前缀。这里显式黑名单单字命中，
 保留前缀机制供未来 namespace 化的 schedule.* / cron.* 工具使用。
 """

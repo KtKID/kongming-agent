@@ -28,22 +28,22 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from core.contracts import EventSink, Tool
-from tools.approval import (
+from tools.builtin.file_tool import (
+    ListDirTool,
+    ReadFileTool,
+    WriteFileTool,
+    build_file_tools,
+)
+from tools.builtin.shell_tool import ShellTool, build_shell_tool
+from tools.runtime.approval import (
     AutoAllowApproval,
     AutoDenyApproval,
     InteractiveApproval,
     PromptFn,
     build_default_approval,
 )
-from tools.base import BaseBuiltinTool
-from tools.file_tools import (
-    ListDirTool,
-    ReadFileTool,
-    WriteFileTool,
-    build_file_tools,
-)
-from tools.registry import ToolRegistry
-from tools.shell_tool import ShellTool, build_shell_tool
+from tools.runtime.base import BaseBuiltinTool
+from tools.runtime.registry import ToolRegistry
 
 if TYPE_CHECKING:
     from config_loader.models import Config
@@ -73,7 +73,7 @@ def build_default_registry(
 
     v0.2 起本函数**不再**直接装配 schedule_tool / memory_tool。两者改走外部
     register 模式：调用方在 ``build_default_registry`` 之后用
-    :func:`register_schedule_tool_if_enabled` / :func:`tools.memory_tool.build_memory_tool`
+    :func:`register_schedule_tool_if_enabled` / :func:`tools.builtin.memory_tool.build_memory_tool`
     把工具 register 到 registry 上。这样 cli/web 装配链路单一、调用方不需要为
     每个可选工具拖一串 kwargs。
 
@@ -123,13 +123,13 @@ def register_schedule_tool_if_enabled(
 ) -> Store | None:
     """按 ``cfg.scheduler.enabled`` 外部 register schedule_tool。
 
-    与 :func:`tools.memory_tool.build_memory_tool` 同款"外部 register"模式：
+    与 :func:`tools.builtin.memory_tool.build_memory_tool` 同款"外部 register"模式：
     调用方先用 :func:`build_default_registry` 拿到 registry，再调本 helper
     决定是否补一个 schedule_tool。这样 cli / web 装配代码可以共用同一行调用，
     避免每条入口都重复写 if-cfg.scheduler.enabled 分支。
 
     注意：本 helper **lazy import** ``scheduler.*`` 与
-    :func:`tools.schedule_tool.build_schedule_tool`；``cfg.scheduler.enabled=False``
+    :func:`tools.builtin.schedule_tool.build_schedule_tool`；``cfg.scheduler.enabled=False``
     时不会触碰 cron 模块，启动开销保持原样。
 
     Args:
@@ -148,7 +148,7 @@ def register_schedule_tool_if_enabled(
 
     from config_loader.paths import get_kongming_home
     from scheduler.store import Store
-    from tools.schedule_tool import build_schedule_tool
+    from tools.builtin.schedule_tool import build_schedule_tool
 
     home = cfg.scheduler.home if cfg.scheduler.home is not None else (get_kongming_home() / "cron")
     store = Store(home)
@@ -180,7 +180,7 @@ def register_evolution_write_tool_if_enabled(
 
     from evolution.state_store import EvolutionStateStore
     from evolution.store import EvolutionStore, resolve_evolution_root
-    from tools.evolution_write_tool import build_evolution_write_tool
+    from tools.builtin.evolution_write_tool import build_evolution_write_tool
 
     root_dir = resolve_evolution_root(cfg.evolution.learning.root_path)
     state_store = EvolutionStateStore(root_dir)

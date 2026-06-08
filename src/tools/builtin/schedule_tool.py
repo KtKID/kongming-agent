@@ -49,7 +49,7 @@ from scheduler.timing import (
     to_iso,
     utc_now,
 )
-from tools.base import BaseBuiltinTool
+from tools.runtime.base import BaseBuiltinTool
 
 _THREAD_ID_RE = re.compile(r"^thread-[a-f0-9]{12}$")
 

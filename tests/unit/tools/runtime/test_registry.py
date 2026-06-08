@@ -1,4 +1,4 @@
-"""unit：tools.registry CRUD + ToolLookup Protocol 兼容性。"""
+"""unit：tools.runtime.registry CRUD + ToolLookup Protocol 兼容性。"""
 
 from __future__ import annotations
 

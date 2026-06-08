@@ -18,7 +18,7 @@
     必须是 "standard" 或 "elevated"
 
 强约束：
-- 不修改 src/tools/approval.py
+- 不修改 src/tools/runtime/approval.py
 - 用 FakeApproval 模拟 InteractiveApproval，记录 enriched request 用于断言
 """
 

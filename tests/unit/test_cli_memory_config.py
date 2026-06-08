@@ -28,7 +28,7 @@ from config_loader.models import (
     RunnerConfig,
 )
 from memory import MemoryStore
-from tools.memory_tool import MemoryTool, build_memory_tool
+from tools.builtin.memory_tool import MemoryTool, build_memory_tool
 
 # 默认 AGENT 模板内容（来自源模板文件）。断言"agent 段落已被拼入 rendered/text"
 # 用此内容做真值，避免与模板字面字符串硬编码耦合（模板内容可能后续被改写）。
@@ -194,7 +194,7 @@ async def test_read_max_chars_truncates_big_memory_file(tmp_path: Path) -> None:
 
 def test_memory_tool_description_has_dont_use_write_file_hint() -> None:
     """MemoryTool.description 必须明确引导 Agent 走 memory 而不是 write_file。"""
-    from tools.memory_tool import MemoryTool
+    from tools.builtin.memory_tool import MemoryTool
 
     desc = MemoryTool.description
     assert "不要用 write_file" in desc or "INSTEAD" in desc

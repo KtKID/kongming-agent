@@ -1,7 +1,7 @@
 """safety v0.1.4 M5.3-M5.6 — CLI 三按钮审批 UX。
 
 提供 :func:`build_cli_action_prompt` 工厂，返回一个
-:class:`tools.approval.PromptActionFn`，被 :class:`tools.approval.InteractiveApproval`
+:class:`tools.runtime.approval.PromptActionFn`，被 :class:`tools.runtime.approval.InteractiveApproval`
 透明消费。
 
 UX 形态：
@@ -15,7 +15,7 @@ UX 形态：
 
 不依赖：
 
-- 本模块只 import :mod:`core.contracts` + :mod:`tools.approval`，不反向
+- 本模块只 import :mod:`core.contracts` + :mod:`tools.runtime.approval`，不反向
   import :mod:`safety/`：cli → tools → core。
 
 实现注意：
@@ -37,7 +37,7 @@ from typing import Any
 import click
 
 from core.contracts import ApprovalAction, ApprovalRequest
-from tools.approval import PromptActionFn, mark_action_aware
+from tools.runtime.approval import PromptActionFn, mark_action_aware
 
 # 二次确认提示文案：persist 持久化路径强 UX 提醒
 _PERSIST_CONFIRM_PROMPT = (
@@ -56,8 +56,8 @@ def build_cli_action_prompt(
         config_path_hint: 二次确认提示中显示的目标 yaml 路径，仅 UI 文案用。
 
     Returns:
-        被 :func:`tools.approval.mark_action_aware` 标记的协程函数；
-        :class:`tools.approval.InteractiveApproval` 据此走 action 分支。
+        被 :func:`tools.runtime.approval.mark_action_aware` 标记的协程函数；
+        :class:`tools.runtime.approval.InteractiveApproval` 据此走 action 分支。
     """
 
     @mark_action_aware

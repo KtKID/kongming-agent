@@ -35,7 +35,7 @@ from safety.approval_manager import (
     reset_for_testing,
 )
 from safety.approval_rules import ApprovalRules
-from tools.approval import ApprovalAction
+from tools.runtime.approval import ApprovalAction
 
 # ============ Fixtures ============
 

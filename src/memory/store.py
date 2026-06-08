@@ -10,7 +10,7 @@ v0.1.3 Memory Snapshot：多文件读取（MEMORY / USER / ERRORS）、
 - memory tool 只读写活态 entries 和磁盘，保证工具结果准确。
 - history compact 后重新 ``load_from_disk()``，刷新冻结态。
 
-外部访问入口：``src/tools/memory_tool.py::MemoryTool``。Agent 只能通过 MemoryTool
+外部访问入口：``src/tools/builtin/memory_tool.py::MemoryTool``。Agent 只能通过 MemoryTool
 的 target 参数（memory/user/errors）访问记忆，不能直接操作文件路径——这是为了
 防止 Agent 绕过 memory 管理用 write_file 建 MEMORY.md 这类"野文件"。
 """

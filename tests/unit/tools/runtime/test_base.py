@@ -1,4 +1,4 @@
-"""unit：tools.base.BaseBuiltinTool 兜底契约。
+"""unit：tools.runtime.base.BaseBuiltinTool 兜底契约。
 
 B9 / CR 报告 cr-report-20260424-202744.md。
 """
@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from core.contracts import ToolContext, ToolResult
-from tools.base import BaseBuiltinTool
+from tools.runtime.base import BaseBuiltinTool
 
 
 def _ctx(call_id: str = "c1") -> ToolContext:

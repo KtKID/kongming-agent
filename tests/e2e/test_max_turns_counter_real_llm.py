@@ -34,9 +34,9 @@ from core.errors import MaxTurnsExceededError
 from core.session import InMemorySession
 from executors.agent_runtime.native_runtime import NativeRuntime
 from safety.capability_policy import CapabilityPolicy, CapabilitySet
-from tools.approval import AutoAllowApproval
-from tools.base import BaseBuiltinTool
-from tools.registry import ToolRegistry
+from tools.runtime.approval import AutoAllowApproval
+from tools.runtime.base import BaseBuiltinTool
+from tools.runtime.registry import ToolRegistry
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 LOCAL_MODEL_YAML = REPO_ROOT / "config" / "setting.yaml"

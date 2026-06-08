@@ -11,7 +11,7 @@ import pytest
 
 from core.message import ToolCall
 from memory import MemoryStore
-from tools.memory_tool import MemoryTool, build_memory_tool
+from tools.builtin.memory_tool import MemoryTool, build_memory_tool
 
 # ---------------------------------------------------------------------------
 # 文案防回退（即便 stub LLM 路径搭不起来，也能守住基线）
@@ -60,7 +60,7 @@ async def test_stub_llm_chooses_memory_tool_for_preferences(tmp_path) -> None:
     from executors.agent_runtime.native_runtime import NativeRuntime
     from safety import CapabilityPolicy, CapabilitySet
     from tests.e2e.conftest import StubLLMProvider
-    from tools.registry import ToolRegistry
+    from tools.runtime.registry import ToolRegistry
 
     mem_dir = tmp_path / ".kongming" / "memory"
     mem_dir.mkdir(parents=True)

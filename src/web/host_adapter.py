@@ -163,7 +163,7 @@ class WebHostAdapter(HostAdapter):
         - cell evict / adapter close → :meth:`close` 把 future
           ``set_result(REJECT)`` → 返回 ``ApprovalAction.REJECT``
 
-        ``mark_action_aware`` 装饰器告诉 :class:`tools.approval.InteractiveApproval`
+        ``mark_action_aware`` 装饰器告诉 :class:`tools.runtime.approval.InteractiveApproval`
         本回调返回 :class:`ApprovalAction` 而非旧 ``bool``，从而把
         ``ACCEPT_FOR_SESSION`` 信号传到 :class:`safety.chain.SafetyGatedApproval`
         触发 GrantStore 写入（per-thread 物理隔离修 P1 bug）。

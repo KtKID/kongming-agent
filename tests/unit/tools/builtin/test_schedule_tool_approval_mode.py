@@ -18,7 +18,7 @@ from pathlib import Path
 from core.contracts import ToolContext, ToolResult
 from scheduler.domain import ApprovalMode
 from scheduler.store import Store
-from tools.schedule_tool import ScheduleTool, build_schedule_tool
+from tools.builtin.schedule_tool import ScheduleTool, build_schedule_tool
 
 
 def _ctx() -> ToolContext:

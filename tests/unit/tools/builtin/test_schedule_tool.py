@@ -26,7 +26,7 @@ from scheduler.domain import (
 )
 from scheduler.store import Store
 from scheduler.timing import parse_iso, to_iso, utc_now
-from tools.schedule_tool import ScheduleTool, build_schedule_tool
+from tools.builtin.schedule_tool import ScheduleTool, build_schedule_tool
 
 
 def _ctx() -> ToolContext:

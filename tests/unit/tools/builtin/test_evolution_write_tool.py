@@ -10,7 +10,7 @@ import pytest
 from core.contracts import ToolContext
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore
-from tools.evolution_write_tool import build_evolution_write_tool
+from tools.builtin.evolution_write_tool import build_evolution_write_tool
 
 
 def _ctx() -> ToolContext:

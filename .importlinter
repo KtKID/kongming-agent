@@ -88,10 +88,10 @@ ignore_imports =
     scheduler.execution_bridge -> executors.llm.provider_factory
     scheduler.execution_bridge -> observability
     tools -> scheduler.store
-    tools.schedule_tool -> scheduler.domain
-    tools.schedule_tool -> scheduler.store
-    tools.schedule_tool -> scheduler.schedule_parser
-    tools.schedule_tool -> scheduler.timing
+    tools.builtin.schedule_tool -> scheduler.domain
+    tools.builtin.schedule_tool -> scheduler.store
+    tools.builtin.schedule_tool -> scheduler.schedule_parser
+    tools.builtin.schedule_tool -> scheduler.timing
     scheduler.runtime_factory -> sessions.session_bootstrap
     evolution.claude_evidence_selector -> web.claude_code.jsonl_history
     executors.agent_runtime.native_runtime -> evolution
