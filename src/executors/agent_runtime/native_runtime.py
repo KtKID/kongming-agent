@@ -15,7 +15,7 @@
 - 对 ``safety/`` 的依赖是"装配层 → 下层 policy"的向下引用，属于运行时装配
   职责的一部分（已在 ``.importlinter`` 中显式白名单化，避免触犯 layered 合约）。
 - 绝不 import ``tools/`` / ``host/`` / ``cli/`` / ``observability/`` /
-  ``context/`` 里的任何具体类。调用方（host 或 cli 或 tests）通过 ``build(...)``
+  ``sessions/` / `prompting/`` 里的任何具体类。调用方（host 或 cli 或 tests）通过 ``build(...)``
   的 kwargs 注入它们。
 - ``tools: ToolLookup | None`` / ``approval: ApprovalProvider | None`` /
   ``event_sinks: list[EventSink] | None`` / ``session_factory`` 全部允许空缺，
@@ -40,10 +40,6 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from config_loader.models import Config
-from context import HistoryCompactor
-from context.history_compactor import CompactorConfig
-from context.input_assembler import InputAssembler
-from context.instruction_loader import InstructionSource
 from core.agent_spec import AgentSpec
 from core.contracts import (
     ApprovalDecision,
@@ -64,6 +60,10 @@ from core.runner import Runner
 from core.session import InMemorySession
 from executors.llm.anthropic_messages import AnthropicMessagesProvider
 from executors.llm.openai_responses import OpenAIResponsesProvider
+from prompting import HistoryCompactor
+from prompting.history_compactor import CompactorConfig
+from prompting.input_assembler import InputAssembler
+from prompting.instruction_loader import InstructionSource
 from safety import (
     CapabilityPolicy,
     PermissionPolicy,
@@ -214,14 +214,14 @@ class NativeRuntime:
             agent_spec: 默认 AgentSpec；不传则按 Config 合成一份最小 spec。
             instructions: 系统指令文本。若 ``agent_spec`` 也为 ``None``，这段文本
                 会替换默认 ``"You are kongming agent."``；装配层（CLI / host）可
-                通过 :class:`context.InstructionLoader` 把 agent_spec / 外部文件 /
+                通过 :class:`prompting.InstructionLoader` 把 agent_spec / 外部文件 /
                 环境变量合并后传入。显式传 ``agent_spec`` 时，本参数被忽略。
             capability_policy: 显式注入的 :class:`safety.CapabilityPolicy`。
                 ``None`` 时走 :meth:`CapabilityPolicy.from_config` 自动装配。
             permission_policy: 显式注入的 :class:`safety.PermissionPolicy`。
                 ``None`` 时走 :meth:`PermissionPolicy.from_config` 自动装配。
             message_compactor: 在 runner 每 turn 把 history 送给 LLM 之前做一次
-                加工。``None`` 时使用默认的 :class:`context.HistoryCompactor`
+                加工。``None`` 时使用默认的 :class:`prompting.HistoryCompactor`
                 （超过 50 条时裁剪中段、截断超长 tool_result，永远保留首条 system
                 和最近 20 条）。显式传 ``False`` 式占位对象可关闭；测试场景可传
                 ``_NoopCompactor`` 之类的 stub。

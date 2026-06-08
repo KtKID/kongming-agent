@@ -14,7 +14,7 @@
     - ``"anthropic"`` → ``GenericChatAnthropicUsage``
     - ``"openai_compatible"`` → ``GenericChatOpenAIUsage``
 - FileSession messages.jsonl 格式：每行 JSON 含可选 ``usage`` dict（跟 SDK 原生
-  usage dict 同形）；详见 ``context/file_session.py::FileSession.append``
+  usage dict 同形）；详见 ``sessions/file_session.py::FileSession.append``
 - 文件不存在 / 无含 usage 的行 → 返回 None
 """
 

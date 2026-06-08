@@ -18,10 +18,10 @@ from pathlib import Path
 
 import pytest
 
-from context import InputAssembler, InstructionSource
 from core import AgentSpec, InMemorySession, Runner
 from core.message import Message
 from memory import MemoryStore
+from prompting import InputAssembler, InstructionSource
 from tests.e2e.conftest import RecordingApproval, StubLLMProvider
 
 _DUMP_DIR = Path(".kongming/debug")

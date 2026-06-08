@@ -19,13 +19,13 @@ from pathlib import Path
 
 import pytest
 
-from context.session_store import _message_from_dict, _message_to_dict
 from core.message import Message
 from executors.llm.media_adapter import (
     ImageMediaPart,
     build_media_part_from_metadata,
     collect_media_parts_from_messages,
 )
+from sessions.session_store import _message_from_dict, _message_to_dict
 from web.uploads.registry import EXT_BY_MIME
 from web.uploads.storage import AssetStorage
 

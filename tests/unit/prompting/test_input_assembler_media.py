@@ -19,8 +19,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from context.input_assembler import InputAssembler
 from core.message import Message
+from prompting.input_assembler import InputAssembler
 
 
 def _make_ref(

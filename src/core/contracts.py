@@ -1,7 +1,7 @@
 """跨模块共享协议真源。
 
 这是 v1-mini 唯一可以被其他模块 ``import`` 的协议定义文件。
-如果一个接口会被 ``core / tools / context / executors / safety / observability / host / cli``
+如果一个接口会被 ``core / tools / sessions / prompting / executors / safety / observability / host / cli``
 中任意两个模块同时消费，它就必须收口到这里。
 
 当前收进来的协议：
@@ -380,7 +380,7 @@ class Session(Protocol):
     """会话历史存储协议。
 
     - :mod:`core.session` 提供第一批 ``InMemorySession`` 默认实现。
-    - ``context/session_store.py`` 以后会提供工程化实现，继续遵守此协议，
+    - ``sessions/session_store.py`` 以后会提供工程化实现，继续遵守此协议，
       不得再定义一份新 Session 接口。
     """
 
@@ -549,10 +549,10 @@ class EventSink(Protocol):
 class MessageCompactor(Protocol):
     """runner 在每个 turn 把 history 送给 LLM 之前的加工钩子。
 
-    实现类在 ``context.history_compactor.HistoryCompactor``；core 只定义接口，
+    实现类在 ``prompting.history_compactor.HistoryCompactor``；core 只定义接口，
     不持有实现。命名刻意和实现类错开（Protocol = ``MessageCompactor``，实现 =
     ``HistoryCompactor``），避免 ``from core.contracts import HistoryCompactor``
-    和 ``from context import HistoryCompactor`` 同名歧义。
+    和 ``from prompting import HistoryCompactor`` 同名歧义。
 
     典型实现：压缩超长 history（裁剪空白消息、截断长 tool_result）。未来如果要做
     敏感字段 redact / few-shot 注入，也走同一个 Protocol，不新增协议。
@@ -578,7 +578,7 @@ class MessageCompactor(Protocol):
 class AssembledInput:
     """InputAssembler.assemble() 的返回类型契约。
 
-    core 在此定义完整数据结构（协议单一真源），context 层 InputAssembler
+    core 在此定义完整数据结构（协议单一真源），prompting 层 InputAssembler
     直接使用此类型，不再重定义。
 
     Attributes:
@@ -596,7 +596,7 @@ class AssembledInput:
 class PromptSource(Protocol):
     """指令来源的最小 Protocol，runner 用于传给 assembler。
 
-    具体实现（``context.instruction_loader.InstructionSource``）是 frozen
+    具体实现（``prompting.instruction_loader.InstructionSource``）是 frozen
     dataclass，满足此 Protocol。runner 只需知道 origin 和 content 两个属性。
     """
 
@@ -610,12 +610,12 @@ class PromptSource(Protocol):
 class PromptAssembler(Protocol):
     """prompt build 的统一入口协议（runner 对 InputAssembler 的视图）。
 
-    实现类在 ``context.input_assembler.InputAssembler``；core 只定义接口，
+    实现类在 ``prompting.input_assembler.InputAssembler``；core 只定义接口，
     不持有实现。runner 只调用 :meth:`assemble`，不关心内部如何做 compact /
     system 注入。
 
     注意：返回值类型声明为 :class:`AssembledInput`（core 定义的最小契约），
-    实现方可以返回更丰富的子类型（例如 context 里带 ``system_message`` 字段
+    实现方可以返回更丰富的子类型（例如 prompting 里带 ``system_message`` 字段
     的版本），runner 只读 ``messages`` 和 ``metadata``，不受影响。
     """
 

@@ -26,7 +26,7 @@ import asyncio
 import contextlib
 import os
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -34,22 +34,22 @@ import click
 
 from config_loader import Config, get_kongming_home, load_config
 from config_loader.errors import ConfigLoadError, ConfigValidationError
-from context import (
-    SessionSummary,
-    assemble_instructions,
-    build_session,
-    discover_file_sessions,
-    discover_sqlite_sessions,
-    find_session_by_id,
-    most_recent_session,
-)
-from context.skill_loader import SkillSpec, format_skill_listing, load_skill_specs
 from core.contracts import EventSink, SupportsLLMStream
 from executors.agent_runtime.native_runtime import NativeRuntime
 from host.cli_adapter import CLIAdapter, CLIEventSink
 from host.session_bridge import SessionBridge
 from memory import MemoryStore
 from observability import JsonlTraceSink, PromptDebugDumpSink
+from prompting import assemble_instructions
+from prompting.skill_loader import SkillSpec, format_skill_listing, load_skill_specs
+from sessions import (
+    SessionSummary,
+    build_session,
+    discover_file_sessions,
+    discover_sqlite_sessions,
+    find_session_by_id,
+    most_recent_session,
+)
 from tools import (
     build_default_approval,
     build_default_registry,
@@ -468,7 +468,7 @@ async def _run(
     import hashlib
     import time
 
-    from context import SessionBootstrap
+    from sessions import SessionBootstrap
 
     bootstrap = SessionBootstrap(
         agent_name="kongming-agent",
@@ -624,7 +624,7 @@ async def _assemble_instructions(
         以及 MemoryStore 实例（memory 关闭时为 ``None``）。
 
     - 基础指令装配（prompts 物化 + env + runtime context）委托给
-      :func:`context.assemble_instructions`，本函数只追加 skill / memory 通道。
+      :func:`prompting.assemble_instructions`，本函数只追加 skill / memory 通道。
     - v0.1.6 skill 通道：``skill_listing`` 非空时追加为 ``# skills`` 段并标
       origin。空 listing（无 skill 或 loader 跳过）保持 v0.1.5 行为。
     - 本地长期记忆的加载由 ``cfg.evolution.memory`` 控制：
@@ -853,7 +853,10 @@ def _format_session_summary(summary: SessionSummary) -> str:
 def _format_timestamp(value: float) -> str:
     if value <= 0:
         return "unknown"
-    return datetime.fromtimestamp(value).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        return datetime.fromtimestamp(value).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except (OSError, OverflowError, ValueError):
+        return datetime.fromtimestamp(value, tz=UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _print_banner(

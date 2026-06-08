@@ -1,4 +1,4 @@
-"""unit：context.skill_loader 装配器覆盖。
+"""unit：prompting.skill_loader 装配器覆盖。
 
 模块 A / task skill-loader-v0.1.6。覆盖 frontmatter 解析、双源扫描、
 符号链接逃逸防御、listing 渲染（含 250 字截断）以及事件 fan-out。
@@ -15,12 +15,12 @@ from pathlib import Path
 
 import pytest
 
-from context.skill_loader import (
+from core.contracts import Event
+from prompting.skill_loader import (
     SkillSpec,
     format_skill_listing,
     load_skill_specs,
 )
-from core.contracts import Event
 
 # ---------------------------------------------------------------------------
 # 测试辅助

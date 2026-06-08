@@ -25,7 +25,7 @@ from config_loader.models import (
     SessionConfig,
     TraceConfig,
 )
-from context.skill_loader import format_skill_listing, load_skill_specs
+from prompting.skill_loader import format_skill_listing, load_skill_specs
 
 
 def _build_cfg() -> Config:

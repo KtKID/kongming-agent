@@ -113,11 +113,12 @@ class _StubCommandService:
         self,
         raw_input: str,
         *,
-        context: Any,
+        execution_context: Any,
         attachments: list[dict[str, Any]] | None = None,
     ) -> CommandResult:
+        exec_ctx = execution_context
         self.calls.append(raw_input)
-        assert context.session_id == "sid-1"
+        assert exec_ctx.session_id == "sid-1"
         return self._result
 
 

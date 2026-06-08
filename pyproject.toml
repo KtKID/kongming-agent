@@ -80,7 +80,8 @@ Repository = "https://github.com/kongming-agent/kongming-agent"
 packages = [
     "src/core",
     "src/tools",
-    "src/context",
+    "src/sessions",
+    "src/prompting",
     "src/executors",
     "src/host",
     "src/cli",
@@ -97,7 +98,8 @@ packages = [
 include = [
     "src/core",
     "src/tools",
-    "src/context",
+    "src/sessions",
+    "src/prompting",
     "src/executors",
     "src/host",
     "src/cli",
@@ -160,14 +162,15 @@ ignore = [
 "src/core/runner.py" = ["SIM108"]
 "src/safety/chain.py" = ["SIM103"]
 "src/config_loader/models.py" = ["SIM103"]
-"src/context/session_store.py" = ["SIM108"]
+"src/sessions/session_store.py" = ["SIM108"]
 "src/executors/agent_runtime/native_runtime.py" = ["SIM108"]
 
 [tool.ruff.lint.isort]
 known-first-party = [
     "core",
     "tools",
-    "context",
+    "sessions",
+    "prompting",
     "executors",
     "host",
     "cli",
@@ -275,7 +278,8 @@ branch = true
 source = [
     "core",
     "tools",
-    "context",
+    "sessions",
+    "prompting",
     "executors",
     "host",
     "cli",

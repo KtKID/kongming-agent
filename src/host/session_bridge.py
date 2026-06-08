@@ -115,7 +115,7 @@ class SessionBridge:
         )
         result = await self._command_service.handle_input(
             user_input,
-            context=context,
+            execution_context=context,
             attachments=attachments,
         )
         if isinstance(result, Result):

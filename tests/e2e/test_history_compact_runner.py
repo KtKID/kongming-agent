@@ -5,7 +5,7 @@
 1. runner 构造时不传 ``message_compactor`` 的语义（原样透传 history）没被改变
 2. runner 构造时传入符合 ``core.contracts.MessageCompactor`` Protocol 的对象
    后，每 turn 发给 LLM 的 messages 真的是 compactor 加工后的结果
-3. NativeRuntime.build 默认注入 context.HistoryCompactor，用户什么都不传也能
+3. NativeRuntime.build 默认注入 prompting.HistoryCompactor，用户什么都不传也能
    防止长对话撞 context 上限
 
 辅助组件用结构化鸭子类型满足 Protocol，避免触碰真实 OpenAI provider。
@@ -23,12 +23,12 @@ from config_loader.models import (
     SessionConfig,
     TraceConfig,
 )
-from context import HistoryCompactor
 from core import Runner
 from core.agent_spec import AgentSpec
 from core.message import Message
 from core.session import InMemorySession
 from executors.agent_runtime.native_runtime import NativeRuntime
+from prompting import HistoryCompactor
 
 
 class _CountingCompactor:

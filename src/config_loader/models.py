@@ -350,7 +350,7 @@ class SessionConfig(BaseModel):
 
     Attributes:
         backend: ``memory`` 使用 :class:`core.session.InMemorySession`；
-            ``sqlite`` 交给 ``context/session_store.py`` 的工程化实现承接；
+            ``sqlite`` 交给 ``sessions/session_store.py`` 的工程化实现承接；
             ``file`` 使用 append-only JSONL 文件持久化（v0.1.1 新增）。
         store_path: sqlite 后端的持久化数据库文件路径。
             memory 和 file 后端忽略此项。
@@ -478,7 +478,7 @@ class StreamConfig(BaseModel):
 class CompactorConfig(BaseModel):
     """历史压缩策略参数。
 
-    对应 :mod:`context.history_compactor` 的同名 dataclass，这里用 pydantic
+    对应 :mod:`prompting.history_compactor` 的同名 dataclass，这里用 pydantic
     模型做校验，装配层按需转成 dataclass 传给 HistoryCompactor。
 
     **默认关闭**：当前压缩仅做消息数 FIFO，语义和 LLM summarize 式压缩（参考

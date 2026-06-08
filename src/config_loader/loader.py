@@ -423,7 +423,7 @@ def load_config(
 
     resolved = _resolve_config_path(path)
     raw_data = _load_yaml(resolved)
-    # 加载 per-module YAML 文件（context.yaml / tools.yaml / llm.yaml / observability.yaml）
+    # 加载 per-module YAML 文件（context yaml / tools yaml / llm yaml / observability yaml）
     config_dir = resolved.parent
     with_modules = _load_module_yamls(config_dir, raw_data)
     merged = _apply_env_overrides(with_modules)

@@ -1,4 +1,4 @@
-"""unit：context.session_store 覆盖（SQLiteSession + build_session）。
+"""unit：sessions.session_store 覆盖（SQLiteSession + build_session）。
 
 B3 / CR 报告 cr-report-20260424-202744.md。覆盖：
 
@@ -23,14 +23,14 @@ from pathlib import Path
 import pytest
 
 from config_loader.models import Config, ModelConfig, SessionConfig
-from context.session_store import (
+from core.message import Message, ToolCall
+from core.session import InMemorySession
+from sessions.session_store import (
     SQLiteSession,
     _message_from_dict,
     _message_to_dict,
     build_session,
 )
-from core.message import Message, ToolCall
-from core.session import InMemorySession
 
 
 def _cfg(tmp_path: Path, backend: str = "memory", **extra) -> Config:
@@ -279,8 +279,8 @@ def test_build_session_file_requires_bootstrap(tmp_path):
 
 
 def test_build_session_file_with_bootstrap(tmp_path):
-    from context.file_session import FileSession
-    from context.session_bootstrap import SessionBootstrap
+    from sessions.file_session import FileSession
+    from sessions.session_bootstrap import SessionBootstrap
 
     bootstrap = SessionBootstrap(
         agent_name="a",

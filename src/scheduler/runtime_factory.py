@@ -39,9 +39,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from config_loader.models import LLMPresetConfig
-    from context.session_bootstrap import SessionBootstrap
     from core.contracts import EventSink, Session, Tool, ToolLookup
     from scheduler.delivery import DeliveryDispatcher
+    from sessions.session_bootstrap import SessionBootstrap
 
 
 def _default_cron_session_factory(
@@ -59,13 +59,13 @@ def _default_cron_session_factory(
     本函数生成默认 factory：
 
     - ``backend='memory'`` → 仍走 ``InMemorySession``（与 v0.2 行为一致）
-    - ``backend='sqlite' | 'file'`` → 走 ``context.build_session``，**让 cron
+    - ``backend='sqlite' | 'file'`` → 走 ``sessions.build_session``，**让 cron
       fresh session 跟主 session 用同一种 backend**
 
     file backend 需要 ``SessionBootstrap``：调用方未传时构造一个最小 placeholder
     （cron 是独立 fresh run，bootstrap 元数据不必跟主 session 一致）。
     """
-    from context import SessionBootstrap, build_session
+    from sessions import SessionBootstrap, build_session
 
     resolved_bootstrap = bootstrap or SessionBootstrap(
         agent_name="kongming-agent-cron",

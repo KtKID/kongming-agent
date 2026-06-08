@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-# key 跟前端 ``web/src/lib/model-context.ts`` 字典 key 严格一致
+# key 跟前端 ``web/src/lib/model-context ts`` 字典 key 严格一致
 DEFAULT_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # === OpenAI ===
     "gpt-4o": 128_000,

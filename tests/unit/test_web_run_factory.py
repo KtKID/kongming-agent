@@ -137,9 +137,9 @@ def mock_deps():
         patch("executors.agent_runtime.native_runtime.NativeRuntime") as MockRuntime,
         patch("host.session_bridge.SessionBridge") as MockBridge,
         patch(
-            "context.instruction_loader.assemble_instructions", new_callable=AsyncMock
+            "prompting.instruction_loader.assemble_instructions", new_callable=AsyncMock
         ) as mock_asm,
-        patch("context.skill_loader.load_skill_specs", new_callable=AsyncMock) as mock_skills,
+        patch("prompting.skill_loader.load_skill_specs", new_callable=AsyncMock) as mock_skills,
         patch("tools.build_default_approval") as mock_approval,
         patch("tools.build_default_registry") as mock_registry,
         patch("tools.register_schedule_tool_if_enabled") as mock_register_schedule,

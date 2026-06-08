@@ -217,13 +217,13 @@ def _make_runtime_factory(cfg: object) -> object:
     """Build a runtime factory for web thread cells and cron runs."""
     from config_loader.models import Config, LLMPresetConfig
     from config_loader.paths import get_kongming_home
-    from context import SessionBootstrap, build_session
-    from context.instruction_loader import assemble_instructions
-    from context.skill_loader import format_skill_listing, load_skill_specs
     from executors.agent_runtime.native_runtime import NativeRuntime
     from host.session_bridge import SessionBridge
     from observability import JsonlTraceSink
+    from prompting.instruction_loader import assemble_instructions
+    from prompting.skill_loader import format_skill_listing, load_skill_specs
     from safety.approval_manager import make_manager_prompt_fn
+    from sessions import SessionBootstrap, build_session
     from tools import (
         ToolRegistry,
         build_default_approval,

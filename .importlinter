@@ -12,7 +12,8 @@
 root_packages =
     core
     tools
-    context
+    sessions
+    prompting
     executors
     host
     cli
@@ -39,7 +40,8 @@ source_modules =
     core
 forbidden_modules =
     tools
-    context
+    sessions
+    prompting
     executors
     host
     cli
@@ -47,14 +49,14 @@ forbidden_modules =
     observability
     prompts
 
-; Contract 2（"context 不允许重定义 Session Protocol"）由 pytest 架构合约测试
-; 实现，见 tests/unit/test_arch_contracts.py::test_context_does_not_define_session_protocol
+; Contract 2（"sessions 不允许重定义 Session Protocol"）由 pytest 架构合约测试
+; 实现，见 tests/unit/test_arch_contracts.py::test_sessions_do_not_define_session_protocol
 ; 原因：import-linter 的 forbidden_modules 不支持 "symbol 级" 禁止
 ; （typing_extensions.Protocol 是符号，不是子包）。
 
 ; ---------------------------------------------------------------------------
 ; Contract 3: 整体分层依赖方向
-;   core < (tools / context / executors / observability) < safety < host < cli
+;   core < (tools / sessions / prompting / executors / observability) < safety < host < cli
 ; ---------------------------------------------------------------------------
 
 [importlinter:contract:layered-dependency-direction]
@@ -64,25 +66,25 @@ layers =
     cli | web
     host
     safety
-    tools | context | executors | observability | scheduler
+    tools | sessions | prompting | executors | observability | scheduler
     memory
     config_loader
     core
     prompts
 containers =
 ; Exception: 运行时装配层 ``executors/agent_runtime/native_runtime.py`` 跨层
-; 引用 ``safety`` / ``context`` 是 v1-mini 的刻意设计——Safety Baseline 和
+; 引用 ``safety`` / ``prompting`` 是 v1-mini 的刻意设计——Safety Baseline 和
 ; HistoryCompactor 默认装配都由它承担（详见 docs/kongming-agent-v1-minimal/
 ; 10-contracts.md "Native Runtime 边界"）。仅放行真实存在的这两条 import；
 ; 其他任何跨层 import 仍被合约阻止。
 ignore_imports =
     executors.agent_runtime.native_runtime -> safety
-    executors.agent_runtime.native_runtime -> context
-    executors.agent_runtime.native_runtime -> context.history_compactor
-    executors.agent_runtime.native_runtime -> context.input_assembler
-    executors.agent_runtime.native_runtime -> context.instruction_loader
+    executors.agent_runtime.native_runtime -> prompting
+    executors.agent_runtime.native_runtime -> prompting.history_compactor
+    executors.agent_runtime.native_runtime -> prompting.input_assembler
+    executors.agent_runtime.native_runtime -> prompting.instruction_loader
     scheduler.runtime_factory -> executors.agent_runtime.native_runtime
-    scheduler.runtime_factory -> context
+    scheduler.runtime_factory -> sessions
     scheduler.execution_bridge -> executors.llm.provider_factory
     scheduler.execution_bridge -> observability
     tools -> scheduler.store
@@ -90,13 +92,13 @@ ignore_imports =
     tools.schedule_tool -> scheduler.store
     tools.schedule_tool -> scheduler.schedule_parser
     tools.schedule_tool -> scheduler.timing
-    scheduler.runtime_factory -> context.session_bootstrap
+    scheduler.runtime_factory -> sessions.session_bootstrap
     evolution.claude_evidence_selector -> web.claude_code.jsonl_history
     executors.agent_runtime.native_runtime -> evolution
 ; claude-image-paste-e2e §4/§5：MediaPart Protocol + ImageMediaPart 需要
 ; 引用 ``web.uploads.storage::AssetStorage`` (IO 抽象) 与
 ; ``web.uploads.registry::EXT_BY_MIME`` (MIME→ext 白名单)。这两个符号是
-; domain logic（无 framework 耦合），技术上可以提到 core / context 层，
+; domain logic（无 framework 耦合），技术上可以提到 core / prompting 层，
 ; 但本任务范围不做搬移。spec-media-input §5 设计文档明确：MediaPart 是
 ; assembly → provider 路径上的中间表示，引用 web.uploads 是单点白名单。
     executors.llm.media_adapter -> web.uploads.storage
@@ -140,7 +142,8 @@ source_modules =
 forbidden_modules =
     core
     tools
-    context
+    sessions
+    prompting
     executors
     host
     cli
@@ -157,7 +160,7 @@ forbidden_modules =
 ;             web.host_adapter / web.ws_event_sink / web.thread_cell /
 ;             web.thread_metadata / web.types / config_loader / 外部库。
 ;             不可 import core / tools / executors / safety / host / cli /
-;             context / observability / memory / prompts。
+;             sessions / prompting / observability / memory / prompts。
 ;
 ;             v0.1.5 取舍：web.run / web.thread_manager / web.host_adapter
 ;             / web.ws_event_sink / web.thread_cell 之类 **装配 entrypoint** 与
@@ -171,7 +174,7 @@ forbidden_modules =
 ; ---------------------------------------------------------------------------
 
 [importlinter:contract:web-app-shell-no-cross-pillar]
-name = web app shell must not import core/tools/executors/safety/host/cli/context/observability/memory/prompts
+name = web app shell must not import core/tools/executors/safety/host/cli/sessions/prompting/observability/memory/prompts
 type = forbidden
 source_modules =
     web.app
@@ -190,12 +193,13 @@ forbidden_modules =
     safety
     host
     cli
-    context
+    sessions
+    prompting
     observability
     memory
     prompts
 ; web.slash_candidates_loader 是装配期 loader（同 web.run），
-; 仅在 lifespan startup 懒 import，允许触达 context / commands。
+; 仅在 lifespan startup 懒 import，允许触达 prompting / commands。
 ignore_imports =
     web.app -> web.slash_candidates_loader
     web.app -> scheduler.runtime_factory
@@ -393,7 +397,8 @@ allow_indirect_imports = True
 source_modules =
     core
     tools
-    context
+    sessions
+    prompting
     executors
     host
     cli

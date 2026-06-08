@@ -6,7 +6,7 @@ frontend）的接口契约真源。
 
 设计约束：
 
-- **零 sibling 依赖**：本子包不能 import 任何 ``core`` / ``context`` /
+- **零 sibling 依赖**：本子包不能 import 任何 ``core`` / ``prompting`` /
   ``executors`` / ``safety`` / ``tools`` / ``host`` / ``cli`` 等内核 / 装配层模块。
   这一点由 ``.importlinter`` 第 5 条 contract 强制（``web-protocol-no-deps``）。
 - **手写双侧契约**：Python 这一份是真源，前端 ``web/src/protocol.ts`` 由人手抄

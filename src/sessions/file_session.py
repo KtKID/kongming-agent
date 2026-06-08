@@ -26,11 +26,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from core.message import Message
+
 # FileSession 通过结构化协议（duck typing）满足 Session Protocol，
 # 不显式继承，与 SQLiteSession 风格一致。
-from context.session_bootstrap import SessionBootstrap
-from context.session_store import _message_from_dict, _message_to_dict
-from core.message import Message
+from sessions.session_bootstrap import SessionBootstrap
+from sessions.session_store import _message_from_dict, _message_to_dict
 
 logger = logging.getLogger(__name__)
 

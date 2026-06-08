@@ -2,9 +2,9 @@
 
 v1-mini 的装配职责：
 
-1. 把 :class:`context.instruction_loader.InstructionSource` 渲染成一条 ``system``
+1. 把 :class:`prompting.instruction_loader.InstructionSource` 渲染成一条 ``system``
    消息（若历史里还没 system）
-2. 调用 :class:`context.history_compactor.HistoryCompactor` 做历史裁剪
+2. 调用 :class:`prompting.history_compactor.HistoryCompactor` 做历史裁剪
 3. 把 system + 压缩后 history 合并成最终的 messages 序列
 4. 在 metadata 里记下原始 / 压缩后长度、是否追加了 system，便于 trace 和调试
 
@@ -23,7 +23,7 @@ v1-mini 的装配职责：
   把本轮所有 user 消息的 attachments 引用拍平到一个 list，便于 trace 观测；
   不参与 provider 输入构造（provider 直接遍历 ``messages[i].metadata``）
 - provider 通过 :func:`executors.llm.media_adapter.collect_media_parts_from_messages`
-  把 ``messages`` 还原成 ``list[MediaPart]``（解耦：context 层不依赖 executors 层）
+  把 ``messages`` 还原成 ``list[MediaPart]``（解耦：prompting 层不依赖 executors 层）
 
 返回的 :class:`AssembledInput` 是 frozen dataclass，只读；调用方要追加字段自己拿
 dict 拷一份。
@@ -34,10 +34,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from context.history_compactor import HistoryCompactor
-from context.instruction_loader import InstructionLoader, InstructionSource
 from core.contracts import AssembledInput, MessageCompactor
 from core.message import Message
+from prompting.history_compactor import HistoryCompactor
+from prompting.instruction_loader import InstructionLoader, InstructionSource
 
 
 class InputAssembler:

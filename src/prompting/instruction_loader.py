@@ -13,7 +13,7 @@ v1-mini 的职责边界：
   ``docs/kongming-agent-v1-minimal/11-v1-file-layout.md`` 里对 ``instruction_loader``
   的说明）
 - 不做 skill / tool-specific instruction 分层——那是 ``skill_loader.py`` 的事，明确
-  留到 v0.2+（11-v1-file-layout.md 已列出 not-in-v1 的 ``context/skill_loader.py``）
+  留到 v0.2+（11-v1-file-layout.md 已列出 not-in-v1 的 ``prompting/skill_loader.py``）
 
 渲染策略：
 
@@ -158,7 +158,7 @@ async def assemble_instructions(
     cwd: Path | None = None,
     sitian_root: Path | None = None,
 ) -> tuple[str, list[str]]:
-    """Assemble base agent instructions from prompts + extra files + env + runtime context.
+    """Assemble base agent instructions from prompts + extra files + env + runtime context text.
 
     Shared by CLI and web host. Extracts the core instruction assembly logic
     (prompts materialization, InstructionLoader, runtime context injection)
@@ -167,7 +167,7 @@ async def assemble_instructions(
     Args:
         kongming_home: Path to the ``.kongming/`` directory.
         extra_files: Additional instruction file paths (e.g. from CLI ``--instructions-file``).
-        cwd: Working directory for runtime context. Defaults to ``Path.cwd()``.
+        cwd: Working directory for runtime context text. Defaults to ``Path.cwd()``.
         sitian_root: Optional sitian project root. When set, appends sitian context
             (core-flow, suggestions, etc.) as an ``"sitian"`` origin instruction source.
 

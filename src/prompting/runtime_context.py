@@ -8,7 +8,7 @@
 
 - **纯函数**：不读 env、不读文件、不调 :func:`Path.cwd`，所有输入由调用方注入，
   方便单测和未来在非 CLI 宿主里复用。
-- **stdlib only**：不 import 任何 sibling 模块（遵守 ``context/`` 包零 sibling
+- **stdlib only**：不 import 任何 sibling 模块（遵守 ``sessions/`` / ``prompting/`` 包零 sibling
   依赖约束）。
 - **范围收紧**：当前只包含 cwd 与 ``kongming_home`` 两个最关键字段。模型 / git
   root / 项目名等扩展留待真实需要再加；不引入 config 字段保留最小爆炸半径。

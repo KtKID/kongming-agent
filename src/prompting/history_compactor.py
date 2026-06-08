@@ -4,7 +4,7 @@ v1-mini 的压缩目标是 **不把 context 撑爆**，不是做高质量摘要�
 
 1. 当历史长度超过阈值 ``max_messages`` 时才触发压缩；否则原样返回
 2. 保留第一个 ``system`` 消息（如果存在且 ``keep_system=True``）——这通常是
-   :mod:`context.instruction_loader` 渲染出的规则，丢掉它会让模型失忆
+   :mod:`prompting.instruction_loader` 渲染出的规则，丢掉它会让模型失忆
 3. 保留最近 ``keep_recent`` 条——这是 agent loop 正在推进的工作区，不能截
 4. 中间段：丢弃"无意义"的消息（没有 ``content`` 也没有 ``tool_calls`` 的
    assistant 消息），保留有内容的 user / assistant 消息；``tool`` 结果消息的

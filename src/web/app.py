@@ -21,7 +21,7 @@ import 边界：
 
 - 本文件可 import ``web.*`` 子模块、``config_loader``、外部 fastapi
 - **不可** import ``core`` / ``tools`` / ``executors`` / ``safety`` / ``host`` /
-  ``cli`` / ``context`` / ``observability`` / ``memory`` / ``prompts``
+  ``cli`` / ``prompting`` / ``observability`` / ``memory`` / ``prompts``
 """
 
 from __future__ import annotations

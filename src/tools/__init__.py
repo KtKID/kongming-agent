@@ -18,7 +18,7 @@
 设计约束：
 
 - 协议真源只在 :mod:`core.contracts`，本包里**不**重定义 Protocol。
-- 本包不 import ``safety/`` / ``host/`` / ``cli/`` / ``executors/`` / ``context/`` /
+- 本包不 import ``safety/`` / ``host/`` / ``cli/`` / ``executors/`` / ``sessions/`` / ``prompting/`` /
   ``observability/`` 下任何模块，硬约束由 import-linter 背书。
 """
 

@@ -1,4 +1,4 @@
-"""unit：context.runtime_context 文本生成覆盖。
+"""unit：prompting.runtime_context 文本生成覆盖。
 
 验证 ``build_runtime_context_text`` 输出包含 cwd 与 kongming_home 两个绝对
 路径，并保持稳定的标题 / 提示语，便于 LLM 锚定路径语义。
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from context.runtime_context import build_runtime_context_text
+from prompting.runtime_context import build_runtime_context_text
 
 
 @pytest.mark.unit

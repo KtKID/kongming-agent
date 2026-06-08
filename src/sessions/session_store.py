@@ -46,7 +46,7 @@ from core.message import Message, ToolCall
 
 if TYPE_CHECKING:
     from config_loader.models import Config
-    from context.session_bootstrap import SessionBootstrap
+    from sessions.session_bootstrap import SessionBootstrap
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +280,7 @@ class SQLiteSession:
         """sqlite 后端不维护 run_count；调用即抛 ``NotImplementedError``。
 
         项目当前默认 ``backend: file``，sqlite 是代码里留的备用通道但最近版本
-        不再维护。需要 run_id 自增语义请使用 :class:`context.file_session.FileSession`
+        不再维护。需要 run_id 自增语义请使用 :class:`sessions.file_session.FileSession`
         或 :class:`core.session.InMemorySession`。
         """
         raise NotImplementedError(
@@ -337,7 +337,7 @@ def build_session(
     if backend == "file":
         if bootstrap is None:
             raise ValueError("file backend requires bootstrap")
-        from context.file_session import FileSession
+        from sessions.file_session import FileSession
 
         return FileSession(
             session_id,

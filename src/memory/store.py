@@ -8,7 +8,7 @@ v0.1.3 Memory Snapshot：多文件读取（MEMORY / USER / ERRORS）、
 - ``load_from_disk()`` 是唯一冻结态刷新入口。
 - ``format_for_system_prompt()`` 只读冻结态，保证普通 turn 的 prompt 稳定。
 - memory tool 只读写活态 entries 和磁盘，保证工具结果准确。
-- context compact 后重新 ``load_from_disk()``，刷新冻结态。
+- history compact 后重新 ``load_from_disk()``，刷新冻结态。
 
 外部访问入口：``src/tools/memory_tool.py::MemoryTool``。Agent 只能通过 MemoryTool
 的 target 参数（memory/user/errors）访问记忆，不能直接操作文件路径——这是为了
@@ -89,7 +89,7 @@ class MemorySnapshot:
     """冻结态记忆快照，用于 system prompt 注入。
 
     snapshot 在 ``load_from_disk()`` 时捕获，之后保持不变。
-    只有 context compact 后重新 ``load_from_disk()`` 才会刷新。
+    只有 history compact 后重新 ``load_from_disk()`` 才会刷新。
 
     Attributes:
         memory_text: MEMORY.md 的完整文本。
@@ -291,7 +291,7 @@ class MemoryStore:
     async def load_from_disk(self) -> MemorySnapshot:
         """从磁盘读取所有 memory 文件，刷新活态条目和冻结快照。
 
-        这是唯一冻结态刷新入口。context compact 后应调用此方法重新加载。
+        这是唯一冻结态刷新入口。history compact 后应调用此方法重新加载。
 
         行为：
             1. 创建目录（``mkdir(exist_ok=True)``），不创建文件。

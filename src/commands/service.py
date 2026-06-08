@@ -39,12 +39,17 @@ class CommandService:
         self,
         raw_input: str,
         *,
-        context: CommandExecutionContext,
+        execution_context: CommandExecutionContext,
         attachments: list[dict[str, Any]] | None = None,
     ) -> Result | CommandResult:
+        exec_ctx = execution_context
         parsed = parse_input(raw_input)
         if parsed.kind == "text":
-            return await self._runtime_delegate(raw_input, context.reasoning_effort, attachments)
+            return await self._runtime_delegate(
+                raw_input,
+                exec_ctx.reasoning_effort,
+                attachments,
+            )
 
         command_name = parsed.command_name or ""
         command = self._registry.lookup(command_name, self._host_kind)
@@ -60,7 +65,7 @@ class CommandService:
             if parsed.args_text:
                 prompt_text = parsed.args_text
             # slash command 路径不带附件（命令展开成纯文本 prompt）。
-            return await self._runtime_delegate(prompt_text, context.reasoning_effort, None)
+            return await self._runtime_delegate(prompt_text, exec_ctx.reasoning_effort, None)
 
         return CommandResult(
             status="failed",
