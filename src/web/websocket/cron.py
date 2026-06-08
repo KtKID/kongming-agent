@@ -109,7 +109,7 @@ class CronWSBroker:
         except Exception as exc:
             # 半死连接：客户端已断开但未走到 finally detach 路径
             log_network_exception(
-                "web.cron_ws",
+                "web.websocket.cron",
                 "broadcast_send_failed",
                 exc,
                 websocket_id=id(ws),
@@ -201,7 +201,7 @@ async def _cron_ws_handler(websocket: WebSocket) -> None:
         # 客户端断连或其它 ws 错误；安静退出
         logger.debug("/ws/cron client disconnected or errored")
         log_network_event(
-            "web.cron_ws",
+            "web.websocket.cron",
             "ws_loop_terminated",
             level="INFO" if isinstance(exc, WebSocketDisconnect) else "WARNING",
             message=str(exc),

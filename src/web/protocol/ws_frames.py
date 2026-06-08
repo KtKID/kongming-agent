@@ -76,7 +76,7 @@ class InterruptFrame(_C2SFrameBase):
     UX 入口：前端在 ``cell.status in ("running","awaiting_approval")`` 时显示
     "Stop" 按钮，点击后发本帧。
 
-    后端 ws 路由层（``src/web/ws.py``）收到本帧 → 检查
+    后端 ws 路由层（``src/web/websocket/routes.py``）收到本帧 → 检查
     ``cell.current_run_task``：
     - ``None`` / 已 ``done()`` → 推 ``SystemNoticeFrame`` 提示 "no active run"
     - 否则调 ``task.cancel()`` → runner 顶层 except 收尾 → emit ``run.cancelled``

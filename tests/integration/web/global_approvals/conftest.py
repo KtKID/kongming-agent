@@ -21,7 +21,7 @@ from tests.unit.test_web_ws_endpoint import WSFakeTM
 from web.app import create_app
 from web.auth import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
 from web.global_approvals.broadcaster import reset_inbox_broadcaster_for_testing
-from web.thread_status_ws import reset_broadcaster_for_testing
+from web.websocket.thread_status import reset_broadcaster_for_testing
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 

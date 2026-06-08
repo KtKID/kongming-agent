@@ -1,6 +1,6 @@
 """WSEventSink × FullLogger 接入集成测试（full-log-v0.1 阶段 1）。
 
-验证 :class:`web.ws_event_sink.WSEventSink` 在 emit 阶段：
+验证 :class:`web.websocket.event_sink.WSEventSink` 在 emit 阶段：
 
 - send 成功后对 ``turn.start`` / ``turn.end`` 调 ``full_logger.log()``，
   日志记录里包含 ``thread_id`` 字段
@@ -21,7 +21,7 @@ import pytest
 
 from core.contracts import Event
 from devtools.full_logger import FullLogger, _reset_for_tests, init_full_logger
-from web.ws_event_sink import WSEventSink
+from web.websocket.event_sink import WSEventSink
 
 
 class _StubConfig:

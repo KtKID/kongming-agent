@@ -37,7 +37,7 @@ from web._shared.session_manager import SessionManager
 from web.codex._image_cli_args import CodexImageCliArgsBuilder
 from web.codex.approval import map_permission_mode
 from web.codex.normalizer import normalize
-from web.thread_status_ws import get_broadcaster
+from web.websocket.thread_status import get_broadcaster
 
 if TYPE_CHECKING:
     from web.protocol.rest_models import UserInputAttachment

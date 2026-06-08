@@ -1,6 +1,6 @@
 """web — cron 投递 sink (v0.3 M4)。
 
-cron 触发完成后通过 :class:`web.cron_ws.CronWSBroker` 把 ``cron.run.completed``
+cron 触发完成后通过 :class:`web.websocket.cron.CronWSBroker` 把 ``cron.run.completed``
 事件 broadcast 给所有当前订阅 ``/ws/cron`` 的 web 客户端。
 
 设计：
@@ -30,7 +30,7 @@ from typing import Any
 
 from scheduler.delivery import DeliveryResult, DeliverySink
 from scheduler.domain import ScheduledRun, ScheduledTask
-from web.cron_ws import CronWSBroker
+from web.websocket.cron import CronWSBroker
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class WebDeliverySink(DeliverySink):
 
     使用方式（web/run.py 装配）::
 
-        from web.cron_ws import get_broker
+        from web.websocket.cron import get_broker
         from web.cron_delivery import WebDeliverySink
         from scheduler.delivery import DeliveryDispatcher
 

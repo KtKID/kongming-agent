@@ -73,7 +73,7 @@ _EVENT_KIND_TO_PHASE: dict[str, Phase] = {
 class ThreadStatusBroadcaster:
     """thread-status 全局 WS 广播器。
 
-    结构与 :class:`web.cron_ws.CronWSBroker` 完全一致，扩展了
+    结构与 :class:`web.websocket.cron.CronWSBroker` 完全一致，扩展了
     :meth:`emit` 方法做 kind→phase 映射。
     """
 
@@ -115,7 +115,7 @@ class ThreadStatusBroadcaster:
             await ws.send_json(payload)
         except Exception as exc:
             log_network_exception(
-                "web.thread_status_ws",
+                "web.websocket.thread_status",
                 "broadcast_send_failed",
                 exc,
                 websocket_id=id(ws),
@@ -332,7 +332,7 @@ async def _thread_status_ws_handler(websocket: WebSocket) -> None:
     except Exception as exc:
         logger.debug("/ws/thread-status client disconnected or errored")
         log_network_event(
-            "web.thread_status_ws",
+            "web.websocket.thread_status",
             "ws_loop_terminated",
             level="INFO" if isinstance(exc, WebSocketDisconnect) else "WARNING",
             message=str(exc),

@@ -155,15 +155,15 @@ forbidden_modules =
 
 ; ---------------------------------------------------------------------------
 ; Contract 6: web 应用层（app shell）不可 import 跨支柱模块
-;             web.app / web.routers / web.ws / web.auth* / web.static / web.errors
+;             web.app / web.routers / web.websocket.routes / web.auth* / web.static / web.errors
 ;             / web.rate_limit 必须只依赖 web.protocol / web.thread_manager /
-;             web.host_adapter / web.ws_event_sink / web.thread_cell /
+;             web.host_adapter / web.websocket.event_sink / web.thread_cell /
 ;             web.thread_metadata / web.types / config_loader / 外部库。
 ;             不可 import core / tools / executors / safety / host / cli /
 ;             sessions / prompting / observability / memory / prompts。
 ;
 ;             v0.1.5 取舍：web.run / web.thread_manager / web.host_adapter
-;             / web.ws_event_sink / web.thread_cell 之类 **装配 entrypoint** 与
+;             / web.websocket.event_sink / web.thread_cell 之类 **装配 entrypoint** 与
 ;             已存在的 thread_manager 联动模块允许跨支柱（如 thread_cell 需要
 ;             import core.contracts / executors.agent_runtime / host.session_bridge）；
 ;             这些路径走全局 layered-dependency-direction（Contract 3）保护。
@@ -184,7 +184,7 @@ source_modules =
     web.rate_limit
     web.static
     web.types
-    web.ws
+    web.websocket.routes
     web.routers
 forbidden_modules =
     core
@@ -212,9 +212,9 @@ ignore_imports =
     web.routers.threads -> evolution.models
     web.routers.threads -> evolution.state_store
     web.routers.threads -> evolution.store
-    web.ws -> evolution.state_store
-    web.ws -> evolution.store
-    web.claude_code.route -> web.ws_event_sink
+    web.websocket.routes -> evolution.state_store
+    web.websocket.routes -> evolution.store
+    web.claude_code.route -> web.websocket.event_sink
     web.claude_code.route -> evolution.claude_transcript_provider
     web.claude_code.route -> core.contracts
 ; web.routers.uploads -> web.uploads.{storage,registry,validation}：
@@ -336,9 +336,9 @@ source_modules =
     web.app
     web.routers
     web.cron_delivery
-    web.cron_ws
-    web.ws
-    web.ws_event_sink
+    web.websocket.cron
+    web.websocket.routes
+    web.websocket.event_sink
     web.thread_metadata
     web.claude_code
     web.codex

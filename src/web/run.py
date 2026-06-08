@@ -287,7 +287,7 @@ def _make_runtime_factory(cfg: object) -> object:
             if real_cfg.scheduler.enabled:
                 from scheduler.delivery import DeliveryDispatcher
                 from web.cron_delivery import WebDeliverySink
-                from web.cron_ws import get_broker
+                from web.websocket.cron import get_broker
 
                 cron_dispatcher = DeliveryDispatcher(
                     web_sink=WebDeliverySink(get_broker()),

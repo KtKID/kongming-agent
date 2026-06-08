@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
-from web.ws_fanout import WebSocketFanout
+from web.websocket.fanout import WebSocketFanout
 
 
 def _make_ws() -> AsyncMock:

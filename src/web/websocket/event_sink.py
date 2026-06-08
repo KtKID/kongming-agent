@@ -177,7 +177,7 @@ class WSEventSink:
                 exc,
             )
             log_network_exception(
-                "web.ws_event_sink",
+                "web.websocket.event_sink",
                 "emit_send_failed",
                 exc,
                 event_kind=event.kind,
@@ -190,7 +190,7 @@ class WSEventSink:
                     await close_call
             except Exception as close_exc:
                 log_network_exception(
-                    "web.ws_event_sink",
+                    "web.websocket.event_sink",
                     "emit_close_failed",
                     close_exc,
                     event_kind=event.kind,

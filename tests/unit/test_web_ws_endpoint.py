@@ -513,6 +513,99 @@ def test_ws_interrupt_cancels_active_run_task(tmp_path: Path) -> None:
         client.__exit__(None, None, None)
 
 
+# ---------------------------------------------------------------------------
+# fix-generic-chat-ws-peek-frame-type：旁路 peek 字段从 "type" 切到 "frame_type"
+# ---------------------------------------------------------------------------
+#
+# 背景：protocol-frame-type-unify-v0.2 把 wire 协议从历史的 ``kind`` / ``type``
+# 统一到 ``frame_type``，前端 useAutoApproval.ts 也按 ``frame_type`` 发帧；
+# 但 ``src/web/websocket/routes.py::_receive_loop`` 的旁路 peek 漏改、仍读 ``preview.get("type")``，
+# 导致 ``auto-approval-toggle`` / ``auto-approval-query`` 帧无法命中旁路，
+# 全部回退到 ``WSFrameC2SAdapter.validate_json`` 被 discriminated union 拒，
+# 报 ``union_tag_invalid``。
+#
+# 下面两个 case 用真实的 ``app.state.auto_approval_policy``（由 create_app
+# 装配出来）走通完整链路，断言收到 ``auto_approval_state`` 帧且
+# ``channel == "generic_chat"``，证明：
+# 1. 旁路确实命中（否则 union 报错，帧型不是 auto_approval_state）
+# 2. handler 拿到了正确的 ``channel`` 关键字（不是 claude_code 默认值）
+
+
+def _wait_for_frame_type(ws: Any, frame_type: str, max_msgs: int = 10) -> dict[str, Any]:
+    """等收到指定 frame_type 的 frame；最多读 max_msgs 个消息。
+
+    跟 ``tests/unit/web/claude_code/test_route_smart_approval.py::_wait_for_kind``
+    行为对齐，单独在本文件留一份避免跨包 import。
+    """
+    for _ in range(max_msgs):
+        msg = ws.receive_json()
+        if msg.get("frame_type") == frame_type:
+            return msg  # type: ignore[no-any-return]
+    raise AssertionError(f"did not receive frame_type={frame_type}")
+
+
+def test_ws_auto_approval_toggle_bypass_hit(tmp_path: Path) -> None:
+    """通用频道发 auto-approval-toggle 帧 → 旁路命中 → 回 auto_approval_state。
+
+    这是 protocol-frame-type-unify-v0.2 修复的回归测试：旁路 peek 读
+    ``preview.get("frame_type")`` 才能命中，读 ``"type"`` 会让帧落到
+    ``WSFrameC2SAdapter`` 被 union 拒（``union_tag_invalid``）。
+    """
+    tm = WSFakeTM()
+    client = _login(tmp_path, tm)
+    try:
+        # create_app 已装配 app.state.auto_approval_policy；二次确认
+        assert client.app.state.auto_approval_policy is not None  # type: ignore[attr-defined]
+        with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
+            _ = ws.receive_json()  # thread.history
+            ws.send_json(
+                {
+                    "frame_type": "auto-approval-toggle",
+                    "cwd": "/proj/generic-toggle",
+                    "enabled": True,
+                }
+            )
+            msg = _wait_for_frame_type(ws, "auto_approval_state")
+            # 旁路命中的核心证据：channel == "generic_chat"（不是 claude_code
+            # 默认值，也不是 union 拒掉后推的 frame_type="error"）
+            assert msg["channel"] == "generic_chat"
+            assert msg["cwd"] == "/proj/generic-toggle"
+            assert msg["enabled"] is True
+
+        # 持久化也要对：app.state.auto_approval_policy 应能再读出 enabled=True
+        policy = client.app.state.auto_approval_policy  # type: ignore[attr-defined]
+        cfg = policy.get_config("/proj/generic-toggle")
+        assert cfg.enabled is True
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_ws_auto_approval_query_bypass_hit(tmp_path: Path) -> None:
+    """通用频道发 auto-approval-query 帧 → 旁路命中 → 回 auto_approval_state。
+
+    对称覆盖 query 路径；这条路径是用户报错的直接触发点（前端
+    useAutoApproval.queryAutoApproval 在切 thread / 重连时主动发）。
+    """
+    tm = WSFakeTM()
+    client = _login(tmp_path, tm)
+    try:
+        with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
+            _ = ws.receive_json()  # thread.history
+            ws.send_json(
+                {
+                    "frame_type": "auto-approval-query",
+                    "cwd": "/proj/generic-query",
+                }
+            )
+            msg = _wait_for_frame_type(ws, "auto_approval_state")
+            assert msg["channel"] == "generic_chat"
+            assert msg["cwd"] == "/proj/generic-query"
+            # 新 cwd 默认 enabled=False
+            assert msg["enabled"] is False
+    finally:
+        client.__exit__(None, None, None)
+
+
 def test_ws_user_input_done_callback_clears_current_run_task(tmp_path: Path) -> None:
     """task.add_done_callback 应该在 run_once 完成后把 cell.current_run_task 清成 None。
 

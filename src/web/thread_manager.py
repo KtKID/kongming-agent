@@ -53,7 +53,6 @@ from web.thread_metadata import (
     thread_metadata_path,
     write_thread_metadata,
 )
-from web.thread_status_ws import ThreadStatusEventSink
 from web.uploads.storage import AssetStorage
 from web.usage_token_v2 import (
     ClaudeJsonlLocator,
@@ -62,8 +61,9 @@ from web.usage_token_v2 import (
     ThreadMetadataReader,
     UsageTokenManager,
 )
-from web.ws_event_sink import WSEventSink
-from web.ws_fanout import WebSocketFanout
+from web.websocket.event_sink import WSEventSink
+from web.websocket.fanout import WebSocketFanout
+from web.websocket.thread_status import ThreadStatusEventSink
 
 logger = logging.getLogger(__name__)
 

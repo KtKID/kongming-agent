@@ -18,7 +18,7 @@ import pytest
 
 from core.message import Message
 from web.protocol.ws_frames import ThreadHistoryFrame
-from web.ws import _send_history_frame
+from web.websocket.routes import _send_history_frame
 
 
 class _FakeWS:

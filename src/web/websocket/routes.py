@@ -148,7 +148,7 @@ async def _thread_ws_handler(websocket: WebSocket, thread_id: str) -> None:
                 detach_call(websocket)
             except Exception as exc:
                 log_network_exception(
-                    "web.ws",
+                    "web.websocket.routes",
                     "detach_ws_failed",
                     exc,
                     thread_id=thread_id,
@@ -167,7 +167,7 @@ async def _receive_loop(
             raw = await websocket.receive_text()
         except WebSocketDisconnect:
             log_network_event(
-                "web.ws",
+                "web.websocket.routes",
                 "ws_disconnected",
                 level="INFO",
                 message="generic chat websocket disconnected",
@@ -301,7 +301,7 @@ async def _dispatch_frame(
         except Exception as exc:
             # 推 pong 失败说明 ws 断了；让下次 receive 抛 WebSocketDisconnect
             log_network_exception(
-                "web.ws",
+                "web.websocket.routes",
                 "pong_send_failed",
                 exc,
                 thread_id=thread_id,
@@ -501,7 +501,7 @@ async def _send_error_frame(
         await websocket.send_json(frame.model_dump())
     except Exception as exc:
         log_network_exception(
-            "web.ws",
+            "web.websocket.routes",
             "send_error_frame_failed",
             exc,
             error_code=error_code,
@@ -529,7 +529,7 @@ async def _send_no_active_run_notice(websocket: WebSocket, thread_id: str) -> No
         await websocket.send_json(frame.model_dump())
     except Exception as exc:
         log_network_exception(
-            "web.ws",
+            "web.websocket.routes",
             "send_no_active_run_notice_failed",
             exc,
             thread_id=thread_id,

@@ -13,7 +13,7 @@
   注意：流式路径下 ``CLIStreamSink`` 已实时打印过完整 content；web 同理走
   ``WSEventSink.content.delta`` 推流，``write_output`` 几乎不会被调用。
 - ``notify_event``：CLI verbose 时打 stderr；web 默认空操作 —— 事件流
-  统一走 :class:`web.ws_event_sink.WSEventSink`，避免双推。
+  统一走 :class:`web.websocket.event_sink.WSEventSink`，避免双推。
 - ``prompt_approval``：CLI 阻塞读 ``[y/N]``；web 创建 ``asyncio.Future`` +
   推 ``ApprovalRequestFrame`` + ``await asyncio.wait_for(future, timeout)``。
   浏览器在收到帧后回 ``approval.ack``，路由层调 :meth:`resolve_approval`
@@ -70,7 +70,7 @@ class WebHostAdapter(HostAdapter):
     """HostAdapter 协议的 web 实现。
 
     每个 ThreadCell 私有一个 adapter 实例（不跨 cell 共享），与
-    :class:`web.ws_event_sink.WSEventSink` 共享同一个 WS 连接 ——
+    :class:`web.websocket.event_sink.WSEventSink` 共享同一个 WS 连接 ——
     实现上各持一份 ``_ws`` 引用，在 :meth:`attach_ws` 时由 ThreadCell
     同步替换。
 
@@ -143,7 +143,7 @@ class WebHostAdapter(HostAdapter):
         await self._safe_send_json(frame.model_dump())
 
     async def notify_event(self, event: Event) -> None:
-        """web 端事件统一走 :class:`web.ws_event_sink.WSEventSink`。
+        """web 端事件统一走 :class:`web.websocket.event_sink.WSEventSink`。
 
         本方法保留协议兼容，默认空操作 —— 避免与 sink 双推同一事件。
         """

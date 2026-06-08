@@ -46,7 +46,7 @@ class WebSocketFanout:
             except Exception as exc:
                 dead_clients.append(client)
                 log_network_exception(
-                    "web.ws_fanout",
+                    "web.websocket.fanout",
                     "client_send_failed",
                     exc,
                     client_id=id(client),
@@ -57,7 +57,7 @@ class WebSocketFanout:
                         await close_call
                 except Exception as close_exc:
                     log_network_exception(
-                        "web.ws_fanout",
+                        "web.websocket.fanout",
                         "client_close_failed",
                         close_exc,
                         client_id=id(client),
@@ -74,7 +74,7 @@ class WebSocketFanout:
                     await close_call
             except Exception as exc:
                 log_network_exception(
-                    "web.ws_fanout",
+                    "web.websocket.fanout",
                     "fanout_close_failed",
                     exc,
                     client_id=id(client),

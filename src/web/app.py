@@ -265,7 +265,7 @@ def create_app(
                 from scheduler.store import Store
                 from scheduler.ticker import run_ticker_loop
                 from web.cron_delivery import WebDeliverySink
-                from web.cron_ws import get_broker
+                from web.websocket.cron import get_broker
 
                 cron_home = (
                     cfg.scheduler.home if cfg.scheduler.home is not None else (home / "cron")
@@ -613,13 +613,13 @@ def create_app(
         app.include_router(workflow_router)
 
     # 9. WS endpoint
-    from web.cron_ws import register_cron_ws_routes
-    from web.thread_status_ws import register_thread_status_routes
-    from web.ws import register_ws_routes
+    from web.websocket.cron import register_cron_ws_routes
+    from web.websocket.routes import register_ws_routes
+    from web.websocket.thread_status import register_thread_status_routes
 
     register_ws_routes(app)
     # v0.3 cron-delivery M4：cron 全局 WS 端点 /ws/cron。
-    # broker 是模块级单例（web/cron_ws.py:get_broker），与 web/run.py 装配的
+    # broker 是模块级单例（web/websocket/cron.py:get_broker），与 web/run.py 装配的
     # WebDeliverySink 共享同一个实例，无需通过 app.state 串引用。
     register_cron_ws_routes(app)
     register_thread_status_routes(app)

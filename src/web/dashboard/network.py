@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from web.cron_ws import get_broker
-from web.thread_status_ws import get_broadcaster
+from web.websocket.cron import get_broker
+from web.websocket.thread_status import get_broadcaster
 
 
 def get_thread_status_connections() -> int:

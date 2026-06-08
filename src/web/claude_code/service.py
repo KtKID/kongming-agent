@@ -31,7 +31,7 @@ from web._shared.session_manager import SessionManager
 from web.claude_code._attachment_prefix import AttachmentPrefixBuilder
 from web.claude_code.approval import ApprovalBridge
 from web.claude_code.normalizer import ClaudeNormalizer
-from web.thread_status_ws import get_broadcaster
+from web.websocket.thread_status import get_broadcaster
 
 if TYPE_CHECKING:
     from web.protocol.rest_models import UserInputAttachment

@@ -10,7 +10,7 @@
 - ``check-session-status`` → :meth:`SessionManager.is_active` +（active 时）
   :meth:`SessionManager.replace_writer` + send 状态
 
-鉴权：复用现有 ``src/web/ws.py`` 模式（cookie ``kongming_session`` →
+鉴权：复用现有 ``src/web/websocket/routes.py`` 模式（cookie ``kongming_session`` →
 ``verify_session_cookie``）。
 
 v0.1.6 起本 endpoint 接受可选 query 参数 ``thread_id``：当浏览器从一个
@@ -292,7 +292,7 @@ async def claude_code_ws(
 
     # 2.7 evolution hook: register event route
     if evolution_manager is not None and evolution_manager.enabled and bound_thread_id:
-        from web.ws_event_sink import WSEventSink
+        from web.websocket.event_sink import WSEventSink
 
         evo_sink = WSEventSink(ws=websocket, thread_id=bound_thread_id)
         evolution_manager.register_event_route(bound_thread_id, evo_sink)

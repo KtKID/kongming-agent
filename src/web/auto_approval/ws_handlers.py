@@ -3,7 +3,7 @@
 claude_code 与 generic_chat 两条通道都需要 ``auto-approval-toggle`` /
 ``auto-approval-query`` 入站命令以及连接建立时主动 push 一次 state 帧。
 把三段逻辑抽到本模块，让调用方（``web.claude_code.route`` /
-``web.ws._dispatch_frame`` 等）只负责把 ``policy`` 从 ``app.state`` 取出后透传。
+``web.websocket.routes._dispatch_frame`` 等）只负责把 ``policy`` 从 ``app.state`` 取出后透传。
 
 设计取舍
 ----------

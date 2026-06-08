@@ -13,7 +13,7 @@ v0.1 提供的工具：
 
 - :func:`make_connection_id` —— 生成全局唯一的连接 ID（uuid4 hex）
 - :func:`safe_send_json` —— 向 WebSocket 发送 JSON 帧，失败返回 ``False``，
-  调用方据此触发清理（语义抄 ``src/web/ws_fanout.py::WebSocketFanout``）
+  调用方据此触发清理（语义抄 ``src/web/websocket/fanout.py::WebSocketFanout``）
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ def make_connection_id() -> str:
 async def safe_send_json(ws: Any, payload: Any) -> bool:
     """向一个 WebSocket 发送 JSON 帧，捕获并吞掉所有底层异常。
 
-    语义抄 :class:`web.ws_fanout.WebSocketFanout` 的失败连接清理模式：
+    语义抄 :class:`web.websocket.fanout.WebSocketFanout` 的失败连接清理模式：
 
     - 写盘成功 → 返回 ``True``
     - 写盘抛任何异常（连接已断 / 半开 / runtime error）→ 返回 ``False``，

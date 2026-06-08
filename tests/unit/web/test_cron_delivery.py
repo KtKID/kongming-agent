@@ -33,7 +33,7 @@ from scheduler.domain import (
     TriggerType,
 )
 from web.cron_delivery import WebDeliverySink
-from web.cron_ws import CronWSBroker, get_broker, reset_broker_for_testing
+from web.websocket.cron import CronWSBroker, get_broker, reset_broker_for_testing
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -263,7 +263,7 @@ def test_reset_broker_for_testing_creates_new_instance():
 @pytest.mark.asyncio
 async def test_cron_ws_handler_rejects_missing_serializer():
     """``app.state.serializer`` 缺失时关连接 1008。"""
-    from web.cron_ws import _cron_ws_handler
+    from web.websocket.cron import _cron_ws_handler
 
     websocket = MagicMock()
     # 模拟 app.state 没 serializer
@@ -281,7 +281,7 @@ async def test_cron_ws_handler_rejects_missing_serializer():
 @pytest.mark.asyncio
 async def test_cron_ws_handler_rejects_invalid_cookie():
     """没 cookie / cookie 验签失败 → 关连接 1008。"""
-    from web.cron_ws import _cron_ws_handler
+    from web.websocket.cron import _cron_ws_handler
 
     websocket = MagicMock()
     websocket.app.state = MagicMock()
