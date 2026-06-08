@@ -156,14 +156,14 @@ forbidden_modules =
 ; ---------------------------------------------------------------------------
 ; Contract 6: web 应用层（app shell）不可 import 跨支柱模块
 ;             web.app / web.routers / web.websocket.routes / web.auth* / web.static / web.errors
-;             / web.rate_limit 必须只依赖 web.protocol / web.thread_manager /
-;             web.host_adapter / web.websocket.event_sink / web.thread_cell /
-;             web.thread_metadata / web.types / config_loader / 外部库。
+;             / web.rate_limit 必须只依赖 web.protocol / web.threads.manager /
+;             web.host_adapter / web.websocket.event_sink / web.threads.cell /
+;             web.threads.metadata / web.threads.types / config_loader / 外部库。
 ;             不可 import core / tools / executors / safety / host / cli /
 ;             sessions / prompting / observability / memory / prompts。
 ;
-;             v0.1.5 取舍：web.run / web.thread_manager / web.host_adapter
-;             / web.websocket.event_sink / web.thread_cell 之类 **装配 entrypoint** 与
+;             v0.1.5 取舍：web.run / web.threads.manager / web.host_adapter
+;             / web.websocket.event_sink / web.threads.cell 之类 **装配 entrypoint** 与
 ;             已存在的 thread_manager 联动模块允许跨支柱（如 thread_cell 需要
 ;             import core.contracts / executors.agent_runtime / host.session_bridge）；
 ;             这些路径走全局 layered-dependency-direction（Contract 3）保护。
@@ -183,7 +183,7 @@ source_modules =
     web.errors
     web.rate_limit
     web.static
-    web.types
+    web.threads.types
     web.websocket.routes
     web.routers
 forbidden_modules =
@@ -220,7 +220,7 @@ ignore_imports =
 ; web.routers.uploads -> web.uploads.{storage,registry,validation}：
 ; routers/uploads.py 作为 media-upload-shell controller，必须直接消费 storage
 ; / registry / validator 三件套。web.uploads 子模块自身依赖 config_loader
-; （storage 默认 base_dir 走 ``get_kongming_home()``）和 web.thread_manager
+; （storage 默认 base_dir 走 ``get_kongming_home()``）和 web.threads.manager
 ; （validator 校验 thread 存在）——这些都是合理的领域内依赖，但通过
 ; ``config_loader.errors -> core.errors`` 与 ``thread_manager -> thread_cell
 ; -> native_runtime -> host/safety/...`` 的传递链会被 Contract 6 误判为
@@ -314,7 +314,7 @@ ignore_imports =
 ;             5 大硬性约束的机器强制；详见 docs/usage-token/。
 ;
 ;             白名单：
-;             - ``web.thread_metadata -> web.usage_token._migration``
+;             - ``web.threads.metadata -> web.usage_token._migration``
 ;               task#2 阶段 thread_metadata.py 的 lazy upgrade 链需要单点调用
 ;               ``upgrade_v7_to_v8`` 纯函数（迁移逻辑沉到 _migration 模块）
 ; ---------------------------------------------------------------------------
@@ -339,7 +339,7 @@ source_modules =
     web.websocket.cron
     web.websocket.routes
     web.websocket.event_sink
-    web.thread_metadata
+    web.threads.metadata
     web.claude_code
     web.codex
     web.protocol
@@ -349,7 +349,7 @@ forbidden_modules =
     web.usage_token_v2._derive_generic
     web.usage_token_v2._models
     web.usage_token_v2._model_context_table
-; web.thread_manager 是装配层，允许构造 v2 manager + 注入 locator；
+; web.threads.manager 是装配层，允许构造 v2 manager + 注入 locator；
 ; 但仍禁止直接 import 派生器（manager 内部消费）。
 
 ; ---------------------------------------------------------------------------

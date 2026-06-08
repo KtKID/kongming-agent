@@ -13,7 +13,7 @@ import pytest
 
 from web.claude_code import projects_registry as claude_registry
 from web.codex import projects_registry as codex_registry
-from web.thread_metadata import ThreadMetadata, write_thread_metadata
+from web.threads.metadata import ThreadMetadata, write_thread_metadata
 
 
 @dataclass(frozen=True)

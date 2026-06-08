@@ -56,7 +56,7 @@ from web.uploads.validation import (
 
 if TYPE_CHECKING:
     from web.auth import SessionTokenPayload
-    from web.types import ThreadManagerProtocol
+    from web.threads.types import ThreadManagerProtocol
 
 logger = logging.getLogger(__name__)
 

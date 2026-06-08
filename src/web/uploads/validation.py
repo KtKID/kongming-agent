@@ -23,12 +23,12 @@ from web.uploads.storage import AttachmentKind  # noqa: F401  # public re-export
 
 if TYPE_CHECKING:
     # 使用 Protocol 而非具体 ThreadManager 类：
-    # 1. routers 通过 ``web.uploads.validation`` 间接触达 ``web.thread_manager``
+    # 1. routers 通过 ``web.uploads.validation`` 间接触达 ``web.threads.manager``
     #    会被 import-linter Contract 6 拦截（web.routers 不可传递依赖 host/
     #    executors/safety/...）。
-    # 2. Protocol 是 ``web.types`` 暴露的最小子集，已包含 ``list_threads``
+    # 2. Protocol 是 ``web.threads.types`` 暴露的最小子集，已包含 ``list_threads``
     #    （本类实际只用这一个方法），单测注入 fake 也更简单。
-    from web.types import ThreadManagerProtocol
+    from web.threads.types import ThreadManagerProtocol
 
 __all__ = [
     "ALLOWED_IMAGE_MIME_TYPES",

@@ -40,8 +40,8 @@ from web.whiteboard_manager import (
 )
 
 if TYPE_CHECKING:
-    from web.thread_metadata import ThreadMetadata
-    from web.types import ThreadManagerProtocol
+    from web.threads.metadata import ThreadMetadata
+    from web.threads.types import ThreadManagerProtocol
 
 router = APIRouter(prefix="/api/threads", tags=["whiteboard"])
 

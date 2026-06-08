@@ -23,7 +23,7 @@ from config_loader.models import Config
 from tests.unit.test_web_app_lifespan import _seed_password
 from web.app import create_app
 from web.auth import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
-from web.thread_metadata import ThreadMetadata
+from web.threads.metadata import ThreadMetadata
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 
@@ -168,7 +168,7 @@ def test_thread_manager_create_thread_signature() -> None:
     """
     import inspect
 
-    from web.thread_manager import ThreadManager
+    from web.threads.manager import ThreadManager
 
     sig = inspect.signature(ThreadManager.create_thread)
     params = sig.parameters
@@ -183,7 +183,7 @@ def test_thread_manager_create_thread_signature() -> None:
 @pytest.mark.asyncio
 async def test_real_create_thread_default_generic_chat(tmp_path: Path) -> None:
     """ThreadManager 真实实例：默认创建 generic_chat。"""
-    from web.thread_manager import ThreadManager
+    from web.threads.manager import ThreadManager
 
     cfg = _make_cfg()
 
@@ -201,7 +201,7 @@ async def test_real_create_thread_default_generic_chat(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_real_create_thread_with_workspace_cwd(tmp_path: Path) -> None:
     """ThreadManager 真实实例：创建时可持久化 cwd。"""
-    from web.thread_manager import ThreadManager
+    from web.threads.manager import ThreadManager
 
     cfg = _make_cfg()
 
@@ -217,7 +217,7 @@ async def test_real_create_thread_with_workspace_cwd(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_real_create_thread_claude_code_empty_preset_ok(tmp_path: Path) -> None:
     """ThreadManager 真实实例：claude_code 允许空 preset_id。"""
-    from web.thread_manager import ThreadManager
+    from web.threads.manager import ThreadManager
 
     cfg = _make_cfg()
 
@@ -236,7 +236,7 @@ async def test_real_create_thread_generic_chat_empty_preset_raises(
     tmp_path: Path,
 ) -> None:
     """ThreadManager 真实实例：generic_chat + 空 preset_id → ValueError。"""
-    from web.thread_manager import ThreadManager
+    from web.threads.manager import ThreadManager
 
     cfg = _make_cfg()
 
@@ -462,7 +462,7 @@ def test_post_threads_omitted_name_uses_thread_id(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_real_create_thread_empty_name_uses_thread_id(tmp_path: Path) -> None:
     """ThreadManager 真实实例：空 name → 用 thread_id 兜底。"""
-    from web.thread_manager import ThreadManager
+    from web.threads.manager import ThreadManager
 
     cfg = _make_cfg()
 

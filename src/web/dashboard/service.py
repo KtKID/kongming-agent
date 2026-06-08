@@ -32,7 +32,7 @@ from web.protocol import (
     RuntimeStatusProviderSessionsDTO,
     RuntimeStatusSnapshotDTO,
 )
-from web.types import ThreadManagerProtocol
+from web.threads.types import ThreadManagerProtocol
 
 
 class RuntimeStatusService:

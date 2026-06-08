@@ -74,7 +74,7 @@ except ModuleNotFoundError as exc:
 if TYPE_CHECKING:
     from itsdangerous import URLSafeTimedSerializer
 
-    from web.types import ThreadManagerProtocol
+    from web.threads.types import ThreadManagerProtocol
 
 router = APIRouter()
 

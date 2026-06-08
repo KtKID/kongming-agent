@@ -59,7 +59,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from web.path_utils import is_absolute_workspace_path
-from web.thread_metadata import list_thread_metadata
+from web.threads.metadata import list_thread_metadata
 
 logger = logging.getLogger(__name__)
 

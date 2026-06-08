@@ -30,7 +30,7 @@ from web.codex.projects_registry import (
 from web.codex.projects_registry import (
     load_registry as load_codex_registry,
 )
-from web.thread_metadata import ThreadMetadata, write_thread_metadata
+from web.threads.metadata import ThreadMetadata, write_thread_metadata
 
 # ---------------------------------------------------------------------------
 # 辅助

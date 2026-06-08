@@ -31,7 +31,7 @@ from core.result import Result
 from executors.agent_runtime.native_runtime import NativeRuntime
 from host.session_bridge import SessionBridge
 from web.host_adapter import WebHostAdapter
-from web.thread_metadata import ThreadMetadata
+from web.threads.metadata import ThreadMetadata
 
 # cell 状态机（单字段 status）。
 # - idle：未在跑 turn，无 pending approval

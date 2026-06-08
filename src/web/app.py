@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     from config_loader.models import Config
     from scheduler.store import Store
     from web.rate_limit import LoginRateLimiter
-    from web.types import ThreadManagerProtocol
+    from web.threads.types import ThreadManagerProtocol
 
     SchedulerRuntimeFactory = Callable[[Store], tuple[Any, Any]]
 
@@ -139,7 +139,7 @@ def create_app(
     Args:
         cfg: 整体 :class:`Config`；本函数只读 ``cfg.web.*``。
         thread_manager: 已构造好的 :class:`ThreadManagerProtocol` 实例（生产
-            代码传 :class:`web.thread_manager.ThreadManager`，测试可传 fake）。
+            代码传 :class:`web.threads.manager.ThreadManager`，测试可传 fake）。
         home_dir: ``.kongming/`` 根目录；为 None 时调
             :func:`config_loader.paths.get_kongming_home`。测试时建议显式
             传 ``tmp_path / ".kongming"`` 隔离。

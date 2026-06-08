@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from tests.unit.test_web_app_lifespan import _seed_password
 from tests.unit.test_web_routers_threads import CSRF_HEADERS, FakeTM, _login_client, _make_cfg
 from web.app import create_app
-from web.thread_metadata import ThreadMetadata
+from web.threads.metadata import ThreadMetadata
 
 
 def _meta(thread_id: str, claude_thread_id: str = "", cwd: str = "") -> ThreadMetadata:

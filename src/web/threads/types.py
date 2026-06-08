@@ -3,10 +3,10 @@
 主要用于：
 
 - **测试 mock**：路由层 / WS 层在单测里注入 :class:`ThreadManagerProtocol`
-  实现，免装配真实 :class:`web.thread_manager.ThreadManager`。
+  实现，免装配真实 :class:`web.threads.manager.ThreadManager`。
 - **类型注解**：路由 handler 用 Protocol 而非具体类型，便于将来替换实现。
 
-生产代码仍 import 真实类（``from web.thread_manager import ThreadManager``）；
+生产代码仍 import 真实类（``from web.threads.manager import ThreadManager``）；
 本文件只是接口面契约，不负责生产实现。
 
 Why typing.Protocol：
@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from web.protocol import CellSummaryDTO, EvictReason
-    from web.thread_metadata import ThreadMetadata
+    from web.threads.metadata import ThreadMetadata
 
 
 @runtime_checkable
@@ -133,9 +133,9 @@ class ThreadManagerProtocol(Protocol):
     def usage_manager(self) -> Any:
         """:class:`web.usage_token_v2.UsageTokenManager` 实例（v2 无状态门面）。
 
-        ``Any`` 而非具体类型——避免 ``web.types`` Protocol 文件 import
+        ``Any`` 而非具体类型——避免 ``web.threads.types`` Protocol 文件 import
         ``web.usage_token_v2``（保持 types.py 零运行时依赖）。具体类型由
-        ``web.thread_manager.ThreadManager.usage_manager`` 提供。
+        ``web.threads.manager.ThreadManager.usage_manager`` 提供。
         """
         ...
 
@@ -143,7 +143,7 @@ class ThreadManagerProtocol(Protocol):
 
     # ``action`` 实际是 :class:`core.contracts.ApprovalAction` 或同义 string 字面值
     # （``"accept_once"`` / ``"accept_for_session"`` / ``"reject"``）。
-    # 类型注解保持 ``Any``——避免 ``web.types`` import ``core.contracts``
+    # 类型注解保持 ``Any``——避免 ``web.threads.types`` import ``core.contracts``
     # （Contract: web.* → core.* 禁止；跟 ``usage_manager`` 同款 escape）。
 
 

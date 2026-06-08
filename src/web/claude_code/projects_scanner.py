@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from web.claude_code.jsonl_history import encode_cwd
-from web.thread_metadata import ThreadMetadata
+from web.threads.metadata import ThreadMetadata
 
 __all__ = [
     "ProjectSummary",
@@ -105,7 +105,7 @@ def list_projects(
             单元测试可注入临时目录。
         progress_callback: 流式刷新场景使用，签名 ``(current, total, name)``。
         thread_metadata_index: ``{claude_thread_id → ThreadMetadata}`` 索引，
-            由 router 层用 :func:`web.thread_metadata.list_thread_metadata`
+            由 router 层用 :func:`web.threads.metadata.list_thread_metadata`
             构建后传入。命中的 jsonl 直接用 ``meta.name`` 当 title，并按
             ``meta.is_archived`` 过滤归档项。未命中走原 fallback（首条 user
             message → 占位符）。``None`` 表示调用方未提供索引（保持后兼容），

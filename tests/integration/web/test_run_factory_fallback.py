@@ -37,7 +37,7 @@ from web.run import (
     _build_manager_and_inbox_sink,
     _resolve_default_cwd_for_thread,
 )
-from web.thread_metadata import ThreadMetadata
+from web.threads.metadata import ThreadMetadata
 
 # ---------------------------------------------------------------------------
 # fixtures / 小工具
@@ -178,7 +178,7 @@ def test_resolve_default_cwd_falls_back_when_app_missing() -> None:
     """app=None（runtime_factory 尚未回挂时） → 退到进程 cwd。"""
     resolved = _resolve_default_cwd_for_thread(None, "thread-abc123def456")
     assert resolved  # 非空兜底
-    assert resolved == str(Path.cwd())
+    assert Path(resolved) == Path.cwd()
 
 
 # ---------------------------------------------------------------------------

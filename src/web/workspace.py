@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from web.thread_metadata import ThreadMetadata
+from web.threads.metadata import ThreadMetadata
 
 WORKSPACE_MAX_TEXT_FILE_BYTES = 256 * 1024
 WORKSPACE_TREE_DEFAULT_LIMIT = 200
@@ -34,12 +34,12 @@ def resolve_workspace_cwd(meta: ThreadMetadata, server_workspace_root: Path) -> 
 
     Returns:
         ``meta.cwd`` 非空（strip 后）直接返回；否则返回
-        ``str(server_workspace_root)``。
+        ``server_workspace_root`` 的正斜杠字符串。
     """
     cwd = meta.cwd.strip()
     if cwd:
         return cwd
-    return str(server_workspace_root)
+    return server_workspace_root.as_posix()
 
 
 def require_workspace_root(

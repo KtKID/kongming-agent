@@ -65,7 +65,7 @@ from web.protocol import (
 if TYPE_CHECKING:
     from itsdangerous import URLSafeTimedSerializer
 
-    from web.types import ThreadManagerProtocol
+    from web.threads.types import ThreadManagerProtocol
 
 logger = logging.getLogger(__name__)
 

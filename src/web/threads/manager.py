@@ -44,8 +44,8 @@ from web.claude_code.jsonl_history import jsonl_path_for
 from web.codex.projects_scanner import list_codex_projects
 from web.host_adapter import WebHostAdapter
 from web.protocol import CellEvictedFrame, CellSummaryDTO, EvictReason
-from web.thread_cell import ThreadCell
-from web.thread_metadata import (
+from web.threads.cell import ThreadCell
+from web.threads.metadata import (
     ThreadMetadata,
     delete_thread_metadata_dir,
     list_thread_metadata,
@@ -795,7 +795,7 @@ class ThreadManager:
                 await cell.adapter._safe_send_json(frame.model_dump())
             except Exception as exc:
                 log_network_exception(
-                    "web.thread_manager",
+                    "web.threads.manager",
                     "cell_evicted_notify_failed",
                     exc,
                     thread_id=thread_id,
@@ -1139,7 +1139,7 @@ class ThreadManager:
                 )
         except Exception as exc:
             log_network_exception(
-                "web.thread_manager",
+                "web.threads.manager",
                 "cron_message_notify_failed",
                 exc,
                 thread_id=thread_id,

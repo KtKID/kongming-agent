@@ -37,7 +37,7 @@ import time
 from pathlib import Path
 
 from web.claude_code.projects_scanner import list_projects
-from web.thread_metadata import ThreadMetadata
+from web.threads.metadata import ThreadMetadata
 
 
 def _write_jsonl(path: Path, entries: list[dict]) -> None:

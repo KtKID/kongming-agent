@@ -34,7 +34,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from web.auth import SessionTokenPayload
 from web.routers.uploads import router as uploads_router
-from web.thread_metadata import ThreadMetadata
+from web.threads.metadata import ThreadMetadata
 from web.uploads.registry import EXT_BY_MIME, AssetRegistry, compute_sha256
 from web.uploads.storage import AssetStorage, AttachmentAsset
 from web.uploads.validation import (
@@ -791,7 +791,7 @@ class TestThreadManagerDeleteThreadCleansAssets:
         from unittest.mock import AsyncMock, MagicMock
 
         from config_loader.models import Config
-        from web.thread_manager import ThreadManager
+        from web.threads.manager import ThreadManager
 
         cfg = Config.model_validate(
             {
@@ -879,7 +879,7 @@ class TestThreadManagerDeleteThreadCleansAssets:
         from unittest.mock import AsyncMock, MagicMock
 
         from config_loader.models import Config
-        from web.thread_manager import ThreadManager
+        from web.threads.manager import ThreadManager
 
         cfg = Config.model_validate(
             {

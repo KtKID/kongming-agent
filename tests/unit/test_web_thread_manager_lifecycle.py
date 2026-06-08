@@ -16,8 +16,8 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from config_loader.models import Config
-from web.thread_manager import ThreadManager
-from web.thread_metadata import ThreadMetadata, read_thread_metadata, write_thread_metadata
+from web.threads.manager import ThreadManager
+from web.threads.metadata import ThreadMetadata, read_thread_metadata, write_thread_metadata
 
 
 def _make_cfg() -> Config:

@@ -21,7 +21,7 @@ from web.errors import InvalidThreadIdError, ThreadNotFoundError
 from web.protocol import CellSummaryDTO, RuntimeStatusSnapshotDTO
 
 if TYPE_CHECKING:
-    from web.types import ThreadManagerProtocol
+    from web.threads.types import ThreadManagerProtocol
 
 logger = logging.getLogger(__name__)
 

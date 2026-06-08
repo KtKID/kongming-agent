@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, HTTPException, Request
 
 if TYPE_CHECKING:
-    from web.thread_metadata import ThreadMetadata
-    from web.types import ThreadManagerProtocol
+    from web.threads.metadata import ThreadMetadata
+    from web.threads.types import ThreadManagerProtocol
 
 from web.errors import ThreadNotFoundError
 from web.protocol import (

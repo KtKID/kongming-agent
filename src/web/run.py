@@ -27,7 +27,7 @@ def main() -> int:
     from web._app_lock import acquire_app_instance_lock, release_app_instance_lock
     from web.app import create_app
     from web.startup_progress import StartupProgress
-    from web.thread_manager import ThreadManager
+    from web.threads.manager import ThreadManager
 
     home = get_kongming_home()
 
@@ -165,7 +165,7 @@ def _resolve_default_cwd_for_thread(app: Any, thread_id: str) -> str:
        （``app.state.workspace_root``）。
     2. ``app`` 未注入 / thread_manager 缺失 / list_threads 抛错 / metadata
        查不到 → **显式降级**到 ``app.state.workspace_root`` 字符串；
-       连 workspace_root 也拿不到时退到 ``str(Path.cwd())``。
+       连 workspace_root 也拿不到时退到当前进程 cwd。
 
     用户心智：未绑 cwd 的纯聊天 thread，审批默认走 server 启动目录的 cwd 配置
     （而不是空字符串导致命中不到任何 ProjectConfig）。
@@ -180,6 +180,9 @@ def _resolve_default_cwd_for_thread(app: Any, thread_id: str) -> str:
     """
     from web.workspace import resolve_workspace_cwd
 
+    def _cwd_string(path: Path) -> str:
+        return path.as_posix()
+
     server_workspace_root: Path
     if app is not None:
         server_workspace_root = Path(getattr(app.state, "workspace_root", Path.cwd()))
@@ -187,11 +190,11 @@ def _resolve_default_cwd_for_thread(app: Any, thread_id: str) -> str:
         server_workspace_root = Path.cwd()
 
     if app is None:
-        return str(server_workspace_root)
+        return _cwd_string(server_workspace_root)
 
     tm = getattr(app.state, "thread_manager", None)
     if tm is None:
-        return str(server_workspace_root)
+        return _cwd_string(server_workspace_root)
 
     try:
         metas = tm.list_threads()
@@ -201,14 +204,14 @@ def _resolve_default_cwd_for_thread(app: Any, thread_id: str) -> str:
             thread_id,
             exc,
         )
-        return str(server_workspace_root)
+        return _cwd_string(server_workspace_root)
 
     meta = next((m for m in metas if m.id == thread_id), None)
     if meta is None:
         # 装配链上 thread metadata 通常已写盘（先 create_thread → metadata.json
         # → 再调 factory）。拿不到属异常路径，显式降级到 server cwd 而非
         # silently 走空字符串。
-        return str(server_workspace_root)
+        return _cwd_string(server_workspace_root)
 
     return resolve_workspace_cwd(meta, server_workspace_root)
 

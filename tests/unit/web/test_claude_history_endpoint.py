@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 
 from tests.unit.test_web_routers_threads import FakeTM, _login_client
-from web.thread_metadata import ThreadMetadata
+from web.threads.metadata import ThreadMetadata
 
 
 def _add_thread(

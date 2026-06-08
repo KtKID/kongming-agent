@@ -18,8 +18,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 from config_loader.models import Config
 from core.contracts import ApprovalAction, ApprovalRequest
-from web.thread_manager import ThreadManager
-from web.thread_metadata import ThreadMetadata, write_thread_metadata
+from web.threads.manager import ThreadManager
+from web.threads.metadata import ThreadMetadata, write_thread_metadata
 
 
 def _make_cfg(idle_timeout: int = 60, idle_check: int = 10) -> Config:

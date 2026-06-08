@@ -81,8 +81,8 @@ from web.workspace import (
 )
 
 if TYPE_CHECKING:
-    from web.thread_metadata import ThreadMetadata
-    from web.types import ThreadManagerProtocol
+    from web.threads.metadata import ThreadMetadata
+    from web.threads.types import ThreadManagerProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -407,7 +407,7 @@ async def rename_thread(
 
     if meta is None:
         # 什么都没改，读取当前状态返回
-        from web.thread_metadata import read_thread_metadata
+        from web.threads.metadata import read_thread_metadata
 
         meta_read = await asyncio.to_thread(
             read_thread_metadata, request.app.state.kongming_home, thread_id

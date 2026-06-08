@@ -48,7 +48,7 @@ from web.claude_code.projects_registry import (
 )
 from web.claude_code.projects_scanner import ProjectSummary, list_projects
 from web.protocol.rest_models import AddProjectRequest, ProjectRegistryEntryDTO
-from web.thread_metadata import ThreadMetadata
+from web.threads.metadata import ThreadMetadata
 
 logger = logging.getLogger(__name__)
 

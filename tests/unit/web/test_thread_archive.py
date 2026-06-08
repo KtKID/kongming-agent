@@ -23,8 +23,8 @@ from config_loader.models import Config
 from tests.unit.test_web_app_lifespan import _seed_password
 from web.app import create_app
 from web.auth import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
-from web.thread_cell import ThreadCell
-from web.thread_metadata import ThreadMetadata, read_thread_metadata, write_thread_metadata
+from web.threads.cell import ThreadCell
+from web.threads.metadata import ThreadMetadata, read_thread_metadata, write_thread_metadata
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 
@@ -58,7 +58,7 @@ async def _fake_factory(tid: str, pid: str, adapter: Any, sinks: list[Any]) -> t
 @pytest.mark.asyncio
 async def test_set_archived_true_roundtrip(tmp_path: Path) -> None:
     """set_archived(tid, True) 写盘后 read 拿到 is_archived=True + schema v10。"""
-    from web.thread_manager import ThreadManager
+    from web.threads.manager import ThreadManager
 
     cfg = _make_cfg()
     tm = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=_fake_factory)
@@ -81,7 +81,7 @@ async def test_set_archived_true_roundtrip(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_set_archived_false_reverse_roundtrip(tmp_path: Path) -> None:
     """set_archived(tid, False) 反向往返还原。"""
-    from web.thread_manager import ThreadManager
+    from web.threads.manager import ThreadManager
 
     cfg = _make_cfg()
     tm = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=_fake_factory)
@@ -102,7 +102,7 @@ async def test_set_archived_false_reverse_roundtrip(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_set_archived_unknown_thread_raises_keyerror(tmp_path: Path) -> None:
     """set_archived 对不存在 thread_id 抛 KeyError。"""
-    from web.thread_manager import ThreadManager
+    from web.threads.manager import ThreadManager
 
     cfg = _make_cfg()
     tm = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=_fake_factory)
@@ -114,7 +114,7 @@ async def test_set_archived_unknown_thread_raises_keyerror(tmp_path: Path) -> No
 @pytest.mark.asyncio
 async def test_set_archived_updates_booted_cell_metadata(tmp_path: Path) -> None:
     """set_archived 后若 cell 已 boot，cell.metadata 同步刷新。"""
-    from web.thread_manager import ThreadManager
+    from web.threads.manager import ThreadManager
 
     cfg = _make_cfg()
     tm = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=_fake_factory)
@@ -144,7 +144,7 @@ async def test_set_archived_updates_booted_cell_metadata(tmp_path: Path) -> None
 @pytest.mark.asyncio
 async def test_set_archived_preserves_other_fields(tmp_path: Path) -> None:
     """set_archived 不破坏 name / is_pinned / claude_thread_id 等其它字段。"""
-    from web.thread_manager import ThreadManager
+    from web.threads.manager import ThreadManager
 
     cfg = _make_cfg()
     tm = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=_fake_factory)
@@ -182,7 +182,7 @@ async def test_set_archived_preserves_other_fields(tmp_path: Path) -> None:
 
 def _login_client_with_real_tm(tmp_path: Path) -> tuple[TestClient, Any]:
     """装好真实 ThreadManager 的 app + login。"""
-    from web.thread_manager import ThreadManager
+    from web.threads.manager import ThreadManager
 
     _seed_password(tmp_path, "pwd")
     cfg = _make_cfg()

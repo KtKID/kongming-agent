@@ -440,7 +440,7 @@ class Runner:
                     )
                 )
             # claude-image-paste-e2e §5：把 ``session_id``(Web 路径 == ``thread_id``,
-            # 见 src/web/thread_metadata.py:112)透传到 provider,供
+            # 见 src/web/threads/metadata.py:112)透传到 provider,供
             # :class:`executors.llm.anthropic_messages.AnthropicMessagesProvider`
             # 还原附件物理路径(``.kongming/web/uploads/images/<thread_id>/<asset_id>.<ext>``)。
             # CLI 路径无 attachments,thread_id 取值不命中 storage,无副作用。

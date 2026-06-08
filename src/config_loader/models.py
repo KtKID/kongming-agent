@@ -905,7 +905,7 @@ class LLMPresetConfig(BaseModel):
       reasoning_profiles），用于现有 cli 路径。
     - ``LLMPresetConfig`` 是"web 端可选模型清单"——只描述足以构造一个
       :class:`ModelConfig` 实例的 5 个核心字段。具体如何把 preset 翻译成
-      ``ModelConfig`` 由 :mod:`web.thread_manager` 在装配 cell 时决定（v0.1.5
+      ``ModelConfig`` 由 :mod:`web.threads.manager` 在装配 cell 时决定（v0.1.5
       最简单做法：保留 ``Config.model`` 的其他字段不变，仅替换 name / base_url
       / api_key）。
 

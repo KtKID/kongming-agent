@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from web.thread_metadata import (
+from web.threads.metadata import (
     THREAD_METADATA_SCHEMA_VERSION,
     ThreadMetadata,
     read_thread_metadata,
