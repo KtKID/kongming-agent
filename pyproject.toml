@@ -65,7 +65,9 @@ dev = [
 ]
 
 [project.scripts]
-kongming = "cli.main:main"
+kongming = "hosts.cli.main:main"
+kongming-web = "hosts.web.run:main"
+kongming-web-ctl = "hosts.web.ctl:main"
 kongming-sitian = "sitian.cli:main"
 
 [project.urls]
@@ -85,12 +87,10 @@ packages = [
     "src/infrastructure",
     "src/application",
     "src/runtime_assembly",
-    "src/host",
-    "src/cli",
+    "src/hosts",
     "src/safety",
     "src/memory",
     "src/prompts",
-    "src/web",
     "src/sitian",
 ]
 
@@ -103,12 +103,10 @@ include = [
     "src/infrastructure",
     "src/application",
     "src/runtime_assembly",
-    "src/host",
-    "src/cli",
+    "src/hosts",
     "src/safety",
     "src/memory",
     "src/prompts",
-    "src/web",
     "src/sitian",
     "config",
     "README.md",
@@ -174,12 +172,10 @@ known-first-party = [
     "infrastructure",
     "application",
     "runtime_assembly",
-    "host",
-    "cli",
+    "hosts",
     "safety",
     "memory",
     "prompts",
-    "web",
     "sitian",
 ]
 
@@ -283,8 +279,7 @@ source = [
     "infrastructure",
     "application",
     "runtime_assembly",
-    "host",
-    "cli",
+    "hosts",
     "safety",
     "memory",
     "sitian",

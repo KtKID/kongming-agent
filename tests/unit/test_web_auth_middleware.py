@@ -16,7 +16,7 @@ import time
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
-from web.auth.middleware import (
+from hosts.web.auth.middleware import (
     SESSION_COOKIE_NAME,
     AuthMiddleware,
     issue_session_cookie,
@@ -191,7 +191,7 @@ def test_expired_cookie_returns_401() -> None:
         assert resp.status_code == 200
 
     # 用 verify_session_cookie 直接以 max_age=0 调来模拟过期
-    from web.auth.middleware import verify_session_cookie
+    from hosts.web.auth.middleware import verify_session_cookie
 
     payload = verify_session_cookie(raw, serializer, max_age_seconds=0)
     # 立即调用通常仍 fresh；让出 1 秒后再验

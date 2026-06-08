@@ -27,17 +27,17 @@ from typing import Any
 
 import pytest
 
+from hosts.web.approvals.auto.config_store import ConfigStore, ProjectConfig
+from hosts.web.run import (
+    _build_manager_and_inbox_sink,
+    _resolve_default_cwd_for_thread,
+)
+from hosts.web.threads.metadata import ThreadMetadata
 from safety.approval.manager import (
     ApprovalManager,
     make_manager_prompt_fn,
     reset_for_testing,
 )
-from web.approvals.auto.config_store import ConfigStore, ProjectConfig
-from web.run import (
-    _build_manager_and_inbox_sink,
-    _resolve_default_cwd_for_thread,
-)
-from web.threads.metadata import ThreadMetadata
 
 # ---------------------------------------------------------------------------
 # fixtures / 小工具
@@ -123,8 +123,8 @@ def test_manager_build_injects_policy_when_present() -> None:
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
         # 用真实 AutoApprovalPolicy（验证 duck typing 不漂移）
-        from web.approvals.auto.policy import AutoApprovalPolicy
-        from web.approvals.auto.rules import RuleSet
+        from hosts.web.approvals.auto.policy import AutoApprovalPolicy
+        from hosts.web.approvals.auto.rules import RuleSet
 
         store = ConfigStore(Path(tmp_dir))
         rule_set = RuleSet(version=1, default_timeout_ms=10_000, rules=())
@@ -192,8 +192,8 @@ def _make_real_policy(store: ConfigStore) -> Any:
     端到端用例用真实 policy 验证 duck typing 不漂移 + cwd 总开关串通。
     本套测不验证 24 规则匹配（rm 命中走 ``tests/integration/safety/...``）。
     """
-    from web.approvals.auto.policy import AutoApprovalPolicy
-    from web.approvals.auto.rules import RuleSet
+    from hosts.web.approvals.auto.policy import AutoApprovalPolicy
+    from hosts.web.approvals.auto.rules import RuleSet
 
     rule_set = RuleSet(version=1, default_timeout_ms=10_000, rules=())
     return AutoApprovalPolicy(rule_set, store)

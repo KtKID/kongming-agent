@@ -28,15 +28,15 @@ from claude_agent_sdk.types import (
     ToolPermissionContext,
 )
 
-from web.approvals.auto import (
+from hosts.web.approvals.auto import (
     AuditLogger,
     AutoApprovalPolicy,
     ConfigStore,
     load_default_rules,
 )
-from web.integrations.claude_code.approval import ApprovalBridge
-from web.integrations.claude_code.normalizer import ClaudeNormalizer
-from web.shared.session_manager import SessionManager
+from hosts.web.integrations.claude_code.approval import ApprovalBridge
+from hosts.web.integrations.claude_code.normalizer import ClaudeNormalizer
+from hosts.web.shared.session_manager import SessionManager
 
 
 class _FakeWriter:

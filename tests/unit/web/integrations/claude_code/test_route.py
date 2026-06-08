@@ -30,10 +30,10 @@ from claude_agent_sdk.types import (
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from hosts.web.app import create_app
+from hosts.web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
 from infrastructure.config.models import Config
 from tests.unit.test_web_app_lifespan import FakeThreadManager, _seed_password
-from web.app import create_app
-from web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 
@@ -103,7 +103,7 @@ def app_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Test
         return fake_client
 
     monkeypatch.setattr(
-        "web.integrations.claude_code.service.ClaudeSDKClient",
+        "hosts.web.integrations.claude_code.service.ClaudeSDKClient",
         factory,
     )
 
@@ -209,7 +209,7 @@ def test_keepalive_events_are_written_to_workspace_logs(
         return fake_client
 
     monkeypatch.setattr(
-        "web.integrations.claude_code.service.ClaudeSDKClient",
+        "hosts.web.integrations.claude_code.service.ClaudeSDKClient",
         factory,
     )
 
@@ -280,7 +280,7 @@ def test_abort_session_active_does_not_emit_complete_from_route(
     返 True 但不触发 _consume，验证 route handler 自身**不**主动 send_json
     complete 帧（队列里只有 ws.receive_json timeout 或 pong）。
     """
-    from web.integrations.claude_code import route as route_mod
+    from hosts.web.integrations.claude_code import route as route_mod
 
     # 拦截 service.abort 让它返 True（模拟"有活 session 被 cancel"），但不真起
     # _consume → 不会有 _consume finally 路径发 complete
@@ -343,7 +343,7 @@ def test_invalid_command_field_types(app_client: TestClient) -> None:
 
 def test_session_manager_attached_to_app_state(tmp_path: Path) -> None:
     """app.state.claude_session_manager 已挂载。"""
-    from web.shared.session_manager import SessionManager
+    from hosts.web.shared.session_manager import SessionManager
 
     _seed_password(tmp_path, "pwd")
     cfg = _make_cfg()
@@ -377,7 +377,7 @@ def app_client_with_threads(
         return fake_client
 
     monkeypatch.setattr(
-        "web.integrations.claude_code.service.ClaudeSDKClient",
+        "hosts.web.integrations.claude_code.service.ClaudeSDKClient",
         factory,
     )
 

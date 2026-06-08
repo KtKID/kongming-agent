@@ -22,11 +22,11 @@ from pathlib import Path
 
 import pytest
 
-from web.threads.manager import (
+from hosts.web.threads.manager import (
     ClaudeThreadConflictError,
     ThreadManager,
 )
-from web.threads.metadata import list_thread_metadata
+from hosts.web.threads.metadata import list_thread_metadata
 
 
 def _make_runtime_factory() -> Callable:

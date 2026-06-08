@@ -105,8 +105,8 @@ class DeliverySink(ABC):
 
     每个 channel 一个具体实现：
 
-    - ``WebDeliverySink``（M4 in src/web/）：通过 WS 广播 + RunRecord 落盘
-    - ``CliDeliverySink``（M5 in src/cli/）：buffer + REPL 提示符前 flush
+    - ``WebDeliverySink``（M4 in src/hosts/web/）：通过 WS 广播 + RunRecord 落盘
+    - ``CliDeliverySink``（M5 in src/hosts/cli/）：buffer + REPL 提示符前 flush
 
     不用 :class:`typing.Protocol` 因为 ``DeliveryDispatcher`` 当前硬编码两
     channel 路由（spec 决策 2）；ABC 让"忘记实现 deliver"在装配时即抛错。

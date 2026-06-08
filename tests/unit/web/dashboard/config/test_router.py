@@ -25,16 +25,16 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from web.dashboard.config.manager import (
+from hosts.web.dashboard.config.manager import (
     EffectiveResponse,
     RawResponse,
     RestartResponse,
     SavePatchResponse,
     SchemaResponse,
 )
-from web.dashboard.config.restart import RestartScriptNotFoundError
-from web.dashboard.config.router import router as dashboard_config_router
-from web.dashboard.config.writer import (
+from hosts.web.dashboard.config.restart import RestartScriptNotFoundError
+from hosts.web.dashboard.config.router import router as dashboard_config_router
+from hosts.web.dashboard.config.writer import (
     ConflictError,
     PatchItem,
     ValidationFailedError,

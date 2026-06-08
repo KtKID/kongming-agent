@@ -54,8 +54,7 @@ def test_sessions_do_not_define_session_protocol() -> None:
         "infrastructure",
         "application",
         "runtime_assembly",
-        "host",
-        "cli",
+        "hosts",
         "safety",
     ],
 )

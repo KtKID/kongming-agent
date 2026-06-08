@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
-from cli.approval_manager_sink import CLIApprovalEventSink
 from core.contracts import ApprovalAction, ApprovalRequest
+from hosts.cli.approval_manager_sink import CLIApprovalEventSink
 from safety.approval.manager import ApprovalManager, _PendingApproval
 from safety.approval.rules import ApprovalRules
 

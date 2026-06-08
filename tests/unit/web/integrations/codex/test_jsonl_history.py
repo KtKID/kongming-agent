@@ -13,7 +13,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from web.integrations.codex.jsonl_history import parse_codex_rollout, read_session_meta
+from hosts.web.integrations.codex.jsonl_history import parse_codex_rollout, read_session_meta
 
 _FIXTURE_DIR = Path(__file__).parents[4] / "fixtures" / "codex"
 

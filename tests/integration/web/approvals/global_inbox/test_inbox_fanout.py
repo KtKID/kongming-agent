@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from web.approvals.global_inbox.broadcaster import get_inbox_broadcaster
+from hosts.web.approvals.global_inbox.broadcaster import get_inbox_broadcaster
 
 
 def _drain_snapshot(ws: Any) -> dict[str, Any]:

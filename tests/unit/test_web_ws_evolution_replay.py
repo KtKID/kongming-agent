@@ -11,8 +11,8 @@ import pytest
 from evolution.models import EvolutionNutrient, ReviewResult, ReviewWritePayload
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore
+from hosts.web.websocket.routes import _send_evolution_replay_frames
 from infrastructure.config.models import Config
-from web.websocket.routes import _send_evolution_replay_frames
 
 
 class _FakeWS:

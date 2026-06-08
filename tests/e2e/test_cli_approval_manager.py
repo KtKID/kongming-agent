@@ -8,9 +8,9 @@ from typing import Any
 
 import pytest
 
-import cli.approval as cli_approval
-from cli.approval_manager_sink import CLIApprovalEventSink
+import hosts.cli.approval as cli_approval
 from core.contracts import ApprovalAction, ApprovalRequest
+from hosts.cli.approval_manager_sink import CLIApprovalEventSink
 from infrastructure.config.models import (
     ApprovalConfig,
     Config,

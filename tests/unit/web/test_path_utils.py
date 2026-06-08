@@ -1,4 +1,4 @@
-from web.app_support.path_utils import is_absolute_workspace_path
+from hosts.web.app_support.path_utils import is_absolute_workspace_path
 
 
 def test_accepts_posix_absolute_path() -> None:

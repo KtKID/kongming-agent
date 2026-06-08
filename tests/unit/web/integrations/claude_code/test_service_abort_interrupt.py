@@ -23,10 +23,10 @@ import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from web.integrations.claude_code.approval import ApprovalBridge
-from web.integrations.claude_code.normalizer import ClaudeNormalizer
-from web.integrations.claude_code.service import ClaudeCodeService
-from web.shared.session_manager import SessionManager
+from hosts.web.integrations.claude_code.approval import ApprovalBridge
+from hosts.web.integrations.claude_code.normalizer import ClaudeNormalizer
+from hosts.web.integrations.claude_code.service import ClaudeCodeService
+from hosts.web.shared.session_manager import SessionManager
 
 
 class _FakeWriter:
@@ -151,7 +151,7 @@ async def test_abort_no_client_skips_interrupt_but_still_calls_request_abort() -
         return real_create_task(coro, **kwargs)
 
     # monkeypatch 在 service 模块级别引用上（service.py 里直接 asyncio.create_task）
-    import web.integrations.claude_code.service as service_mod
+    import hosts.web.integrations.claude_code.service as service_mod
 
     original = service_mod.asyncio.create_task
     service_mod.asyncio.create_task = spy_create_task  # type: ignore[assignment]

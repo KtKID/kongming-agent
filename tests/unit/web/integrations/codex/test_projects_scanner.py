@@ -12,7 +12,7 @@ import json
 import uuid
 from pathlib import Path
 
-from web.integrations.codex.projects_scanner import list_codex_projects
+from hosts.web.integrations.codex.projects_scanner import list_codex_projects
 
 # ---------------------------------------------------------------------------
 # helpers

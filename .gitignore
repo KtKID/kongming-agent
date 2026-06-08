@@ -11,6 +11,7 @@ plugins/
 # 工具产物
 .rtk/
 .serena/
+.xcodeatlas/
 .kongming/
 
 # Python

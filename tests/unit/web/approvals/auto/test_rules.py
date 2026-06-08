@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from web.approvals.auto.rules import (
+from hosts.web.approvals.auto.rules import (
     SUPPORTED_MATCH_KINDS,
     RuleDefinition,
     RuleSet,

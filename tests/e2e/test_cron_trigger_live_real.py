@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
+from hosts.web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SHANGHAI_TZ = timezone(timedelta(hours=8))
@@ -104,7 +104,7 @@ def live_server(tmp_path: Path):
     env["KONGMING_HOME"] = str((tmp_path / ".kongming").resolve())
 
     proc = subprocess.Popen(
-        [sys.executable, "-m", "web.run"],
+        [sys.executable, "-m", "hosts.web.run"],
         cwd=str(REPO_ROOT),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

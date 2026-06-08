@@ -27,10 +27,10 @@ from claude_agent_sdk.types import (
     TextBlock,
 )
 
-from web.integrations.claude_code.approval import ApprovalBridge
-from web.integrations.claude_code.normalizer import ClaudeNormalizer
-from web.integrations.claude_code.service import ClaudeCodeService
-from web.shared.session_manager import SessionManager
+from hosts.web.integrations.claude_code.approval import ApprovalBridge
+from hosts.web.integrations.claude_code.normalizer import ClaudeNormalizer
+from hosts.web.integrations.claude_code.service import ClaudeCodeService
+from hosts.web.shared.session_manager import SessionManager
 
 
 class _FakeWriter:
@@ -126,7 +126,7 @@ async def test_complete_triggers_get_thread_usage_broadcast(
     mock_broadcaster.broadcast = AsyncMock()
     mock_broadcaster.emit = AsyncMock()
     monkeypatch.setattr(
-        "web.integrations.claude_code.service.get_broadcaster", lambda: mock_broadcaster
+        "hosts.web.integrations.claude_code.service.get_broadcaster", lambda: mock_broadcaster
     )
 
     sessions = SessionManager()
@@ -183,7 +183,7 @@ async def test_v1_methods_no_longer_called(monkeypatch: pytest.MonkeyPatch) -> N
     mock_broadcaster.broadcast = AsyncMock()
     mock_broadcaster.emit = AsyncMock()
     monkeypatch.setattr(
-        "web.integrations.claude_code.service.get_broadcaster", lambda: mock_broadcaster
+        "hosts.web.integrations.claude_code.service.get_broadcaster", lambda: mock_broadcaster
     )
 
     sessions = SessionManager()
@@ -278,7 +278,7 @@ async def test_usage_dto_none_no_broadcast(monkeypatch: pytest.MonkeyPatch) -> N
     mock_broadcaster.broadcast = AsyncMock()
     mock_broadcaster.emit = AsyncMock()
     monkeypatch.setattr(
-        "web.integrations.claude_code.service.get_broadcaster", lambda: mock_broadcaster
+        "hosts.web.integrations.claude_code.service.get_broadcaster", lambda: mock_broadcaster
     )
 
     sessions = SessionManager()
@@ -325,7 +325,7 @@ async def test_get_thread_usage_exception_does_not_break_main_flow(
     mock_broadcaster.broadcast = AsyncMock()
     mock_broadcaster.emit = AsyncMock()
     monkeypatch.setattr(
-        "web.integrations.claude_code.service.get_broadcaster", lambda: mock_broadcaster
+        "hosts.web.integrations.claude_code.service.get_broadcaster", lambda: mock_broadcaster
     )
 
     sessions = SessionManager()

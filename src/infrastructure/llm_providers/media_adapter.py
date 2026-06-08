@@ -26,8 +26,8 @@ from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from core.message import Message
-from web.uploads.registry import EXT_BY_MIME
-from web.uploads.storage import AssetStorage, AttachmentKind
+from hosts.web.uploads.registry import EXT_BY_MIME
+from hosts.web.uploads.storage import AssetStorage, AttachmentKind
 
 __all__ = [
     "AnthropicMediaAdapter",

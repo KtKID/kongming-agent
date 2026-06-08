@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from web import ctl
+from hosts.web import ctl
 
 
 def test_persist_running_pid_prefers_listener_pid(

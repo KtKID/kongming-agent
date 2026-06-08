@@ -17,8 +17,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from web.integrations.codex.service import CodexService
-from web.shared.session_manager import SessionManager
+from hosts.web.integrations.codex.service import CodexService
+from hosts.web.shared.session_manager import SessionManager
 
 # ---------------------------------------------------------------------------
 # Fixtures + helpers
@@ -239,9 +239,9 @@ class TestSpawnArgs:
 
     def test_windows_prefers_cmd_wrapper(self, codex_service: CodexService) -> None:
         with (
-            patch("web.integrations.codex.service.sys.platform", "win32"),
+            patch("hosts.web.integrations.codex.service.sys.platform", "win32"),
             patch(
-                "web.integrations.codex.service.shutil.which",
+                "hosts.web.integrations.codex.service.shutil.which",
                 side_effect=lambda name: (
                     r"C:\Users\Administrator\AppData\Roaming\npm\codex.cmd"
                     if name == "codex.cmd"
@@ -261,9 +261,9 @@ class TestSpawnArgs:
 
     def test_windows_falls_back_to_exe(self, codex_service: CodexService) -> None:
         with (
-            patch("web.integrations.codex.service.sys.platform", "win32"),
+            patch("hosts.web.integrations.codex.service.sys.platform", "win32"),
             patch(
-                "web.integrations.codex.service.shutil.which",
+                "hosts.web.integrations.codex.service.shutil.which",
                 side_effect=lambda name: (
                     r"C:\Program Files\WindowsApps\OpenAI.Codex\app\resources\codex.exe"
                     if name == "codex.exe"
@@ -283,8 +283,8 @@ class TestSpawnArgs:
 
     def test_windows_unresolved_keeps_plain_codex(self, codex_service: CodexService) -> None:
         with (
-            patch("web.integrations.codex.service.sys.platform", "win32"),
-            patch("web.integrations.codex.service.shutil.which", return_value=None),
+            patch("hosts.web.integrations.codex.service.sys.platform", "win32"),
+            patch("hosts.web.integrations.codex.service.shutil.which", return_value=None),
         ):
             invocation = codex_service._build_invocation(
                 session_id="pending-1",
@@ -314,7 +314,7 @@ class TestQueryHappyPath:
         proc = _make_mock_proc(stdout_lines, exit_code=0)
 
         with patch(
-            "web.integrations.codex.service.asyncio.create_subprocess_exec",
+            "hosts.web.integrations.codex.service.asyncio.create_subprocess_exec",
             new=AsyncMock(return_value=proc),
         ):
             await codex_service.query(
@@ -354,7 +354,7 @@ class TestQueryHappyPath:
         proc = _make_mock_proc(stdout_lines, exit_code=0)
 
         with patch(
-            "web.integrations.codex.service.asyncio.create_subprocess_exec",
+            "hosts.web.integrations.codex.service.asyncio.create_subprocess_exec",
             new=AsyncMock(return_value=proc),
         ):
             await codex_service.query(
@@ -402,7 +402,7 @@ class TestAbort:
             coro.close()
             raise TimeoutError
 
-        with patch("web.integrations.codex.service.asyncio.wait_for", new=_fake_wait_for):
+        with patch("hosts.web.integrations.codex.service.asyncio.wait_for", new=_fake_wait_for):
             ok = await codex_service.abort("sid-1")
 
         assert ok is True
@@ -428,7 +428,7 @@ class TestAbort:
         async def _fake_wait_for(coro: Any, *args: Any, **kwargs: Any) -> Any:
             return await coro
 
-        with patch("web.integrations.codex.service.asyncio.wait_for", new=_fake_wait_for):
+        with patch("hosts.web.integrations.codex.service.asyncio.wait_for", new=_fake_wait_for):
             ok = await codex_service.abort("sid-2")
 
         assert ok is True
@@ -454,7 +454,7 @@ class TestErrorHandling:
         writer: _FakeWriter,
     ) -> None:
         with patch(
-            "web.integrations.codex.service.asyncio.create_subprocess_exec",
+            "hosts.web.integrations.codex.service.asyncio.create_subprocess_exec",
             new=AsyncMock(side_effect=FileNotFoundError("codex")),
         ):
             await codex_service.query(
@@ -479,7 +479,7 @@ class TestErrorHandling:
         proc = _make_mock_proc(stdout_lines, stderr_lines, exit_code=1)
 
         with patch(
-            "web.integrations.codex.service.asyncio.create_subprocess_exec",
+            "hosts.web.integrations.codex.service.asyncio.create_subprocess_exec",
             new=AsyncMock(return_value=proc),
         ):
             await codex_service.query(
@@ -504,7 +504,7 @@ class TestErrorHandling:
         proc = _make_mock_proc(stdout_lines, stderr_lines, exit_code=42)
 
         with patch(
-            "web.integrations.codex.service.asyncio.create_subprocess_exec",
+            "hosts.web.integrations.codex.service.asyncio.create_subprocess_exec",
             new=AsyncMock(return_value=proc),
         ):
             await codex_service.query(
@@ -533,7 +533,7 @@ class TestErrorHandling:
         proc = _make_mock_proc(stdout_lines, exit_code=0)
 
         with patch(
-            "web.integrations.codex.service.asyncio.create_subprocess_exec",
+            "hosts.web.integrations.codex.service.asyncio.create_subprocess_exec",
             new=AsyncMock(return_value=proc),
         ):
             await codex_service.query(

@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-import cli.main as cli_main
+import hosts.cli.main as cli_main
 from infrastructure.config.models import (
     ApprovalConfig,
     Config,

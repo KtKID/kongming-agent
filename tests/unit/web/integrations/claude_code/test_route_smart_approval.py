@@ -9,10 +9,10 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from hosts.web.app import create_app
+from hosts.web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
 from infrastructure.config.models import Config
 from tests.unit.test_web_app_lifespan import FakeThreadManager, _seed_password
-from web.app import create_app
-from web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 

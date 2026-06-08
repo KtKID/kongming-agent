@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from web.dashboard.config.writer import (
+from hosts.web.dashboard.config.writer import (
     ConflictError,
     PatchItem,
     ValidationFailedError,

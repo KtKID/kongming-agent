@@ -7,7 +7,7 @@ import json
 import time
 from pathlib import Path
 
-import cli.main as cli_main
+import hosts.cli.main as cli_main
 from core.message import Message
 from infrastructure.config.models import (
     ApprovalConfig,

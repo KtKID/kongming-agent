@@ -42,7 +42,7 @@ CWD = "test-cwd"
 
 def _setup_claude_home(tmp_path: Path) -> Path:
     """在 tmp_path 下搭 claude home 目录结构 + 复制 fixture jsonl。"""
-    from web.integrations.claude_code.jsonl_history import encode_cwd
+    from hosts.web.integrations.claude_code.jsonl_history import encode_cwd
 
     claude_home = tmp_path / "claude_home"
     encoded = encode_cwd(CWD)

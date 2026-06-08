@@ -20,14 +20,14 @@ from pathlib import Path
 import pytest
 
 from core.message import Message
+from hosts.web.uploads.registry import EXT_BY_MIME
+from hosts.web.uploads.storage import AssetStorage
 from infrastructure.llm_providers.media_adapter import (
     ImageMediaPart,
     build_media_part_from_metadata,
     collect_media_parts_from_messages,
 )
 from sessions.session_store import _message_from_dict, _message_to_dict
-from web.uploads.registry import EXT_BY_MIME
-from web.uploads.storage import AssetStorage
 
 # ---------------------------------------------------------------------------
 # 工具：构造 attachment ref dict + 落盘 fixture

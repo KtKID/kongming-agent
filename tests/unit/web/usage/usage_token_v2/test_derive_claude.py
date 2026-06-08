@@ -10,8 +10,8 @@ import json
 from pathlib import Path
 
 # tests/ 不受 importlinter Contract 9 约束，允许 import 私有模块
-from web.usage.usage_token_v2._derive_claude import derive_from_jsonl
-from web.usage.usage_token_v2._models import ClaudeUsage
+from hosts.web.usage.usage_token_v2._derive_claude import derive_from_jsonl
+from hosts.web.usage.usage_token_v2._models import ClaudeUsage
 
 
 def _write_jsonl(path: Path, entries: list[dict]) -> None:

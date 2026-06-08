@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from cli import main as cli_main
+from hosts.cli import main as cli_main
 from infrastructure.config.models import (
     ApprovalConfig,
     Config,

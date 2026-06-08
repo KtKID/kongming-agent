@@ -21,9 +21,9 @@ from pathlib import Path
 
 import pytest
 
-from web.integrations.codex._image_cli_args import CodexImageCliArgsBuilder
-from web.protocol.rest_models import UserInputAttachment
-from web.uploads.storage import AssetStorage
+from hosts.web.integrations.codex._image_cli_args import CodexImageCliArgsBuilder
+from hosts.web.protocol.rest_models import UserInputAttachment
+from hosts.web.uploads.storage import AssetStorage
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -246,7 +246,9 @@ class TestInputDefenses:
         _write_asset(storage, asset_id="e" * 32, thread_id=thread_id)
         builder = CodexImageCliArgsBuilder(storage)
 
-        with caplog.at_level(logging.WARNING, logger="web.integrations.codex._image_cli_args"):
+        with caplog.at_level(
+            logging.WARNING, logger="hosts.web.integrations.codex._image_cli_args"
+        ):
             result = builder.build(
                 [_make_att(asset_id="e" * 32, kind="video")],
                 thread_id=thread_id,
@@ -264,7 +266,9 @@ class TestInputDefenses:
         _write_asset(storage, asset_id="f" * 32, thread_id=thread_id)
         builder = CodexImageCliArgsBuilder(storage)
 
-        with caplog.at_level(logging.WARNING, logger="web.integrations.codex._image_cli_args"):
+        with caplog.at_level(
+            logging.WARNING, logger="hosts.web.integrations.codex._image_cli_args"
+        ):
             result = builder.build(
                 [_make_att(asset_id="f" * 32, status="processing")],
                 thread_id=thread_id,
@@ -283,7 +287,9 @@ class TestInputDefenses:
         thread_id = "thread-99999999aaaa"
         builder = CodexImageCliArgsBuilder(storage)
 
-        with caplog.at_level(logging.WARNING, logger="web.integrations.codex._image_cli_args"):
+        with caplog.at_level(
+            logging.WARNING, logger="hosts.web.integrations.codex._image_cli_args"
+        ):
             result = builder.build(
                 [_make_att(asset_id="9" * 32, mime_type="image/bmp")],
                 thread_id=thread_id,
@@ -299,7 +305,9 @@ class TestInputDefenses:
         # **不**写盘 —— path.is_file() 返 False
         builder = CodexImageCliArgsBuilder(storage)
 
-        with caplog.at_level(logging.WARNING, logger="web.integrations.codex._image_cli_args"):
+        with caplog.at_level(
+            logging.WARNING, logger="hosts.web.integrations.codex._image_cli_args"
+        ):
             result = builder.build(
                 [_make_att(asset_id="a" * 31 + "0", mime_type="image/png")],
                 thread_id=thread_id,

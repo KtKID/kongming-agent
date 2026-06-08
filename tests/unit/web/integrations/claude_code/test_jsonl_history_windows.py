@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from web.integrations.claude_code.jsonl_history import encode_cwd, jsonl_path_for
+from hosts.web.integrations.claude_code.jsonl_history import encode_cwd, jsonl_path_for
 
 
 def test_encode_cwd_replaces_windows_drive_and_backslashes() -> None:

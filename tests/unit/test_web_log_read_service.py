@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from hosts.web.dashboard.logs.registry import LogSourceRegistry
+from hosts.web.dashboard.logs.service import LogReadService
+from hosts.web.protocol.log_dto import LogReadResponseDTO
 from infrastructure.config.models import Config, ModelConfig
-from web.dashboard.logs.registry import LogSourceRegistry
-from web.dashboard.logs.service import LogReadService
-from web.protocol.log_dto import LogReadResponseDTO
 
 # ---------------------------------------------------------------------------
 # Fixtures

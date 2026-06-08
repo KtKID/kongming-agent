@@ -41,10 +41,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from web.dashboard.config import restart as restart_mod
-from web.dashboard.config.manager import ConfigManager
-from web.dashboard.config.restart import RestartScriptNotFoundError
-from web.dashboard.config.router import router as dashboard_config_router
+from hosts.web.dashboard.config import restart as restart_mod
+from hosts.web.dashboard.config.manager import ConfigManager
+from hosts.web.dashboard.config.restart import RestartScriptNotFoundError
+from hosts.web.dashboard.config.router import router as dashboard_config_router
 
 # ---------------------------------------------------------------------------
 # fixtures
@@ -378,12 +378,12 @@ def test_post_restart_happy(client: TestClient, monkeypatch: pytest.MonkeyPatch)
     """让 ``restart.trigger_restart`` 返回 fake pid → 200 + restarting/pid。
 
     monkeypatch 打到 ``web.dashboard.config.manager.restart.trigger_restart``
-    （manager.py 内 ``from web.dashboard.config import restart``，调用走
+    （manager.py 内 ``from hosts.web.dashboard.config import restart``，调用走
     ``restart.trigger_restart`` 属性查找，patch manager 引用的 module 即可）。
     """
     fake_pid = 99887
     monkeypatch.setattr(
-        "web.dashboard.config.manager.restart.trigger_restart",
+        "hosts.web.dashboard.config.manager.restart.trigger_restart",
         lambda repo_root: fake_pid,
     )
     resp = client.post("/api/manage/config/restart")
@@ -411,7 +411,9 @@ def test_post_restart_script_missing_returns_503(
     def _raise_missing(repo_root: Any) -> int:
         raise RestartScriptNotFoundError(f"./start.sh missing under {repo_root}")
 
-    monkeypatch.setattr("web.dashboard.config.manager.restart.trigger_restart", _raise_missing)
+    monkeypatch.setattr(
+        "hosts.web.dashboard.config.manager.restart.trigger_restart", _raise_missing
+    )
     resp = client.post("/api/manage/config/restart")
     assert resp.status_code == 503
     detail = resp.json()["detail"]

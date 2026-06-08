@@ -19,7 +19,7 @@ RUN_ID = "run-claude-thread-test000001-5"
 
 def _setup_fixture(claude_home: Path, fixture_name: str) -> None:
     """Copy a fixture jsonl into the claude_home directory structure."""
-    from web.integrations.claude_code.jsonl_history import encode_cwd
+    from hosts.web.integrations.claude_code.jsonl_history import encode_cwd
 
     encoded = encode_cwd(CWD)
     target_dir = claude_home / "projects" / encoded

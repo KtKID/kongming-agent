@@ -15,7 +15,7 @@ from commands.registry import CommandRegistry, build_builtin_registry
 from core.result import Result
 
 if TYPE_CHECKING:
-    from host.base import HostAdapter
+    from hosts.shared.base import HostAdapter
     from runtime_assembly.native_runtime import NativeRuntime
 
 # ``attachments`` 第 3 个位置参数：web 路径透传用户附件 dict 列表

@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from web.threads.metadata import (
+from hosts.web.threads.metadata import (
     THREAD_METADATA_SCHEMA_VERSION,
     ThreadMetadata,
     delete_thread_metadata_dir,

@@ -21,11 +21,11 @@ from application.agent_workflows.manager import (
 )
 from application.agent_workflows.strategies.base import WorkflowRunRequest, WorkflowStrategyNotFound
 from application.subagents.manager import SubAgentManager, SubAgentTask
-from cli.main import _apply_model_preset_or_exit
 from core.agent_spec import AgentSpec
 from core.contracts import LLMRequest, LLMResponse, ToolContext
 from core.message import Message, ToolCall
 from core.runner import Runner
+from hosts.cli.main import _apply_model_preset_or_exit
 from infrastructure.config.models import Config, LLMPresetConfig, ModelConfig, WebConfig
 from runtime_assembly.native_runtime import NativeRuntime
 from sessions import SessionBootstrap, build_session

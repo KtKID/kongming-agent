@@ -36,8 +36,8 @@ import os
 import time
 from pathlib import Path
 
-from web.integrations.claude_code.projects_scanner import list_projects
-from web.threads.metadata import ThreadMetadata
+from hosts.web.integrations.claude_code.projects_scanner import list_projects
+from hosts.web.threads.metadata import ThreadMetadata
 
 
 def _write_jsonl(path: Path, entries: list[dict]) -> None:
@@ -85,7 +85,7 @@ def test_registry_cwd_without_claude_dir_keeps_node(tmp_path: Path) -> None:
 
 
 def test_skip_agent_files(tmp_path: Path) -> None:
-    from web.integrations.claude_code.jsonl_history import encode_cwd
+    from hosts.web.integrations.claude_code.jsonl_history import encode_cwd
 
     cwd = "/foo/bar"
     encoded = encode_cwd(cwd)
@@ -107,7 +107,7 @@ def test_skip_agent_files(tmp_path: Path) -> None:
 
 
 def test_empty_jsonl_skipped(tmp_path: Path) -> None:
-    from web.integrations.claude_code.jsonl_history import encode_cwd
+    from hosts.web.integrations.claude_code.jsonl_history import encode_cwd
 
     cwd = "/foo"
     encoded = encode_cwd(cwd)
@@ -125,7 +125,7 @@ def test_empty_jsonl_skipped(tmp_path: Path) -> None:
 
 
 def test_corrupt_jsonl_title_unparsable(tmp_path: Path) -> None:
-    from web.integrations.claude_code.jsonl_history import encode_cwd
+    from hosts.web.integrations.claude_code.jsonl_history import encode_cwd
 
     cwd = "/foo"
     encoded = encode_cwd(cwd)
@@ -140,7 +140,7 @@ def test_corrupt_jsonl_title_unparsable(tmp_path: Path) -> None:
 
 
 def test_no_user_message_title_is_empty_session(tmp_path: Path) -> None:
-    from web.integrations.claude_code.jsonl_history import encode_cwd
+    from hosts.web.integrations.claude_code.jsonl_history import encode_cwd
 
     cwd = "/foo"
     encoded = encode_cwd(cwd)
@@ -162,7 +162,7 @@ def test_no_user_message_title_is_empty_session(tmp_path: Path) -> None:
 
 
 def test_title_truncated_to_40_chars_no_newlines(tmp_path: Path) -> None:
-    from web.integrations.claude_code.jsonl_history import encode_cwd
+    from hosts.web.integrations.claude_code.jsonl_history import encode_cwd
 
     cwd = "/foo"
     encoded = encode_cwd(cwd)
@@ -180,7 +180,7 @@ def test_title_truncated_to_40_chars_no_newlines(tmp_path: Path) -> None:
 
 
 def test_message_count_is_total_lines(tmp_path: Path) -> None:
-    from web.integrations.claude_code.jsonl_history import encode_cwd
+    from hosts.web.integrations.claude_code.jsonl_history import encode_cwd
 
     cwd = "/foo"
     encoded = encode_cwd(cwd)
@@ -203,7 +203,7 @@ def test_message_count_is_total_lines(tmp_path: Path) -> None:
 
 
 def test_sessions_sorted_by_mtime_desc(tmp_path: Path) -> None:
-    from web.integrations.claude_code.jsonl_history import encode_cwd
+    from hosts.web.integrations.claude_code.jsonl_history import encode_cwd
 
     cwd = "/foo"
     encoded = encode_cwd(cwd)
@@ -227,7 +227,7 @@ def test_sessions_sorted_by_mtime_desc(tmp_path: Path) -> None:
 
 
 def test_projects_sorted_by_max_session_mtime_desc(tmp_path: Path) -> None:
-    from web.integrations.claude_code.jsonl_history import encode_cwd
+    from hosts.web.integrations.claude_code.jsonl_history import encode_cwd
 
     cwd_old = "/old"
     cwd_new = "/new"
@@ -253,7 +253,7 @@ def test_projects_sorted_by_max_session_mtime_desc(tmp_path: Path) -> None:
 
 def test_cwd_and_display_name_from_registry(tmp_path: Path) -> None:
     """display_name 直接来自 registry cwd 的 basename，不再从 jsonl entry 反推。"""
-    from web.integrations.claude_code.jsonl_history import encode_cwd
+    from hosts.web.integrations.claude_code.jsonl_history import encode_cwd
 
     cwd = "/foo/bar/baz"
     encoded = encode_cwd(cwd)
@@ -273,7 +273,7 @@ def test_cwd_and_display_name_from_registry(tmp_path: Path) -> None:
 
 
 def test_progress_callback_receives_project_scan_progress(tmp_path: Path) -> None:
-    from web.integrations.claude_code.jsonl_history import encode_cwd
+    from hosts.web.integrations.claude_code.jsonl_history import encode_cwd
 
     cwd1 = "/foo"
     cwd2 = "/bar"
@@ -313,7 +313,7 @@ def test_progress_callback_receives_project_scan_progress(tmp_path: Path) -> Non
 def test_title_from_metadata(tmp_path: Path) -> None:
     """metadata.name 命中 → SessionSummary.title 取 metadata.name，
     不再去 jsonl 扫首条 user message。"""
-    from web.integrations.claude_code.jsonl_history import encode_cwd
+    from hosts.web.integrations.claude_code.jsonl_history import encode_cwd
 
     cwd = "/foo"
     encoded = encode_cwd(cwd)
@@ -335,7 +335,7 @@ def test_title_from_metadata(tmp_path: Path) -> None:
 def test_archived_from_metadata_filters_session(tmp_path: Path) -> None:
     """meta.is_archived=True → _build_session_summary 返回 None → session
     不出现在列表里（project 节点仍保留，sessions=[]）。"""
-    from web.integrations.claude_code.jsonl_history import encode_cwd
+    from hosts.web.integrations.claude_code.jsonl_history import encode_cwd
 
     cwd = "/foo"
     encoded = encode_cwd(cwd)
@@ -371,7 +371,7 @@ def test_archived_from_metadata_filters_session(tmp_path: Path) -> None:
 
 def test_metadata_not_found_fallback_to_first_user_msg(tmp_path: Path) -> None:
     """索引为空 / 缺该 claude_thread_id → 走原 fallback：扫首条 user message。"""
-    from web.integrations.claude_code.jsonl_history import encode_cwd
+    from hosts.web.integrations.claude_code.jsonl_history import encode_cwd
 
     cwd = "/foo"
     encoded = encode_cwd(cwd)
@@ -404,7 +404,7 @@ def test_metadata_overrides_old_4kb_window_bug(tmp_path: Path) -> None:
     本测试构造：jsonl 首行是 ``custom-title``，后接 12KB 大消息。
     metadata.name=``新名``。预期 title=``新名``。
     """
-    from web.integrations.claude_code.jsonl_history import encode_cwd
+    from hosts.web.integrations.claude_code.jsonl_history import encode_cwd
 
     cwd = "/foo"
     encoded = encode_cwd(cwd)
@@ -439,7 +439,7 @@ def test_read_custom_title_and_read_archived_deleted() -> None:
     1. 从 module import 这俩函数应抛 ImportError（symbol 不存在）。
     2. 解析源文件 AST，确认顶层不存在同名 def。
     """
-    import web.integrations.claude_code.projects_scanner as scanner_mod
+    import hosts.web.integrations.claude_code.projects_scanner as scanner_mod
 
     assert not hasattr(scanner_mod, "read_custom_title")
     assert not hasattr(scanner_mod, "read_archived")

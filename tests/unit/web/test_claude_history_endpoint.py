@@ -14,8 +14,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from hosts.web.threads.metadata import ThreadMetadata
 from tests.unit.test_web_routers_threads import FakeTM, _login_client
-from web.threads.metadata import ThreadMetadata
 
 
 def _add_thread(
@@ -43,9 +43,9 @@ def _add_thread(
 def test_unauthenticated_returns_401(tmp_path: Path) -> None:
     from fastapi.testclient import TestClient
 
+    from hosts.web.app import create_app
     from tests.unit.test_web_app_lifespan import _seed_password
     from tests.unit.test_web_routers_threads import _make_cfg
-    from web.app import create_app
 
     _seed_password(tmp_path, "pwd")
     tm = FakeTM()
@@ -97,7 +97,7 @@ def test_jsonl_missing_returns_404(tmp_path: Path, monkeypatch) -> None:
     )
     # mock jsonl_path_for 返回不存在的路径
     monkeypatch.setattr(
-        "web.routers.threads.jsonl_path_for",
+        "hosts.web.routers.threads.jsonl_path_for",
         lambda cwd, sid: tmp_path / "nope.jsonl",
     )
     client = _login_client(tmp_path, tm)
@@ -148,7 +148,7 @@ def test_happy_path_returns_messages(tmp_path: Path, monkeypatch) -> None:
             + "\n"
         )
     monkeypatch.setattr(
-        "web.routers.threads.jsonl_path_for",
+        "hosts.web.routers.threads.jsonl_path_for",
         lambda cwd, sid_: jsonl,
     )
     client = _login_client(tmp_path, tm)
@@ -193,10 +193,10 @@ def test_history_endpoint_returns_recent_tail_only(tmp_path: Path, monkeypatch) 
                 + "\n"
             )
     monkeypatch.setattr(
-        "web.routers.threads.jsonl_path_for",
+        "hosts.web.routers.threads.jsonl_path_for",
         lambda cwd, sid_: jsonl,
     )
-    monkeypatch.setattr("web.routers.threads.CLAUDE_HISTORY_MAX_MESSAGES", 2)
+    monkeypatch.setattr("hosts.web.routers.threads.CLAUDE_HISTORY_MAX_MESSAGES", 2)
     client = _login_client(tmp_path, tm)
     try:
         resp = client.get("/api/threads/thread-aaaaaaaaaaaa/claude_history")
@@ -296,7 +296,7 @@ def test_history_endpoint_filters_tool_entries_by_default(
             + "\n"
         )
     monkeypatch.setattr(
-        "web.routers.threads.jsonl_path_for",
+        "hosts.web.routers.threads.jsonl_path_for",
         lambda cwd, sid_: jsonl,
     )
     client = _login_client(tmp_path, tm)
@@ -369,7 +369,7 @@ def test_history_endpoint_include_tools_true_restores_tool_entries(
             + "\n"
         )
     monkeypatch.setattr(
-        "web.routers.threads.jsonl_path_for",
+        "hosts.web.routers.threads.jsonl_path_for",
         lambda cwd, sid_: jsonl,
     )
     client = _login_client(tmp_path, tm)

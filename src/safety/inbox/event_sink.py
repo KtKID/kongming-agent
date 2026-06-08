@@ -9,10 +9,10 @@ fan-out / 重连补包 / 协议帧等逻辑。
 跨层依赖说明：
 - safety 包按 ``.importlinter`` 规则不直接 import web；``broadcaster`` 实例通过 DI
   （构造函数）传入。本模块只引入一个本地 ``Protocol`` 描述 broadcaster 的最小接口
-  （duck typing），运行期由 ``src/web/run.py`` 装配点把
+  （duck typing），运行期由 ``src/hosts/web/run.py`` 装配点把
   ``web.approvals.global_inbox.broadcaster.ApprovalInboxBroadcaster`` 实例注进来——
   结构匹配，零反向 import。
-- ``src/web/run.py`` 装配时实例化
+- ``src/hosts/web/run.py`` 装配时实例化
   ``InboxEventSink(broadcaster=get_inbox_broadcaster(), manager=mgr)``
   并调 ``mgr.register_event_sink(sink)``。
 

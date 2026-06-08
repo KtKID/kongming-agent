@@ -17,20 +17,20 @@ from pathlib import Path
 
 import pytest
 
-from web.app import _bootstrap_projects_registry
-from web.integrations.claude_code.projects_registry import (
+from hosts.web.app import _bootstrap_projects_registry
+from hosts.web.integrations.claude_code.projects_registry import (
     claude_projects_path,
 )
-from web.integrations.claude_code.projects_registry import (
+from hosts.web.integrations.claude_code.projects_registry import (
     load_registry as load_claude_registry,
 )
-from web.integrations.codex.projects_registry import (
+from hosts.web.integrations.codex.projects_registry import (
     codex_projects_path,
 )
-from web.integrations.codex.projects_registry import (
+from hosts.web.integrations.codex.projects_registry import (
     load_registry as load_codex_registry,
 )
-from web.threads.metadata import ThreadMetadata, write_thread_metadata
+from hosts.web.threads.metadata import ThreadMetadata, write_thread_metadata
 
 # ---------------------------------------------------------------------------
 # 辅助
@@ -176,11 +176,11 @@ class TestIsolationBetweenClaudeAndCodex:
 
         # 在 _bootstrap_projects_registry 函数内部 import 之前替换源模块属性。
         monkeypatch.setattr(
-            "web.integrations.claude_code.projects_registry.bootstrap_register_self",
+            "hosts.web.integrations.claude_code.projects_registry.bootstrap_register_self",
             _boom,
         )
 
-        with caplog.at_level(logging.WARNING, logger="web.app"):
+        with caplog.at_level(logging.WARNING, logger="hosts.web.app"):
             _bootstrap_projects_registry(tmp_path, repo_root)
 
         # codex registry 仍应正确登记 repo_root
@@ -218,15 +218,15 @@ class TestMigrateFailureDoesNotBlockBootstrap:
 
         # 替换两个 registry 的 migrate（两个独立 try/except，但都应被容错）
         monkeypatch.setattr(
-            "web.integrations.claude_code.projects_registry.migrate_from_thread_metadata",
+            "hosts.web.integrations.claude_code.projects_registry.migrate_from_thread_metadata",
             _boom,
         )
         monkeypatch.setattr(
-            "web.integrations.codex.projects_registry.migrate_from_thread_metadata",
+            "hosts.web.integrations.codex.projects_registry.migrate_from_thread_metadata",
             _boom,
         )
 
-        with caplog.at_level(logging.WARNING, logger="web.app"):
+        with caplog.at_level(logging.WARNING, logger="hosts.web.app"):
             # 不应抛
             _bootstrap_projects_registry(tmp_path, repo_root)
 
@@ -261,11 +261,11 @@ class TestMigrateFailureDoesNotBlockBootstrap:
             raise RuntimeError("simulated claude migrate failure")
 
         monkeypatch.setattr(
-            "web.integrations.claude_code.projects_registry.migrate_from_thread_metadata",
+            "hosts.web.integrations.claude_code.projects_registry.migrate_from_thread_metadata",
             _boom_claude,
         )
 
-        with caplog.at_level(logging.WARNING, logger="web.app"):
+        with caplog.at_level(logging.WARNING, logger="hosts.web.app"):
             _bootstrap_projects_registry(tmp_path, repo_root)
 
         # claude bootstrap 仍跑过 → 含 repo_root

@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from hosts.web.threads.manager import ThreadManager
+from hosts.web.threads.metadata import ThreadMetadata, read_thread_metadata, write_thread_metadata
 from infrastructure.config.models import Config
-from web.threads.manager import ThreadManager
-from web.threads.metadata import ThreadMetadata, read_thread_metadata, write_thread_metadata
 
 
 def _make_cfg() -> Config:

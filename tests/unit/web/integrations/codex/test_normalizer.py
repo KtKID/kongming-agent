@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from web.integrations.codex.normalizer import INTERNAL_CONTENT_PREFIXES, normalize
+from hosts.web.integrations.codex.normalizer import INTERNAL_CONTENT_PREFIXES, normalize
 
 SID = "test-sid-019dee"
 

@@ -39,7 +39,7 @@ def live_server():
     env["KONGMING_WEB_DEV_MODE"] = "true"
 
     proc = subprocess.Popen(
-        [sys.executable, "-m", "web.run"],
+        [sys.executable, "-m", "hosts.web.run"],
         cwd=str(_REPO),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

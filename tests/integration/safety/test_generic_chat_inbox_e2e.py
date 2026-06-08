@@ -28,6 +28,10 @@ import asyncio
 import pytest
 
 from core.contracts import ApprovalAction, ApprovalRequest
+from hosts.web.approvals.global_inbox.broadcaster import (
+    ApprovalInboxBroadcaster,
+    reset_inbox_broadcaster_for_testing,
+)
 from safety.approval.manager import (
     ApprovalManager,
     make_manager_prompt_fn,
@@ -35,10 +39,6 @@ from safety.approval.manager import (
 )
 from safety.approval.rules import ApprovalRules
 from safety.inbox.event_sink import InboxEventSink
-from web.approvals.global_inbox.broadcaster import (
-    ApprovalInboxBroadcaster,
-    reset_inbox_broadcaster_for_testing,
-)
 
 pytestmark = pytest.mark.asyncio
 

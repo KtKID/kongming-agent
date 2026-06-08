@@ -1,4 +1,4 @@
-"""web.approvals.auto.ws_handlers 单测。
+"""hosts.web.approvals.auto.ws_handlers 单测。
 
 验证 toggle / query / state-msg 三个公共函数的行为，覆盖：
 
@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from web.approvals.auto.ws_handlers import (
+from hosts.web.approvals.auto.ws_handlers import (
     build_auto_approval_state_msg,
     handle_auto_approval_query,
     handle_auto_approval_toggle,

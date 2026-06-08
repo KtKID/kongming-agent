@@ -21,7 +21,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 from core.contracts import Event
-from web.websocket.event_sink import WSEventSink
+from hosts.web.websocket.event_sink import WSEventSink
 
 
 def _make_ws() -> AsyncMock:

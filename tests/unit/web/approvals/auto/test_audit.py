@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from web.approvals.auto.audit import AuditLogger
+from hosts.web.approvals.auto.audit import AuditLogger
 
 
 @pytest.fixture()

@@ -27,8 +27,8 @@ from pathlib import Path
 
 import pytest
 
-from web.dashboard.config import schema as _schema
-from web.dashboard.config.manager import (
+from hosts.web.dashboard.config import schema as _schema
+from hosts.web.dashboard.config.manager import (
     ConfigManager,
     EffectiveResponse,
     RawResponse,
@@ -36,8 +36,8 @@ from web.dashboard.config.manager import (
     SavePatchResponse,
     SchemaResponse,
 )
-from web.dashboard.config.restart import RestartScriptNotFoundError
-from web.dashboard.config.writer import (
+from hosts.web.dashboard.config.restart import RestartScriptNotFoundError
+from hosts.web.dashboard.config.writer import (
     ConflictError,
     PatchItem,
     ValidationFailedError,
@@ -305,7 +305,7 @@ def test_trigger_restart_returns_pid(
         return fake_pid
 
     # 在 manager 实际 import 处打 patch
-    monkeypatch.setattr("web.dashboard.config.manager.restart.trigger_restart", _fake_trigger)
+    monkeypatch.setattr("hosts.web.dashboard.config.manager.restart.trigger_restart", _fake_trigger)
     resp: RestartResponse = manager.trigger_restart()
     assert resp.restarting is True
     assert resp.pid == fake_pid
@@ -324,6 +324,8 @@ def test_trigger_restart_script_missing(
     def _raise_missing(repo_root: Path) -> int:
         raise RestartScriptNotFoundError("start.sh missing")
 
-    monkeypatch.setattr("web.dashboard.config.manager.restart.trigger_restart", _raise_missing)
+    monkeypatch.setattr(
+        "hosts.web.dashboard.config.manager.restart.trigger_restart", _raise_missing
+    )
     with pytest.raises(RestartScriptNotFoundError):
         manager.trigger_restart()

@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from web.integrations.claude_code.jsonl_history import jsonl_path_for, parse_jsonl_history
+from hosts.web.integrations.claude_code.jsonl_history import jsonl_path_for, parse_jsonl_history
 
 
 def _write_jsonl(path: Path, entries: list[dict]) -> None:

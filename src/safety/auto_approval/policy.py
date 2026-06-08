@@ -79,7 +79,7 @@ class AutoApprovalPolicy:
         让 generic_chat 通道的 :class:`safety.approval.rules.ApprovalRules` 复用
         **同一份** :class:`ConfigStore` 实例——保证 "用户在 UI 一处 toggle 即时
         生效于所有通道（claude_code + generic_chat）"，而不是各通道各持一份
-        store / 读不同盘文件。装配点见 ``src/web/run.py``。
+        store / 读不同盘文件。装配点见 ``src/hosts/web/run.py``。
 
         通过 property 暴露而非直接 ``_config_store`` 私有访问：保留封装边界 +
         可测试性（测试 ``policy.config_store is store_instance``）。

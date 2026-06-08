@@ -16,8 +16,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.contracts import Event
-from web.websocket.event_sink import WSEventSink
-from web.websocket.fanout import WebSocketFanout
+from hosts.web.websocket.event_sink import WSEventSink
+from hosts.web.websocket.fanout import WebSocketFanout
 
 
 def _make_ws() -> AsyncMock:

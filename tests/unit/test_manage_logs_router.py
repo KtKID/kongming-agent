@@ -8,10 +8,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from hosts.web.dashboard.logs.registry import LogSourceRegistry
+from hosts.web.dashboard.logs.router import router
+from hosts.web.dashboard.logs.service import LogReadService
 from infrastructure.config.models import Config, ModelConfig
-from web.dashboard.logs.registry import LogSourceRegistry
-from web.dashboard.logs.router import router
-from web.dashboard.logs.service import LogReadService
 
 # ---------------------------------------------------------------------------
 # Fixtures

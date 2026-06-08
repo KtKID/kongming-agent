@@ -17,9 +17,9 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from core.contracts import ApprovalAction, ApprovalRequest
+from hosts.web.threads.manager import ThreadManager
+from hosts.web.threads.metadata import ThreadMetadata, write_thread_metadata
 from infrastructure.config.models import Config
-from web.threads.manager import ThreadManager
-from web.threads.metadata import ThreadMetadata, write_thread_metadata
 
 
 def _make_cfg(idle_timeout: int = 60, idle_check: int = 10) -> Config:

@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from web.approvals.auto.matchers import matches, normalize_bash_cmd, split_chained
-from web.approvals.auto.rules import load_default_rules
+from hosts.web.approvals.auto.matchers import matches, normalize_bash_cmd, split_chained
+from hosts.web.approvals.auto.rules import load_default_rules
 
 # 加载一次给所有测试用
 _RULES = {r.id: r for r in load_default_rules().rules}

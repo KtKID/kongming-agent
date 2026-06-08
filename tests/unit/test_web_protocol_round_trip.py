@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from web.protocol.rest_models import (
+from hosts.web.protocol.rest_models import (
     CellSummaryDTO,
     CreateThreadRequest,
     ErrorResponseDTO,
@@ -27,7 +27,7 @@ from web.protocol.rest_models import (
     RenameThreadRequest,
     ThreadMetadataDTO,
 )
-from web.protocol.ws_frames import (
+from hosts.web.protocol.ws_frames import (
     ApprovalAckFrame,
     ApprovalDecisionFrame,
     ApprovalRequestFrame,

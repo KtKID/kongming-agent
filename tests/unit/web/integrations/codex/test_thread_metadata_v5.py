@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from web.threads.metadata import (
+from hosts.web.threads.metadata import (
     THREAD_METADATA_SCHEMA_VERSION,
     ThreadMetadata,
     read_thread_metadata,

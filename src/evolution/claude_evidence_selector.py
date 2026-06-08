@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 
 from evolution.models import TranscriptMessage, TranscriptWindow
-from web.integrations.claude_code.jsonl_history import jsonl_path_for, parse_jsonl_history
+from hosts.web.integrations.claude_code.jsonl_history import jsonl_path_for, parse_jsonl_history
 
 logger = logging.getLogger(__name__)
 

@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-import cli.main as cli_main
+import hosts.cli.main as cli_main
 
 
 @pytest.fixture(autouse=True)

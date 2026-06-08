@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from web.approvals.global_inbox.broadcaster import (
+from hosts.web.approvals.global_inbox.broadcaster import (
     ApprovalInboxBroadcaster,
     get_inbox_broadcaster,
     reset_inbox_broadcaster_for_testing,

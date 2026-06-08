@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from hosts.web.threads.metadata import ThreadMetadata
 from tests.unit.web.test_workspace_context_endpoint import CSRF_HEADERS, FakeTM, _login_client
-from web.threads.metadata import ThreadMetadata
 
 
 def _clean_git_env() -> dict[str, str]:

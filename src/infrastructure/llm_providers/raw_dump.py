@@ -39,7 +39,7 @@ def is_enabled() -> bool:
     通常由 provider 在调用 :func:`dump_raw_llm_interaction` 时显式传入
     ``enabled=cfg.trace.raw_llm`` —— 此时不走本函数。
     env 来源保留做"命令行临时一次性开启"场景：
-    ``KONGMING_TRACE_RAW_LLM=1 uv run python -m cli.main``。
+    ``KONGMING_TRACE_RAW_LLM=1 uv run python -m hosts.cli.main``。
     """
     return os.getenv(_ENV_FLAG) == "1"
 

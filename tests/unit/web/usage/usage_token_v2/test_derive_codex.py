@@ -9,8 +9,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from web.usage.usage_token_v2._derive_codex import derive_from_rollout
-from web.usage.usage_token_v2._models import CodexUsage
+from hosts.web.usage.usage_token_v2._derive_codex import derive_from_rollout
+from hosts.web.usage.usage_token_v2._models import CodexUsage
 
 
 def _write_jsonl(path: Path, entries: list[dict]) -> None:

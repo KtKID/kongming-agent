@@ -14,7 +14,10 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
-from web.integrations.claude_code.normalizer import INTERNAL_CONTENT_PREFIXES, ClaudeNormalizer
+from hosts.web.integrations.claude_code.normalizer import (
+    INTERNAL_CONTENT_PREFIXES,
+    ClaudeNormalizer,
+)
 
 SESSION_ID = "sess-abc"
 

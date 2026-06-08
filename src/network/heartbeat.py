@@ -49,7 +49,7 @@ class HeartbeatHooks(Protocol):
 
         :param frame: 已构造好的 pong 帧 dict（包含 ``frame_type`` /
             ``timestamp_ms`` / ``ts`` 等字段，schema 见
-            ``src/web/protocol/ws_frames.py::PongFrame``）
+            ``src/hosts/web/protocol/ws_frames.py::PongFrame``）
         """
         ...
 

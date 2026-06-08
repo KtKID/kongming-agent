@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from web.integrations.codex.approval import map_permission_mode
+from hosts.web.integrations.codex.approval import map_permission_mode
 
 
 class TestPermissionModeMapping:

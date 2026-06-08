@@ -29,10 +29,10 @@ from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from web.integrations.claude_code.approval import ApprovalBridge
-from web.integrations.claude_code.normalizer import ClaudeNormalizer
-from web.integrations.claude_code.service import ClaudeCodeService
-from web.shared.session_manager import SessionManager
+from hosts.web.integrations.claude_code.approval import ApprovalBridge
+from hosts.web.integrations.claude_code.normalizer import ClaudeNormalizer
+from hosts.web.integrations.claude_code.service import ClaudeCodeService
+from hosts.web.shared.session_manager import SessionManager
 
 
 class _FakeWriter:

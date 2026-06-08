@@ -38,17 +38,17 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from hosts.web.app import create_app
+from hosts.web.integrations.codex.projects_registry import (
+    add_project,
+    codex_projects_path,
+    load_registry,
+)
 from tests.unit.test_web_app_lifespan import _seed_password
 from tests.unit.test_web_routers_threads import (
     CSRF_HEADERS,
     FakeTM,
     _make_cfg,
-)
-from web.app import create_app
-from web.integrations.codex.projects_registry import (
-    add_project,
-    codex_projects_path,
-    load_registry,
 )
 
 # ---------------------------------------------------------------------------
@@ -67,7 +67,7 @@ def _disable_bootstrap_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     必须把这步置空，否则每条用例都会被预登记一条 ``/Volumes/.../kongming-agent``。
     """
     monkeypatch.setattr(
-        "web.app._bootstrap_projects_registry",
+        "hosts.web.app._bootstrap_projects_registry",
         lambda home, repo_root: None,
     )
 

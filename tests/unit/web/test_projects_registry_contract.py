@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from web.integrations.claude_code import projects_registry as claude_registry
-from web.integrations.codex import projects_registry as codex_registry
-from web.threads.metadata import ThreadMetadata, write_thread_metadata
+from hosts.web.integrations.claude_code import projects_registry as claude_registry
+from hosts.web.integrations.codex import projects_registry as codex_registry
+from hosts.web.threads.metadata import ThreadMetadata, write_thread_metadata
 
 
 @dataclass(frozen=True)
@@ -35,7 +35,7 @@ SPECS = [
     RegistrySpec(
         name="claude",
         backend_kind="claude_code",
-        logger_name="web.integrations.claude_code.projects_registry",
+        logger_name="hosts.web.integrations.claude_code.projects_registry",
         current_version=claude_registry.CURRENT_VERSION,
         entry_type=claude_registry.ProjectRegistryEntry,
         registry_path=claude_registry.claude_projects_path,
@@ -48,7 +48,7 @@ SPECS = [
     RegistrySpec(
         name="codex",
         backend_kind="codex",
-        logger_name="web.integrations.codex.projects_registry",
+        logger_name="hosts.web.integrations.codex.projects_registry",
         current_version=codex_registry.CURRENT_VERSION,
         entry_type=codex_registry.ProjectRegistryEntry,
         registry_path=codex_registry.codex_projects_path,

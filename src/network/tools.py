@@ -13,7 +13,7 @@ v0.1 提供的工具：
 
 - :func:`make_connection_id` —— 生成全局唯一的连接 ID（uuid4 hex）
 - :func:`safe_send_json` —— 向 WebSocket 发送 JSON 帧，失败返回 ``False``，
-  调用方据此触发清理（语义抄 ``src/web/websocket/fanout.py::WebSocketFanout``）
+  调用方据此触发清理（语义抄 ``src/hosts/web/websocket/fanout.py::WebSocketFanout``）
 """
 
 from __future__ import annotations

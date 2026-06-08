@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from web.integrations.claude_code._attachment_prefix import AttachmentPrefixBuilder
-from web.protocol.rest_models import UserInputAttachment
-from web.uploads.storage import AssetStorage
+from hosts.web.integrations.claude_code._attachment_prefix import AttachmentPrefixBuilder
+from hosts.web.protocol.rest_models import UserInputAttachment
+from hosts.web.uploads.storage import AssetStorage
 
 
 def _make_att(
@@ -266,7 +266,7 @@ class TestPathWithSpecialChars:
 
         # 不能真在 Unix 上构造 WindowsPath（文件 IO 会失败），改 monkeypatch
         # AssetStorage.asset_path 直接返回 fake Windows path
-        from web.uploads import storage as storage_mod
+        from hosts.web.uploads import storage as storage_mod
 
         storage = AssetStorage(base_dir=tmp_path)
         thread_id = "thread-winpath01"
@@ -304,7 +304,7 @@ class TestPathWithSpecialChars:
     ) -> None:
         """路径含 ``"`` → quoted 且内嵌引号被反斜杠转义。"""
 
-        from web.uploads import storage as storage_mod
+        from hosts.web.uploads import storage as storage_mod
 
         storage = AssetStorage(base_dir=tmp_path)
         thread_id = "thread-quote0001"

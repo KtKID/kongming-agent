@@ -96,4 +96,4 @@ def test_legacy_claude_code_keepalive_log_path_removed() -> None:
     搬迁后 ``keepalive_log`` 唯一真源 = ``network.keepalive_log``。
     """
     with pytest.raises(ModuleNotFoundError):
-        __import__("web.integrations.claude_code.keepalive_log")
+        __import__("hosts.web.integrations.claude_code.keepalive_log")

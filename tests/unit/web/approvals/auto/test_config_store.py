@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from web.approvals.auto.config_store import ConfigStore, ProjectConfig, cwd_hash
+from hosts.web.approvals.auto.config_store import ConfigStore, ProjectConfig, cwd_hash
 
 # ---------- cwd_hash ----------
 

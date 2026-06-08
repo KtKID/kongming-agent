@@ -22,8 +22,8 @@ import pytest
 
 from application.agent_workflows.manager import AgentWorkflowManager
 from application.subagents.manager import SubAgentManager
-from cli.main import _apply_model_preset_or_exit
 from core.agent_spec import AgentSpec
+from hosts.cli.main import _apply_model_preset_or_exit
 from infrastructure.config import load_config
 from runtime_assembly.native_runtime import NativeRuntime
 from tools import AutoAllowApproval, ToolRegistry, build_file_tools

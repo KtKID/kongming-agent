@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from web.websocket.thread_status import (
+from hosts.web.websocket.thread_status import (
     ThreadStatusBroadcaster,
     reset_broadcaster_for_testing,
 )

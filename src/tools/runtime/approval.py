@@ -267,6 +267,7 @@ def build_default_approval(
 
 
 __all__ = [
+    "ApprovalAction",
     "AutoAllowApproval",
     "AutoDenyApproval",
     "InteractiveApproval",

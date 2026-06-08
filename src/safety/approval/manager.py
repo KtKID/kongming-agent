@@ -563,7 +563,7 @@ def get_approval_manager(
     """获取或创建 manager 单例。
 
     首次调用必须传 ``rules``（懒构造）；之后调用忽略所有参数，
-    返回已构造实例。装配点（``src/web/run.py`` 等）首次调用时初始化；
+    返回已构造实例。装配点（``src/hosts/web/run.py`` 等）首次调用时初始化；
     其余只读。
 
     Args:
@@ -610,7 +610,7 @@ def make_manager_prompt_fn(
     """生成 prompt_fn，内部调 ``manager.request``；返回值映射成 :class:`ApprovalAction`。
 
     替代现有 :meth:`web.app_support.host_adapter.WebHostAdapter.prompt_approval`
-    （推 per-thread WS 旧模态）。``src/web/run.py`` 装配点用法：
+    （推 per-thread WS 旧模态）。``src/hosts/web/run.py`` 装配点用法：
 
     .. code-block:: python
 

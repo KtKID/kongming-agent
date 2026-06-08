@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from web.approvals.auto.config_store import ConfigStore, ProjectConfig
-from web.approvals.auto.policy import AutoApprovalPolicy, Decision
-from web.approvals.auto.rules import load_default_rules
+from hosts.web.approvals.auto.config_store import ConfigStore, ProjectConfig
+from hosts.web.approvals.auto.policy import AutoApprovalPolicy, Decision
+from hosts.web.approvals.auto.rules import load_default_rules
 
 
 @pytest.fixture()

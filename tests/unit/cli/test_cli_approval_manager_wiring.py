@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import cli.approval
-import cli.main as cli_main
+import hosts.cli.approval as cli_approval
+import hosts.cli.main as cli_main
 from core.contracts import ApprovalAction, ApprovalRequest
 from safety.approval.manager import reset_for_testing
 
@@ -46,7 +46,7 @@ async def test_cli_manager_prompt_fn_routes_through_cli_sink(monkeypatch, tmp_pa
         return ApprovalAction.ACCEPT_ONCE
 
     prompt.__action_aware__ = True  # type: ignore[attr-defined]
-    monkeypatch.setattr(cli.approval, "build_cli_action_prompt", lambda: prompt)
+    monkeypatch.setattr(cli_approval, "build_cli_action_prompt", lambda: prompt)
 
     prompt_fn = cli_main._build_cli_manager_prompt_fn("cli-session")
     action = await prompt_fn(
@@ -86,7 +86,7 @@ async def test_cli_manager_prompt_fn_auto_allow_projects_deadline(
         return ApprovalAction.ACCEPT_ONCE
 
     prompt.__action_aware__ = True  # type: ignore[attr-defined]
-    monkeypatch.setattr(cli.approval, "build_cli_action_prompt", lambda: prompt)
+    monkeypatch.setattr(cli_approval, "build_cli_action_prompt", lambda: prompt)
 
     prompt_fn = cli_main._build_cli_manager_prompt_fn("cli-session")
     action = await prompt_fn(

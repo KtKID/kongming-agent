@@ -13,8 +13,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from web.integrations.codex.service import CodexService
-from web.shared.session_manager import SessionManager
+from hosts.web.integrations.codex.service import CodexService
+from hosts.web.shared.session_manager import SessionManager
 
 
 class _MockStdout:
@@ -112,7 +112,7 @@ async def test_get_thread_usage_called_on_turn_completed() -> None:
 
     writer = _FakeWriter()
     with patch(
-        "web.integrations.codex.service.asyncio.create_subprocess_exec",
+        "hosts.web.integrations.codex.service.asyncio.create_subprocess_exec",
         new=AsyncMock(return_value=proc),
     ):
         await svc.query(
@@ -142,7 +142,7 @@ async def test_record_run_usage_skipped_when_thread_manager_none() -> None:
 
     writer = _FakeWriter()
     with patch(
-        "web.integrations.codex.service.asyncio.create_subprocess_exec",
+        "hosts.web.integrations.codex.service.asyncio.create_subprocess_exec",
         new=AsyncMock(return_value=proc),
     ):
         await svc.query(
@@ -175,7 +175,7 @@ async def test_record_run_usage_skipped_when_no_kongming_thread_id() -> None:
 
     writer = _FakeWriter()
     with patch(
-        "web.integrations.codex.service.asyncio.create_subprocess_exec",
+        "hosts.web.integrations.codex.service.asyncio.create_subprocess_exec",
         new=AsyncMock(return_value=proc),
     ):
         await svc.query(
@@ -211,14 +211,16 @@ async def test_usage_summary_broadcast_after_turn_completed(
     mock_broadcaster = MagicMock()
     mock_broadcaster.broadcast = AsyncMock()
     mock_broadcaster.emit = AsyncMock()
-    monkeypatch.setattr("web.integrations.codex.service.get_broadcaster", lambda: mock_broadcaster)
+    monkeypatch.setattr(
+        "hosts.web.integrations.codex.service.get_broadcaster", lambda: mock_broadcaster
+    )
 
     session_mgr = SessionManager()
     svc = CodexService(session_mgr, thread_manager=thread_mgr)
 
     writer = _FakeWriter()
     with patch(
-        "web.integrations.codex.service.asyncio.create_subprocess_exec",
+        "hosts.web.integrations.codex.service.asyncio.create_subprocess_exec",
         new=AsyncMock(return_value=proc),
     ):
         await svc.query(
@@ -265,7 +267,7 @@ async def test_multiple_queries_each_call_get_thread_usage() -> None:
         proc = _make_mock_proc(stdout_lines, exit_code=0)
         writer = _FakeWriter()
         with patch(
-            "web.integrations.codex.service.asyncio.create_subprocess_exec",
+            "hosts.web.integrations.codex.service.asyncio.create_subprocess_exec",
             new=AsyncMock(return_value=proc),
         ):
             await svc.query(
@@ -300,7 +302,7 @@ async def test_record_run_usage_failure_does_not_break_main_flow() -> None:
 
     writer = _FakeWriter()
     with patch(
-        "web.integrations.codex.service.asyncio.create_subprocess_exec",
+        "hosts.web.integrations.codex.service.asyncio.create_subprocess_exec",
         new=AsyncMock(return_value=proc),
     ):
         await svc.query(

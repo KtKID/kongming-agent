@@ -18,11 +18,11 @@ from typing import Any, Literal
 
 from fastapi.testclient import TestClient
 
+from hosts.web.app import create_app
+from hosts.web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
+from hosts.web.threads.metadata import ThreadMetadata
 from infrastructure.config.models import Config
 from tests.unit.test_web_app_lifespan import _seed_password
-from web.app import create_app
-from web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
-from web.threads.metadata import ThreadMetadata
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 
@@ -36,7 +36,7 @@ class _FakeUsageManager:
     """
 
     async def get_thread_summary(self, thread_id: str):  # type: ignore[no-untyped-def]
-        from web.usage_token import ThreadUsageSummary
+        from hosts.web.usage_token import ThreadUsageSummary
 
         del thread_id
         return ThreadUsageSummary(channel="anthropic")

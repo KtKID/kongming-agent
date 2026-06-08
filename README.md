@@ -78,7 +78,7 @@ ollama pull llama3.2
 ### 3. 冒烟验证（装配 + 真请求最小探测）
 
 ```bash
-uv run python -m cli.main --smoke
+uv run python -m hosts.cli.main --smoke
 ```
 
 期望输出：
@@ -91,7 +91,7 @@ uv run python -m cli.main --smoke
 ### 4. 进入交互式对话
 
 ```bash
-uv run python -m cli.main
+uv run python -m hosts.cli.main
 ```
 
 ```
@@ -119,7 +119,7 @@ kongming >
 ### 5. 看到中间发生了什么
 
 ```bash
-uv run python -m cli.main --verbose
+uv run python -m hosts.cli.main --verbose
 ```
 
 每轮都会打 `turn.start` / `tool.call.start` / `approval.decision` / `llm.response` 等事件进度，排障友好。
@@ -150,21 +150,21 @@ env 优先于 `.env`，`.env` 永远不覆盖已设值）。
 # 切到 Ollama
 KONGMING_MODEL_BASE_URL=http://127.0.0.1:11434 \
 KONGMING_MODEL_NAME=llama3.2 \
-uv run python -m cli.main
+uv run python -m hosts.cli.main
 
 # 切到远端 OpenAI
 KONGMING_MODEL_BASE_URL=https://api.openai.com \
 KONGMING_MODEL_NAME=gpt-4o-mini \
 KONGMING_MODEL_API_KEY=sk-xxx \
-uv run python -m cli.main
+uv run python -m hosts.cli.main
 ```
 
 **或者指定一份自己的配置文件**：
 
 ```bash
-uv run python -m cli.main --config /path/to/my.yaml
+uv run python -m hosts.cli.main --config /path/to/my.yaml
 # 或通过 env
-KONGMING_CONFIG=/path/to/my.yaml uv run python -m cli.main
+KONGMING_CONFIG=/path/to/my.yaml uv run python -m hosts.cli.main
 ```
 
 ### 7. 持久化会话（跨进程保留历史）
@@ -173,7 +173,7 @@ KONGMING_CONFIG=/path/to/my.yaml uv run python -m cli.main
 
 ```bash
 KONGMING_SESSION_BACKEND=sqlite \
-uv run python -m cli.main --session-id my-project
+uv run python -m hosts.cli.main --session-id my-project
 ```
 
 下次用同一个 `--session-id` 启动，会从 `.kongming/sessions.db` 恢复历史。
@@ -189,17 +189,17 @@ uv run python -m cli.main --session-id my-project
 | `auto_deny` | 自动拒绝 | 压测 deny 分支、模型纯聊天不碰工具 |
 
 ```bash
-KONGMING_APPROVAL_MODE=auto_allow uv run python -m cli.main
+KONGMING_APPROVAL_MODE=auto_allow uv run python -m hosts.cli.main
 ```
 
 ### 9. 关闭某类工具
 
 ```bash
 # 只保留文件工具，关掉 shell
-KONGMING_TOOL_SHELL_ENABLED=false uv run python -m cli.main
+KONGMING_TOOL_SHELL_ENABLED=false uv run python -m hosts.cli.main
 
 # 反过来
-KONGMING_TOOL_FILE_ENABLED=false uv run python -m cli.main
+KONGMING_TOOL_FILE_ENABLED=false uv run python -m hosts.cli.main
 ```
 
 ### 10. 常见问题速查
@@ -300,7 +300,7 @@ response status、response headers、**完整 response body**（gzip 自动解�
 
 ```bash
 # 跑 CLI 时开启
-KONGMING_TRACE_RAW_LLM=1 uv run python -m cli.main
+KONGMING_TRACE_RAW_LLM=1 uv run python -m hosts.cli.main
 
 # 看最近一次调用的完整响应
 ls -t .kongming/debug/raw-llm-*.json | head -1 | xargs jq '.response.body'
@@ -320,13 +320,13 @@ ls -t .kongming/debug/raw-llm-*.json | head -1 \
 | 能力 | 说明 |
 |---|---|
 | 单 agent run loop | 唯一 `core.runner.Runner`，async-first，turn 推进 + tool 回填 + 停止条件收口 |
-| OpenAI-compatible provider | `executors/llm/openai_responses.py`，兼容 LM Studio / Ollama / vLLM / OpenAI 官方 |
+| OpenAI-compatible provider | `infrastructure/llm_providers/openai_responses.py`，兼容 LM Studio / Ollama / vLLM / OpenAI 官方 |
 | 内置工具 | `read_file` / `write_file` / `list_dir` / `run_shell`（全 async subprocess，带超时） |
 | 三层安全链 | CapabilityPolicy → PermissionPolicy → ApprovalProvider（装配在 `SafetyGatedApproval`） |
 | Session 工程化 | `InMemorySession` 或 `SQLiteSession`（跨进程恢复），可配置切换 |
 | Trace 落盘 | `JsonlTraceSink` 把 run/tool/approval 事件 append 到 JSONL，后续可派生 usage/audit |
 | 统一配置入口 | YAML + 16 个 `KONGMING_*` 环境变量覆盖，本地模型可无 api_key |
-| CLI 宿主 | `HostAdapter` + `SessionBridge` + `CLIAdapter`，click + prompt_toolkit |
+| CLI 宿主 | `hosts.shared` + `hosts.cli`，click + prompt_toolkit |
 | 架构边界强制 | import-linter 3 contracts + pytest 架构合约测试 |
 
 ---
@@ -334,13 +334,14 @@ ls -t .kongming/debug/raw-llm-*.json | head -1 \
 ## 架构一览
 
 ```
-src/cli/                        ← 第一个真实宿主入口（click + prompt_toolkit）
- └─▶ src/host/                  ← 宿主抽象与桥接层
-      └─▶ src/safety/           ← capability → permission → approval 安全链
-           └─▶ src/executors/   ← OpenAI-compat provider + NativeRuntime 装配层
-                └─▶ src/core/   ← 宿主无关 agent 运行语义（runner + contracts 真源）
+src/hosts/cli/                  ← CLI 宿主入口（click + prompt_toolkit）
+ └─▶ src/hosts/shared/          ← 宿主抽象与桥接层
+      └─▶ src/runtime_assembly/ ← NativeRuntime composition root
+           ├─▶ src/safety/      ← capability → permission → approval 安全链
+           ├─▶ src/infrastructure/llm_providers/ ← OpenAI-compatible / Anthropic provider
+           └─▶ src/core/        ← 宿主无关 agent 运行语义（runner + contracts 真源）
 
-src/tools/ src/context/ src/observability/ src/config_loader/  ← core 之上的横切/实现层
+src/tools/ src/sessions/ src/prompting/ src/infrastructure/{config,tracing}/ ← core 之上的横切/实现层
 ```
 
 **依赖方向（import-linter 强制）**：

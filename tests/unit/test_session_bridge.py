@@ -25,8 +25,8 @@ from commands.models import CommandResult
 from core.errors import ProviderError
 from core.message import Message
 from core.result import Result
-from host.base import HostAdapter
-from host.session_bridge import SessionBridge
+from hosts.shared.base import HostAdapter
+from hosts.shared.session_bridge import SessionBridge
 
 
 class _StubAdapter(HostAdapter):

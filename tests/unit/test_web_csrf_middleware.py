@@ -14,7 +14,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE, CSRFMiddleware
+from hosts.web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE, CSRFMiddleware
 
 
 def _build_app() -> FastAPI:

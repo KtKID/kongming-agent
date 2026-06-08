@@ -5,7 +5,7 @@
 1. 缺必填字段 → ValidationError
 2. 字段类型错 → ValidationError
 3. ``extra='forbid'`` 生效 → 未知字段 ValidationError
-4. ``Literal`` 枚举字段拒绝错误值（ErrorCode / EvictReason / ApprovalOutcome / HistoryMessageRole）
+4. ``Literal`` 枚举字段拒绝错误值（ErrorCode / EvictReason / ApprovalOutcome / NormalizedMessage provider）
 5. ``WSFrameC2SAdapter`` / ``WSFrameS2CAdapter`` discriminator 拒绝未知 ``frame_type``
 6. ``frozen=True`` 生效——构造后赋值会抛异常
 7. ``ThreadMetadataDTO.id`` / ``CellSummaryDTO.thread_id`` pattern 约束
@@ -22,17 +22,18 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from web.protocol.rest_models import (
+import hosts.web.protocol as protocol
+import hosts.web.protocol.rest_models as rest_models
+from hosts.web.protocol.rest_models import (
     CellSummaryDTO,
     CreateThreadRequest,
     ErrorResponseDTO,
-    HistoryMessageDTO,
     LLMPresetDTO,
     LoginRequest,
     RenameThreadRequest,
     ThreadMetadataDTO,
 )
-from web.protocol.ws_frames import (
+from hosts.web.protocol.ws_frames import (
     ApprovalAckFrame,
     ApprovalDecisionFrame,
     ApprovalRequestFrame,
@@ -56,6 +57,17 @@ from web.protocol.ws_frames import (
 )
 
 # ---------------------------------------------------------------------------
+# 0. 退役 DTO 删除契约
+# ---------------------------------------------------------------------------
+
+
+def test_history_message_dto_is_not_exported() -> None:
+    """HistoryMessageDTO 已退役，协议层不保留 shim / alias。"""
+    assert not hasattr(rest_models, "HistoryMessageDTO")
+    assert not hasattr(protocol, "HistoryMessageDTO")
+
+
+# ---------------------------------------------------------------------------
 # 1. 缺必填字段
 # ---------------------------------------------------------------------------
 
@@ -67,8 +79,6 @@ from web.protocol.ws_frames import (
         (UserInputFrame, {"text": "hello"}),
         # ApprovalAckFrame：缺 approved
         (ApprovalAckFrame, {"call_id": "call-1"}),
-        # HistoryMessageDTO：缺 content/turn/timestamp_ms
-        (HistoryMessageDTO, {"role": "user"}),
         # ContentDeltaFrame：缺 seq + timestamp_ms
         (ContentDeltaFrame, {"delta": "x", "turn": 1}),
         # CreateThreadRequest：name + preset_id 都已改为可选，无必填字段可测
@@ -78,7 +88,6 @@ from web.protocol.ws_frames import (
     ids=[
         "user_input_missing_request_id",
         "approval_ack_missing_approved",
-        "history_message_missing_content_turn_timestamp",
         "content_delta_missing_seq_timestamp",
         "login_request_empty",
     ],
@@ -126,7 +135,7 @@ def test_reject_missing_required_fields(model: Any, kwargs: dict[str, Any]) -> N
                 "timestamp_ms": 1,
             },
         ),
-        # ThreadHistoryFrame.messages 应为 list[HistoryMessageDTO]
+        # ThreadHistoryFrame.messages 应为 list[NormalizedMessage]
         (ThreadHistoryFrame, {"messages": "not_a_list", "timestamp_ms": 1}),
         # ThreadMetadataDTO.created_at 应为 float / number
         (
@@ -212,10 +221,21 @@ def test_reject_extra_forbidden_fields(model: Any, kwargs: dict[str, Any]) -> No
             ApprovalDecisionFrame,
             {"call_id": "x", "outcome": "WAT", "turn": 1, "timestamp_ms": 1},
         ),
-        # HistoryMessageRole 错误值
+        # NormalizedMessage provider 错误值
         (
-            HistoryMessageDTO,
-            {"role": "bot", "content": "x", "turn": 1, "timestamp_ms": 1},
+            ThreadHistoryFrame,
+            {
+                "messages": [
+                    {
+                        "id": "m1",
+                        "sessionId": None,
+                        "timestamp": "2026-06-04T00:00:00Z",
+                        "provider": "bot",
+                        "frame_type": "text",
+                    }
+                ],
+                "timestamp_ms": 1,
+            },
         ),
         # ErrorResponseDTO（REST 端共享 ErrorCode）错误值
         (ErrorResponseDTO, {"error_code": "wrong_kind", "message": "x"}),
@@ -237,7 +257,7 @@ def test_reject_extra_forbidden_fields(model: Any, kwargs: dict[str, Any]) -> No
         "error_code_invalid",
         "evict_reason_invalid",
         "approval_outcome_invalid",
-        "history_role_invalid",
+        "normalized_provider_invalid",
         "error_response_code_invalid",
         "cell_summary_status_invalid",
     ],

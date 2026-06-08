@@ -7,4 +7,17 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-uv run mypy src/core src/tools src/context src/executors src/host src/cli src/safety src/observability
+uv run mypy \
+  src/core \
+  src/tools \
+  src/sessions \
+  src/prompting \
+  src/infrastructure \
+  src/application \
+  src/runtime_assembly \
+  src/hosts \
+  src/safety \
+  src/memory \
+  src/evolution \
+  src/scheduler \
+  src/network

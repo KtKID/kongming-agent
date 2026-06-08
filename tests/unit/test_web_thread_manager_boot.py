@@ -18,10 +18,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from hosts.web.app_support.host_adapter import WebHostAdapter
+from hosts.web.threads.manager import ThreadManager
+from hosts.web.threads.metadata import ThreadMetadata, write_thread_metadata
 from infrastructure.config.models import Config
-from web.app_support.host_adapter import WebHostAdapter
-from web.threads.manager import ThreadManager
-from web.threads.metadata import ThreadMetadata, write_thread_metadata
 
 
 def _make_cfg() -> Config:
@@ -158,7 +158,7 @@ async def test_create_thread_writes_metadata(tmp_path: Path) -> None:
     assert meta.name == "My thread"
     assert meta.preset_id == "preset-1"
     # 落盘可读回
-    from web.threads.metadata import read_thread_metadata
+    from hosts.web.threads.metadata import read_thread_metadata
 
     loaded = read_thread_metadata(tmp_path, meta.id)
     assert loaded == meta
@@ -230,7 +230,7 @@ async def test_delete_thread_removes_metadata_and_cell(tmp_path: Path) -> None:
 
     await mgr.delete_thread(meta.id)
     assert mgr.get_cell(meta.id) is None
-    from web.threads.metadata import read_thread_metadata
+    from hosts.web.threads.metadata import read_thread_metadata
 
     assert read_thread_metadata(tmp_path, meta.id) is None
 

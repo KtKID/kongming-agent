@@ -135,7 +135,7 @@ def mock_deps():
     """
     with (
         patch("runtime_assembly.native_runtime.NativeRuntime") as MockRuntime,
-        patch("host.session_bridge.SessionBridge") as MockBridge,
+        patch("hosts.shared.session_bridge.SessionBridge") as MockBridge,
         patch(
             "prompting.instructions.instruction_loader.assemble_instructions",
             new_callable=AsyncMock,
@@ -176,7 +176,7 @@ class TestPresetLookup:
 
     @pytest.mark.asyncio
     async def test_unknown_preset_raises_value_error(self, test_cfg, mock_adapter):
-        from web.run import _make_runtime_factory
+        from hosts.web.run import _make_runtime_factory
 
         factory = _make_runtime_factory(test_cfg)
         with pytest.raises(ValueError, match="unknown preset_id"):
@@ -184,7 +184,7 @@ class TestPresetLookup:
 
     @pytest.mark.asyncio
     async def test_valid_preset_found(self, test_cfg, mock_adapter, mock_deps):
-        from web.run import _make_runtime_factory
+        from hosts.web.run import _make_runtime_factory
 
         factory = _make_runtime_factory(test_cfg)
         await factory("thread-1", "test-local", mock_adapter, [])
@@ -197,7 +197,7 @@ class TestModelConfigOverride:
 
     @pytest.mark.asyncio
     async def test_local_preset_overrides(self, test_cfg, mock_adapter, mock_deps):
-        from web.run import _make_runtime_factory
+        from hosts.web.run import _make_runtime_factory
 
         factory = _make_runtime_factory(test_cfg)
         await factory("thread-1", "test-local", mock_adapter, [])
@@ -215,7 +215,7 @@ class TestModelConfigOverride:
 
     @pytest.mark.asyncio
     async def test_remote_preset_with_env_key(self, test_cfg, mock_adapter, mock_deps):
-        from web.run import _make_runtime_factory
+        from hosts.web.run import _make_runtime_factory
 
         factory = _make_runtime_factory(test_cfg)
         with patch.dict(os.environ, {"TEST_API_KEY": "sk-test-123"}):
@@ -232,7 +232,7 @@ class TestModelConfigOverride:
 
     @pytest.mark.asyncio
     async def test_missing_env_key_gives_empty(self, test_cfg, mock_adapter, mock_deps):
-        from web.run import _make_runtime_factory
+        from hosts.web.run import _make_runtime_factory
 
         factory = _make_runtime_factory(test_cfg)
         with patch.dict(os.environ, {}, clear=False):
@@ -257,7 +257,7 @@ class TestApprovalWiring:
         self, test_cfg, mock_adapter, mock_deps
     ):
         """验证 build_default_approval 收到的是 make_manager_prompt_fn 工厂返回的闭包。"""
-        from web.run import _make_runtime_factory
+        from hosts.web.run import _make_runtime_factory
 
         factory = _make_runtime_factory(test_cfg)
         await factory("thread-1", "test-local", mock_adapter, [])
@@ -277,7 +277,7 @@ class TestSessionBridge:
 
     @pytest.mark.asyncio
     async def test_echo_final_content_false(self, test_cfg, mock_adapter, mock_deps):
-        from web.run import _make_runtime_factory
+        from hosts.web.run import _make_runtime_factory
 
         factory = _make_runtime_factory(test_cfg)
         await factory("thread-abc", "test-local", mock_adapter, [])
@@ -297,7 +297,7 @@ class TestInstructionsCaching:
     async def test_instructions_loaded_once_for_multiple_cells(
         self, test_cfg, mock_adapter, mock_deps
     ):
-        from web.run import _make_runtime_factory
+        from hosts.web.run import _make_runtime_factory
 
         factory = _make_runtime_factory(test_cfg)
 
@@ -316,7 +316,7 @@ class TestSchedulerRuntimeFactory:
     async def test_scheduler_runtime_factory_forwards_tools_and_enabled_names(
         self, test_cfg, mock_adapter, mock_deps
     ):
-        from web.run import _make_runtime_factory
+        from hosts.web.run import _make_runtime_factory
 
         test_cfg.scheduler.enabled = True
         factory = _make_runtime_factory(test_cfg)
@@ -341,8 +341,8 @@ class TestEventSinks:
 
     @pytest.mark.asyncio
     async def test_sinks_passed_to_runtime(self, test_cfg, mock_adapter, mock_deps):
+        from hosts.web.run import _make_runtime_factory
         from infrastructure.tracing import JsonlTraceSink
-        from web.run import _make_runtime_factory
 
         factory = _make_runtime_factory(test_cfg)
         mock_sink = MagicMock()
@@ -362,8 +362,8 @@ class TestEventSinks:
     @pytest.mark.asyncio
     async def test_jsonl_sink_path_per_thread_isolation(self, test_cfg, mock_adapter, mock_deps):
         """两个不同 thread_id 各自分配独立的 JsonlTraceSink，文件路径不冲突。"""
+        from hosts.web.run import _make_runtime_factory
         from infrastructure.tracing import JsonlTraceSink
-        from web.run import _make_runtime_factory
 
         factory = _make_runtime_factory(test_cfg)
 

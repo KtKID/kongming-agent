@@ -21,7 +21,7 @@ import pytest
 
 from core.contracts import Event
 from devtools.full_logger import FullLogger, _reset_for_tests, init_full_logger
-from web.websocket.event_sink import WSEventSink
+from hosts.web.websocket.event_sink import WSEventSink
 
 
 class _StubConfig:

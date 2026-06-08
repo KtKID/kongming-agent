@@ -17,10 +17,10 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from hosts.web.app import create_app
+from hosts.web.integrations.claude_code.projects_scanner import ProjectSummary, SessionSummary
 from tests.unit.test_web_app_lifespan import _seed_password
 from tests.unit.test_web_routers_threads import FakeTM, _login_client, _make_cfg
-from web.app import create_app
-from web.integrations.claude_code.projects_scanner import ProjectSummary, SessionSummary
 
 
 def test_unauthenticated_returns_401(tmp_path: Path) -> None:
@@ -67,7 +67,7 @@ def test_returns_projects_dict(tmp_path: Path, monkeypatch) -> None:
         del registry_cwds, claude_home, progress_callback, thread_metadata_index
         return fake_data
 
-    monkeypatch.setattr("web.routers.claude.list_projects", fake_list_projects)
+    monkeypatch.setattr("hosts.web.routers.claude.list_projects", fake_list_projects)
     tm = FakeTM()
     client = _login_client(tmp_path, tm)
     try:
@@ -119,7 +119,7 @@ def test_refresh_stream_returns_progress_and_done(tmp_path: Path, monkeypatch) -
             progress_callback(1, 1, "-foo-bar")
         return fake_data
 
-    monkeypatch.setattr("web.routers.claude.list_projects", fake_list_projects)
+    monkeypatch.setattr("hosts.web.routers.claude.list_projects", fake_list_projects)
     tm = FakeTM()
     client = _login_client(tmp_path, tm)
     try:

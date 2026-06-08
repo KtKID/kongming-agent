@@ -29,8 +29,8 @@ from evolution.models import (
 )
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore
+from hosts.web.app import create_app
 from infrastructure.config.models import Config
-from web.app import create_app
 
 
 def _make_cfg(*, dev_mode: bool = True) -> Config:
@@ -137,7 +137,7 @@ class FakeThreadManager:
 
 def _seed_password(home: Path, password: str = "test-password") -> None:
     """提前在 home/web/password.hash 落 hash，避免装配时抛 WebAuthNotConfiguredError。"""
-    from web.auth.secrets import hash_password
+    from hosts.web.auth.secrets import hash_password
 
     web_dir = home / "web"
     web_dir.mkdir(parents=True, exist_ok=True)
@@ -210,7 +210,7 @@ def test_password_not_configured_raises(tmp_path: Path, monkeypatch: pytest.Monk
     tm = FakeThreadManager()
     # 不调 _seed_password
 
-    from web.errors import WebAuthNotConfiguredError
+    from hosts.web.errors import WebAuthNotConfiguredError
 
     with pytest.raises(WebAuthNotConfiguredError):
         create_app(cfg, tm, home_dir=tmp_path)

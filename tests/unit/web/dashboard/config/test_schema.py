@@ -23,13 +23,13 @@ from typing import Any
 
 import pytest
 
-from infrastructure.config.models import Config, ModelConfig
-from web.dashboard.config.schema import (
+from hosts.web.dashboard.config.schema import (
     FieldMeta,
     get_field_meta,
     list_field_metas,
     list_groups,
 )
+from infrastructure.config.models import Config, ModelConfig
 
 # ---------------------------------------------------------------------------
 # 常量

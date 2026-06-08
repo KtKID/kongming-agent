@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from web.approvals.global_inbox.broadcaster import get_inbox_broadcaster
+from hosts.web.approvals.global_inbox.broadcaster import get_inbox_broadcaster
 
 
 def _make_payload(request_id: str, thread_id: str = "thread-aaa") -> dict[str, Any]:

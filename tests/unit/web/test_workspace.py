@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from web.threads.metadata import ThreadMetadata
-from web.workspace.model import (
+from hosts.web.threads.metadata import ThreadMetadata
+from hosts.web.workspace.model import (
     WorkspaceError,
     require_workspace_root,
     resolve_workspace_cwd,

@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.contracts import ApprovalAction, ApprovalRequest, Event
-from web.app_support.host_adapter import WebHostAdapter
+from hosts.web.app_support.host_adapter import WebHostAdapter
 
 
 def _make_ws() -> AsyncMock:

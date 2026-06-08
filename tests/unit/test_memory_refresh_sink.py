@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from core.contracts import Event
-from host.memory_refresh_sink import MemoryRefreshSink
+from hosts.shared.memory_refresh_sink import MemoryRefreshSink
 from memory.store import MemorySnapshot
 
 # ---------------------------------------------------------------------------

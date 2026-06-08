@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from hosts.web.app import create_app
 from scheduler.domain import TaskState, TriggerType
 from scheduler.timing import to_iso
 from tests.unit.test_web_app_lifespan import _seed_password
@@ -41,7 +42,6 @@ from tests.unit.web.test_cron_router import (
     _login_client_with_store,
     _make_cfg,
 )
-from web.app import create_app
 
 # ---------------------------------------------------------------------------
 # helpers

@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from web.dashboard.config.restart import (
+from hosts.web.dashboard.config.restart import (
     RestartScriptNotFoundError,
     find_start_script,
     trigger_restart,
@@ -77,7 +77,9 @@ def test_trigger_restart_spawns_detached_with_devnull(tmp_path: Path) -> None:
     fake_proc = MagicMock()
     fake_proc.pid = 4242
 
-    with patch("web.dashboard.config.restart.subprocess.Popen", return_value=fake_proc) as popen:
+    with patch(
+        "hosts.web.dashboard.config.restart.subprocess.Popen", return_value=fake_proc
+    ) as popen:
         pid = trigger_restart(tmp_path)
 
     assert pid == 4242
@@ -96,7 +98,7 @@ def test_trigger_restart_spawns_detached_with_devnull(tmp_path: Path) -> None:
 
 def test_trigger_restart_raises_when_script_missing(tmp_path: Path) -> None:
     # tmp_path 故意不放 start.sh
-    with patch("web.dashboard.config.restart.subprocess.Popen") as popen:
+    with patch("hosts.web.dashboard.config.restart.subprocess.Popen") as popen:
         with pytest.raises(RestartScriptNotFoundError):
             trigger_restart(tmp_path)
 
@@ -109,7 +111,7 @@ def test_trigger_restart_raises_when_script_not_executable(tmp_path: Path) -> No
     script.write_text("#!/bin/sh\n")
     script.chmod(0o644)
 
-    with patch("web.dashboard.config.restart.subprocess.Popen") as popen:
+    with patch("hosts.web.dashboard.config.restart.subprocess.Popen") as popen:
         with pytest.raises(RestartScriptNotFoundError):
             trigger_restart(tmp_path)
 

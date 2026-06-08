@@ -9,8 +9,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from web.usage.usage_token_v2._derive_generic import derive_from_session
-from web.usage.usage_token_v2._models import (
+from hosts.web.usage.usage_token_v2._derive_generic import derive_from_session
+from hosts.web.usage.usage_token_v2._models import (
     GenericChatAnthropicUsage,
     GenericChatOpenAIUsage,
 )

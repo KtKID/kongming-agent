@@ -1,13 +1,13 @@
-"""unit：``_send_history_frame`` 把 tool 角色 Message 完整转 HistoryMessageDTO。
+"""unit：``_send_history_frame`` 把 runtime Message 转 NormalizedMessage history。
 
-v0.1.6 修 web 历史重放路径"工具卡片显示空"bug 的回归保护：之前 DTO 只透传
-role/content/turn/tool_call_id；前端从历史重建 tool 卡片时丢 toolName / ok /
-data / errorMessage（即便 Message 里都有）。本测试覆盖：
+complete-generic-channel-manager-handoff：generic history 复用三频道统一的
+NormalizedMessage[]，移除旧历史 DTO。
 
-1. tool role：DTO 正确填 tool_name（取自 Message.name）+ ok / data /
-   error_message（取自 Message.metadata）+ content（ToolResult.content）
-2. user / assistant role：tool_name / ok / data / error_message 全为 None
-3. metadata 缺字段或类型错误时，DTO 字段安全降级为 None
+本测试覆盖：
+
+1. user / assistant role：产 text message，保留 role/content
+2. assistant tool_calls：产 tool_use message，保留 toolId/toolName/toolInput
+3. tool role：产 tool_result message，保留 toolId/toolName/content/isError
 """
 
 from __future__ import annotations
@@ -16,9 +16,9 @@ from typing import Any
 
 import pytest
 
-from core.message import Message
-from web.protocol.ws_frames import ThreadHistoryFrame
-from web.websocket.routes import _send_history_frame
+from core.message import Message, ToolCall
+from hosts.web.protocol.ws_frames import ThreadHistoryFrame
+from hosts.web.websocket.routes import _send_history_frame
 
 
 class _FakeWS:
@@ -60,7 +60,7 @@ def _last_frame(ws: _FakeWS) -> ThreadHistoryFrame:
 
 @pytest.mark.asyncio
 async def test_history_frame_tool_message_carries_full_metadata() -> None:
-    """tool 角色 Message：tool_name / ok / data / error_message 全部传出。"""
+    """tool 角色 Message：toolName / toolId / content / isError 传出。"""
     msg = Message(
         role="tool",
         content="stdout text",
@@ -74,14 +74,15 @@ async def test_history_frame_tool_message_carries_full_metadata() -> None:
 
     frame = _last_frame(ws)
     assert len(frame.messages) == 1
-    dto = frame.messages[0]
-    assert dto.role == "tool"
-    assert dto.content == "stdout text"
-    assert dto.tool_call_id == "call-1"
-    assert dto.tool_name == "run_shell"
-    assert dto.ok is True
-    assert dto.data == {"exit_code": 0, "lines": 2}
-    assert dto.error_message is None
+    msg_out = frame.messages[0]
+    assert msg_out["provider"] == "generic_chat"
+    assert msg_out["frame_type"] == "tool_result"
+    assert msg_out["content"] == "stdout text"
+    assert msg_out["toolId"] == "call-1"
+    assert msg_out["toolName"] == "run_shell"
+    assert msg_out["isError"] is False
+    assert "id" in msg_out
+    assert "timestamp" in msg_out
 
 
 @pytest.mark.asyncio
@@ -98,15 +99,16 @@ async def test_history_frame_tool_error_carries_error_message() -> None:
     cell = _FakeCell([msg])
     await _send_history_frame(ws, cell)  # type: ignore[arg-type]
 
-    dto = _last_frame(ws).messages[0]
-    assert dto.tool_name == "write_file"
-    assert dto.ok is False
-    assert dto.error_message == "permission denied"
+    msg_out = _last_frame(ws).messages[0]
+    assert msg_out["toolName"] == "write_file"
+    assert msg_out["toolId"] == "call-2"
+    assert msg_out["isError"] is True
+    assert msg_out["content"] == '{"error": "permission denied"}'
 
 
 @pytest.mark.asyncio
 async def test_history_frame_user_and_assistant_have_none_tool_fields() -> None:
-    """非 tool 角色：tool_name / ok / data / error_message 必须 None。"""
+    """非 tool 角色：产 text message。"""
     user_msg = Message(role="user", content="hello")
     asst_msg = Message(role="assistant", content="world")
     ws = _FakeWS()
@@ -115,16 +117,17 @@ async def test_history_frame_user_and_assistant_have_none_tool_fields() -> None:
 
     msgs = _last_frame(ws).messages
     assert len(msgs) == 2
-    for dto in msgs:
-        assert dto.tool_name is None
-        assert dto.ok is None
-        assert dto.data is None
-        assert dto.error_message is None
+    assert msgs[0]["frame_type"] == "text"
+    assert msgs[0]["role"] == "user"
+    assert msgs[0]["content"] == "hello"
+    assert msgs[1]["frame_type"] == "text"
+    assert msgs[1]["role"] == "assistant"
+    assert msgs[1]["content"] == "world"
 
 
 @pytest.mark.asyncio
 async def test_history_frame_tool_with_missing_metadata_falls_to_none() -> None:
-    """tool message 没 metadata / metadata 类型错误 → 字段安全降级 None，不抛。"""
+    """tool message 没 metadata → isError=false，不抛。"""
     msg = Message(
         role="tool",
         content="x",
@@ -136,16 +139,35 @@ async def test_history_frame_tool_with_missing_metadata_falls_to_none() -> None:
     cell = _FakeCell([msg])
     await _send_history_frame(ws, cell)  # type: ignore[arg-type]
 
-    dto = _last_frame(ws).messages[0]
-    assert dto.tool_name == "echo"
-    assert dto.ok is None
-    assert dto.data is None
-    assert dto.error_message is None
+    msg_out = _last_frame(ws).messages[0]
+    assert msg_out["toolName"] == "echo"
+    assert msg_out["isError"] is False
 
 
 @pytest.mark.asyncio
-async def test_history_frame_tool_with_non_dict_metadata_data_returns_none() -> None:
-    """metadata.data 不是 dict 时 frame 写 None（防御损坏数据）。"""
+async def test_history_frame_tool_with_missing_name_uses_unknown() -> None:
+    """tool result 缺 name 时仍产合法 NormalizedMessage。"""
+    msg = Message.tool_result(
+        tool_call_id="call-missing-name",
+        content="tool output",
+        name=None,
+        metadata={"ok": True},
+    )
+    ws = _FakeWS()
+    cell = _FakeCell([msg])
+    await _send_history_frame(ws, cell)  # type: ignore[arg-type]
+
+    msg_out = _last_frame(ws).messages[0]
+    assert msg_out["frame_type"] == "tool_result"
+    assert msg_out["toolId"] == "call-missing-name"
+    assert msg_out["toolName"] == "unknown"
+    assert msg_out["content"] == "tool output"
+    assert msg_out["isError"] is False
+
+
+@pytest.mark.asyncio
+async def test_history_frame_tool_metadata_data_is_not_projected() -> None:
+    """metadata.data 没有 NormalizedMessage 承载字段，本路径不透出。"""
     msg = Message(
         role="tool",
         content="x",
@@ -157,28 +179,25 @@ async def test_history_frame_tool_with_non_dict_metadata_data_returns_none() -> 
     cell = _FakeCell([msg])
     await _send_history_frame(ws, cell)  # type: ignore[arg-type]
 
-    dto = _last_frame(ws).messages[0]
-    assert dto.tool_name == "run_shell"
-    assert dto.ok is True
-    assert dto.data is None  # 非 dict 兜底
+    msg_out = _last_frame(ws).messages[0]
+    assert msg_out["toolName"] == "run_shell"
+    assert msg_out["isError"] is False
+    assert "data" not in msg_out
 
 
 @pytest.mark.asyncio
 async def test_history_frame_assistant_with_none_content_renders_empty_string() -> None:
-    """v0.1.6 修：assistant 只发 tool_calls 时 ``Message.content=None``，DTO
-    必须落空字符串而不是字面 ``"None"``——之前 ``str(content)`` 把 None 转成
-    字符串 "None"，前端用户消息后会跟一个白框写着 "None"，体感像 bug。
-    """
+    """assistant content=None 时 text content 为空字符串。"""
     msg = Message(role="assistant", content=None)
     ws = _FakeWS()
     cell = _FakeCell([msg])
     await _send_history_frame(ws, cell)  # type: ignore[arg-type]
 
-    dto = _last_frame(ws).messages[0]
-    assert dto.role == "assistant"
-    assert dto.content == ""  # 不能是 "None"
+    msg_out = _last_frame(ws).messages[0]
+    assert msg_out["role"] == "assistant"
+    assert msg_out["content"] == ""
     # 防御性强校验：彻底排除字面 "None" 字符串泄漏
-    assert dto.content != "None"
+    assert msg_out["content"] != "None"
 
 
 @pytest.mark.asyncio
@@ -189,6 +208,26 @@ async def test_history_frame_user_with_none_content_renders_empty_string() -> No
     cell = _FakeCell([msg])
     await _send_history_frame(ws, cell)  # type: ignore[arg-type]
 
-    dto = _last_frame(ws).messages[0]
-    assert dto.content == ""
-    assert dto.content != "None"
+    msg_out = _last_frame(ws).messages[0]
+    assert msg_out["content"] == ""
+    assert msg_out["content"] != "None"
+
+
+@pytest.mark.asyncio
+async def test_history_frame_assistant_tool_calls_emit_tool_use() -> None:
+    """assistant tool_calls 历史产 tool_use，供前端恢复工具调用卡片。"""
+    msg = Message.assistant(
+        content=None,
+        tool_calls=[
+            ToolCall(call_id="call-5", tool_name="read_file", arguments={"path": "/tmp/a"})
+        ],
+    )
+    ws = _FakeWS()
+    cell = _FakeCell([msg])
+    await _send_history_frame(ws, cell)  # type: ignore[arg-type]
+
+    msg_out = _last_frame(ws).messages[0]
+    assert msg_out["frame_type"] == "tool_use"
+    assert msg_out["toolId"] == "call-5"
+    assert msg_out["toolName"] == "read_file"
+    assert msg_out["toolInput"] == {"path": "/tmp/a"}

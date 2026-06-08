@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from core.message import Message
+from hosts.web.uploads.storage import AssetStorage
 from infrastructure.config.models import ModelConfig
 from infrastructure.llm_providers.anthropic_messages import AnthropicMessagesProvider
 from infrastructure.llm_providers.media_adapter import (
@@ -29,7 +30,6 @@ from infrastructure.llm_providers.media_adapter import (
     MediaPart,
     OpenAIMediaAdapter,
 )
-from web.uploads.storage import AssetStorage
 
 # ---------------------------------------------------------------------------
 # 工具与 fixtures

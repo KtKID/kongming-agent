@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from web.shared.session_manager import SessionManager
+from hosts.web.shared.session_manager import SessionManager
 
 
 class _FakeWriter:

@@ -6,13 +6,9 @@ B5 / CR 报告 cr-report-20260424-202744.md。覆盖：
 - 未知 kind 返回 None
 - ``_render_reasoning`` 只在 payload.provider_metadata.reasoning_content 非空时打印
 - ``_format_arguments`` 空 / 超长 / 多键分支
-- ``_blocking_readline`` 可被 monkeypatch 替换
 - ``CLIEventSink(verbose=False, show_reasoning=False)`` 完全静默
 - ``CLIEventSink(verbose=True)`` 已知 kind → stderr 单行
 - ``CLIEventSink(show_reasoning=True)`` 对 llm.response 打印 reasoning
-- ``CLIAdapter.prompt_approval`` v0.1.6 三档：y/yes → ACCEPT_ONCE，
-  s/session → ACCEPT_FOR_SESSION，其他/EOF/Ctrl-C → REJECT；
-  ``__action_aware__`` 标记被 ``InteractiveApproval`` 探测到
 - ``CLIAdapter.close`` 幂等
 """
 
@@ -20,8 +16,8 @@ from __future__ import annotations
 
 import pytest
 
-from core.contracts import ApprovalAction, ApprovalRequest, Event
-from host.cli_adapter import (
+from core.contracts import Event
+from hosts.cli.adapter import (
     CLIAdapter,
     CLIEventSink,
     _format_arguments,
@@ -228,141 +224,6 @@ async def test_cli_event_sink_verbose_silently_ignores_unknown_kind(capsys):
     await sink.emit(Event(kind="llm.request", run_id="r", turn=1))  # 非白名单
     out = capsys.readouterr()
     assert out.err == ""
-
-
-# ---------------------------------------------------------------------------
-# CLIAdapter.prompt_approval（monkeypatch _blocking_readline）
-# ---------------------------------------------------------------------------
-
-
-def _make_request() -> ApprovalRequest:
-    return ApprovalRequest(
-        run_id="r",
-        session_id="s",
-        turn=1,
-        call_id="c",
-        tool_name="shell",
-        arguments={"cmd": "ls"},
-    )
-
-
-@pytest.mark.asyncio
-async def test_prompt_approval_y_returns_accept_once(monkeypatch):
-    monkeypatch.setattr("host.cli_adapter._blocking_readline", lambda _: "y")
-    adapter = CLIAdapter()
-    decision = await adapter.prompt_approval(_make_request())
-    assert decision is ApprovalAction.ACCEPT_ONCE
-
-
-@pytest.mark.asyncio
-async def test_prompt_approval_yes_full_word_returns_accept_once(monkeypatch):
-    monkeypatch.setattr("host.cli_adapter._blocking_readline", lambda _: "Yes")
-    adapter = CLIAdapter()
-    decision = await adapter.prompt_approval(_make_request())
-    assert decision is ApprovalAction.ACCEPT_ONCE
-
-
-@pytest.mark.asyncio
-async def test_prompt_approval_s_returns_accept_for_session(monkeypatch):
-    monkeypatch.setattr("host.cli_adapter._blocking_readline", lambda _: "s")
-    adapter = CLIAdapter()
-    decision = await adapter.prompt_approval(_make_request())
-    assert decision is ApprovalAction.ACCEPT_FOR_SESSION
-
-
-@pytest.mark.asyncio
-async def test_prompt_approval_session_full_word_returns_accept_for_session(monkeypatch):
-    monkeypatch.setattr("host.cli_adapter._blocking_readline", lambda _: "SESSION")
-    adapter = CLIAdapter()
-    decision = await adapter.prompt_approval(_make_request())
-    assert decision is ApprovalAction.ACCEPT_FOR_SESSION
-
-
-@pytest.mark.asyncio
-async def test_prompt_approval_n_returns_reject(monkeypatch):
-    monkeypatch.setattr("host.cli_adapter._blocking_readline", lambda _: "n")
-    adapter = CLIAdapter()
-    decision = await adapter.prompt_approval(_make_request())
-    assert decision is ApprovalAction.REJECT
-
-
-@pytest.mark.asyncio
-async def test_prompt_approval_empty_is_default_reject(monkeypatch):
-    """裸回车 → reject（安全约定，避免误确认）。"""
-    monkeypatch.setattr("host.cli_adapter._blocking_readline", lambda _: "")
-    adapter = CLIAdapter()
-    decision = await adapter.prompt_approval(_make_request())
-    assert decision is ApprovalAction.REJECT
-
-
-@pytest.mark.asyncio
-async def test_prompt_approval_garbage_input_returns_reject(monkeypatch):
-    """任意非 y/yes/s/session 的输入都视为 reject（保守）。"""
-    monkeypatch.setattr("host.cli_adapter._blocking_readline", lambda _: "maybe")
-    adapter = CLIAdapter()
-    decision = await adapter.prompt_approval(_make_request())
-    assert decision is ApprovalAction.REJECT
-
-
-@pytest.mark.asyncio
-async def test_prompt_approval_eof_returns_reject(monkeypatch):
-    def _raise_eof(*_a, **_k):
-        raise EOFError
-
-    monkeypatch.setattr("host.cli_adapter._blocking_readline", _raise_eof)
-    adapter = CLIAdapter()
-    decision = await adapter.prompt_approval(_make_request())
-    assert decision is ApprovalAction.REJECT
-
-
-@pytest.mark.asyncio
-async def test_prompt_approval_keyboard_interrupt_returns_reject(monkeypatch):
-    def _raise(*_a, **_k):
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr("host.cli_adapter._blocking_readline", _raise)
-    adapter = CLIAdapter()
-    decision = await adapter.prompt_approval(_make_request())
-    assert decision is ApprovalAction.REJECT
-
-
-def test_prompt_approval_is_action_aware():
-    """``__action_aware__`` 属性须能透过 bound method 访问，让
-    :class:`InteractiveApproval` 走 v0.1.4 ApprovalAction 路径而非 bool 路径。
-    """
-    adapter = CLIAdapter()
-    assert getattr(adapter.prompt_approval, "__action_aware__", False) is True
-
-
-@pytest.mark.asyncio
-async def test_prompt_approval_strips_whitespace(monkeypatch):
-    """前后空格不影响判定（用户终端容易带空格）。"""
-    monkeypatch.setattr("host.cli_adapter._blocking_readline", lambda _: "  s  ")
-    adapter = CLIAdapter()
-    decision = await adapter.prompt_approval(_make_request())
-    assert decision is ApprovalAction.ACCEPT_FOR_SESSION
-
-
-@pytest.mark.asyncio
-async def test_prompt_approval_writes_request_summary_to_stderr(monkeypatch, capsys):
-    """审批前先把 tool_name + args + reason 输出到 stderr，便于用户判断。"""
-    monkeypatch.setattr("host.cli_adapter._blocking_readline", lambda _: "n")
-    adapter = CLIAdapter()
-    await adapter.prompt_approval(
-        ApprovalRequest(
-            run_id="r",
-            session_id="s",
-            turn=1,
-            call_id="c",
-            tool_name="run_shell",
-            arguments={"cmd": "rm -rf /"},
-            reason="dangerous",
-        )
-    )
-    captured = capsys.readouterr()
-    assert "命中审批" in captured.err
-    assert "run_shell" in captured.err
-    assert "reason=dangerous" in captured.err
 
 
 # ---------------------------------------------------------------------------
