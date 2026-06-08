@@ -540,7 +540,7 @@ def test_schedule_tool_name_is_disallowed_in_cron_run() -> None:
     """ScheduleTool.name == 'schedule'；execution_bridge 应当把它裁掉，
     否则 cron run 内会递归创建任务。
     """
-    from scheduler.execution_bridge import _is_disallowed_tool_name
+    from application.scheduled_runs.execution_bridge import _is_disallowed_tool_name
 
     assert _is_disallowed_tool_name(ScheduleTool.name) is True
     assert _is_disallowed_tool_name("cron") is True

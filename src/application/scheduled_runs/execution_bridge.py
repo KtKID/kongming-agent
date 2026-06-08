@@ -1,4 +1,4 @@
-"""scheduler v0.1 — Execution Bridge（Wave C，#11/#12/#13/#15）。
+"""scheduled run 用例执行桥。
 
 把一个 :class:`scheduler.domain.DueTaskReservation` 转成一次 fresh
 ``Runner.run()``，并把结果回写为 :class:`scheduler.domain.ScheduledRun`。
@@ -20,7 +20,7 @@
 
 边界：
 - 不引入新异常类、不新增 EventSink Protocol
-- 不直接 import ``safety.*``（沿用 scheduler 模块边界）
+- 不直接 import ``safety.*``（沿用 scheduler 执行边界）
 """
 
 from __future__ import annotations

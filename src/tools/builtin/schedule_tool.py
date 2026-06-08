@@ -10,7 +10,7 @@ v0.2 提供六个 action：
 
 任务通过后台 ticker 触发，每次触发会启动一个 fresh agent run；fresh run 内本工具
 被装配层裁掉（防递归创建任务），裁剪规则在
-:mod:`scheduler.execution_bridge` 的 ``_FilteredToolLookup``。
+:mod:`application.scheduled_runs.execution_bridge` 的 ``_FilteredToolLookup``。
 
 约束：
 - 不直接 import :mod:`safety.*`（import-linter Contract 5）

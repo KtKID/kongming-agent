@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from application.scheduled_runs.execution_bridge import ExecutionBridge, _CronAuditWriterSink
 from infrastructure.config.models import (
     Config,
     LLMPresetConfig,
@@ -33,7 +34,6 @@ from scheduler.domain import (
     TaskTarget,
     TriggerType,
 )
-from scheduler.execution_bridge import ExecutionBridge, _CronAuditWriterSink
 
 # ---------------------------------------------------------------------------
 # Helpers

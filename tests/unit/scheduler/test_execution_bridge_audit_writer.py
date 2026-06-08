@@ -1,6 +1,6 @@
 """ExecutionBridge cron audit writer sink 单测（v0.5 阶段 D）。
 
-验证 :class:`scheduler.execution_bridge._CronAuditWriterSink` 在 trust 自动放行
+验证 :class:`application.scheduled_runs.execution_bridge._CronAuditWriterSink` 在 trust 自动放行
 路径下把 ``approval.cron.auto_allow`` event 落成
 ``store.append_audit(action="run_approval_auto_allow", ...)`` audit 行；
 非 trust 路径（fail_closed / hard_block / silent_allow）不写 audit；
@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from application.scheduled_runs.execution_bridge import ExecutionBridge
 from core.contracts import ApprovalDecision, ApprovalRequest
 from scheduler.domain import (
     ApprovalMode,
@@ -31,7 +32,6 @@ from scheduler.domain import (
     TaskTarget,
     TriggerType,
 )
-from scheduler.execution_bridge import ExecutionBridge
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -333,7 +333,10 @@ async def test_a8_augment_preserves_existing_aggregate_sinks_order() -> None:
     保证：audit_writer 仍在首位（不破坏 D 阶段约定的优先级），原 bridge sinks
     保持中间，新 trace_sink 在末尾。
     """
-    from scheduler.execution_bridge import _AggregateEventSink, _CronAuditWriterSink
+    from application.scheduled_runs.execution_bridge import (
+        _AggregateEventSink,
+        _CronAuditWriterSink,
+    )
 
     inner = FakeInner(decision_class="silent_allow", outcome="approved")
     bridge, _store_spy = _make_bridge_with_store_spy(inner)

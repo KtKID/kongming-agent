@@ -6,7 +6,7 @@ cron 触发完成后通过 :class:`web.websocket.cron.CronWSBroker` 把 ``cron.r
 设计：
 
 - 依赖注入：构造时传入 broker；不直接 import 单例 helper（便于测试隔离）
-- 落盘动作不归本 sink：``ScheduledRun`` 在 :class:`scheduler.execution_bridge.ExecutionBridge`
+- 落盘动作不归本 sink：``ScheduledRun`` 在 :class:`application.scheduled_runs.execution_bridge.ExecutionBridge`
   的 ``supersede_and_append_run`` 阶段已落盘（M3 完成）；本 sink 仅做"实时
   推送"
 - broadcast 失败不抛：broker 内部已 ``return_exceptions=True``；本 sink 仍

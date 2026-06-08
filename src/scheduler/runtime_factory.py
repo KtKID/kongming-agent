@@ -1,7 +1,7 @@
 """scheduler v0.1 — cron 装配工厂。
 
 把 :meth:`NativeRuntime.build` 的装配能力复用过来构造一个
-:class:`scheduler.execution_bridge.ExecutionBridge`：cron run 走 fresh
+:class:`application.scheduled_runs.execution_bridge.ExecutionBridge`：cron run 走 fresh
 session + 工具裁剪 + watchdog，但 LLM / safety / tool registry / session 工厂
 等装配仍然走主流程，避免 cron 自己复制一份装配。
 
@@ -30,9 +30,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from application.scheduled_runs.execution_bridge import ExecutionBridge
 from infrastructure.config.models import Config
 from runtime_assembly.native_runtime import NativeRuntime
-from scheduler.execution_bridge import ExecutionBridge
 from scheduler.store import Store
 
 if TYPE_CHECKING:

@@ -90,9 +90,9 @@ ignore_imports =
     runtime_assembly.native_runtime -> prompting.assembly.input_assembler
     runtime_assembly.native_runtime -> prompting.instructions.instruction_loader
     scheduler.runtime_factory -> runtime_assembly.native_runtime
+    scheduler.runtime_factory -> application.scheduled_runs.execution_bridge
+    scheduler.ticker -> application.scheduled_runs.execution_bridge
     scheduler.runtime_factory -> sessions
-    scheduler.execution_bridge -> infrastructure.llm_providers.provider_factory
-    scheduler.execution_bridge -> infrastructure.tracing
     tools -> scheduler.store
     tools.builtin.schedule_tool -> scheduler.domain
     tools.builtin.schedule_tool -> scheduler.store

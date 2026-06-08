@@ -155,7 +155,7 @@ class DeliveryDispatcher:
     调一次 :meth:`deliver`，按 ``task.delivery.channel`` 选 sink + 处理
     silent_marker / 无 sink / sink 异常等分支。
 
-    调用约定（与 :class:`scheduler.execution_bridge.ExecutionBridge` 协作）：
+    调用约定（与 :class:`application.scheduled_runs.execution_bridge.ExecutionBridge` 协作）：
 
     1. 仅在 ``run.status`` 进入终态后调用（COMPLETED / FAILED / SILENT 等）
     2. 返回的 :class:`DeliveryResult` 由 bridge 合并到 ``ScheduledRun``，

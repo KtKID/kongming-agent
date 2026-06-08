@@ -130,7 +130,7 @@ class RunNowResponse(BaseModel):
     """``POST /api/cron/tasks/{id}/run_now`` 的 202 响应。
 
     ``run_id`` 为占位字符串（``"pending-<uuid>"``），实际 run_id 由 ticker
-    抢到 reservation 后由 :class:`scheduler.execution_bridge.ExecutionBridge`
+    抢到 reservation 后由 :class:`application.scheduled_runs.execution_bridge.ExecutionBridge`
     生成。前端通过 ``/ws/cron`` 等 ``cron.run.completed`` 帧获取真实
     ``run_id``。
     """

@@ -52,8 +52,8 @@ from typing import TYPE_CHECKING
 from scheduler.timing import to_iso, utc_now
 
 if TYPE_CHECKING:
+    from application.scheduled_runs.execution_bridge import ExecutionBridge
     from scheduler.domain import DueTaskReservation
-    from scheduler.execution_bridge import ExecutionBridge
     from scheduler.store import Store
 
 logger = logging.getLogger(__name__)

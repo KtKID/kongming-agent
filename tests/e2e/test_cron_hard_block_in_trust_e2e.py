@@ -23,13 +23,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from application.scheduled_runs.execution_bridge import ExecutionBridge
 from core.contracts import (
     ApprovalDecision,
     ApprovalRequest,
     ToolContext,
 )
 from scheduler.domain import ApprovalMode
-from scheduler.execution_bridge import ExecutionBridge
 from scheduler.store import Store
 from tools.builtin.schedule_tool import build_schedule_tool
 

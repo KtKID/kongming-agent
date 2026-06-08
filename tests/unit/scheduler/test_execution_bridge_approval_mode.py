@@ -14,6 +14,11 @@ from collections.abc import Sequence
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from application.scheduled_runs.execution_bridge import (
+    ExecutionBridge,
+    _AggregateEventSink,
+    _CronAuditWriterSink,
+)
 from core.contracts import EventSink
 from infrastructure.config.models import (
     Config,
@@ -33,11 +38,6 @@ from scheduler.domain import (
     TaskState,
     TaskTarget,
     TriggerType,
-)
-from scheduler.execution_bridge import (
-    ExecutionBridge,
-    _AggregateEventSink,
-    _CronAuditWriterSink,
 )
 from scheduler.store import Store
 

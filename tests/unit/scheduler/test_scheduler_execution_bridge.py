@@ -1,4 +1,4 @@
-"""unit：scheduler.execution_bridge.ExecutionBridge + InactivityWatchdog（Wave C）。
+"""unit：application.scheduled_runs.execution_bridge.ExecutionBridge + InactivityWatchdog（Wave C）。
 
 覆盖矩阵：
 
@@ -38,6 +38,7 @@ from typing import Any
 
 import pytest
 
+from application.scheduled_runs.execution_bridge import ExecutionBridge, InactivityWatchdog
 from core import AgentSpec, InMemorySession
 from core.contracts import (
     ApprovalDecision,
@@ -71,7 +72,6 @@ from scheduler.domain import (
     TaskTarget,
     TriggerType,
 )
-from scheduler.execution_bridge import ExecutionBridge, InactivityWatchdog
 from scheduler.store import Store
 from scheduler.timing import to_iso, utc_now
 
