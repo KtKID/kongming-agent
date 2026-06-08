@@ -15,6 +15,7 @@ root_packages =
     sessions
     prompting
     infrastructure
+    application
     runtime_assembly
     host
     cli
@@ -42,6 +43,7 @@ forbidden_modules =
     sessions
     prompting
     infrastructure
+    application
     runtime_assembly
     host
     cli
@@ -64,6 +66,7 @@ type = layers
 layers =
     cli | web
     host
+    application
     runtime_assembly
     safety
     tools
@@ -151,6 +154,7 @@ forbidden_modules =
     sessions
     prompting
     infrastructure
+    application
     runtime_assembly
     host
     cli
@@ -195,6 +199,7 @@ forbidden_modules =
     core
     tools
     runtime_assembly
+    application
     safety
     host
     cli
@@ -343,6 +348,7 @@ source_modules =
     host
     safety
     infrastructure
+    application
     runtime_assembly
     web.app
     web.routers
@@ -411,6 +417,7 @@ source_modules =
     sessions
     prompting
     infrastructure
+    application
     runtime_assembly
     host
     cli

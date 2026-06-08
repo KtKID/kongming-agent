@@ -32,7 +32,10 @@ from typing import Any, Literal
 
 import click
 
-from core.contracts import EventSink, SupportsLLMStream
+from application.agent_workflows.manager import AgentWorkflowManager
+from application.subagents.manager import SubAgentManager, SubAgentTask
+from application.subagents.permissions import SubAgentPermissionSpec
+from core.contracts import ApprovalRequest, EventSink, SupportsLLMStream, ToolContext
 from host.cli_adapter import CLIAdapter, CLIEventSink
 from host.session_bridge import SessionBridge
 from infrastructure.config import Config, get_kongming_home, load_config
