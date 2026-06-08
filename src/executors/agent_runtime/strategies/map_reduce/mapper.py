@@ -33,6 +33,7 @@ class MapperPromptBuilder:
         return self.build(
             objective=spec.objective,
             output_contract=spec.output_contract,
+            mapper_prompt_template=spec.mapper.prompt_template,
             shard=shard,
             manifest=manifest,
         )
@@ -41,13 +42,23 @@ class MapperPromptBuilder:
         self,
         *,
         objective: str,
-        output_contract: Literal["code_findings"] | str,
+        output_contract: Literal["code_findings", "raw_text"] | str,
+        mapper_prompt_template: str,
         shard: MapShard,
         manifest: MapperInputManifest,
     ) -> str:
         """生成 mapper prompt，输入为目标、输出契约、shard 和 manifest，输出为严格 JSON 指令。"""
+        if output_contract == "raw_text":
+            return _raw_text_prompt(
+                objective=objective,
+                mapper_prompt_template=mapper_prompt_template,
+                shard=shard,
+                manifest=manifest,
+            )
         if output_contract != "code_findings":
-            raise ValueError("MapperPromptBuilder only supports output_contract='code_findings'")
+            raise ValueError(
+                "MapperPromptBuilder only supports output_contract='code_findings' or 'raw_text'"
+            )
         file_rows = [
             {
                 "original_path": item.original_path,
@@ -151,6 +162,60 @@ def _example_payload(*, shard: MapShard, manifest: MapperInputManifest) -> dict[
             }
         ],
     }
+
+
+def _raw_text_prompt(
+    *,
+    objective: str,
+    mapper_prompt_template: str,
+    shard: MapShard,
+    manifest: MapperInputManifest,
+) -> str:
+    """生成 raw_text mapper prompt，输入为目标和用户模板，输出为自由文本任务提示。"""
+    file_rows = [
+        {
+            "original_path": item.original_path,
+            "materialized_path": item.materialized_path,
+            "content_digest": item.content_digest,
+        }
+        for item in manifest.files
+    ]
+    return "\n".join(
+        [
+            "你是 map_reduce mapper 子 agent，只完成当前 shard 的任务。",
+            "",
+            "任务目标：",
+            objective.strip(),
+            "",
+            "shard 信息：",
+            _json_block(
+                {
+                    "shard_id": shard.shard_id,
+                    "shard_name": shard.shard_name,
+                    "display_order": shard.display_order,
+                    "module_hint": shard.module_hint,
+                    "shard_reason": shard.shard_reason,
+                    "context": shard.context,
+                }
+            ),
+            "",
+            "输入文件映射：",
+            _json_block(
+                {
+                    "task_run_id": manifest.task_run_id,
+                    "input_dir": manifest.input_dir,
+                    "files": file_rows,
+                }
+            ),
+            "",
+            "mapper 任务：",
+            mapper_prompt_template.strip(),
+            "",
+            "输出要求：",
+            "- 直接输出 mapper 任务要求的最终文本。",
+            "- 保持简洁，禁止输出 Markdown 代码块。",
+        ]
+    ).strip()
 
 
 def _json_block(payload: object) -> str:

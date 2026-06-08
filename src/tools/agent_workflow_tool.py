@@ -12,6 +12,7 @@ AgentWorkflowHandle 调用 manager，再把 workflow 产物路径、子 agent �
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from core.contracts import ToolContext
@@ -19,6 +20,7 @@ from tools.base import BaseBuiltinTool
 
 _SCOPED_WORKDIR_MODE = "scoped_workdir"
 _SCOPED_TOOL_NAMES = frozenset({"read_file", "write_file", "list_dir"})
+_INLINE_INPUT_PREFIXES = ("noop://", "inline://")
 _MAP_REDUCE_SPEC_WRAPPER = "MapReduceWorkflowSpec"
 _MAP_REDUCE_REQUIRED_PAYLOAD_KEYS = frozenset(
     {
@@ -106,7 +108,7 @@ _MAP_REDUCE_PAYLOAD_SCHEMA: dict[str, Any] = {
                 "validation_repair_retries": {"type": "integer"},
             },
         },
-        "output_contract": {"type": "string", "enum": ["code_findings"]},
+        "output_contract": {"type": "string", "enum": ["code_findings", "raw_text"]},
         "audit_tags": {"type": "array", "items": {"type": "string"}},
     },
     "required": [
@@ -305,7 +307,12 @@ class RunAgentWorkflowTool(BaseBuiltinTool):
         payload = args.get("payload")
         if not isinstance(payload, dict):
             raise ValueError("'payload' must be an object")
-        normalized_payload = _normalize_workflow_payload(mode.strip(), payload)
+        normalized_payload = _normalize_workflow_payload(
+            mode.strip(),
+            payload,
+            workspace_root=_workflow_workspace_root(manager, ctx),
+            tool_context=ctx,
+        )
         result = await manager.run_workflow_payload(
             mode=mode.strip(),
             parent_session_id=ctx.session_id,
@@ -423,31 +430,58 @@ def _parse_tasks(raw: Any) -> list[dict[str, object]]:
     return tasks
 
 
-def _normalize_workflow_payload(mode: str, payload: dict[str, Any]) -> dict[str, object]:
+def _normalize_workflow_payload(
+    mode: str,
+    payload: dict[str, Any],
+    *,
+    workspace_root: Path | None = None,
+    tool_context: ToolContext | None = None,
+) -> dict[str, object]:
     if mode == "parallel":
         raw_tasks = payload.get("task_specs", payload.get("tasks"))
         return {"task_specs": _parse_tasks(raw_tasks)}
     if mode == "map_reduce":
         payload = _unwrap_map_reduce_spec_payload(payload)
-        payload = _normalize_map_reduce_payload(payload)
+        payload = _normalize_map_reduce_payload(
+            payload,
+            workspace_root=workspace_root,
+            tool_context=tool_context,
+        )
     normalized = dict(payload)
     normalized.setdefault("mode", mode)
     return normalized
 
 
-def _normalize_map_reduce_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _normalize_map_reduce_payload(
+    payload: dict[str, Any],
+    *,
+    workspace_root: Path | None = None,
+    tool_context: ToolContext | None = None,
+) -> dict[str, Any]:
     """归一化 map_reduce 参数，输入为模型生成 payload，输出为 parser 友好的 payload。"""
     normalized = dict(payload)
+    root = workspace_root or Path.cwd().resolve()
     input_source = _object_copy(normalized.get("input_source"))
     if input_source is not None:
+        input_source.setdefault("root_dir", ".")
         for key in ("include", "exclude", "files"):
             input_source[key] = _coerce_string_array(input_source.get(key))
+        input_source["files"] = _normalize_map_reduce_file_list(
+            input_source.get("files"),
+            root_dir=input_source.get("root_dir"),
+            workspace_root=root,
+        )
         for key in ("index_provider", "input_digest"):
             input_source[key] = _coerce_nullable_string(input_source.get(key))
         normalized["input_source"] = input_source
 
     shard_strategy = _object_copy(normalized.get("shard_strategy"))
     if shard_strategy is not None:
+        shard_strategy.setdefault("max_estimated_tokens_per_shard", 20000)
+        shard_strategy.setdefault("min_shards", 1)
+        shard_strategy.setdefault("max_shards", 8)
+        shard_strategy.setdefault("preserve_directory_boundary", True)
+        shard_strategy.setdefault("prefer_dependency_cohesion", False)
         for key in (
             "max_files_per_shard",
             "max_estimated_tokens_per_shard",
@@ -457,18 +491,25 @@ def _normalize_map_reduce_payload(payload: dict[str, Any]) -> dict[str, Any]:
             shard_strategy[key] = _coerce_int(shard_strategy.get(key))
         for key in ("preserve_directory_boundary", "prefer_dependency_cohesion"):
             shard_strategy[key] = _coerce_bool(shard_strategy.get(key))
+        if shard_strategy.get("prefer_dependency_cohesion") is True:
+            shard_strategy["prefer_dependency_cohesion"] = False
         normalized["shard_strategy"] = shard_strategy
 
     mapper = _object_copy(normalized.get("mapper"))
     if mapper is not None:
+        mapper.setdefault("skill_names", [])
+        mapper.setdefault("permission_mode", _SCOPED_WORKDIR_MODE)
         for key in ("tool_names", "skill_names"):
             mapper[key] = _coerce_string_array(mapper.get(key))
+        mapper["tool_names"] = _normalize_map_reduce_tool_names(mapper.get("tool_names"))
         for key in ("max_turns", "max_output_chars"):
             mapper[key] = _coerce_int(mapper.get(key))
         normalized["mapper"] = mapper
 
     reducer = _object_copy(normalized.get("reducer"))
     if reducer is not None:
+        reducer.setdefault("max_findings", 50)
+        reducer.setdefault("include_failed_shards", True)
         reducer["max_findings"] = _coerce_int(reducer.get("max_findings"))
         reducer["include_failed_shards"] = _coerce_bool(reducer.get("include_failed_shards"))
         reducer["reducer_prompt_template"] = _coerce_nullable_string(
@@ -478,6 +519,12 @@ def _normalize_map_reduce_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     limits = _object_copy(normalized.get("limits"))
     if limits is not None:
+        limits.setdefault("max_concurrency", 4)
+        limits.setdefault("workflow_timeout_seconds", 1800)
+        limits.setdefault("mapper_timeout_seconds", 300)
+        limits.setdefault("reducer_timeout_seconds", 300)
+        limits.setdefault("mapper_retries", 0)
+        limits.setdefault("validation_repair_retries", 0)
         for key in (
             "max_concurrency",
             "workflow_timeout_seconds",
@@ -489,8 +536,177 @@ def _normalize_map_reduce_payload(payload: dict[str, Any]) -> dict[str, Any]:
             limits[key] = _coerce_int(limits.get(key))
         normalized["limits"] = limits
 
+    _normalize_inline_map_reduce_input(
+        normalized,
+        workspace_root=root,
+        tool_context=tool_context,
+    )
     normalized["audit_tags"] = _coerce_string_array(normalized.get("audit_tags"))
     return normalized
+
+
+def _workflow_workspace_root(manager: Any, ctx: ToolContext) -> Path:
+    """解析 workflow 工作区根，输入为 manager/context，输出为绝对目录。"""
+    manager_root = getattr(manager, "workspace_root", None)
+    if isinstance(manager_root, Path):
+        return manager_root.expanduser().resolve()
+    if isinstance(manager_root, str) and manager_root.strip():
+        return Path(manager_root).expanduser().resolve()
+    ctx_root = ctx.metadata.get("cwd")
+    if isinstance(ctx_root, str) and ctx_root.strip():
+        return Path(ctx_root).expanduser().resolve()
+    return Path.cwd().resolve()
+
+
+def _normalize_map_reduce_file_list(
+    value: Any,
+    *,
+    root_dir: Any,
+    workspace_root: Path,
+) -> Any:
+    """归一化 file_list 路径，输入为模型文件列表，输出为相对 input root 的路径列表。"""
+    if not isinstance(value, list):
+        return value
+    input_root = _resolve_input_root_for_normalization(root_dir, workspace_root)
+    return [
+        _normalize_map_reduce_file_path(item, input_root=input_root)
+        if isinstance(item, str)
+        else item
+        for item in value
+    ]
+
+
+def _resolve_input_root_for_normalization(root_dir: Any, workspace_root: Path) -> Path:
+    """解析归一化用 input root，输入为 root_dir 字段，输出为绝对目录。"""
+    if not isinstance(root_dir, str) or not root_dir.strip():
+        return workspace_root
+    root_path = Path(root_dir).expanduser()
+    if root_path.is_absolute():
+        return root_path.resolve()
+    return (workspace_root / root_path).resolve()
+
+
+def _normalize_map_reduce_file_path(value: str, *, input_root: Path) -> str:
+    """把 workspace 内绝对文件路径转相对路径，输入为文件路径，输出为原值或相对路径。"""
+    stripped = value.strip()
+    if not stripped:
+        return value
+    path = Path(stripped).expanduser()
+    if not path.is_absolute():
+        return stripped
+    try:
+        return path.resolve().relative_to(input_root).as_posix()
+    except ValueError:
+        return value
+
+
+def _normalize_map_reduce_tool_names(value: Any) -> Any:
+    """过滤 mapper 工具白名单，输入为模型工具数组，输出为 scoped file tools。"""
+    if not isinstance(value, list):
+        return value
+    normalized = [name for name in value if isinstance(name, str) and name in _SCOPED_TOOL_NAMES]
+    return normalized or ["read_file", "list_dir"]
+
+
+def _normalize_inline_map_reduce_input(
+    normalized: dict[str, Any],
+    *,
+    workspace_root: Path,
+    tool_context: ToolContext | None,
+) -> None:
+    """把 noop/inline 输入转换为真实占位文件，输入为 payload，输出为原地归一化。"""
+    input_source = normalized.get("input_source")
+    if not isinstance(input_source, dict):
+        return
+    files = input_source.get("files")
+    if not _contains_inline_input(files):
+        return
+    shard_strategy = normalized.get("shard_strategy")
+    count = _inline_shard_count(files, shard_strategy)
+    rel_files = _write_inline_map_reduce_files(
+        workspace_root=workspace_root,
+        tool_context=tool_context,
+        count=count,
+        objective=normalized.get("objective"),
+    )
+    input_source["kind"] = "file_list"
+    input_source["root_dir"] = "."
+    input_source["include"] = []
+    input_source["exclude"] = []
+    input_source["files"] = rel_files
+    input_source["index_provider"] = input_source.get("index_provider") or "inline"
+    normalized["output_contract"] = "raw_text"
+
+
+def _contains_inline_input(value: Any) -> bool:
+    """判断文件列表是否包含 inline 占位符，输入为任意值，输出为布尔值。"""
+    if not isinstance(value, list):
+        return False
+    return any(
+        isinstance(item, str) and item.strip().startswith(_INLINE_INPUT_PREFIXES) for item in value
+    )
+
+
+def _inline_shard_count(files: Any, shard_strategy: Any) -> int:
+    """推断 inline 分片数，输入为 files 和 shard_strategy，输出为至少 1 的数量。"""
+    inline_count = 0
+    if isinstance(files, list):
+        inline_count = sum(
+            1
+            for item in files
+            if isinstance(item, str) and item.strip().startswith(_INLINE_INPUT_PREFIXES)
+        )
+    min_shards = 1
+    max_shards: int | None = None
+    if isinstance(shard_strategy, dict):
+        raw_min = shard_strategy.get("min_shards")
+        raw_max = shard_strategy.get("max_shards")
+        if isinstance(raw_min, int) and raw_min > 0:
+            min_shards = raw_min
+        if isinstance(raw_max, int) and raw_max > 0:
+            max_shards = raw_max
+    count = max(1, inline_count, min_shards)
+    if max_shards is not None:
+        count = min(count, max_shards)
+    return count
+
+
+def _write_inline_map_reduce_files(
+    *,
+    workspace_root: Path,
+    tool_context: ToolContext | None,
+    count: int,
+    objective: Any,
+) -> list[str]:
+    """写入 inline 占位输入，输入为工作区和数量，输出为相对 workspace 的文件路径。"""
+    session_id = _safe_path_segment(tool_context.session_id if tool_context is not None else "run")
+    call_id = _safe_path_segment(tool_context.call_id if tool_context is not None else "call")
+    root = workspace_root / ".kongming" / "map_reduce_inline_inputs" / session_id / call_id
+    root.mkdir(parents=True, exist_ok=True)
+    rel_files: list[str] = []
+    objective_text = str(objective).strip() if objective is not None else ""
+    for index in range(1, count + 1):
+        path = root / f"inline-{index:03d}.txt"
+        path.write_text(
+            "\n".join(
+                [
+                    f"inline_shard: {index}",
+                    f"total_inline_shards: {count}",
+                    f"objective: {objective_text}",
+                    "note: this file is a synthetic map_reduce input placeholder.",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        rel_files.append(path.relative_to(workspace_root).as_posix())
+    return rel_files
+
+
+def _safe_path_segment(value: str) -> str:
+    """清理路径段，输入为任意 ID，输出为安全目录名。"""
+    cleaned = "".join(char if char.isalnum() or char in "-_" else "-" for char in value)
+    return cleaned.strip("-") or "unknown"
 
 
 def _object_copy(value: Any) -> dict[str, Any] | None:
