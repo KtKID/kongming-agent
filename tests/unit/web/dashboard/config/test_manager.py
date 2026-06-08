@@ -105,7 +105,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     for var in _ENV_VARS_TO_CLEAN:
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr("config_loader.loader._maybe_load_env_file", lambda: None)
+    monkeypatch.setattr("infrastructure.config.loader._maybe_load_env_file", lambda: None)
 
 
 @pytest.fixture

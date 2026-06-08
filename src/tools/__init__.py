@@ -19,7 +19,7 @@
 
 - 协议真源只在 :mod:`core.contracts`，本包里**不**重定义 Protocol。
 - 本包不 import ``safety/`` / ``host/`` / ``cli/`` / ``executors/`` / ``sessions/`` / ``prompting/`` /
-  ``observability/`` 下任何模块，硬约束由 import-linter 背书。
+  ``infrastructure.tracing/`` 下任何模块，硬约束由 import-linter 背书。
 """
 
 from __future__ import annotations
@@ -46,8 +46,8 @@ from tools.runtime.base import BaseBuiltinTool
 from tools.runtime.registry import ToolRegistry
 
 if TYPE_CHECKING:
-    from config_loader.models import Config
     from evolution.store import EvolutionStore
+    from infrastructure.config.models import Config
     from scheduler.store import Store
 
 
@@ -146,7 +146,7 @@ def register_schedule_tool_if_enabled(
     if not cfg.scheduler.enabled:
         return None
 
-    from config_loader.paths import get_kongming_home
+    from infrastructure.config.paths import get_kongming_home
     from scheduler.store import Store
     from tools.builtin.schedule_tool import build_schedule_tool
 

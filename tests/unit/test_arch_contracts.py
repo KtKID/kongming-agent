@@ -51,12 +51,11 @@ def test_sessions_do_not_define_session_protocol() -> None:
         "tools",
         "sessions",
         "prompting",
-        "executors",
-        "observability",
+        "infrastructure",
+        "runtime_assembly",
         "host",
         "cli",
         "safety",
-        "config_loader",
     ],
 )
 def test_sibling_packages_do_not_redefine_eventsink(pkg: str) -> None:

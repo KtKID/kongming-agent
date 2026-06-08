@@ -28,8 +28,8 @@ from typing import Any, Literal
 
 from core.contracts import EventSink
 from core.result import Result
-from executors.agent_runtime.native_runtime import NativeRuntime
 from host.session_bridge import SessionBridge
+from runtime_assembly.native_runtime import NativeRuntime
 from web.app_support.host_adapter import WebHostAdapter
 from web.threads.metadata import ThreadMetadata
 

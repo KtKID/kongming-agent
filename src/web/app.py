@@ -19,9 +19,9 @@
 
 import 边界：
 
-- 本文件可 import ``web.*`` 子模块、``config_loader``、外部 fastapi
+- 本文件可 import ``web.*`` 子模块、``infrastructure.config``、外部 fastapi
 - **不可** import ``core`` / ``tools`` / ``executors`` / ``safety`` / ``host`` /
-  ``cli`` / ``prompting`` / ``observability`` / ``memory`` / ``prompts``
+  ``cli`` / ``prompting`` / ``infrastructure.tracing`` / ``memory`` / ``prompts``
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
-from config_loader.paths import get_kongming_home
+from infrastructure.config.paths import get_kongming_home
 from web.app_support.startup_progress import StartupProgress
 from web.auth.middleware import AuthMiddleware, CSRFMiddleware, make_serializer
 from web.auth.secrets import (
@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from typing import Any
 
-    from config_loader.models import Config
+    from infrastructure.config.models import Config
     from scheduler.store import Store
     from web.rate_limit import LoginRateLimiter
     from web.threads.types import ThreadManagerProtocol
@@ -82,7 +82,7 @@ def _bootstrap_projects_registry(home: Path, repo_root: str) -> None:
     任一失败仅 log warning 不阻塞 web server 启动；下一次启动会重试。
 
     Args:
-        home: ``.kongming/`` 根目录（由 :func:`config_loader.paths.get_kongming_home`
+        home: ``.kongming/`` 根目录（由 :func:`infrastructure.config.paths.get_kongming_home`
             或 ``create_app(home_dir=...)`` 注入）。
         repo_root: 当前 web server 进程对应的项目根绝对路径。
     """
@@ -141,7 +141,7 @@ def create_app(
         thread_manager: 已构造好的 :class:`ThreadManagerProtocol` 实例（生产
             代码传 :class:`web.threads.manager.ThreadManager`，测试可传 fake）。
         home_dir: ``.kongming/`` 根目录；为 None 时调
-            :func:`config_loader.paths.get_kongming_home`。测试时建议显式
+            :func:`infrastructure.config.paths.get_kongming_home`。测试时建议显式
             传 ``tmp_path / ".kongming"`` 隔离。
         rate_limiter: 自定义限流器；为 None 时构造默认实例。
         lifespan_shutdown_timeout: shutdown 调 aclose_all 的超时秒。
@@ -520,8 +520,8 @@ def create_app(
     # network-layer-claude-keepalive-v0.1: 进程级单例，注入心跳配置
     # （来自 cfg.web.ws_heartbeat_* 真源；所有频道公用一个倒计时配置）。
     # 当前仅 Claude 频道接入；其他频道在 v0.2 才走 NetworkManager。
-    # 注：get_kongming_home 走 config_loader.paths 子模块直 import，避免
-    # config_loader/__init__.py → config_loader.errors → core.errors 间接链
+    # 注：get_kongming_home 走 infrastructure.config.paths 子模块直 import，避免
+    # infrastructure.config/__init__.py → infrastructure.config.errors → core.errors 间接链
     # 触发 Contract 6 (web-app-shell-no-cross-pillar) 违规。
     from network import HeartbeatConfig, get_network_manager
     from network.manager import configure_heartbeat_log

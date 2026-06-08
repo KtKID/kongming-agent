@@ -25,7 +25,7 @@ def build_runtime_context_text(*, cwd: Path, kongming_home: Path) -> str:
     Args:
         cwd: 当前工作目录绝对路径（调用方通常传 :meth:`Path.cwd`）。
         kongming_home: ``.kongming`` 根目录绝对路径
-            （调用方通常传 :func:`config_loader.get_kongming_home` 的返回值）。
+            （调用方通常传 :func:`infrastructure.config.get_kongming_home` 的返回值）。
 
     Returns:
         一段 markdown 文本，已 strip。结构稳定，便于 LLM 锚定路径语义。

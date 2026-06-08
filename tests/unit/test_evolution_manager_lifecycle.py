@@ -10,7 +10,7 @@ from evolution.evolution_manager import EvolutionManager
 
 
 def _cfg(tmp_path: Path, *, enabled: bool = True) -> object:
-    from config_loader import load_config
+    from infrastructure.config import load_config
 
     cfg = load_config(None)
     return cfg.model_copy(

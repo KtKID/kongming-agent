@@ -38,7 +38,8 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import (
+from core.contracts import ApprovalDecision, ApprovalRequest
+from infrastructure.config.models import (
     ApprovalConfig,
     Config,
     EvolutionConfig,
@@ -48,7 +49,6 @@ from config_loader.models import (
     ShellToolConfig,
     ToolConfig,
 )
-from core.contracts import ApprovalDecision, ApprovalRequest
 from safety.boundary_resolver import BoundaryResolver
 from safety.capability_policy import CapabilityPolicy, CapabilitySet
 from safety.chain import build_safety_chain

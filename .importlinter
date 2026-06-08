@@ -14,12 +14,11 @@ root_packages =
     tools
     sessions
     prompting
-    executors
+    infrastructure
+    runtime_assembly
     host
     cli
     safety
-    observability
-    config_loader
     memory
     prompts
     evolution
@@ -42,11 +41,11 @@ forbidden_modules =
     tools
     sessions
     prompting
-    executors
+    infrastructure
+    runtime_assembly
     host
     cli
     safety
-    observability
     prompts
 
 ; Contract 2（"sessions 不允许重定义 Session Protocol"）由 pytest 架构合约测试
@@ -56,7 +55,7 @@ forbidden_modules =
 
 ; ---------------------------------------------------------------------------
 ; Contract 3: 整体分层依赖方向
-;   core < (tools / sessions / prompting / executors / observability) < safety < host < cli
+;   core < infrastructure.config < infrastructure adapters < domain packages < safety < runtime_assembly < host < cli
 ; ---------------------------------------------------------------------------
 
 [importlinter:contract:layered-dependency-direction]
@@ -65,28 +64,32 @@ type = layers
 layers =
     cli | web
     host
+    runtime_assembly
     safety
-    tools | sessions | prompting | executors | observability | scheduler
+    tools
+    scheduler
+    sessions | prompting
+    infrastructure.llm_providers | infrastructure.tracing
     memory
-    config_loader
+    infrastructure.config
     core
     prompts
 containers =
-; Exception: 运行时装配层 ``executors/agent_runtime/native_runtime.py`` 跨层
+; Exception: 运行时装配层 ``runtime_assembly/native_runtime.py`` 跨层
 ; 引用 ``safety`` / ``prompting`` 是 v1-mini 的刻意设计——Safety Baseline 和
 ; HistoryCompactor 默认装配都由它承担（详见 docs/kongming-agent-v1-minimal/
 ; 10-contracts.md "Native Runtime 边界"）。仅放行真实存在的这两条 import；
 ; 其他任何跨层 import 仍被合约阻止。
 ignore_imports =
-    executors.agent_runtime.native_runtime -> safety
-    executors.agent_runtime.native_runtime -> prompting
-    executors.agent_runtime.native_runtime -> prompting.compaction.history_compactor
-    executors.agent_runtime.native_runtime -> prompting.assembly.input_assembler
-    executors.agent_runtime.native_runtime -> prompting.instructions.instruction_loader
-    scheduler.runtime_factory -> executors.agent_runtime.native_runtime
+    runtime_assembly.native_runtime -> safety
+    runtime_assembly.native_runtime -> prompting
+    runtime_assembly.native_runtime -> prompting.compaction.history_compactor
+    runtime_assembly.native_runtime -> prompting.assembly.input_assembler
+    runtime_assembly.native_runtime -> prompting.instructions.instruction_loader
+    scheduler.runtime_factory -> runtime_assembly.native_runtime
     scheduler.runtime_factory -> sessions
-    scheduler.execution_bridge -> executors.llm.provider_factory
-    scheduler.execution_bridge -> observability
+    scheduler.execution_bridge -> infrastructure.llm_providers.provider_factory
+    scheduler.execution_bridge -> infrastructure.tracing
     tools -> scheduler.store
     tools.builtin.schedule_tool -> scheduler.domain
     tools.builtin.schedule_tool -> scheduler.store
@@ -94,15 +97,15 @@ ignore_imports =
     tools.builtin.schedule_tool -> scheduler.timing
     scheduler.runtime_factory -> sessions.session_bootstrap
     evolution.claude_evidence_selector -> web.integrations.claude_code.jsonl_history
-    executors.agent_runtime.native_runtime -> evolution
+    runtime_assembly.native_runtime -> evolution
 ; claude-image-paste-e2e §4/§5：MediaPart Protocol + ImageMediaPart 需要
 ; 引用 ``web.uploads.storage::AssetStorage`` (IO 抽象) 与
 ; ``web.uploads.registry::EXT_BY_MIME`` (MIME→ext 白名单)。这两个符号是
 ; domain logic（无 framework 耦合），技术上可以提到 core / prompting 层，
 ; 但本任务范围不做搬移。spec-media-input §5 设计文档明确：MediaPart 是
 ; assembly → provider 路径上的中间表示，引用 web.uploads 是单点白名单。
-    executors.llm.media_adapter -> web.uploads.storage
-    executors.llm.media_adapter -> web.uploads.registry
+    infrastructure.llm_providers.media_adapter -> web.uploads.storage
+    infrastructure.llm_providers.media_adapter -> web.uploads.registry
 
 ; ---------------------------------------------------------------------------
 ; Contract 4: tools 不允许直接 import safety 内部 policy / guards / decision_engine
@@ -144,37 +147,36 @@ forbidden_modules =
     tools
     sessions
     prompting
-    executors
+    infrastructure
+    runtime_assembly
     host
     cli
     safety
-    observability
     memory
     prompts
-    config_loader
 
 ; ---------------------------------------------------------------------------
 ; Contract 6: web 应用层（app shell）不可 import 跨支柱模块
 ;             web.app / web.routers / web.websocket.routes / web.auth* / web.static / web.errors
 ;             / web.rate_limit 必须只依赖 web.protocol / web.threads.manager /
 ;             web.app_support.host_adapter / web.websocket.event_sink / web.threads.cell /
-;             web.threads.metadata / web.threads.types / config_loader / 外部库。
-;             不可 import core / tools / executors / safety / host / cli /
-;             sessions / prompting / observability / memory / prompts。
+;             web.threads.metadata / web.threads.types / infrastructure.config / 外部库。
+;             不可 import core / tools / runtime_assembly / safety / host / cli /
+;             sessions / prompting / infrastructure.tracing / memory / prompts。
 ;
 ;             v0.1.5 取舍：web.run / web.threads.manager / web.app_support.host_adapter
 ;             / web.websocket.event_sink / web.threads.cell 之类 **装配 entrypoint** 与
 ;             已存在的 thread_manager 联动模块允许跨支柱（如 thread_cell 需要
-;             import core.contracts / executors.agent_runtime / host.session_bridge）；
+;             import core.contracts / runtime_assembly / host.session_bridge）；
 ;             这些路径走全局 layered-dependency-direction（Contract 3）保护。
 ;
 ;             本 Contract 6 仅约束 web-app-shell 任务交付的 app shell 层文件
 ;             —— 它们是 thread-manager 之上的薄装配，应当只依赖协议 + 接口
-;             Protocol 而不接触 core / executors / host 等支柱细节。
+;             Protocol 而不接触 core / runtime_assembly / host 等支柱细节。
 ; ---------------------------------------------------------------------------
 
 [importlinter:contract:web-app-shell-no-cross-pillar]
-name = web app shell must not import core/tools/executors/safety/host/cli/sessions/prompting/observability/memory/prompts
+name = web app shell must not import core/tools/runtime_assembly/safety/host/cli/sessions/prompting/infrastructure adapters/memory/prompts
 type = forbidden
 source_modules =
     web.app
@@ -189,13 +191,14 @@ source_modules =
 forbidden_modules =
     core
     tools
-    executors
+    runtime_assembly
     safety
     host
     cli
     sessions
     prompting
-    observability
+    infrastructure.llm_providers
+    infrastructure.tracing
     memory
     prompts
 ; web.app_support.slash_candidates_loader 是装配期 loader（同 web.run），
@@ -219,10 +222,10 @@ ignore_imports =
     web.integrations.claude_code.route -> core.contracts
 ; web.routers.uploads -> web.uploads.{storage,registry,validation}：
 ; routers/uploads.py 作为 media-upload-shell controller，必须直接消费 storage
-; / registry / validator 三件套。web.uploads 子模块自身依赖 config_loader
+; / registry / validator 三件套。web.uploads 子模块自身依赖 infrastructure.config
 ; （storage 默认 base_dir 走 ``get_kongming_home()``）和 web.threads.manager
 ; （validator 校验 thread 存在）——这些都是合理的领域内依赖，但通过
-; ``config_loader.errors -> core.errors`` 与 ``thread_manager -> thread_cell
+; ``infrastructure.config.errors -> core.errors`` 与 ``thread_manager -> thread_cell
 ; -> native_runtime -> host/safety/...`` 的传递链会被 Contract 6 误判为
 ; routers 跨支柱依赖。单点白名单放行（已在 spec-media-input §5 注明）。
     web.routers.uploads -> web.uploads.storage
@@ -231,12 +234,12 @@ ignore_imports =
 ; claude-code-channel-image-paste：claude_code 通道补图片粘贴。
 ; service.py / _attachment_prefix.py 需要消费 AssetStorage（路径反推） +
 ; EXT_BY_MIME（mime→ext 白名单单点真源）。同 routers/uploads.py 通过
-; ``config_loader.errors -> core.errors`` 传递触发 Contract 6，单点放行。
+; ``infrastructure.config.errors -> core.errors`` 传递触发 Contract 6，单点放行。
     web.integrations.claude_code.service -> web.uploads.storage
     web.integrations.claude_code._attachment_prefix -> web.uploads.storage
 ; codex-channel-image-paste §3：codex 通道 service + _image_cli_args 消费
 ; AssetStorage (路径反推) + EXT_BY_MIME (mime→ext 白名单)。同 claude_code 通过
-; ``config_loader.errors -> core.errors`` 传递触发 Contract 6，单点放行。
+; ``infrastructure.config.errors -> core.errors`` 传递触发 Contract 6，单点放行。
     web.integrations.codex.service -> web.uploads.storage
     web.integrations.codex._image_cli_args -> web.uploads.storage
     web.integrations.codex._image_cli_args -> web.uploads.registry
@@ -244,14 +247,14 @@ ignore_imports =
 ; web.app -> web.uploads.{storage,registry,validation}：
 ; app.py 装配期注入单例到 ``app.state.*``（asset_storage / asset_registry
 ; / upload_validator），让 routers/uploads.py 优先消费注入的单例而不是
-; module-level lazy singleton。同样通过 ``config_loader.errors -> core.errors``
+; module-level lazy singleton。同样通过 ``infrastructure.config.errors -> core.errors``
 ; 传递触发 Contract 6，单点白名单放行（与上方 routers 同理）。
     web.app -> web.uploads.storage
     web.app -> web.uploads.registry
     web.app -> web.uploads.validation
 ; manage-config-tab #6：web.app + dashboard/config/router 都需要触达 manager / writer
-; / restart / schema 子模块。其中 writer 走 config_loader.{loader,errors} 做
-; pydantic 校验闭环——``config_loader.errors -> core.errors`` 的传递链触发
+; / restart / schema 子模块。其中 writer 走 infrastructure.config.{loader,errors} 做
+; pydantic 校验闭环——``infrastructure.config.errors -> core.errors`` 的传递链触发
 ; Contract 6。dashboard/config 是 task 单点真源（操作 setting.yaml 的唯一入口），
 ; 与 web.uploads 同模式单点白名单放行。
     web.app -> web.dashboard.config
@@ -273,12 +276,12 @@ source_modules =
 forbidden_modules =
     web
 ; claude-image-paste-e2e §5：scheduler.runtime_factory → native_runtime
-; → executors.llm.anthropic_messages → executors.llm.media_adapter
+; → infrastructure.llm_providers.anthropic_messages → infrastructure.llm_providers.media_adapter
 ; → web.uploads.storage 是传递链(media_adapter 的 web.uploads 白名单已在
 ; Contract 3 上方注明)。scheduler 本身不直接 import web,这里单点放行透传。
 ignore_imports =
-    executors.llm.media_adapter -> web.uploads.storage
-    executors.llm.media_adapter -> web.uploads.registry
+    infrastructure.llm_providers.media_adapter -> web.uploads.storage
+    infrastructure.llm_providers.media_adapter -> web.uploads.registry
 
 ; ---------------------------------------------------------------------------
 ; Contract 8: evolution 不允许 import web 模块
@@ -297,11 +300,11 @@ forbidden_modules =
 ignore_imports =
     evolution.claude_evidence_selector -> web.integrations.claude_code.jsonl_history
 ; claude-image-paste-e2e §5：evolution.evolution_manager → native_runtime
-; → executors.llm.anthropic_messages → executors.llm.media_adapter
+; → infrastructure.llm_providers.anthropic_messages → infrastructure.llm_providers.media_adapter
 ; → web.uploads.{storage,registry} 是传递链(已在 Contract 3 白名单)。
 ; evolution 自身不直接 import web,这里单点放行透传。
-    executors.llm.media_adapter -> web.uploads.storage
-    executors.llm.media_adapter -> web.uploads.registry
+    infrastructure.llm_providers.media_adapter -> web.uploads.storage
+    infrastructure.llm_providers.media_adapter -> web.uploads.registry
 
 ; ---------------------------------------------------------------------------
 ; Contract 9: usage-token 封装边界
@@ -330,9 +333,8 @@ source_modules =
     cli
     host
     safety
-    observability
-    config_loader
-    executors
+    infrastructure
+    runtime_assembly
     web.app
     web.routers
     web.app_support.cron_delivery
@@ -399,12 +401,11 @@ source_modules =
     tools
     sessions
     prompting
-    executors
+    infrastructure
+    runtime_assembly
     host
     cli
     safety
-    observability
-    config_loader
     memory
     prompts
     evolution

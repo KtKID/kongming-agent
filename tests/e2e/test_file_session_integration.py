@@ -7,12 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from config_loader import Config
 from core.agent_spec import AgentSpec
 from core.contracts import ApprovalDecision, ApprovalRequest, LLMRequest, LLMResponse
 from core.message import Message
 from core.run_state import RunState
 from core.runner import Runner
+from infrastructure.config import Config
 from sessions.file_session import FileSession
 from sessions.session_bootstrap import SessionBootstrap
 from sessions.session_store import build_session

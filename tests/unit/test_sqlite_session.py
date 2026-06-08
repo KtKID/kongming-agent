@@ -22,9 +22,9 @@ from pathlib import Path
 
 import pytest
 
-from config_loader.models import Config, ModelConfig, SessionConfig
 from core.message import Message, ToolCall
 from core.session import InMemorySession
+from infrastructure.config.models import Config, ModelConfig, SessionConfig
 from sessions.session_store import (
     SQLiteSession,
     _message_from_dict,

@@ -9,7 +9,7 @@
 - :mod:`core.session` 提供默认 :class:`InMemorySession` 实现。
 
 core 不允许 import 任何 sibling 模块（tools / sessions / prompting / executors / host / cli / safety /
-observability）。其他模块可以自由 import core，但必须消费这里定义的协议和模型，
+infrastructure.tracing）。其他模块可以自由 import core，但必须消费这里定义的协议和模型，
 而不是在自己的目录里重定义一份同名接口。
 """
 

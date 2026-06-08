@@ -26,13 +26,13 @@ from typing import Any
 
 import pytest
 
-from config_loader import load_config
-from config_loader.paths import get_kongming_home
 from core.agent_spec import AgentSpec
 from core.contracts import Session, ToolContext
 from core.errors import MaxTurnsExceededError
 from core.session import InMemorySession
-from executors.agent_runtime.native_runtime import NativeRuntime
+from infrastructure.config import load_config
+from infrastructure.config.paths import get_kongming_home
+from runtime_assembly.native_runtime import NativeRuntime
 from safety.capability_policy import CapabilityPolicy, CapabilitySet
 from tools.runtime.approval import AutoAllowApproval
 from tools.runtime.base import BaseBuiltinTool

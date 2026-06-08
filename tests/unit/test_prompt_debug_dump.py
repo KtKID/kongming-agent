@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from core.message import Message, ToolCall
-from observability import PromptDebugDumpSink
+from infrastructure.tracing import PromptDebugDumpSink
 
 
 def test_prompt_debug_dump_writes_prompt_snapshot_json(tmp_path) -> None:

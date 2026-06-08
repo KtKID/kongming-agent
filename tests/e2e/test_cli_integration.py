@@ -8,7 +8,8 @@ import time
 from pathlib import Path
 
 import cli.main as cli_main
-from config_loader.models import (
+from core.message import Message
+from infrastructure.config.models import (
     ApprovalConfig,
     Config,
     ModelConfig,
@@ -17,10 +18,9 @@ from config_loader.models import (
     SessionConfig,
     TraceConfig,
 )
-from core.message import Message
-from executors.agent_runtime.native_runtime import NativeRuntime
-from observability import JsonlTraceSink, PromptDebugDumpSink
+from infrastructure.tracing import JsonlTraceSink, PromptDebugDumpSink
 from prompting import InstructionLoader
+from runtime_assembly.native_runtime import NativeRuntime
 from sessions import build_session
 from sessions.session_bootstrap import SessionBootstrap
 

@@ -6,7 +6,7 @@
 
 严格约束：
 - 本 package 不导出任何 Python 符号；模板通过 `importlib.resources` 读取
-- 不 import 任何 sibling 模块（core / sessions / prompting / config_loader 等）
+- 不 import 任何 sibling 模块（core / sessions / prompting / infrastructure.config 等）
 """
 
 from __future__ import annotations

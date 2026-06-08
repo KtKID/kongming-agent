@@ -10,7 +10,7 @@
   ``approved``，可切 ``rejected``。
 - :func:`local_model_config`：构造一个指向本地模型基线
   (``http://127.0.0.1:1234`` + ``gemma-4-e4b-it`` + 空 ``api_key``) 的
-  :class:`config_loader.models.Config`。
+  :class:`infrastructure.config.models.Config`。
 
 所有 e2e 默认走 stub provider，测试不需要真实模型服务就能跑；真实模型路径
 仅通过环境变量 ``KONGMING_E2E_REAL_MODEL=1`` 显式开启。
@@ -22,7 +22,6 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from config_loader.models import ApprovalConfig, Config, ModelConfig, RunnerConfig
 from core.contracts import (
     ApprovalDecision,
     ApprovalOutcome,
@@ -33,6 +32,7 @@ from core.contracts import (
     LLMStreamChunk,
 )
 from core.message import Message, ToolCall
+from infrastructure.config.models import ApprovalConfig, Config, ModelConfig, RunnerConfig
 
 # ---------------------------------------------------------------------------
 # Stub LLM Provider

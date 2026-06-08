@@ -1,4 +1,4 @@
-"""unit：config_loader.paths.get_kongming_home() 覆盖。
+"""unit：infrastructure.config.paths.get_kongming_home() 覆盖。
 
 模块 1 / task prompt-modules-v0.1.3。覆盖 env KONGMING_HOME 优先级、
 `~` 展开、空字符串 fallback、cwd fallback、不触发 I/O 等全部分支。
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from config_loader import get_kongming_home
+from infrastructure.config import get_kongming_home
 
 
 @pytest.mark.unit

@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from config_loader.models import Config
+from infrastructure.config.models import Config
 from web.dashboard.models import (
     ActiveCellSnapshot,
     DashboardPollingConfig,

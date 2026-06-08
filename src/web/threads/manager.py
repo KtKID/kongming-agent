@@ -36,9 +36,9 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal
 
-from config_loader.models import Config, LLMPresetConfig
 from core.contracts import ApprovalAction
 from core.message import Message
+from infrastructure.config.models import Config, LLMPresetConfig
 from network.network_log import log_network_exception
 from web.app_support.host_adapter import WebHostAdapter
 from web.integrations.claude_code.jsonl_history import jsonl_path_for

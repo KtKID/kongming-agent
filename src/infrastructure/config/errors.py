@@ -2,7 +2,7 @@
 
 所有错误都继承 :class:`core.errors.ConfigError`，这样装配层 / CLI 只用
 ``except ConfigError`` 就能覆盖配置层全部失败分支，而不需要感知
-config_loader 内部细分。
+infrastructure.config 内部细分。
 """
 
 from __future__ import annotations

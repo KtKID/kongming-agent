@@ -3,10 +3,10 @@
 这里只做四件事：
 
 1. 用 :mod:`click` 解析命令行参数；
-2. 调 :func:`config_loader.load_config` 拿统一配置；
+2. 调 :func:`infrastructure.config.load_config` 拿统一配置；
 3. 按 Config 装配 session 工厂 / trace sink / instructions 三条**可观测的**
    输入通道；
-4. 通过 :meth:`executors.agent_runtime.native_runtime.NativeRuntime.build`
+4. 通过 :meth:`runtime_assembly.native_runtime.NativeRuntime.build`
    装配 runtime，交给 :class:`host.session_bridge.SessionBridge` 跑交互循环。
 
 **不做**：
@@ -32,16 +32,16 @@ from typing import Any, Literal
 
 import click
 
-from config_loader import Config, get_kongming_home, load_config
-from config_loader.errors import ConfigLoadError, ConfigValidationError
 from core.contracts import EventSink, SupportsLLMStream
-from executors.agent_runtime.native_runtime import NativeRuntime
 from host.cli_adapter import CLIAdapter, CLIEventSink
 from host.session_bridge import SessionBridge
+from infrastructure.config import Config, get_kongming_home, load_config
+from infrastructure.config.errors import ConfigLoadError, ConfigValidationError
+from infrastructure.tracing import JsonlTraceSink, PromptDebugDumpSink
 from memory import MemoryStore
-from observability import JsonlTraceSink, PromptDebugDumpSink
 from prompting import assemble_instructions
 from prompting.skills.skill_loader import SkillSpec, format_skill_listing, load_skill_specs
+from runtime_assembly.native_runtime import NativeRuntime
 from sessions import (
     SessionSummary,
     build_session,

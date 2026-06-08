@@ -87,7 +87,7 @@ def _build_deny_chain(
     )
     boundary = BoundaryResolver.from_project_root()
 
-    from config_loader.models import (
+    from infrastructure.config.models import (
         ApprovalConfig,
         Config,
         ModelConfig,

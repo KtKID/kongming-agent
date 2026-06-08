@@ -25,8 +25,8 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import ApprovalConfig, Config, ModelConfig
 from core.contracts import ApprovalDecision, ApprovalRequest
+from infrastructure.config.models import ApprovalConfig, Config, ModelConfig
 from safety.default_rules import (
     DEFAULT_ALLOW_TOOLS_SILENT,
     DEFAULT_APPROVAL_REQUIRED_COMMANDS,

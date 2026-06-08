@@ -14,13 +14,13 @@ from collections.abc import Sequence
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from config_loader.models import (
+from core.contracts import EventSink
+from infrastructure.config.models import (
     Config,
     ModelConfig,
     SchedulerApprovalConfig,
     SchedulerConfig,
 )
-from core.contracts import EventSink
 from scheduler.domain import (
     ApprovalMode,
     ConcurrencyPolicy,

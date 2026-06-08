@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from config_loader.models import ReasoningProfile
+from infrastructure.config.models import ReasoningProfile
 
 # ---------------------------------------------------------------------------
 # 类型定义

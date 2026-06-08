@@ -790,7 +790,7 @@ class TestThreadManagerDeleteThreadCleansAssets:
 
         from unittest.mock import AsyncMock, MagicMock
 
-        from config_loader.models import Config
+        from infrastructure.config.models import Config
         from web.threads.manager import ThreadManager
 
         cfg = Config.model_validate(
@@ -878,7 +878,7 @@ class TestThreadManagerDeleteThreadCleansAssets:
 
         from unittest.mock import AsyncMock, MagicMock
 
-        from config_loader.models import Config
+        from infrastructure.config.models import Config
         from web.threads.manager import ThreadManager
 
         cfg = Config.model_validate(

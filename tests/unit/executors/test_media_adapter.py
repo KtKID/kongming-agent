@@ -1,4 +1,4 @@
-"""unit：``executors.llm.media_adapter`` 模块行为契约。
+"""unit：``infrastructure.llm_providers.media_adapter`` 模块行为契约。
 
 对应 ``dev-pipeline/tasks/claude-image-paste-e2e/`` §4 multimodal-assembly
 的测试矩阵 A / B / C / E（pytest #21）。
@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from core.message import Message
-from executors.llm.media_adapter import (
+from infrastructure.llm_providers.media_adapter import (
     ImageMediaPart,
     build_media_part_from_metadata,
     collect_media_parts_from_messages,
@@ -388,7 +388,7 @@ def test_collect_media_parts_malformed_ref_not_dict_warns_and_skips(
         metadata={"attachments": ["not-a-dict", _make_ref(asset_id="good")]},
     )
 
-    with caplog.at_level(logging.WARNING, logger="executors.llm.media_adapter"):
+    with caplog.at_level(logging.WARNING, logger="infrastructure.llm_providers.media_adapter"):
         parts = collect_media_parts_from_messages([msg], storage=storage, thread_id="t")
 
     assert [p.asset_id for p in parts] == ["good"]
@@ -412,7 +412,7 @@ def test_collect_media_parts_unknown_kind_warns_and_skips(
         },
     )
 
-    with caplog.at_level(logging.WARNING, logger="executors.llm.media_adapter"):
+    with caplog.at_level(logging.WARNING, logger="infrastructure.llm_providers.media_adapter"):
         parts = collect_media_parts_from_messages([msg], storage=storage, thread_id="t")
 
     assert [p.asset_id for p in parts] == ["ok"]

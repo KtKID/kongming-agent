@@ -33,13 +33,13 @@ import re
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from config_loader.models import Config
 from core.contracts import (
     ApprovalDecision,
     ApprovalProvider,
     ApprovalRequest,
 )
 from core.errors import AgentError
+from infrastructure.config.models import Config
 from safety.boundary_resolver import BoundaryResolver
 from safety.capability_policy import CapabilityPolicy
 from safety.decision_engine import SafetyDecisionEngine, TraceEmitter

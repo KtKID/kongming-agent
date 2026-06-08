@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from config_loader.models import Config
+from infrastructure.config.models import Config
 from web.app_support.host_adapter import WebHostAdapter
 from web.threads.manager import ThreadManager
 from web.threads.metadata import ThreadMetadata, write_thread_metadata

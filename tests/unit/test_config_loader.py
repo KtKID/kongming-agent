@@ -1,4 +1,4 @@
-"""unit：config_loader.load_config 基本行为。
+"""unit：infrastructure.config.load_config 基本行为。
 
 - 从 yaml 加载出合法 Config
 - 环境变量覆盖单字段
@@ -15,9 +15,9 @@ from typing import Any
 import pytest
 import yaml
 
-from config_loader import load_config
-from config_loader.errors import ConfigLoadError, ConfigValidationError
-from config_loader.models import Config
+from infrastructure.config import load_config
+from infrastructure.config.errors import ConfigLoadError, ConfigValidationError
+from infrastructure.config.models import Config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SETTING_YAML = REPO_ROOT / "config" / "setting.yaml"

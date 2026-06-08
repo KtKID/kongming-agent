@@ -24,7 +24,7 @@ class MemoryRefreshSink:
 
     装配方式（v1-mini 方案 γ）：CLI 在 ``build_session`` 之后把
     :class:`MemoryRefreshSink` 加进 runner 的 ``list[EventSink]``，使其和
-    :class:`observability.JsonlTraceSink` 并列接收事件。收到
+    :class:`infrastructure.tracing.JsonlTraceSink` 并列接收事件。收到
     ``history.compact`` 时调 :meth:`memory.MemoryStore.load_from_disk`
     刷新冻结快照，并把 ``memory.snapshot.refreshed`` 事件 fan-out 到
     downstream sinks（通常是 trace sink），保证下一轮 prompt 组装

@@ -8,7 +8,7 @@ tool / compactor / retry / cli / evolution / stream / safety / scheduler / web�
 
 **真源关系**：
 
-- 字段集合和类型来自 :mod:`config_loader.models`（pydantic 模型）；
+- 字段集合和类型来自 :mod:`infrastructure.config.models`（pydantic 模型）；
 - 字段描述（``desc``）就近抄自 ``config/setting.yaml`` 行内注释或 pydantic
   ``Field`` description；
 - **元数据只描述结构和编辑能力，不携带运行值**。运行值由 ``writer.py`` /
@@ -104,7 +104,7 @@ _GROUPS: list[dict[str, str]] = [
 # ---------------------------------------------------------------------------
 #
 # 字段顺序按"顶层模块 → 子字段在 pydantic 模型内的声明顺序"组织，便于人工对照
-# ``src/config_loader/models.py`` 排查漂移。
+# ``src/infrastructure.config/models.py`` 排查漂移。
 #
 # 一致 desc 中常见后缀语义：
 #   "下次对话生效" —— 改了对当前对话无影响，但下次 runner 装配会拾起新值

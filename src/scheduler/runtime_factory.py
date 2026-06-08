@@ -19,7 +19,7 @@ session + 工具裁剪 + watchdog，但 LLM / safety / tool registry / session �
 
 - 不装配 :class:`Store`，由调用方传入（CLI / web app lifespan 自己持有）。
 - 不持有 ``stop_event`` / ``ticker``：本工厂只负责"造 bridge"，循环编排留给调用方。
-- 仅依赖 :mod:`executors.agent_runtime.native_runtime` 暴露出来的 properties，
+- 仅依赖 :mod:`runtime_assembly.native_runtime` 暴露出来的 properties，
   不直接读私有字段。
 """
 
@@ -30,16 +30,16 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from config_loader.models import Config
-from executors.agent_runtime.native_runtime import NativeRuntime
+from infrastructure.config.models import Config
+from runtime_assembly.native_runtime import NativeRuntime
 from scheduler.execution_bridge import ExecutionBridge
 from scheduler.store import Store
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from config_loader.models import LLMPresetConfig
     from core.contracts import EventSink, Session, Tool, ToolLookup
+    from infrastructure.config.models import LLMPresetConfig
     from scheduler.delivery import DeliveryDispatcher
     from sessions.session_bootstrap import SessionBootstrap
 

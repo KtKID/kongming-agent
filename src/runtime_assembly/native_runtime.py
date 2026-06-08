@@ -10,11 +10,11 @@
 
 **依赖方向**：
 
-- 只 import ``core`` 协议 / 数据结构、``config_loader`` 配置、本包自己的
+- 只 import ``core`` 协议 / 数据结构、``infrastructure.config`` 配置、本包自己的
   ``executors/llm`` provider，以及 ``safety/`` 下的安全链装配入口。
 - 对 ``safety/`` 的依赖是"装配层 → 下层 policy"的向下引用，属于运行时装配
   职责的一部分（已在 ``.importlinter`` 中显式白名单化，避免触犯 layered 合约）。
-- 绝不 import ``tools/`` / ``host/`` / ``cli/`` / ``observability/`` /
+- 绝不 import ``tools/`` / ``host/`` / ``cli/`` / ``infrastructure.tracing/`` /
   ``sessions/` / `prompting/`` 里的任何具体类。调用方（host 或 cli 或 tests）通过 ``build(...)``
   的 kwargs 注入它们。
 - ``tools: ToolLookup | None`` / ``approval: ApprovalProvider | None`` /
@@ -39,7 +39,6 @@ import contextlib
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from config_loader.models import Config
 from core.agent_spec import AgentSpec
 from core.contracts import (
     ApprovalDecision,
@@ -58,8 +57,9 @@ from core.message import Message
 from core.result import Result
 from core.runner import Runner
 from core.session import InMemorySession
-from executors.llm.anthropic_messages import AnthropicMessagesProvider
-from executors.llm.openai_responses import OpenAIResponsesProvider
+from infrastructure.config.models import Config
+from infrastructure.llm_providers.anthropic_messages import AnthropicMessagesProvider
+from infrastructure.llm_providers.openai_responses import OpenAIResponsesProvider
 from prompting import HistoryCompactor
 from prompting.assembly.input_assembler import InputAssembler
 from prompting.compaction.history_compactor import CompactorConfig
@@ -197,8 +197,8 @@ class NativeRuntime:
         """按 Config 装配一份默认 runtime。
 
         Args:
-            config: 从 :func:`config_loader.load_config` 拿到的 :class:`Config`。
-            event_sinks: 事件落地 sinks。默认空列表；observability 批次落地
+            config: 从 :func:`infrastructure.config.load_config` 拿到的 :class:`Config`。
+            event_sinks: 事件落地 sinks。默认空列表；infrastructure.tracing 批次落地
                 后由 host 或 cli 注入 ``JsonlTraceSink``。
             approval: **底层** 审批 provider（命中 ``ask`` 时用）。默认使用
                 :class:`_AllowAllApproval` 占位（裸放行）。不论是否传入，

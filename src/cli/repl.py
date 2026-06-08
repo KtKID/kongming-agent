@@ -7,7 +7,7 @@ helper，避免每个将来新增的 CLI 子命令各自重新发明一遍。
 **不要在这里实现**：
 
 - 第二套 :class:`host.session_bridge.SessionBridge` / 第二套 run loop
-- 装配逻辑（那是 :meth:`executors.agent_runtime.native_runtime.NativeRuntime.build`
+- 装配逻辑（那是 :meth:`runtime_assembly.native_runtime.NativeRuntime.build`
   唯一职责）
 """
 

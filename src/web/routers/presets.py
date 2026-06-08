@@ -26,7 +26,7 @@ from fastapi import APIRouter, Request
 from web.protocol import LLMPresetDTO
 
 if TYPE_CHECKING:
-    from config_loader.models import Config, LLMPresetConfig
+    from infrastructure.config.models import Config, LLMPresetConfig
 
 logger = logging.getLogger(__name__)
 

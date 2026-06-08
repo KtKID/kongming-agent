@@ -520,7 +520,7 @@ def test_env_override_sitian_scanner_window_days(
         encoding="utf-8",
     )
     monkeypatch.setenv("KONGMING_SITIAN_SCANNER_RECENT_SESSION_WINDOW_DAYS", "7")
-    from config_loader import load_config
+    from infrastructure.config import load_config
 
     cfg = load_config(yaml_path)
     assert cfg.sitian.scanner.recent_session_window_days == 7

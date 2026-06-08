@@ -24,9 +24,9 @@ from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore, resolve_evolution_root
 
 if TYPE_CHECKING:
-    from config_loader.models import Config
     from core.contracts import EventSink
     from evolution.transcript_provider import TranscriptProvider
+    from infrastructure.config.models import Config
 
 __all__ = ["EvolutionManager"]
 
@@ -392,7 +392,7 @@ class EvolutionManager:
         from core.agent_spec import AgentSpec
         from core.session import InMemorySession
         from evolution.reviewer_runtime import REVIEWER_TOOL_NAME
-        from executors.agent_runtime.native_runtime import NativeRuntime
+        from runtime_assembly.native_runtime import NativeRuntime
         from tools import AutoAllowApproval
 
         learning = self._learning

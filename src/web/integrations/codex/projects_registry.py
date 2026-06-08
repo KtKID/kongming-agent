@@ -1,7 +1,7 @@
 """Codex 项目登记表持久化层（v0.1）。
 
 落盘位置：``<home>/web/codex_projects.json``，``home`` 由调用方注入
-（通常来自 :func:`config_loader.get_kongming_home`）。
+（通常来自 :func:`infrastructure.config.get_kongming_home`）。
 
 设计目标：
 

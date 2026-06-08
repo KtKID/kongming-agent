@@ -33,11 +33,11 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from config_loader.errors import ConfigLoadError, ConfigValidationError
-from config_loader.models import Config
+from infrastructure.config.errors import ConfigLoadError, ConfigValidationError
+from infrastructure.config.models import Config
 
-# 仓库根。src/config_loader/loader.py → src/config_loader/ → src/ → <repo root>。
-_REPO_ROOT: Path = Path(__file__).resolve().parents[2]
+# 仓库根。src/infrastructure/config/loader.py → src/infrastructure/ → src/ → <repo root>。
+_REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 _DEFAULT_CONFIG_PATH: Path = _REPO_ROOT / "config" / "setting.yaml"
 
 # 环境变量前缀。任何以 ``KONGMING_`` 开头、且按 ``_`` 切分后能落到有效 section
@@ -253,7 +253,7 @@ def _parse_bool_env(raw: str) -> bool | None:
 
 def _warn(msg: str) -> None:
     """env 解析失败的统一 stderr 提示。集中一个出口便于将来切到 logger。"""
-    print(f"[config_loader] warning: {msg}", file=sys.stderr)
+    print(f"[infrastructure.config] warning: {msg}", file=sys.stderr)
 
 
 def _apply_scheduler_env_overrides(data: dict[str, Any]) -> None:
@@ -423,7 +423,7 @@ def load_config(
 
     resolved = _resolve_config_path(path)
     raw_data = _load_yaml(resolved)
-    # 加载 per-module YAML 文件（context yaml / tools yaml / llm yaml / observability yaml）
+    # 加载 per-module YAML 文件（context yaml / tools yaml / llm yaml / infrastructure.tracing yaml）
     config_dir = resolved.parent
     with_modules = _load_module_yamls(config_dir, raw_data)
     merged = _apply_env_overrides(with_modules)

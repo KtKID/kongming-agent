@@ -29,21 +29,21 @@ from typing import Any, Literal
 
 import httpx
 
-from config_loader.models import ModelConfig
 from core.contracts import LLMRequest, LLMResponse, LLMStreamChunk
 from core.errors import ProviderError
 from core.message import Message, ToolCall
-from executors.llm.anthropic_stream_parser import AnthropicStreamParser
-from executors.llm.base import BaseLLMProvider
-from executors.llm.media_adapter import (
+from infrastructure.config.models import ModelConfig
+from infrastructure.llm_providers.anthropic_stream_parser import AnthropicStreamParser
+from infrastructure.llm_providers.base import BaseLLMProvider
+from infrastructure.llm_providers.media_adapter import (
     AnthropicMediaAdapter,
     AssetStorage,
     MediaAdapter,
     collect_media_parts_from_messages,
 )
-from executors.llm.raw_dump import dump_raw_llm_interaction
-from executors.llm.reasoning import ReasoningConfig, resolve_reasoning_plan
-from executors.llm.sse_reader import iter_sse_events
+from infrastructure.llm_providers.raw_dump import dump_raw_llm_interaction
+from infrastructure.llm_providers.reasoning import ReasoningConfig, resolve_reasoning_plan
+from infrastructure.llm_providers.sse_reader import iter_sse_events
 from network.network_log import log_network_exception
 
 _LOGGER = logging.getLogger(__name__)
@@ -229,7 +229,7 @@ class AnthropicMessagesProvider(BaseLLMProvider):
                 )
             except Exception as exc:
                 log_network_exception(
-                    "executors.llm.anthropic_messages",
+                    "infrastructure.llm_providers.anthropic_messages",
                     "raw_dump_failed",
                     exc,
                     url=url,
@@ -588,7 +588,7 @@ class AnthropicMessagesProvider(BaseLLMProvider):
         # 厂商扩展字段：保留原始 Anthropic 字段名。
         provider_metadata: dict[str, Any] = {}
 
-        # cache token 细分也保留到 provider_metadata（向后兼容 observability 旧消费者）
+        # cache token 细分也保留到 provider_metadata（向后兼容 infrastructure.tracing 旧消费者）
         for cache_key in ("cache_creation_input_tokens", "cache_read_input_tokens"):
             if cache_key in usage_raw:
                 provider_metadata[cache_key] = usage_raw[cache_key]

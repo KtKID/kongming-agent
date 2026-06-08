@@ -8,10 +8,10 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import Config
 from evolution.models import EvolutionNutrient, ReviewResult, ReviewWritePayload
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore
+from infrastructure.config.models import Config
 from web.websocket.routes import _send_evolution_replay_frames
 
 

@@ -29,7 +29,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from config_loader.models import Config
+from infrastructure.config.models import Config
 from safety.types import (
     ApprovalRequiredCommand,
     BoundaryScope,

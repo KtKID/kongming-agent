@@ -1,7 +1,7 @@
 """跨模块共享协议真源。
 
 这是 v1-mini 唯一可以被其他模块 ``import`` 的协议定义文件。
-如果一个接口会被 ``core / tools / sessions / prompting / executors / safety / observability / host / cli``
+如果一个接口会被 ``core / tools / sessions / prompting / executors / safety / infrastructure.tracing / host / cli``
 中任意两个模块同时消费，它就必须收口到这里。
 
 当前收进来的协议：
@@ -257,7 +257,7 @@ class LLMResponse:
     Attributes:
         message: 模型这一轮的 assistant 消息。允许只带 tool_calls，不带 content。
         finish_reason: 结束原因；tool_calls 表示模型要求继续执行工具。
-        usage: token 使用量等运行时统计（透传给 observability）。
+        usage: token 使用量等运行时统计（透传给 infrastructure.tracing）。
         provider_metadata: 厂商扩展字段（reasoning_tokens / cached_tokens /
             reasoning_content / request_id / model / system_fingerprint 等）。
             dict 结构，保留原始字段名，不强行归一化。core 不解释内容，只透传。
@@ -516,7 +516,7 @@ class Event:
     """统一事件结构。
 
     runner 在关键节点构造 Event，fan-out 到所有注册的 :class:`EventSink`。
-    v1-mini 只有一个 sink：``observability/trace_sink.py`` 的 ``JsonlTraceSink``。
+    v1-mini 只有一个 sink：``infrastructure.tracing/trace_sink.py`` 的 ``JsonlTraceSink``。
     v0.2+ 追加 usage / audit sink 时仍然走同一个协议，不新增事件协议。
     """
 
@@ -639,7 +639,7 @@ class PromptAssembler(Protocol):
 class PromptDebugSink(Protocol):
     """prompt debug dump 输出协议。
 
-    实现方通常在 ``observability/``，runner 只负责在 LLM request 前把
+    实现方通常在 ``infrastructure.tracing/``，runner 只负责在 LLM request 前把
     当前 turn 的 prompt build 快照交出去。
     """
 

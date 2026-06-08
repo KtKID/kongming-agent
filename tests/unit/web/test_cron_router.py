@@ -28,7 +28,7 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from config_loader.models import Config
+from infrastructure.config.models import Config
 from scheduler.domain import (
     ConcurrencyPolicy,
     DeliveryStatus,

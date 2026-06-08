@@ -56,7 +56,7 @@ def acquire_app_instance_lock(home: Path) -> int:
     但 dev 环境单进程场景足够）。
 
     Args:
-        home: :func:`config_loader.paths.get_kongming_home` 返回的 home 目录
+        home: :func:`infrastructure.config.paths.get_kongming_home` 返回的 home 目录
 
     Returns:
         持锁的 fd——``main()`` **必须持到进程退出**，否则锁立即释放。

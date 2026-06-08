@@ -22,8 +22,8 @@ from dotenv import load_dotenv
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(_REPO_ROOT / ".env")
 
-from config_loader import load_config  # noqa: E402
-from config_loader.paths import get_kongming_home  # noqa: E402
+from infrastructure.config import load_config  # noqa: E402
+from infrastructure.config.paths import get_kongming_home  # noqa: E402
 from web.app_support.startup_progress import StartupProgress  # noqa: E402
 from web.auth.middleware import (  # noqa: E402
     SESSION_COOKIE_NAME,

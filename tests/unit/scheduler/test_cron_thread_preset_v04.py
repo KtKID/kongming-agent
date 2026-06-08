@@ -238,11 +238,11 @@ class TestScheduleToolDeliveryTarget:
 
 
 class TestProviderFactory:
-    """executors.llm.provider_factory 的 apply_preset / build_provider。"""
+    """infrastructure.llm_providers.provider_factory 的 apply_preset / build_provider。"""
 
     def test_apply_preset_overrides_model_name(self) -> None:
         """apply_preset 把 preset.model 写入 config.model.name。"""
-        from config_loader.models import Config, LLMPresetConfig, ModelConfig
+        from infrastructure.config.models import Config, LLMPresetConfig, ModelConfig
 
         cfg = Config(
             model=ModelConfig(
@@ -257,7 +257,7 @@ class TestProviderFactory:
             base_url="http://127.0.0.1:5678/v1",
             model="gpt-4",
         )
-        from executors.llm.provider_factory import apply_preset
+        from infrastructure.llm_providers.provider_factory import apply_preset
 
         new_cfg = apply_preset(cfg, preset)
         assert new_cfg.model.name == "gpt-4"
@@ -267,9 +267,9 @@ class TestProviderFactory:
 
     def test_build_provider_openai(self) -> None:
         """config 的 effective_provider 为 openai_compatible 时返回 OpenAIResponsesProvider。"""
-        from config_loader.models import Config, ModelConfig
-        from executors.llm.openai_responses import OpenAIResponsesProvider
-        from executors.llm.provider_factory import build_provider
+        from infrastructure.config.models import Config, ModelConfig
+        from infrastructure.llm_providers.openai_responses import OpenAIResponsesProvider
+        from infrastructure.llm_providers.provider_factory import build_provider
 
         cfg = Config(
             model=ModelConfig(
@@ -283,9 +283,9 @@ class TestProviderFactory:
 
     def test_build_provider_anthropic(self) -> None:
         """config 的 effective_provider 为 anthropic 时返回 AnthropicMessagesProvider。"""
-        from config_loader.models import Config, ModelConfig
-        from executors.llm.anthropic_messages import AnthropicMessagesProvider
-        from executors.llm.provider_factory import build_provider
+        from infrastructure.config.models import Config, ModelConfig
+        from infrastructure.llm_providers.anthropic_messages import AnthropicMessagesProvider
+        from infrastructure.llm_providers.provider_factory import build_provider
 
         cfg = Config(
             model=ModelConfig(

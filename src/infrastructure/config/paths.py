@@ -12,7 +12,7 @@ sessions 等现存模块的 ``.kongming/xxx`` 路径拼接不在本次范围内�
 
 本函数不创建目录，只返回 :class:`Path` 对象；所有消费者按需自行 ``mkdir``。
 
-注意：``KONGMING_HOME`` 不是 :class:`config_loader.models.Config` 字段，而是
+注意：``KONGMING_HOME`` 不是 :class:`infrastructure.config.models.Config` 字段，而是
 和 ``KONGMING_CONFIG`` 同类的"特殊入口 env"，因此它不走 loader.py 的
 ``_ENV_FIELD_PATHS`` 覆盖机制。
 """

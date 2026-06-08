@@ -9,7 +9,7 @@
 - ``ModelConfig`` 区分本地模型与远端模型只通过 ``base_url`` 指向的主机判定，
   不允许在代码其它位置再出现一份"本地 vs 远端"的特殊分支。
 - pydantic v2 ``model_validator`` 负责跨字段校验；校验失败由 loader.py 再包
-  成 :class:`config_loader.errors.ConfigValidationError` 向外抛。
+  成 :class:`infrastructure.config.errors.ConfigValidationError` 向外抛。
 """
 
 from __future__ import annotations
@@ -442,7 +442,7 @@ class StreamConfig(BaseModel):
     """LLM 流式响应配置。
 
     顶层挂在 :class:`Config.stream`（**非** :class:`ModelConfig` 子节），因为
-    流式跨 observability / runtime / provider 三层职责，不归属单一模块。
+    流式跨 infrastructure.tracing / runtime / provider 三层职责，不归属单一模块。
 
     Attributes:
         enabled: 是否启用流式。装配层用此开关 + ``isinstance(llm, SupportsLLMStream)``
@@ -866,7 +866,7 @@ class SchedulerConfig(BaseModel):
     """v0.5.1 新增：cron task.policy.max_turns 缺省时的兜底 max_turns。
 
     替换 v0.2 ~ v0.5 期间在 ``execution_bridge._DEFAULT_MAX_TURNS=20`` 的硬编码
-    （违反"默认值集中在 config_loader.models"约束）。默认 ``90`` 是经验值——
+    （违反"默认值集中在 infrastructure.config.models"约束）。默认 ``90`` 是经验值——
     司天扫描类重型 cron 任务通常需要 40~80 turn 才能稳定完成；20 太低反复
     触发 max_turns 强制终止。
 

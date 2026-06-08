@@ -42,7 +42,7 @@ LogDir = Literal["c2s", "s2c", "http_req", "http_resp"]
 class _FullLogConfigLike(Protocol):
     """鸭子类型协议 —— ``WebFullLogConfig`` 实例或任意有相同字段的对象都行。
 
-    阶段 1 ``WebFullLogConfig`` 还没并到 ``config_loader``（并行任务在做），
+    阶段 1 ``WebFullLogConfig`` 还没并到 ``infrastructure.config``（并行任务在做），
     用 Protocol 避免硬依赖。
     """
 

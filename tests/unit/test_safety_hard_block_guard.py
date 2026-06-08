@@ -19,8 +19,8 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import ApprovalConfig, Config, ModelConfig
 from core.contracts import ApprovalRequest
+from infrastructure.config.models import ApprovalConfig, Config, ModelConfig
 from safety.guards.hard_block import HardBlockGuard
 from safety.types import (
     ApprovalMetadataKeys,
@@ -630,7 +630,7 @@ _USER_NOTDELTEST_RULES: list[dict[str, Any]] = [
 
 def _user_cfg_with_notdeltest() -> Config:
     """构造一份含 notdeltest 保护规则的 Config（模拟用户 yaml 配置）。"""
-    from config_loader.models import SafetyConfig, SafetyHardDenyConfig
+    from infrastructure.config.models import SafetyConfig, SafetyHardDenyConfig
 
     return Config(
         model=ModelConfig(

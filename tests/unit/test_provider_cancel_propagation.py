@@ -2,7 +2,7 @@
 
 两层钉子：
 
-1. **静态 AST 钉子**：扫 ``src/executors/llm/*.py``，检查没有 ``except BaseException``
+1. **静态 AST 钉子**：扫 ``src/infrastructure/llm_providers/*.py``，检查没有 ``except BaseException``
    或 ``except (BaseException, ...)`` —— 此类写法会吞掉 ``asyncio.CancelledError``
    导致用户 interrupt 时 runner 顶层 except 永远等不到 CancelledError，
    ``Result(status="cancelled")`` 退化为 ``Result(status="failed", error=ProviderError(...))``。
@@ -25,12 +25,12 @@ from typing import Any
 import httpx
 import pytest
 
-from config_loader.models import ModelConfig
 from core.contracts import LLMRequest
 from core.message import Message
-from executors.llm.anthropic_messages import AnthropicMessagesProvider
+from infrastructure.config.models import ModelConfig
+from infrastructure.llm_providers.anthropic_messages import AnthropicMessagesProvider
 
-_PROVIDER_DIR = Path(__file__).resolve().parents[2] / "src" / "executors" / "llm"
+_PROVIDER_DIR = Path(__file__).resolve().parents[2] / "src" / "infrastructure" / "llm_providers"
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +61,7 @@ def _names_in_except_type(t: ast.AST) -> list[str]:
 
 @pytest.mark.unit
 def test_no_provider_module_catches_baseexception() -> None:
-    """provider 层（src/executors/llm/）不许 ``except BaseException``（任何形式）。
+    """provider 层（src/infrastructure/llm_providers/）不许 ``except BaseException``（任何形式）。
 
     BaseException 是 ``Exception`` + ``KeyboardInterrupt`` + ``SystemExit`` +
     ``asyncio.CancelledError`` 的共同祖先；catch 它会让用户 interrupt 失效。

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from config_loader.models import Config, ModelConfig
+from infrastructure.config.models import Config, ModelConfig
 from sitian.config import SiTianAnalyzerConfig, SiTianConfig, SiTianSourceConfig
 from sitian.store import SiTianRecordsStore
 

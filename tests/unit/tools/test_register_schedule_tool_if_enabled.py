@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from config_loader.models import (
+from infrastructure.config.models import (
     ApprovalConfig,
     Config,
     ModelConfig,
@@ -85,7 +85,7 @@ def test_enabled_uses_default_home_when_none(monkeypatch, tmp_path: Path) -> Non
     fake_home.mkdir()
 
     # patch get_kongming_home（lazy import 在 helper 内部，patch 模块级符号）
-    import config_loader.paths as paths_mod
+    import infrastructure.config.paths as paths_mod
 
     monkeypatch.setattr(paths_mod, "get_kongming_home", lambda: fake_home)
 

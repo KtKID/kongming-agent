@@ -96,7 +96,7 @@ def _build_real_bridge(
 
 def _config_with_global_mode(mode: str) -> object:
     """构造最小 Config，把 scheduler.approval.mode 设为 mode。供需要显式覆盖兜底的测试用。"""
-    from config_loader.models import (
+    from infrastructure.config.models import (
         Config,
         ModelConfig,
         SchedulerApprovalConfig,

@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from config_loader.models import (
+from infrastructure.config.models import (
     Config,
     ModelConfig,
     SchedulerConfig,

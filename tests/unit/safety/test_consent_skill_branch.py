@@ -18,8 +18,8 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import ApprovalConfig, Config, ModelConfig, SafetySkillCallConfig
 from core.contracts import ApprovalDecision, ApprovalRequest
+from infrastructure.config.models import ApprovalConfig, Config, ModelConfig, SafetySkillCallConfig
 from safety.default_rules import DEFAULT_SKILL_CALL_RULES
 from safety.guards.consent import (
     ConsentResolver,

@@ -46,16 +46,16 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from config_loader.models import (
-    Config,
-    SafetyApprovalRequiredConfig,
-    SafetySensitivePathConfig,
-    SafetySkillCallConfig,
-)
 from core.contracts import (
     ApprovalDecision,
     ApprovalProvider,
     ApprovalRequest,
+)
+from infrastructure.config.models import (
+    Config,
+    SafetyApprovalRequiredConfig,
+    SafetySensitivePathConfig,
+    SafetySkillCallConfig,
 )
 from safety.default_rules import (
     DEFAULT_APPROVAL_REQUIRED_COMMANDS,

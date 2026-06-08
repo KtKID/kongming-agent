@@ -1,4 +1,4 @@
-"""unit：observability.trace_sink 覆盖。
+"""unit：infrastructure.tracing.trace_sink 覆盖。
 
 B1 / CR 报告 cr-report-20260424-202744.md。覆盖：
 
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from observability.trace_sink import (
+from infrastructure.tracing.trace_sink import (
     JsonlTraceSink,
     _event_to_dict,
     _json_default,
@@ -236,7 +236,7 @@ async def test_close_is_noop_and_idempotent(tmp_path):
 
 @pytest.mark.asyncio
 async def test_build_jsonl_trace_sink_reads_only_output_path(tmp_path):
-    from config_loader.models import Config, ModelConfig, TraceConfig
+    from infrastructure.config.models import Config, ModelConfig, TraceConfig
 
     cfg = Config(
         model=ModelConfig(name="m", base_url="http://localhost:1234"),
@@ -356,8 +356,8 @@ async def test_invalid_periodic_batch_size_raises(tmp_path):
 @pytest.mark.asyncio
 async def test_build_jsonl_trace_sink_passes_stream_config(tmp_path):
     """D#5：build_jsonl_trace_sink 把 cfg.stream.delta_sampling / periodic_batch_size 传入 sink。"""
-    from config_loader.models import Config, ModelConfig, StreamConfig, TraceConfig
     from core.contracts import Event
+    from infrastructure.config.models import Config, ModelConfig, StreamConfig, TraceConfig
 
     cfg = Config(
         model=ModelConfig(name="m", base_url="http://localhost:1234"),

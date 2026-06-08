@@ -23,7 +23,7 @@ import pytest
 
 from core.contracts import LLMStreamChunk
 from core.errors import ProviderError
-from executors.llm.anthropic_stream_parser import AnthropicStreamParser
+from infrastructure.llm_providers.anthropic_stream_parser import AnthropicStreamParser
 
 from .streaming.fixtures import (
     async_iter_events,
@@ -374,7 +374,7 @@ async def test_stall_detection_emits_warning(monkeypatch, caplog) -> None:  # ty
     """
     import logging
 
-    from executors.llm import anthropic_stream_parser as mod
+    from infrastructure.llm_providers import anthropic_stream_parser as mod
 
     # 第 1 次 100.0，第 2 次 145.0（跳 45s 触发 stall），之后递增 0.1 不再触发
     call_count = {"n": 0}

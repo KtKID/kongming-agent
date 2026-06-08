@@ -22,8 +22,8 @@ def main() -> int:
         sys.stderr.write(f"web dependencies not installed; run `uv sync --all-extras`: {exc}\n")
         return 1
 
-    from config_loader import load_config
-    from config_loader.paths import get_kongming_home
+    from infrastructure.config import load_config
+    from infrastructure.config.paths import get_kongming_home
     from web.app import create_app
     from web.app_support.app_lock import acquire_app_instance_lock, release_app_instance_lock
     from web.app_support.startup_progress import StartupProgress
@@ -218,13 +218,13 @@ def _resolve_default_cwd_for_thread(app: Any, thread_id: str) -> str:
 
 def _make_runtime_factory(cfg: object) -> object:
     """Build a runtime factory for web thread cells and cron runs."""
-    from config_loader.models import Config, LLMPresetConfig
-    from config_loader.paths import get_kongming_home
-    from executors.agent_runtime.native_runtime import NativeRuntime
     from host.session_bridge import SessionBridge
-    from observability import JsonlTraceSink
+    from infrastructure.config.models import Config, LLMPresetConfig
+    from infrastructure.config.paths import get_kongming_home
+    from infrastructure.tracing import JsonlTraceSink
     from prompting.instructions.instruction_loader import assemble_instructions
     from prompting.skills.skill_loader import format_skill_listing, load_skill_specs
+    from runtime_assembly.native_runtime import NativeRuntime
     from safety.approval_manager import make_manager_prompt_fn
     from sessions import SessionBootstrap, build_session
     from tools import (

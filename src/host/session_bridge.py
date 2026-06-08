@@ -3,7 +3,7 @@
 :class:`SessionBridge` 是 host 模块里**唯一**能把一次"用户输入 → runtime
 执行 → 输出"完整串起来的对象。它不承担：
 
-- 装配：那是 :class:`executors.agent_runtime.native_runtime.NativeRuntime.build`
+- 装配：那是 :class:`runtime_assembly.native_runtime.NativeRuntime.build`
   的事；``SessionBridge`` 只消费一个**已经装好**的 runtime。
 - 事件落盘：观测事件通过 :class:`core.contracts.EventSink` 从 runtime
   内部 fan-out，不走 bridge。如果宿主想看 UI 级别进度，通过
@@ -22,8 +22,8 @@ from typing import Any
 from commands.models import CommandResult
 from commands.service import CommandService, build_default_command_service, build_execution_context
 from core.result import Result
-from executors.agent_runtime.native_runtime import NativeRuntime
 from host.base import HostAdapter
+from runtime_assembly.native_runtime import NativeRuntime
 
 
 class SessionBridge:

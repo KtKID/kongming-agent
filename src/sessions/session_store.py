@@ -45,7 +45,7 @@ from core.contracts import Session
 from core.message import Message, ToolCall
 
 if TYPE_CHECKING:
-    from config_loader.models import Config
+    from infrastructure.config.models import Config
     from sessions.session_bootstrap import SessionBootstrap
 
 

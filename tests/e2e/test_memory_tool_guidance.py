@@ -49,7 +49,7 @@ async def test_stub_llm_chooses_memory_tool_for_preferences(tmp_path) -> None:
     如果将来想做"LLM 在看到正确 description 后必选 memory"的测试，需要接真实
     provider；本用例退而求其次，保证工具注册 + 执行路径无误。
     """
-    from config_loader.models import (
+    from infrastructure.config.models import (
         ApprovalConfig,
         Config,
         EvolutionConfig,
@@ -57,7 +57,7 @@ async def test_stub_llm_chooses_memory_tool_for_preferences(tmp_path) -> None:
         ModelConfig,
         RunnerConfig,
     )
-    from executors.agent_runtime.native_runtime import NativeRuntime
+    from runtime_assembly.native_runtime import NativeRuntime
     from safety import CapabilityPolicy, CapabilitySet
     from tests.e2e.conftest import StubLLMProvider
     from tools.runtime.registry import ToolRegistry

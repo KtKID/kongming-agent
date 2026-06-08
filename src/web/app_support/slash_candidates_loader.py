@@ -7,7 +7,7 @@ from pathlib import Path
 
 async def load_slash_candidates() -> list[dict[str, str]]:
     from commands.registry import build_builtin_registry
-    from config_loader.paths import get_kongming_home
+    from infrastructure.config.paths import get_kongming_home
     from prompting.skills.skill_loader import load_skill_specs
 
     home = get_kongming_home()

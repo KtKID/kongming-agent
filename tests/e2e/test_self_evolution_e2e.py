@@ -11,7 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from config_loader.models import (
+from core.contracts import LLMRequest, LLMResponse
+from core.message import Message, ToolCall
+from infrastructure.config.models import (
     ApprovalConfig,
     Config,
     EvolutionConfig,
@@ -23,9 +25,7 @@ from config_loader.models import (
     ShellToolConfig,
     ToolConfig,
 )
-from core.contracts import LLMRequest, LLMResponse
-from core.message import Message, ToolCall
-from executors.agent_runtime.native_runtime import NativeRuntime
+from runtime_assembly.native_runtime import NativeRuntime
 from tests.e2e.conftest import MemoryEventSink
 from tools import ToolRegistry, register_evolution_write_tool_if_enabled
 
@@ -101,7 +101,7 @@ async def test_self_evolution_run_child_reviewer_and_write_files(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(
-        "executors.agent_runtime.native_runtime.OpenAIResponsesProvider",
+        "runtime_assembly.native_runtime.OpenAIResponsesProvider",
         _ScriptedOpenAIProvider,
     )
     _ScriptedOpenAIProvider.reset()

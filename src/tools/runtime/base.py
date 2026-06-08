@@ -84,7 +84,7 @@ class BaseBuiltinTool:
             ``(content, data)`` 二元组：
 
             - ``content`` 是给模型看的人类可读文本，必填。
-            - ``data`` 是给 observability / 装配层看的结构化字段，可选。
+            - ``data`` 是给 infrastructure.tracing / 装配层看的结构化字段，可选。
 
         子类抛出的任何异常都会被 :meth:`execute` 捕获并转成
         ``ToolResult(ok=False, error_message=str(exc))``。

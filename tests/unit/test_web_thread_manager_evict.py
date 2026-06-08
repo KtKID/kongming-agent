@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from config_loader.models import Config
 from core.contracts import ApprovalAction, ApprovalRequest
+from infrastructure.config.models import Config
 from web.threads.manager import ThreadManager
 from web.threads.metadata import ThreadMetadata, write_thread_metadata
 

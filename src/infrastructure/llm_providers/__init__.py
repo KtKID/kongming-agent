@@ -1,4 +1,4 @@
-"""executors.llm：LLM provider 适配实现。
+"""infrastructure.llm_providers：LLM provider 适配实现。
 
 - :class:`BaseLLMProvider`：provider 实现侧基类（重试 / 超时 / 错误归一化 /
   OpenAI chat 消息格式转换助手）。
@@ -13,8 +13,8 @@ Protocol 的重定义，只是 provider 实现方共用的便利基类。Protoco
 
 from __future__ import annotations
 
-from executors.llm.base import BaseLLMProvider
-from executors.llm.openai_responses import OpenAIResponsesProvider
-from executors.llm.provider_factory import apply_preset, build_provider
+from infrastructure.llm_providers.base import BaseLLMProvider
+from infrastructure.llm_providers.openai_responses import OpenAIResponsesProvider
+from infrastructure.llm_providers.provider_factory import apply_preset, build_provider
 
 __all__ = ["BaseLLMProvider", "OpenAIResponsesProvider", "apply_preset", "build_provider"]

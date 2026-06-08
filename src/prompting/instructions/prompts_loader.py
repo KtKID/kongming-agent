@@ -22,7 +22,7 @@
 
 - 不 import `core`（本模块不需要）
 - 只依赖 stdlib + `importlib.resources`
-- 不 import 任何 sibling 模块（cli / safety / observability / memory 等）
+- 不 import 任何 sibling 模块（cli / safety / infrastructure.tracing / memory 等）
 - `prompting.instructions.prompts_loader` 结构上和 `prompting.instructions.instruction_loader` 同层，
   后者继续承接多来源合并（agent_spec / 外部文件 / env），本模块只负责
   生成 "agent_spec 基础文本"（供 InstructionLoader.load 的 agent_instructions 入参）
@@ -121,7 +121,7 @@ async def materialize_and_load_prompts(home: Path) -> str:
 
     Args:
         home: `.kongming/` 根目录的绝对路径（通常由
-            ``config_loader.get_kongming_home()`` 产出）。
+            ``infrastructure.config.get_kongming_home()`` 产出）。
 
     Returns:
         装配好的 system prompt 基础文本；所有段都为空时返回空字符串。

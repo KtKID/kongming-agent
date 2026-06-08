@@ -14,7 +14,7 @@ sibling 模块（如未来的 ``router.py``）只允许通过 :class:`ConfigMana
 - :meth:`ConfigManager.trigger_restart` — spawn ``./start.sh web restart``
 
 **严禁**：sibling 跨过本类直接 ``import schema / writer / restart`` 或
-``config_loader.load_config``。所有触达统一收口到本类，便于：
+``infrastructure.config.load_config``。所有触达统一收口到本类，便于：
 
 - 后续加缓存 / 锁 / 审计层时只动一处；
 - 单测 mock 时只 patch 一个 facade；
@@ -38,8 +38,8 @@ from ruamel.yaml import YAML
 # manager.py 自动同步——而维护两份独立列表才是真正的 bug 源。
 # 同时拷一份 scheduler 通过 _apply_scheduler_env_overrides 注入的字段名，
 # 它们在 loader 里是硬编码而非 _ENV_FIELD_PATHS 成员，必须显式补齐。
-from config_loader.loader import _ENV_FIELD_PATHS as _LOADER_ENV_FIELD_PATHS
-from config_loader.loader import load_config
+from infrastructure.config.loader import _ENV_FIELD_PATHS as _LOADER_ENV_FIELD_PATHS
+from infrastructure.config.loader import load_config
 from web.dashboard.config import restart, schema, writer
 from web.dashboard.config.restart import RestartScriptNotFoundError
 from web.dashboard.config.schema import FieldMeta, FieldSource
@@ -57,7 +57,7 @@ from web.dashboard.config.writer import (
 # scheduler 字段：loader._apply_scheduler_env_overrides 硬编码了一组额外的
 # KONGMING_SCHEDULER_* env，不进 _ENV_FIELD_PATHS。这里显式补齐，让
 # read_effective 的 sources 判定能覆盖到。维护时与
-# config_loader.loader._apply_scheduler_env_overrides 同步。
+# infrastructure.config.loader._apply_scheduler_env_overrides 同步。
 _SCHEDULER_EXTRA_ENV_FIELDS: tuple[tuple[str, ...], ...] = (
     ("scheduler", "enabled"),
     ("scheduler", "interval"),

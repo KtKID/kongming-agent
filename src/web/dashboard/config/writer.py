@@ -9,7 +9,7 @@
 - ``ruamel.yaml(typ="rt")`` round-trip — 保留 yaml 注释 + 空行 + key 顺序
 - 临时文件 + 原子 ``Path.replace`` — 写盘中途断电只会留下"老文件完整"或
   "新文件完整"，不会出现半截文件
-- 写完跑 :func:`config_loader.load_config` 做 pydantic 校验 — 校验失败立刻
+- 写完跑 :func:`infrastructure.config.load_config` 做 pydantic 校验 — 校验失败立刻
   删临时文件，原文件**不动**，把错误翻译成 ``[{"path", "message"}]`` 抛出
 
 参考：``safety._grant_persister`` 已有 ruamel round-trip 模式（追加列表场景，
@@ -18,7 +18,7 @@
 
 不依赖（边界）：
 
-- 仅 import ``config_loader.{loader, errors}`` 做 pydantic 校验闭环
+- 仅 import ``infrastructure.config.{loader, errors}`` 做 pydantic 校验闭环
 - **不** import 任何 ``web.*`` sibling — 由 ``ConfigManager`` 在更上层装配
 - **不** 修改 ``yaml_path`` 之外的任何文件
 """
@@ -37,8 +37,8 @@ from typing import Any
 
 from ruamel.yaml import YAML
 
-from config_loader.errors import ConfigLoadError, ConfigValidationError
-from config_loader.loader import load_config
+from infrastructure.config.errors import ConfigLoadError, ConfigValidationError
+from infrastructure.config.loader import load_config
 
 # ---------------------------------------------------------------------------
 # 公开异常类型
@@ -144,7 +144,7 @@ def round_trip_update(
     4. 按点分路径设值；嵌套 dict 缺中间层 / 试图穿过非 dict 节点 → 立刻抛
        :class:`ValidationFailedError`（不允许"魔法"补结构）。
     5. dump 到同目录临时文件 ``.yaml.tmp.<pid>.<nanos>``。
-    6. :func:`config_loader.load_config` 跑一次 pydantic 校验；失败 → 删临时
+    6. :func:`infrastructure.config.load_config` 跑一次 pydantic 校验；失败 → 删临时
        文件、原文件不动、抛 :class:`ValidationFailedError`。
     7. 校验通过 → ``Path.replace`` 原子覆盖原文件。
     8. 返回 :class:`WriteResult`（含 new_mtime 与 diff_lines）。

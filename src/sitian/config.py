@@ -1,10 +1,10 @@
 """
-司天配置模型——pydantic 校验，住在 sitian 包内而非 config_loader。
+司天配置模型——pydantic 校验，住在 sitian 包内而非 infrastructure.config。
 
 Role:
     定义 SiTianConfig / SiTianSourceConfig / SiTianAnalyzerConfig 等 pydantic 模型，
-    供 YAML 加载和 CLI 参数校验。刻意放在 sitian 包内而非 config_loader，
-    切断 ``web → config_loader → core`` 传递依赖。
+    供 YAML 加载和 CLI 参数校验。刻意放在 sitian 包内而非 infrastructure.config，
+    切断 ``web → infrastructure.config → core`` 传递依赖。
 
 Owns:
     - source kind 枚举（generic_channel / claude_project / codex_project / claude_workspace）
@@ -14,12 +14,12 @@ Owns:
 
 Does not own:
     - 运行时状态模型（models.py 的 frozen dataclass）
-    - 配置加载/解析（config_loader 或 cli.py）
+    - 配置加载/解析（infrastructure.config 或 cli.py）
     - 扫描逻辑（scanners.py）
 
 Called by:
     - sitian 内几乎所有模块（作为配置入参）
-    - config_loader.models（类型引用）
+    - infrastructure.config.models（类型引用）
     - cli.py（构造默认配置）
 
 Key outputs:
@@ -28,7 +28,7 @@ Key outputs:
     - SiTianScannerConfig / SiTianAnalyzerConfig（子配置）
 
 Change risks:
-    - 字段增删需同步 YAML 配置文件和 config_loader 引用
+    - 字段增删需同步 YAML 配置文件和 infrastructure.config 引用
     - kind 枚举变化需同步 scanners.py 分派逻辑
 """
 

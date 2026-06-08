@@ -24,7 +24,6 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import Config, LLMPresetConfig, ModelConfig
 from core import AgentSpec, InMemorySession
 from core.contracts import (
     ApprovalDecision,
@@ -38,6 +37,7 @@ from core.contracts import (
 from core.message import Message
 from core.result import Result
 from core.runner import Runner
+from infrastructure.config.models import Config, LLMPresetConfig, ModelConfig
 from scheduler.domain import (
     ConcurrencyPolicy,
     DueTaskReservation,

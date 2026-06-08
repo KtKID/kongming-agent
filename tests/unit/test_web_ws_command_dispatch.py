@@ -13,9 +13,9 @@ from pathlib import Path
 from typing import Any
 
 from commands.models import CommandResult
-from config_loader.models import Config
 from core.message import Message
 from core.result import Result
+from infrastructure.config.models import Config
 from tests.unit.test_web_app_lifespan import _seed_password
 from web.app import create_app
 from web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE

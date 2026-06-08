@@ -6,7 +6,7 @@ from pathlib import Path
 from click.testing import CliRunner
 
 import sitian.cli as sitian_cli
-from config_loader.models import Config, ModelConfig
+from infrastructure.config.models import Config, ModelConfig
 from sitian.config import SiTianConfig, SiTianSourceConfig
 
 

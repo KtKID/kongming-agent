@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from config_loader import load_config
-from config_loader.models import Config, ModelConfig
-from executors.agent_runtime.native_runtime import NativeRuntime
+from infrastructure.config import load_config
+from infrastructure.config.models import Config, ModelConfig
+from runtime_assembly.native_runtime import NativeRuntime
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 LOCAL_MODEL_YAML = REPO_ROOT / "config" / "setting.yaml"

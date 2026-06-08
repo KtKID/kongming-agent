@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from config_loader.models import Config
+from infrastructure.config.models import Config
 from tests.unit.test_web_app_lifespan import FakeThreadManager, _seed_password
 from web.app import create_app
 from web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE

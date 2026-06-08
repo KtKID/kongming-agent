@@ -1,7 +1,7 @@
 """HostAdapter 协议的 web 实现。
 
 把浏览器 WebSocket 连接缝进 :class:`host.base.HostAdapter` 接口，让
-:class:`executors.agent_runtime.NativeRuntime` 在不感知 web 的前提下
+:class:`runtime_assembly.NativeRuntime` 在不感知 web 的前提下
 正常工作。
 
 与 :class:`host.cli_adapter.CLIAdapter` 的对比：

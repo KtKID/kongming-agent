@@ -1,4 +1,4 @@
-"""Observability Baseline —— v1-mini 第一版观测层。
+"""infrastructure.tracing Baseline —— v1-mini 第一版观测层。
 
 对外只暴露一个 :class:`~core.contracts.EventSink` 的实现类
 :class:`JsonlTraceSink`，以及对应的工厂函数 :func:`build_jsonl_trace_sink`。
@@ -16,8 +16,8 @@
 
 from __future__ import annotations
 
-from observability.prompt_debug_dump import PromptDebugDumpSink
-from observability.trace_sink import JsonlTraceSink, build_jsonl_trace_sink
+from infrastructure.tracing.prompt_debug_dump import PromptDebugDumpSink
+from infrastructure.tracing.trace_sink import JsonlTraceSink, build_jsonl_trace_sink
 
 __all__ = [
     "JsonlTraceSink",

@@ -40,7 +40,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from config_loader.paths import get_kongming_home
+from infrastructure.config.paths import get_kongming_home
 from safety._path_trie import PathTrie
 from safety.default_rules import (
     DEFAULT_SENSITIVE_PATHS,

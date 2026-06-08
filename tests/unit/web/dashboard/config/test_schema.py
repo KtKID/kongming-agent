@@ -1,12 +1,12 @@
 """manage-config-tab dev-checklist #9 — schema.py 字段元数据漂移防火墙。
 
 本测试是 manage 配置页字段真源（``src/web/dashboard/config/schema.py``）的**漂移防火墙**：
-当 ``src/config_loader/models.py`` 内任一 leaf 字段新增 / 改名 / 改类型 / 删除时，
+当 ``src/infrastructure.config/models.py`` 内任一 leaf 字段新增 / 改名 / 改类型 / 删除时，
 schema.py 必须同步修改，否则 manage UI 与真实 pydantic schema 不一致。
 
 加新字段流程：
 
-1. 改 ``src/config_loader/models.py``（pydantic 真源）。
+1. 改 ``src/infrastructure.config/models.py``（pydantic 真源）。
 2. 同步改 ``src/web/dashboard/config/schema.py``（_FIELD_METAS 列表 + _GROUPS 若需新增）。
 3. 跑本测试 ``uv run pytest tests/unit/web/dashboard/config/test_schema.py -v``，全过即可。
 
@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import Config, ModelConfig
+from infrastructure.config.models import Config, ModelConfig
 from web.dashboard.config.schema import (
     FieldMeta,
     get_field_meta,

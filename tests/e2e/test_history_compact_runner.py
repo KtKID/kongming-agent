@@ -15,7 +15,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from config_loader.models import (
+from core import Runner
+from core.agent_spec import AgentSpec
+from core.message import Message
+from core.session import InMemorySession
+from infrastructure.config.models import (
     ApprovalConfig,
     Config,
     ModelConfig,
@@ -23,12 +27,8 @@ from config_loader.models import (
     SessionConfig,
     TraceConfig,
 )
-from core import Runner
-from core.agent_spec import AgentSpec
-from core.message import Message
-from core.session import InMemorySession
-from executors.agent_runtime.native_runtime import NativeRuntime
 from prompting import HistoryCompactor
+from runtime_assembly.native_runtime import NativeRuntime
 
 
 class _CountingCompactor:
@@ -236,7 +236,7 @@ async def test_native_runtime_build_disables_compactor_by_default(
     这是 memory-module5-completion task 定下的新默认行为：现有 FIFO 压缩语义
     与 LLM summarize 式压缩差距大，默认关闭、留给后续 task compactor-v2-llm-summarize。
     """
-    from executors.agent_runtime.native_runtime import _NoopCompactor
+    from runtime_assembly.native_runtime import _NoopCompactor
 
     cfg = _build_stub_cfg(tmp_path)
     runtime = NativeRuntime.build(

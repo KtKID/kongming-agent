@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from config_loader.models import Config
 from evolution.memory_materializer import MemoryMaterializer
 from evolution.models import (
     ApplyJob,
@@ -19,6 +18,7 @@ from evolution.models import (
 from evolution.skill_materializer import materialize_skill
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore, resolve_evolution_root
+from infrastructure.config.models import Config
 from memory import MemoryStore
 
 

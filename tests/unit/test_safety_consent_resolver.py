@@ -28,8 +28,8 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import ApprovalConfig, Config, ModelConfig
 from core.contracts import ApprovalDecision, ApprovalRequest
+from infrastructure.config.models import ApprovalConfig, Config, ModelConfig
 from safety.guards.consent import ConsentResolver
 from safety.types import (
     ApprovalMetadataKeys,

@@ -10,7 +10,7 @@
 设计约束：
 
 - 本文件只消费 ``core.contracts`` 里的协议和 ``host.base`` 的基类；
-  不反向 import ``cli/``，也不 import ``safety/`` / ``observability/``。
+  不反向 import ``cli/``，也不 import ``safety/`` / ``infrastructure.tracing/``。
 - ``prompt_approval``（v0.1.6）返回 :class:`core.contracts.ApprovalAction`
   的 3 档结构化决策（``ACCEPT_ONCE`` / ``ACCEPT_FOR_SESSION`` / ``REJECT``），
   与 web `ApprovalDialog` 三按钮 UX 对齐；由 ``InteractiveApproval`` 通过

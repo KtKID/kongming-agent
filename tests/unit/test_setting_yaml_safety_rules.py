@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from config_loader import load_config
+from infrastructure.config import load_config
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SETTING_YAML = _REPO_ROOT / "config" / "setting.yaml"

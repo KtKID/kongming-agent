@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from config_loader.paths import get_kongming_home
+from infrastructure.config.paths import get_kongming_home
 from prompting.instructions.instruction_loader import assemble_instructions
 from prompting.skills.skill_loader import format_skill_listing, load_skill_specs
 

@@ -1,7 +1,7 @@
 """Anthropic Messages API stream parser。
 
 把 Anthropic Messages 流式响应的 SSE 事件序列归一化为 provider-agnostic 的
-:class:`LLMStreamChunk` 序列，与 :mod:`executors.llm.openai_compat_stream_parser`
+:class:`LLMStreamChunk` 序列，与 :mod:`infrastructure.llm_providers.openai_compat_stream_parser`
 对齐输出形态（runner / sink 不感知 provider 差异）。
 
 事件 → chunk 映射表见 ``docs/llm-provider-v0.2/streaming/04-data-and-state.md`` §5。

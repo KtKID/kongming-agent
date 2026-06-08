@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from config_loader import get_kongming_home
+from infrastructure.config import get_kongming_home
 
 __all__ = ["AssetStorage", "AttachmentAsset", "AttachmentKind", "AttachmentStatus"]
 

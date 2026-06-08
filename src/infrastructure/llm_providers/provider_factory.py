@@ -9,8 +9,8 @@ import os
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from config_loader.models import Config, LLMPresetConfig
     from core.contracts import LLMProvider
+    from infrastructure.config.models import Config, LLMPresetConfig
 
 __all__ = ["apply_preset", "build_provider"]
 
@@ -37,8 +37,8 @@ def apply_preset(config: Config, preset: LLMPresetConfig) -> Config:
 
 def build_provider(config: Config) -> LLMProvider:
     """根据 config.model.effective_provider 构造对应的 LLM provider 实例。"""
-    from executors.llm.anthropic_messages import AnthropicMessagesProvider
-    from executors.llm.openai_responses import OpenAIResponsesProvider
+    from infrastructure.llm_providers.anthropic_messages import AnthropicMessagesProvider
+    from infrastructure.llm_providers.openai_responses import OpenAIResponsesProvider
 
     if config.model.effective_provider == "anthropic":
         return AnthropicMessagesProvider(

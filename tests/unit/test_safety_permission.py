@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from config_loader.models import ApprovalConfig, Config, ModelConfig
+from infrastructure.config.models import ApprovalConfig, Config, ModelConfig
 from safety.permission_policy import PermissionPolicy, PermissionRule
 from safety.types import ApprovalRequiredCommand, SensitivePathRule
 

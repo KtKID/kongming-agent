@@ -22,9 +22,9 @@ from pathlib import Path
 
 import pytest
 
-from config_loader import load_config
 from evolution.claude_transcript_provider import ClaudeTranscriptProvider
 from evolution.evolution_manager import EvolutionManager
+from infrastructure.config import load_config
 
 pytestmark = [
     pytest.mark.e2e,

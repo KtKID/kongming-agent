@@ -5,12 +5,12 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from config_loader.models import ModelConfig
 from core.contracts import LLMRequest, LLMResponse
 from core.message import Message
-from executors.llm.anthropic_messages import AnthropicMessagesProvider
-from executors.llm.base import BaseLLMProvider
-from executors.llm.openai_responses import OpenAIResponsesProvider
+from infrastructure.config.models import ModelConfig
+from infrastructure.llm_providers.anthropic_messages import AnthropicMessagesProvider
+from infrastructure.llm_providers.base import BaseLLMProvider
+from infrastructure.llm_providers.openai_responses import OpenAIResponsesProvider
 
 
 def _make_config(**overrides: object) -> ModelConfig:

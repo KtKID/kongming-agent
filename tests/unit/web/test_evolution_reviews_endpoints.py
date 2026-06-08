@@ -6,7 +6,6 @@ from pathlib import Path
 import httpx
 import pytest
 
-from config_loader.models import Config
 from evolution.models import (
     DecisionItem,
     DecisionRecord,
@@ -17,6 +16,7 @@ from evolution.models import (
 )
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore
+from infrastructure.config.models import Config
 from tests.unit.test_web_app_lifespan import _seed_password
 from web.app import create_app
 from web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE

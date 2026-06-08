@@ -34,14 +34,18 @@ from typing import Any, Literal, cast
 
 import httpx
 
-from config_loader.models import ModelConfig
 from core.contracts import LLMRequest, LLMResponse, LLMStreamChunk
 from core.errors import ProviderError
-from executors.llm.base import BaseLLMProvider
-from executors.llm.openai_compat_stream_parser import OpenAICompatStreamParser
-from executors.llm.raw_dump import dump_raw_llm_interaction
-from executors.llm.reasoning import EffortLevel, ReasoningConfig, resolve_reasoning_plan
-from executors.llm.sse_reader import iter_sse_events
+from infrastructure.config.models import ModelConfig
+from infrastructure.llm_providers.base import BaseLLMProvider
+from infrastructure.llm_providers.openai_compat_stream_parser import OpenAICompatStreamParser
+from infrastructure.llm_providers.raw_dump import dump_raw_llm_interaction
+from infrastructure.llm_providers.reasoning import (
+    EffortLevel,
+    ReasoningConfig,
+    resolve_reasoning_plan,
+)
+from infrastructure.llm_providers.sse_reader import iter_sse_events
 from network.network_log import log_network_exception
 
 FinishReasonStr = Literal["stop", "tool_calls", "length", "error", "other"]
@@ -73,7 +77,7 @@ class OpenAIResponsesProvider(BaseLLMProvider):
             retry_backoff=retry_backoff,
         )
         # 配置驱动的 raw dump 开关；装配层从 cfg.trace.raw_llm 传入。
-        # env KONGMING_TRACE_RAW_LLM=1 通过 config_loader 的 env 覆盖链路
+        # env KONGMING_TRACE_RAW_LLM=1 通过 infrastructure.config 的 env 覆盖链路
         # 会自动把 cfg.trace.raw_llm 变成 True，这里只读最终结果。
         self._enable_raw_dump = enable_raw_dump
         # 流式 read 超时（秒）。装配层从 cfg.stream.read_timeout 传入；
@@ -270,7 +274,7 @@ class OpenAIResponsesProvider(BaseLLMProvider):
                 )
             except Exception as exc:
                 log_network_exception(
-                    "executors.llm.openai_responses",
+                    "infrastructure.llm_providers.openai_responses",
                     "raw_dump_failed",
                     exc,
                     url=url,
@@ -397,7 +401,7 @@ class OpenAIResponsesProvider(BaseLLMProvider):
         if "cached_tokens" in prompt_details:
             normalized_usage["cached_input_tokens"] = prompt_details["cached_tokens"]
 
-        # 厂商扩展字段：按原始字段名收集，不归一化（observability 老消费者用）
+        # 厂商扩展字段：按原始字段名收集，不归一化（infrastructure.tracing 老消费者用）
         provider_metadata: dict[str, Any] = {}
         if "reasoning_tokens" in completion_details:
             provider_metadata["reasoning_tokens"] = completion_details["reasoning_tokens"]

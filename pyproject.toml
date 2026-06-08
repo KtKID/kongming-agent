@@ -82,12 +82,11 @@ packages = [
     "src/tools",
     "src/sessions",
     "src/prompting",
-    "src/executors",
+    "src/infrastructure",
+    "src/runtime_assembly",
     "src/host",
     "src/cli",
     "src/safety",
-    "src/observability",
-    "src/config_loader",
     "src/memory",
     "src/prompts",
     "src/web",
@@ -100,12 +99,11 @@ include = [
     "src/tools",
     "src/sessions",
     "src/prompting",
-    "src/executors",
+    "src/infrastructure",
+    "src/runtime_assembly",
     "src/host",
     "src/cli",
     "src/safety",
-    "src/observability",
-    "src/config_loader",
     "src/memory",
     "src/prompts",
     "src/web",
@@ -161,9 +159,9 @@ ignore = [
 # 其他风格级提示不是硬错误
 "src/core/runner.py" = ["SIM108"]
 "src/safety/chain.py" = ["SIM103"]
-"src/config_loader/models.py" = ["SIM103"]
+"src/infrastructure/config/models.py" = ["SIM103"]
 "src/sessions/session_store.py" = ["SIM108"]
-"src/executors/agent_runtime/native_runtime.py" = ["SIM108"]
+"src/runtime_assembly/native_runtime.py" = ["SIM108"]
 
 [tool.ruff.lint.isort]
 known-first-party = [
@@ -171,12 +169,11 @@ known-first-party = [
     "tools",
     "sessions",
     "prompting",
-    "executors",
+    "infrastructure",
+    "runtime_assembly",
     "host",
     "cli",
     "safety",
-    "observability",
-    "config_loader",
     "memory",
     "prompts",
     "web",
@@ -280,13 +277,12 @@ source = [
     "tools",
     "sessions",
     "prompting",
-    "executors",
+    "infrastructure",
+    "runtime_assembly",
     "host",
     "cli",
     "safety",
-    "observability",
     "memory",
-    "config_loader",
     "sitian",
 ]
 omit = [

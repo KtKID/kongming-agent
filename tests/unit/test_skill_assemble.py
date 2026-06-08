@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 import cli.main as cli_main
-from config_loader.models import (
+from infrastructure.config.models import (
     ApprovalConfig,
     Config,
     EvolutionConfig,

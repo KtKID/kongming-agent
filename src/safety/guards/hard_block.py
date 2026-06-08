@@ -35,11 +35,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from config_loader.models import (
+from core.contracts import ApprovalDecision, ApprovalRequest
+from infrastructure.config.models import (
     Config,
     SafetyHardDenyConfig,
 )
-from core.contracts import ApprovalDecision, ApprovalRequest
 from safety.default_rules import (
     DEFAULT_HARD_DENY_COMMANDS,
     DEFAULT_SENSITIVE_PATHS,

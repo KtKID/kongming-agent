@@ -14,7 +14,7 @@ provider 实现方（``openai_responses.py`` 以及未来的 ``anthropic_message
   OpenAI-compatible 厂商共用）；把 OpenAI choice 对象转回 :class:`Message`
   （包含 tool_calls 解析）
 
-依赖方向：只依赖 ``core`` 协议与 ``config_loader.models.ModelConfig``，
+依赖方向：只依赖 ``core`` 协议与 ``infrastructure.config.models.ModelConfig``，
 不依赖任何 sibling 模块。
 """
 
@@ -28,10 +28,10 @@ from typing import Any
 
 import httpx
 
-from config_loader.models import ModelConfig
 from core.contracts import LLMRequest, LLMResponse
 from core.errors import ProviderError
 from core.message import Message, ToolCall
+from infrastructure.config.models import ModelConfig
 
 
 class BaseLLMProvider:

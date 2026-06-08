@@ -83,7 +83,7 @@ class OpenAICompatStreamParser:
         self._response_id: str | None = None
         self._system_fingerprint: str | None = None
 
-        # 计数（供 llm.stream.end payload 填充，也方便上层 observability）
+        # 计数（供 llm.stream.end payload 填充，也方便上层 infrastructure.tracing）
         self.chunk_count: int = 0
 
     # ------------------------------------------------------------------

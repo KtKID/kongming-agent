@@ -34,8 +34,8 @@ from typing import TYPE_CHECKING
 
 import click
 
-from config_loader import load_config
-from config_loader.models import Config
+from infrastructure.config import load_config
+from infrastructure.config.models import Config
 
 if TYPE_CHECKING:
     from core.contracts import LLMProvider
@@ -165,7 +165,7 @@ def _build_analyzer_provider(cfg: Config) -> LLMProvider | None:
 
     import os
 
-    from config_loader.models import ModelConfig
+    from infrastructure.config.models import ModelConfig
 
     api_key = ""
     if analyzer_cfg.api_key_env:
@@ -181,7 +181,7 @@ def _build_analyzer_provider(cfg: Config) -> LLMProvider | None:
     )
     provider_cfg = cfg.model_copy(update={"model": sitian_model})
 
-    from executors.llm.provider_factory import build_provider
+    from infrastructure.llm_providers.provider_factory import build_provider
 
     return build_provider(provider_cfg)
 

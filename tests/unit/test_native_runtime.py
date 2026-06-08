@@ -13,7 +13,9 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import (
+from core.contracts import LLMRequest, LLMResponse
+from core.message import Message
+from infrastructure.config.models import (
     ApprovalConfig,
     Config,
     FileToolConfig,
@@ -22,9 +24,7 @@ from config_loader.models import (
     ShellToolConfig,
     ToolConfig,
 )
-from core.contracts import LLMRequest, LLMResponse
-from core.message import Message
-from executors.agent_runtime.native_runtime import NativeRuntime
+from runtime_assembly.native_runtime import NativeRuntime
 
 
 def _cfg() -> Config:

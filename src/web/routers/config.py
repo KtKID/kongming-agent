@@ -15,7 +15,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from config_loader.models import Config
+    from infrastructure.config.models import Config
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 

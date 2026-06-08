@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import pytest
 
-from config_loader.models import ApprovalConfig, Config, ModelConfig
 from core.contracts import ApprovalDecision, ApprovalRequest
+from infrastructure.config.models import ApprovalConfig, Config, ModelConfig
 from safety.capability_policy import CapabilityPolicy, CapabilitySet
 from safety.chain import (
     SafetyChainError,

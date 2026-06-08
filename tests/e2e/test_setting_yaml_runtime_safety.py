@@ -34,8 +34,8 @@ for _mod in _FORBIDDEN_MODULES:
         "this test must only call chain.decide, never execute shell."
     )
 
-from config_loader import load_config  # noqa: E402
 from core.contracts import ApprovalDecision, ApprovalRequest  # noqa: E402
+from infrastructure.config import load_config  # noqa: E402
 from safety.chain import build_safety_chain  # noqa: E402
 from safety.types import ApprovalMetadataKeys  # noqa: E402
 

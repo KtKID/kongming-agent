@@ -35,7 +35,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from config_loader.models import SchedulerApprovalConfig
 from core.agent_spec import AgentSpec
 from core.contracts import (
     ApprovalProvider,
@@ -49,6 +48,7 @@ from core.contracts import (
 from core.message import Message
 from core.result import Result
 from core.runner import Runner
+from infrastructure.config.models import SchedulerApprovalConfig
 from scheduler.delivery import DeliveryDispatcher
 from scheduler.domain import (
     DEFAULT_INACTIVITY_TIMEOUT,
@@ -69,8 +69,8 @@ from scheduler.store import Store
 from scheduler.timing import to_iso, utc_now
 
 if TYPE_CHECKING:
-    from config_loader.models import Config, LLMPresetConfig
-    from observability import JsonlTraceSink
+    from infrastructure.config.models import Config, LLMPresetConfig
+    from infrastructure.tracing import JsonlTraceSink
 
 logger = logging.getLogger(__name__)
 
@@ -359,11 +359,11 @@ class ExecutionBridge:
 
         1. **未启用 preset 体系**（``preset_id`` 为空 **或** ``preset_map`` 为
            ``None``）→ 返回 ``self._llm``，即 cli/web 装配时通过
-           :func:`executors.llm.provider_factory.build_provider` 用 ``cfg.model``
+           :func:`infrastructure.llm_providers.provider_factory.build_provider` 用 ``cfg.model``
            构造的**默认 provider**。``cfg.model`` 字段优先级（高 → 低）：
 
            - env：``KONGMING_MODEL_BASE_URL`` / ``KONGMING_MODEL_NAME`` /
-             ``KONGMING_MODEL_API_KEY``（见 :class:`config_loader.models.ModelConfig`）
+             ``KONGMING_MODEL_API_KEY``（见 :class:`infrastructure.config.models.ModelConfig`）
            - ``config/setting.yaml`` 的 ``model:`` 段
            - dataclass 默认值
 
@@ -386,7 +386,7 @@ class ExecutionBridge:
                 f"scheduled task preset_id {preset_id!r} not found in preset_map "
                 f"(available presets: {sorted(self._preset_map.keys())})"
             )
-        from executors.llm.provider_factory import apply_preset, build_provider
+        from infrastructure.llm_providers.provider_factory import apply_preset, build_provider
 
         preset = self._preset_map[preset_id]
         cfg = apply_preset(self._base_config, preset)  # type: ignore[arg-type]
@@ -716,7 +716,7 @@ class ExecutionBridge:
         # 4b) v0.4 per-run trace sink：每次 cron run 独立 jsonl 记录
         trace_sink: JsonlTraceSink | None = None
         if self._trace_dir is not None:
-            from observability import JsonlTraceSink
+            from infrastructure.tracing import JsonlTraceSink
 
             trace_path = self._trace_dir / f"cron-{request.run_id}.jsonl"
             trace_sink = JsonlTraceSink(trace_path, auto_flush=True)

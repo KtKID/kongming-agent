@@ -433,7 +433,7 @@ async def load_skill_specs(
 
     Args:
         home: ``.kongming/`` 根目录的绝对路径（通常由
-            :func:`config_loader.get_kongming_home` 产出）。loader 在其下
+            :func:`infrastructure.config.get_kongming_home` 产出）。loader 在其下
             扫描 ``skills/`` 子目录。
         workspace: 工作空间根（通常 ``cwd``）。loader 在其下扫描
             ``.kongming/skills/`` 子目录。``None`` 表示跳过 workspace 源。

@@ -58,7 +58,7 @@ class ThreadMetadata(BaseModel):
         id: thread ID，格式 ``thread-<hex12>``。与 session_id 同值。
         name: 用户给 thread 起的名（最长 200 字符）。
         preset_id: 创建时选的 LLM preset ID（来自
-            :class:`config_loader.models.LLMPresetConfig`）。``backend_kind="claude_code"``
+            :class:`infrastructure.config.models.LLMPresetConfig`）。``backend_kind="claude_code"``
             时允许空字符串占位（claude_code 由 SDK 内部选 model，不需要 preset）。
         backend_kind: 后端类型；``"generic_chat"`` 表示走 InputAssembler + LLM provider 的
             原有路径；``"claude_code"`` 表示走 ``/ws/claude-code``+ Claude Agent SDK。
@@ -163,7 +163,7 @@ def thread_metadata_path(home: Path, thread_id: str) -> Path:
     """返回单个 thread 的 metadata.json 路径。
 
     Args:
-        home: ``.kongming/`` 根目录（由 :func:`config_loader.get_kongming_home`
+        home: ``.kongming/`` 根目录（由 :func:`infrastructure.config.get_kongming_home`
             提供）。
         thread_id: ``thread-<hex12>`` 格式 ID。
 

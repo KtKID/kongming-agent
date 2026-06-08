@@ -33,7 +33,7 @@ from starlette.responses import FileResponse, JSONResponse
 from starlette.staticfiles import StaticFiles
 
 if TYPE_CHECKING:
-    from config_loader.models import Config
+    from infrastructure.config.models import Config
 
 logger = logging.getLogger(__name__)
 

@@ -18,7 +18,6 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from config_loader.models import Config
 from evolution.apply_executor import build_apply_job
 from evolution.models import (
     DecisionItem,
@@ -30,6 +29,7 @@ from evolution.models import (
 )
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore
+from infrastructure.config.models import Config
 from web.app import create_app
 
 

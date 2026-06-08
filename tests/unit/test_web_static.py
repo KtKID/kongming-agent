@@ -17,7 +17,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from config_loader.models import Config
+from infrastructure.config.models import Config
 from web.static import DEFAULT_DIST_DIR, install_static
 
 

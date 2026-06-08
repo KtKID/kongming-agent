@@ -1,7 +1,7 @@
 """JSONL trace sink —— v1-mini 唯一的 :class:`core.contracts.EventSink` 实现。
 
 设计要点（对齐 ``docs/kongming-agent-v1-minimal/10-contracts.md``
-"Observability / EventSink 边界"）：
+"infrastructure.tracing / EventSink 边界"）：
 
 - :class:`JsonlTraceSink` **不是**一个新的 Protocol，而是
   :class:`core.contracts.EventSink` Protocol 的具体实现类。
@@ -41,8 +41,8 @@ if TYPE_CHECKING:
     # 仅用于类型标注；运行时不强制存在，避免触发循环 import。
     # ``JsonlTraceSink`` 通过鸭子类型实现 EventSink Protocol，
     # 不继承、不在本文件重定义该 Protocol。
-    from config_loader.models import Config
     from core.contracts import Event
+    from infrastructure.config.models import Config
 
 
 _STREAM_DELTA_KINDS: frozenset[str] = frozenset({"content.delta", "reasoning.delta"})
@@ -255,7 +255,7 @@ def _json_default(o: Any) -> Any:
     if dataclasses.is_dataclass(o) and not isinstance(o, type):
         return dataclasses.asdict(o)
     if isinstance(o, Path):
-        return str(o)
+        return o.as_posix()
     if isinstance(o, (datetime, date)):
         return o.isoformat()
     if isinstance(o, set):

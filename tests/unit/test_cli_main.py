@@ -5,7 +5,7 @@ from pathlib import Path
 from click.testing import CliRunner
 
 import cli.main as cli_main
-from config_loader.models import (
+from infrastructure.config.models import (
     ApprovalConfig,
     Config,
     ModelConfig,

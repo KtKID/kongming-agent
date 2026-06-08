@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from config_loader.models import Config
+from infrastructure.config.models import Config
 
 
 def _make_test_config() -> Config:
@@ -134,7 +134,7 @@ def mock_deps():
     at the source module level, not at web.run level.
     """
     with (
-        patch("executors.agent_runtime.native_runtime.NativeRuntime") as MockRuntime,
+        patch("runtime_assembly.native_runtime.NativeRuntime") as MockRuntime,
         patch("host.session_bridge.SessionBridge") as MockBridge,
         patch(
             "prompting.instructions.instruction_loader.assemble_instructions",
@@ -341,7 +341,7 @@ class TestEventSinks:
 
     @pytest.mark.asyncio
     async def test_sinks_passed_to_runtime(self, test_cfg, mock_adapter, mock_deps):
-        from observability import JsonlTraceSink
+        from infrastructure.tracing import JsonlTraceSink
         from web.run import _make_runtime_factory
 
         factory = _make_runtime_factory(test_cfg)
@@ -362,7 +362,7 @@ class TestEventSinks:
     @pytest.mark.asyncio
     async def test_jsonl_sink_path_per_thread_isolation(self, test_cfg, mock_adapter, mock_deps):
         """两个不同 thread_id 各自分配独立的 JsonlTraceSink，文件路径不冲突。"""
-        from observability import JsonlTraceSink
+        from infrastructure.tracing import JsonlTraceSink
         from web.run import _make_runtime_factory
 
         factory = _make_runtime_factory(test_cfg)

@@ -14,7 +14,7 @@
 
 - **trace 通过 callback 注入**：``trace_emitter`` 是 ``Callable[[event_kind, decision,
   request], None] | None``，由装配层（``chain.build_safety_chain``）注入，
-  不直接 import ``observability`` / ``EventSink``，保持 ``safety`` 自包含。
+  不直接 import ``infrastructure.tracing`` / ``EventSink``，保持 ``safety`` 自包含。
 - **运行时 boundary_kind 恒为 host**：``RuntimeBoundaryContext`` 由
   :class:`SafetyGatedApproval` 在调用入口构造，本类不读 ``boundary_kind`` 做
   sandbox 分支。
