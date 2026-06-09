@@ -124,6 +124,7 @@ def _iter_lines_reversed(path: Path) -> Iterator[str]:
                 leftover = b""
             # 反向 yield：尾部的行先出
             for line_bytes in reversed(parts):
+                line_bytes = line_bytes.rstrip(b"\r")
                 if not line_bytes:
                     continue
                 yield line_bytes.decode("utf-8", errors="replace")
@@ -131,6 +132,7 @@ def _iter_lines_reversed(path: Path) -> Iterator[str]:
         # 文件首块如果有残留（说明开头那行不带前导 \n，但只要 remaining=0 进入
         # 上面分支时 leftover 已置空，这里实际不会有内容；保留分支防御）。
         if leftover:
+            leftover = leftover.rstrip(b"\r")
             yield leftover.decode("utf-8", errors="replace")
 
 
@@ -378,7 +380,7 @@ def _resolve_kongming_home(arg: Path | None) -> Path:
     if arg is not None:
         return arg.expanduser().resolve()
     # 复用项目运行时入口
-    from config_loader.paths import get_kongming_home
+    from infrastructure.config.paths import get_kongming_home
 
     return get_kongming_home()
 
