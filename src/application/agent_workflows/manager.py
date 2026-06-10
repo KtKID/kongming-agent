@@ -30,6 +30,9 @@ from application.agent_workflows.strategies.manager import (
 )
 from application.agent_workflows.strategies.map_reduce.strategy import MapReduceStrategy
 from application.agent_workflows.strategies.parallel import ParallelWorkflowStrategy
+from application.agent_workflows.strategies.roundtable_review.strategy import (
+    RoundtableReviewStrategy,
+)
 from application.subagents.manager import SubAgentManager, SubAgentRun, SubAgentTask
 from application.subagents.permissions import (
     SubAgentCreationRecord,
@@ -191,6 +194,7 @@ class AgentWorkflowManager:
         )
         self._strategy_manager.register(ParallelWorkflowStrategy(self))
         self._strategy_manager.register(MapReduceStrategy(self))
+        self._strategy_manager.register(RoundtableReviewStrategy(self))
 
     @property
     def workspace_root(self) -> Path:

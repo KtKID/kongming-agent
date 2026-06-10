@@ -614,8 +614,16 @@ async def test_run_workflow_specs_unknown_mode_uses_strategy_registry(
     finally:
         await runtime.aclose()
 
-    assert exc_info.value.available_modes == ("map_reduce", "parallel")
-    assert exc_info.value.runnable_modes == ("map_reduce", "parallel")
+    assert exc_info.value.available_modes == (
+        "map_reduce",
+        "parallel",
+        "roundtable_review",
+    )
+    assert exc_info.value.runnable_modes == (
+        "map_reduce",
+        "parallel",
+        "roundtable_review",
+    )
     assert exc_info.value.operation == "run"
 
 

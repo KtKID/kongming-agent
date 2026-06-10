@@ -24,6 +24,8 @@ from tools.agent_workflow_tool import (
     build_run_agent_workflow_tool,
 )
 
+_FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "agent_workflows" / "map_reduce"
+
 
 class _FakeSubAgentManager:
     """测试用子 agent manager，按 shard metadata 返回结构化 mapper JSON。"""
@@ -50,6 +52,32 @@ class _FakeSubAgentManager:
             run_id=f"run-{shard_id}",
             status="completed",
             content=content,
+            error_message=None,
+            turn_count=1,
+        )
+
+
+class _RawTextSubAgentManager:
+    """测试用 raw_text 子 agent manager，按任务顺序返回随机数样式文本。"""
+
+    def __init__(self) -> None:
+        """初始化 fake manager，输入为空，输出为记录任务的实例。"""
+        self.tasks: list[Any] = []
+
+    async def run_task(
+        self, *, workflow_id: str, parent_session_id: str, task: Any, audit_writer: Any
+    ) -> SubAgentRun:
+        """运行 fake raw_text mapper，输入为任务 metadata，输出为数字文本。"""
+        del workflow_id, parent_session_id, audit_writer
+        self.tasks.append(task)
+        order = int(task.metadata["map_reduce_display_order"])
+        number = order * 11
+        return SubAgentRun(
+            task=task,
+            session_id=f"child-raw-{order}",
+            run_id=f"run-raw-{order}",
+            status="completed",
+            content=f"数字: {number}\n宣言: 我抽到了 {number}",
             error_message=None,
             turn_count=1,
         )
@@ -141,6 +169,12 @@ def _payload() -> dict[str, Any]:
     }
 
 
+def _load_map_reduce_fixture(name: str) -> dict[str, Any]:
+    """读取 map_reduce fixture，输入为文件名，输出为 JSON 对象。"""
+    path = _FIXTURE_ROOT / name
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _mapper_output(*, shard_id: str, files: list[str]) -> dict[str, Any]:
     """构造 mapper 输出，输入为 shard 和文件，输出为 code_findings JSON 对象。"""
     first_file = files[0]
@@ -209,7 +243,11 @@ async def test_map_reduce_workflow_runs_fake_mappers_and_writes_artifacts(tmp_pa
     )
 
     catalog = manager.list_workflow_strategies()
-    assert [entry.mode for entry in catalog] == ["map_reduce", "parallel"]
+    assert [entry.mode for entry in catalog] == [
+        "map_reduce",
+        "parallel",
+        "roundtable_review",
+    ]
     description = manager.describe_workflow_strategy("map_reduce")
     assert description.status == "available"
     assert description.runnable is True
@@ -672,6 +710,108 @@ async def test_run_agent_workflow_tool_normalizes_minimax_tool_argument_shapes()
     assert limits["mapper_retries"] == 1
     assert limits["validation_repair_retries"] == 0
     assert normalized["audit_tags"] == ["user_review_map_reduce", "agent_runtime_overview"]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_workflow_tool_normalizes_cli_session_map_reduce_payload(
+    tmp_path: Path,
+) -> None:
+    """验证 CLI 真实失败参数被归一化，输入为绝对 file_list，输出为可执行 workflow。"""
+    _write_sample_tree(tmp_path)
+    subagents = _FakeSubAgentManager()
+    manager = AgentWorkflowManager(
+        subagents=subagents,  # type: ignore[arg-type]
+        config=_config(tmp_path),
+        workspace_root=tmp_path,
+    )
+    handle = AgentWorkflowHandle()
+    handle.bind(manager)
+    tool = build_run_agent_workflow_tool(handle)
+
+    payload = _payload()
+    payload["input_source"] = {
+        "kind": "file_list",
+        "files": [
+            str(tmp_path / "src" / "alpha.py"),
+            str(tmp_path / "src" / "pkg" / "beta.py"),
+            str(tmp_path / "tests" / "test_alpha.py"),
+        ],
+    }
+    payload["shard_strategy"] = {
+        "kind": "by_directory",
+        "max_files_per_shard": 5,
+        "min_shards": 5,
+        "max_shards": 5,
+        "preserve_directory_boundary": True,
+        "prefer_dependency_cohesion": True,
+    }
+    payload["mapper"]["tool_names"] = ["read_file", "list_dir", "run_shell"]
+    payload["mapper"].pop("skill_names")
+    payload["limits"] = {
+        "max_concurrency": 5,
+        "workflow_timeout_seconds": 600,
+        "mapper_timeout_seconds": 300,
+        "mapper_retries": 1,
+    }
+
+    result = await tool.execute(
+        {"mode": "map_reduce", "payload": payload},
+        ToolContext(run_id="r", session_id="parent-session", turn=1, call_id="c"),
+    )
+
+    assert result.ok is True
+    assert result.data is not None
+    assert result.data["completed"] is True
+    assert len(subagents.tasks) == 3
+    assert {tuple(task.metadata["map_reduce_files"]) for task in subagents.tasks} == {
+        ("src/alpha.py",),
+        ("src/pkg/beta.py",),
+        ("tests/test_alpha.py",),
+    }
+    assert all("run_shell" not in task.tool_names for task in subagents.tasks)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_workflow_tool_runs_inline_raw_text_map_reduce(
+    tmp_path: Path,
+) -> None:
+    """验证 CLI 失败 fixture 回放，输入为 noop inline，输出为 3 个 raw_text mapper 报告。"""
+    fixture = _load_map_reduce_fixture("cli-5f68e28fc030-inline-noop.json")
+    expected = fixture["expected_after_fix"]
+    subagents = _RawTextSubAgentManager()
+    manager = AgentWorkflowManager(
+        subagents=subagents,  # type: ignore[arg-type]
+        config=_config(tmp_path),
+        workspace_root=tmp_path,
+    )
+    handle = AgentWorkflowHandle()
+    handle.bind(manager)
+    tool = build_run_agent_workflow_tool(handle)
+
+    result = await tool.execute(
+        fixture["arguments"],
+        ToolContext(run_id="r", session_id=fixture["session_id"], turn=1, call_id="inline-call"),
+    )
+
+    assert result.ok is True
+    assert result.data is not None
+    assert result.data["completed"] == expected["completed"]
+    assert len(subagents.tasks) == expected["report_count"]
+    assert (
+        result.data["map_reduce"]["reducer_output"]["output_contract"]
+        == expected["output_contract"]
+    )
+    assert (
+        result.data["map_reduce"]["reducer_output"]["completed_shards"] == expected["report_count"]
+    )
+    summaries = [report["summary"] for report in result.data["reports"]]
+    assert summaries == [
+        "数字: 11 宣言: 我抽到了 11",
+        "数字: 22 宣言: 我抽到了 22",
+        "数字: 33 宣言: 我抽到了 33",
+    ]
+    assert all(task.metadata["map_reduce_files"] for task in subagents.tasks)
+    assert all(task.permission.mode == "scoped_workdir" for task in subagents.tasks)
 
 
 @pytest.mark.asyncio
