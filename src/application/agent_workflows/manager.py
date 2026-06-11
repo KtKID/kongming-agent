@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from application.agent_roles import AgentRoleManager
 from application.agent_workflows.context import WorkflowExecutionContext
 from application.agent_workflows.strategies.base import WorkflowRunRequest
 from application.agent_workflows.strategies.description import (
@@ -184,11 +185,13 @@ class AgentWorkflowManager:
         subagents: SubAgentManager,
         config: Config,
         workspace_root: Path,
+        role_manager: AgentRoleManager,
     ) -> None:
         """初始化管理器，输入为子 agent 管理器、配置和工作区，输出为带默认策略注册的 workflow facade。"""
         self._subagents = subagents
         self._config = config
         self._workspace_root = workspace_root.resolve()
+        self._role_manager = role_manager
         self._strategy_manager = AgentWorkflowStrategyManager(
             context_factory=self._build_workflow_context
         )
@@ -200,6 +203,11 @@ class AgentWorkflowManager:
     def workspace_root(self) -> Path:
         """返回 workflow 运行的工作区根目录，输入为 manager 状态，输出为绝对路径。"""
         return self._workspace_root
+
+    @property
+    def role_manager(self) -> AgentRoleManager:
+        """返回共享角色管理器，输入为 manager 状态，输出为 AgentRoleManager。"""
+        return self._role_manager
 
     def list_workflow_strategies(self) -> tuple[WorkflowStrategyCatalogEntry, ...]:
         """列出已注册策略，输入为当前策略注册表，输出为父 agent 可查看的策略目录。"""

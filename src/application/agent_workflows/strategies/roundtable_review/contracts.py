@@ -1,11 +1,12 @@
 """roundtable_review 编排合同与解析。
 
-本脚本定义 Multi-Agent Roundtable Review 的 payload、默认 reviewer、预算和
+本脚本定义 Multi-Agent Roundtable Review 的 payload、participant、预算和
 ReviewBoard 记录结构。
-作用是让策略入口获得类型化配置，并在运行前完成输入范围、讨论轮次和预算校验。
-关键执行流程：parse_roundtable_review_spec 读取 payload，补默认 reviewer 和 limits，
+作用是让策略入口获得类型化配置，并在运行前完成输入范围、participant、讨论轮次和预算校验。
+关键执行流程：parse_roundtable_review_spec 读取 payload，通过 AgentRoleManager
+解析 participants.select，并补 limits，
 校验路径、轮次、预算后返回 RoundtableReviewSpec。
-关键函数：parse_roundtable_review_spec 解析入口，default_reviewer_specs 提供五类 reviewer，
+关键函数：parse_roundtable_review_spec 解析入口，_parse_participants 解析角色，
 estimate_tokens 估算文本 token 用量。
 """
 
@@ -13,7 +14,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from application.agent_roles import AgentRoleManager, AgentRolePreset
 
 ReviewSeverity = Literal["P0", "P1", "P2", "P3"]
 ReviewCommentType = Literal["support", "refute", "supplement"]
@@ -89,7 +93,7 @@ class RoundtableReviewSpec:
     objective: str
     # 输入来源。
     input_source: ReviewInputSource
-    # reviewer 列表。
+    # participant/reviewer 列表。
     reviewers: tuple[ReviewerSpec, ...]
     # 预算与轮次。
     limits: RoundtableReviewLimits
@@ -159,48 +163,16 @@ class RoundtableReviewContractError(ValueError):
     """roundtable_review payload 解析失败。"""
 
 
-def default_reviewer_specs() -> tuple[ReviewerSpec, ...]:
-    """返回默认五类 reviewer，输入为空，输出固定角色列表。"""
-    return (
-        ReviewerSpec(
-            agent_id="architecture_reviewer",
-            title="架构 Agent",
-            focus="模块边界、职责划分、依赖方向、扩展性",
-            instructions="从模块边界、公开门户、依赖方向、扩展点和演进成本审查设计。",
-        ),
-        ReviewerSpec(
-            agent_id="code_quality_reviewer",
-            title="代码质量 Agent",
-            focus="命名、抽象层次、复杂度、可读性",
-            instructions="从命名、一致性、抽象层级、复杂度、可读性和维护成本审查实现。",
-        ),
-        ReviewerSpec(
-            agent_id="test_reviewer",
-            title="测试 Agent",
-            focus="可测试性、边界条件、回归风险",
-            instructions="从测试入口、边界条件、回归风险、可观测断言和缺失用例审查方案。",
-        ),
-        ReviewerSpec(
-            agent_id="performance_reviewer",
-            title="性能 Agent",
-            focus="热路径、IO、缓存、并发、资源占用",
-            instructions="从热路径、IO 次数、缓存、并发、资源占用和规模上限审查风险。",
-        ),
-        ReviewerSpec(
-            agent_id="safety_stability_reviewer",
-            title="安全/稳定性 Agent",
-            focus="权限、异常处理、数据一致性、失败恢复",
-            instructions="从权限边界、异常处理、数据一致性、失败恢复和误用防护审查风险。",
-        ),
-    )
-
-
-def parse_roundtable_review_spec(raw: Mapping[str, object]) -> RoundtableReviewSpec:
+def parse_roundtable_review_spec(
+    raw: Mapping[str, object],
+    *,
+    role_manager: AgentRoleManager,
+) -> RoundtableReviewSpec:
     """解析 roundtable_review payload，输入为原始映射，输出为类型化 spec。"""
     topic = _required_str(raw, "topic")
     objective = _optional_str(raw.get("objective")) or topic
     input_source = _parse_input_source(raw.get("input_source"), raw.get("module_path"))
-    reviewers = _parse_reviewers(raw.get("reviewers"))
+    reviewers = _parse_participants(raw, role_manager=role_manager)
     limits = _parse_limits(raw.get("limits"), input_source=input_source)
     audit_tags = tuple(_string_list(raw.get("audit_tags")))
     return RoundtableReviewSpec(
@@ -257,36 +229,42 @@ def _parse_input_source(raw: object, module_path: object) -> ReviewInputSource:
     )
 
 
-def _parse_reviewers(raw: object) -> tuple[ReviewerSpec, ...]:
-    """解析 reviewer 列表，输入为可选 payload 字段，输出为 reviewer specs。"""
-    defaults = {reviewer.agent_id: reviewer for reviewer in default_reviewer_specs()}
-    if raw is None:
-        return default_reviewer_specs()
-    if not isinstance(raw, Sequence) or isinstance(raw, str):
-        raise RoundtableReviewContractError("reviewers must be an array")
-    reviewers: list[ReviewerSpec] = []
-    for index, item in enumerate(raw, 1):
-        if isinstance(item, str):
-            reviewer = defaults.get(item.strip())
-            if reviewer is None:
-                raise RoundtableReviewContractError(f"unknown reviewer id: {item}")
-            reviewers.append(reviewer)
-            continue
-        if not isinstance(item, Mapping):
-            raise RoundtableReviewContractError(f"reviewers[{index}] must be object or string")
-        agent_id = _required_str(item, "agent_id")
-        reviewers.append(
-            ReviewerSpec(
-                agent_id=agent_id,
-                title=_optional_str(item.get("title")) or agent_id,
-                focus=_optional_str(item.get("focus")) or "代码模块设计评审",
-                instructions=_optional_str(item.get("instructions"))
-                or "从指定关注点审查代码模块设计。",
-            )
-        )
-    if not reviewers:
-        raise RoundtableReviewContractError("reviewers must contain at least one reviewer")
-    return tuple(reviewers)
+def _parse_participants(
+    raw: Mapping[str, object],
+    *,
+    role_manager: AgentRoleManager,
+) -> tuple[ReviewerSpec, ...]:
+    """解析 participants.select，输入为 payload 和 manager，输出 reviewer specs。"""
+    if "reviewers" in raw:
+        raise RoundtableReviewContractError("reviewers is removed; use participants.select")
+    participants = raw.get("participants")
+    if not isinstance(participants, Mapping):
+        raise RoundtableReviewContractError("participants.select is required")
+    allowed = {"select"}
+    unknown = sorted(str(key) for key in participants if key not in allowed)
+    if unknown:
+        raise RoundtableReviewContractError(f"unsupported participants field: {', '.join(unknown)}")
+    selected = participants.get("select")
+    if not isinstance(selected, Sequence) or isinstance(selected, str):
+        raise RoundtableReviewContractError("participants.select must be an array")
+    role_ids = [item for item in selected if isinstance(item, str)]
+    if len(role_ids) != len(selected):
+        raise RoundtableReviewContractError("participants.select must contain role ids")
+    try:
+        roles = role_manager.resolve_participants(role_ids)
+    except ValueError as exc:
+        raise RoundtableReviewContractError(str(exc)) from exc
+    return tuple(_reviewer_from_role(role) for role in roles)
+
+
+def _reviewer_from_role(role: AgentRolePreset) -> ReviewerSpec:
+    """把角色库 preset 转成 roundtable reviewer，输入为角色，输出 reviewer spec。"""
+    return ReviewerSpec(
+        agent_id=role.role_id,
+        title=role.title,
+        focus=role.role,
+        instructions=role.role,
+    )
 
 
 def _parse_limits(
@@ -381,7 +359,6 @@ __all__ = [
     "RoundtableReviewLimits",
     "RoundtableReviewSpec",
     "SourceFileRecord",
-    "default_reviewer_specs",
     "estimate_tokens",
     "normalize_comment_type",
     "normalize_severity",

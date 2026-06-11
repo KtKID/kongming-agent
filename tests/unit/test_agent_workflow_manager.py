@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from application.agent_roles import AgentRoleManager
 from application.agent_workflows.manager import (
     AgentWorkflowManager,
     SubAgentReportProjection,
@@ -224,6 +225,7 @@ async def test_parallel_workflow_writes_audit_and_keeps_child_contexts_isolated(
             subagents=SubAgentManager(runtime),
             config=cfg,
             workspace_root=tmp_path,
+            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
         )
         result = await manager.run_parallel(
             parent_session_id="parent-session",
@@ -302,6 +304,7 @@ async def test_workflow_rejects_parent_session_path_traversal(tmp_path: Path) ->
             subagents=SubAgentManager(runtime),
             config=cfg,
             workspace_root=tmp_path,
+            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
         )
         with pytest.raises(ValueError, match="session root"):
             await manager.run_parallel(
@@ -324,6 +327,7 @@ async def test_parallel_workflow_reports_failed_child_task(tmp_path: Path) -> No
             subagents=SubAgentManager(runtime),
             config=cfg,
             workspace_root=tmp_path,
+            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
         )
         result = await manager.run_parallel(
             parent_session_id="parent-session",
@@ -375,6 +379,7 @@ async def test_parallel_workflow_uses_unique_task_run_paths_for_slug_collisions(
             subagents=SubAgentManager(runtime),
             config=cfg,
             workspace_root=tmp_path,
+            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
         )
         result = await manager.run_parallel(
             parent_session_id="parent-session",
@@ -415,6 +420,7 @@ async def test_scoped_parallel_workflow_writes_subagent_creation_and_workdir_fil
             subagents=SubAgentManager(runtime),
             config=cfg,
             workspace_root=tmp_path,
+            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
         )
         result = await manager.run_workflow_specs(
             mode="parallel",
@@ -472,6 +478,7 @@ async def test_scoped_parallel_workflow_rejects_outside_write_without_side_effec
             subagents=SubAgentManager(runtime),
             config=cfg,
             workspace_root=tmp_path,
+            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
         )
         result = await manager.run_workflow_specs(
             mode="parallel",
@@ -518,6 +525,7 @@ async def test_scoped_parallel_workflow_audits_hallucinated_not_registered_tool(
             subagents=SubAgentManager(runtime),
             config=cfg,
             workspace_root=tmp_path,
+            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
         )
         result = await manager.run_workflow_specs(
             mode="parallel",
@@ -558,6 +566,7 @@ async def test_run_workflow_specs_rejects_missing_task_fields_with_index(
             subagents=SubAgentManager(runtime),
             config=cfg,
             workspace_root=tmp_path,
+            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
         )
         with pytest.raises(ValueError, match=r"task_specs\[1\]\.task_name"):
             await manager.run_workflow_specs(
@@ -581,6 +590,7 @@ async def test_run_workflow_specs_rejects_more_than_eight_task_specs(
             subagents=SubAgentManager(runtime),
             config=cfg,
             workspace_root=tmp_path,
+            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
         )
         with pytest.raises(ValueError, match="at most 8 task specs"):
             await manager.run_workflow_specs(
@@ -604,6 +614,7 @@ async def test_run_workflow_specs_unknown_mode_uses_strategy_registry(
             subagents=SubAgentManager(runtime),
             config=cfg,
             workspace_root=tmp_path,
+            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
         )
         with pytest.raises(WorkflowStrategyNotFound) as exc_info:
             await manager.run_workflow_specs(
@@ -649,6 +660,7 @@ async def test_run_workflow_specs_rejects_invalid_task_spec_shapes(
             subagents=SubAgentManager(runtime),
             config=cfg,
             workspace_root=tmp_path,
+            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
         )
         with pytest.raises(ValueError, match=error):
             await manager.run_workflow_specs(
@@ -681,6 +693,7 @@ async def test_parallel_strategy_rejects_empty_or_non_list_task_specs(
             subagents=SubAgentManager(runtime),
             config=cfg,
             workspace_root=tmp_path,
+            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
         )
         with pytest.raises(ValueError, match=error):
             await manager.run_workflow(
@@ -867,6 +880,7 @@ async def test_parent_agent_can_create_subagents_through_registered_tool(tmp_pat
         subagents=SubAgentManager(runtime),
         config=cfg,
         workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
     )
     handle.bind(manager)
     try:

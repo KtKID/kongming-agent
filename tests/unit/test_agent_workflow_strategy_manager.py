@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from application.agent_roles import AgentRoleManager
 from application.agent_workflows.context import WorkflowExecutionContext
 from application.agent_workflows.manager import AgentWorkflowManager
 from application.agent_workflows.strategies.base import (
@@ -212,6 +213,7 @@ def test_agent_workflow_manager_registers_parallel_strategy_catalog(tmp_path: Pa
         subagents=object(),  # type: ignore[arg-type]
         config=cfg,
         workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
     )
 
     catalog = manager.list_workflow_strategies()

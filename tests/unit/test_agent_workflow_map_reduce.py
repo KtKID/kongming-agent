@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from application.agent_roles import AgentRoleManager
 from application.agent_workflows.manager import AgentWorkflowManager
 from application.subagents.manager import SubAgentRun
 from core.contracts import ToolContext
@@ -240,6 +241,7 @@ async def test_map_reduce_workflow_runs_fake_mappers_and_writes_artifacts(tmp_pa
         subagents=subagents,  # type: ignore[arg-type]
         config=_config(tmp_path),
         workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
     )
 
     catalog = manager.list_workflow_strategies()
@@ -312,6 +314,7 @@ async def test_map_reduce_rejects_validation_repair_retries(tmp_path: Path) -> N
         subagents=_FakeSubAgentManager(),  # type: ignore[arg-type]
         config=_config(tmp_path),
         workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
     )
 
     with pytest.raises(ValueError, match="validation_repair_retries"):
@@ -332,6 +335,7 @@ async def test_map_reduce_rejects_single_file_above_token_limit(tmp_path: Path) 
         subagents=_FakeSubAgentManager(),  # type: ignore[arg-type]
         config=_config(tmp_path),
         workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
     )
 
     with pytest.raises(ValueError, match="max_estimated_tokens_per_shard"):
@@ -352,6 +356,7 @@ async def test_map_reduce_marks_oversized_mapper_output_as_failed_shard(tmp_path
         subagents=_FakeSubAgentManager(content_suffix="oversized"),  # type: ignore[arg-type]
         config=_config(tmp_path),
         workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
     )
 
     result = await manager.run_workflow_payload(
@@ -396,6 +401,7 @@ async def test_map_reduce_records_mapper_timeout_as_failed_shard(tmp_path: Path)
         subagents=_SlowSubAgentManager(),  # type: ignore[arg-type]
         config=_config(tmp_path),
         workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
     )
 
     result = await manager.run_workflow_payload(
@@ -447,6 +453,7 @@ async def test_map_reduce_records_reducer_timeout_artifacts(
         subagents=_FakeSubAgentManager(),  # type: ignore[arg-type]
         config=_config(tmp_path),
         workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
     )
 
     result = await manager.run_workflow_payload(
@@ -723,6 +730,7 @@ async def test_run_agent_workflow_tool_normalizes_cli_session_map_reduce_payload
         subagents=subagents,  # type: ignore[arg-type]
         config=_config(tmp_path),
         workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
     )
     handle = AgentWorkflowHandle()
     handle.bind(manager)
@@ -783,6 +791,7 @@ async def test_run_agent_workflow_tool_runs_inline_raw_text_map_reduce(
         subagents=subagents,  # type: ignore[arg-type]
         config=_config(tmp_path),
         workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
     )
     handle = AgentWorkflowHandle()
     handle.bind(manager)
@@ -810,6 +819,58 @@ async def test_run_agent_workflow_tool_runs_inline_raw_text_map_reduce(
         "数字: 22 宣言: 我抽到了 22",
         "数字: 33 宣言: 我抽到了 33",
     ]
+    assert all(task.metadata["map_reduce_files"] for task in subagents.tasks)
+    assert all(task.permission.mode == "scoped_workdir" for task in subagents.tasks)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_workflow_tool_runs_absolute_temp_placeholder_map_reduce(
+    tmp_path: Path,
+) -> None:
+    """验证 CLI 临时绝对占位路径 fixture 回放，输入为 /tmp 文件，输出为 5 个 raw_text mapper。"""
+    fixture = _load_map_reduce_fixture("cli-7b3b9df541d4-absolute-temp-placeholder.json")
+    expected = fixture["expected_after_fix"]
+    subagents = _RawTextSubAgentManager()
+    manager = AgentWorkflowManager(
+        subagents=subagents,  # type: ignore[arg-type]
+        config=_config(tmp_path),
+        workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
+    )
+    handle = AgentWorkflowHandle()
+    handle.bind(manager)
+    tool = build_run_agent_workflow_tool(handle)
+
+    result = await tool.execute(
+        fixture["arguments"],
+        ToolContext(
+            run_id="r",
+            session_id=fixture["session_id"],
+            turn=1,
+            call_id="absolute-temp-call",
+        ),
+    )
+
+    assert result.ok is True
+    assert result.data is not None
+    assert result.data["completed"] == expected["completed"]
+    assert len(subagents.tasks) == expected["report_count"]
+    assert (
+        result.data["map_reduce"]["reducer_output"]["output_contract"]
+        == expected["output_contract"]
+    )
+    assert (
+        result.data["map_reduce"]["reducer_output"]["completed_shards"] == expected["report_count"]
+    )
+    summaries = [report["summary"] for report in result.data["reports"]]
+    assert summaries == [
+        "数字: 11 宣言: 我抽到了 11",
+        "数字: 22 宣言: 我抽到了 22",
+        "数字: 33 宣言: 我抽到了 33",
+        "数字: 44 宣言: 我抽到了 44",
+        "数字: 55 宣言: 我抽到了 55",
+    ]
+    assert all("run_shell" not in task.tool_names for task in subagents.tasks)
     assert all(task.metadata["map_reduce_files"] for task in subagents.tasks)
     assert all(task.permission.mode == "scoped_workdir" for task in subagents.tasks)
 

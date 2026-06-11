@@ -98,20 +98,19 @@ class TrustResolver:
         - ``shell``：command 类（path_or_action 为命令首段）
         """
         capability, path_or_action = _derive_capability_and_target(request)
-        if capability is None or path_or_action is None:
-            return None
+        if capability is not None and path_or_action is not None:
+            # 1. 精确 capability 查询（session_id 严格隔离：仅查本 session 桶 + config）
+            result = self._grants.find_matching(
+                capability=capability,
+                path_or_action=path_or_action,
+                boundary_kind=BoundaryKind.HOST,
+                session_id=request.session_id,
+            )
+            if result is not None:
+                return result
 
-        # 1. 精确 capability 查询（session_id 严格隔离：仅查本 session 桶 + config）
-        result = self._grants.find_matching(
-            capability=capability,
-            path_or_action=path_or_action,
-            boundary_kind=BoundaryKind.HOST,
-            session_id=request.session_id,
-        )
-        if result is not None:
-            return result
-
-        # 2. tool: 精确命令前缀匹配（session grant 细化后不再通配）
+        # 2. tool: 精确命令前缀匹配 + 通配工具授权。
+        #    无 path/action 参数的普通工具仍可通过 allow_tools_silent 命中通配 grant。
         tool_name = request.tool_name
         if tool_name:
             tool_capability = f"tool:{tool_name}"

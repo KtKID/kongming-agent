@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from application.agent_roles import AgentRoleManager
 from application.agent_workflows.manager import AgentWorkflowManager
 from application.subagents.manager import SubAgentManager, SubAgentTask
 from application.subagents.permissions import SubAgentPermissionSpec
@@ -83,6 +84,7 @@ async def test_minimax_m3_scoped_subagent_allows_workdir_read_write_and_rejects_
         subagents=SubAgentManager(runtime),
         config=cfg,
         workspace_root=workspace_root,
+        role_manager=AgentRoleManager(role_dir=workspace_root / ".kongming" / "agent_roles"),
     )
 
     try:

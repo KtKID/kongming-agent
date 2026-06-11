@@ -493,6 +493,8 @@ safety:
   allow_tools_silent:
   - "read_file"
   - "list_dir"
+  - "list_agent_roles"
+  - "create_agent_role"
 
   # ---- ⑦ log_silent_reads —— silent_allow + read 操作的 trace 写盘开关 ----
   # 默认 false（避免 jsonl 膨胀）；调试时设 true 可看到完整决策事件。
@@ -502,7 +504,7 @@ safety:
   # ---- env 覆盖（4 个） ----
   # KONGMING_SAFETY_TRUSTED_WORKDIRS=".kongming/work/,.kongming/tmp/"
   # KONGMING_SAFETY_ALLOW_WRITES="~/scratch/,/tmp/kongming-*/"
-  # KONGMING_SAFETY_ALLOW_TOOLS_SILENT="read_file,list_dir"
+  # KONGMING_SAFETY_ALLOW_TOOLS_SILENT="read_file,list_dir,list_agent_roles,create_agent_role"
   # KONGMING_SAFETY_LOG_SILENT_READS=true
 
 

@@ -376,7 +376,7 @@ block 规则，与现有三表并列。
 
 
 # ---------------------------------------------------------------------------
-# trusted_workdirs / allow_writes / allow_tools_silent 默认空集
+# trusted_workdirs / allow_writes / allow_tools_silent 默认集合
 # ---------------------------------------------------------------------------
 
 DEFAULT_TRUSTED_WORKDIRS: tuple[str, ...] = (
@@ -390,6 +390,8 @@ DEFAULT_ALLOW_WRITES: tuple[str, ...] = ()
 DEFAULT_ALLOW_TOOLS_SILENT: tuple[str, ...] = (
     "read_file",
     "list_dir",
+    "list_agent_roles",
+    "create_agent_role",
 )
 
 

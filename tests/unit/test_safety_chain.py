@@ -13,9 +13,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from core.contracts import ApprovalDecision, ApprovalRequest
+from infrastructure.config import load_config
 from infrastructure.config.models import ApprovalConfig, Config, ModelConfig
 from safety.approval.chain import (
     SafetyChainError,
@@ -68,6 +71,10 @@ def _cfg() -> Config:
     )
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SETTING_YAML = _REPO_ROOT / "config" / "setting.yaml"
+
+
 # ---------------------------------------------------------------------------
 # build_safety_chain：函数签名向上游零变更
 # ---------------------------------------------------------------------------
@@ -102,6 +109,22 @@ async def test_build_safety_chain_smoke_decide_does_not_raise() -> None:
     chain = build_safety_chain(_cfg(), interactive_approval=underlying)
     decision = await chain.decide(_req(tool_name="read_file", path="/tmp/test.txt"))
     assert decision.outcome in {"approved", "rejected"}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("tool_name", ["list_agent_roles", "create_agent_role"])
+async def test_agent_role_tools_are_silent_allowed(tool_name: str) -> None:
+    """验证角色工具在仓库默认配置中静默放行，输入为 tool 名，输出 silent_allow。"""
+    underlying = _FixedApproval("rejected")
+    cfg = load_config(_SETTING_YAML, load_env_file=False)
+    assert tool_name in cfg.safety.allow_tools_silent
+    chain = build_safety_chain(cfg, interactive_approval=underlying)
+
+    decision = await chain.decide(_req(tool_name=tool_name))
+
+    assert decision.outcome == "approved"
+    assert decision.metadata[ApprovalMetadataKeys.DECISION_CLASS] == "silent_allow"
+    assert underlying.requests == []
 
 
 # ---------------------------------------------------------------------------

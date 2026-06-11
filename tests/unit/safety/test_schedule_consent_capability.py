@@ -297,7 +297,7 @@ def test_existing_default_tables_unaffected_by_consent_then_trust_tools() -> Non
     - approval_required_commands 仍含 ``git-push`` profile
     - sensitive_paths 仍含 ``ssh-material`` block + ``project-env`` elevated
     - skill_call_rules 仍是空 tuple（deny-by-default）
-    - allow_tools_silent 仍只含 ``read_file`` / ``list_dir``，没有把
+    - allow_tools_silent 含低风险只读工具和 agent role 工具，没有把
       ``schedule`` / ``memory`` 误塞进去
     """
     hard_deny_names = {r.name for r in DEFAULT_HARD_DENY_COMMANDS}
@@ -315,7 +315,12 @@ def test_existing_default_tables_unaffected_by_consent_then_trust_tools() -> Non
 
     assert DEFAULT_SKILL_CALL_RULES == ()
 
-    assert set(DEFAULT_ALLOW_TOOLS_SILENT) == {"read_file", "list_dir"}
+    assert set(DEFAULT_ALLOW_TOOLS_SILENT) == {
+        "read_file",
+        "list_dir",
+        "list_agent_roles",
+        "create_agent_role",
+    }
     # 关键回归：schedule / memory 不应被错误地放进 allow_tools_silent
     # （否则用户首次也不会被询问，破坏 consent-then-trust 语义）
     assert "schedule" not in DEFAULT_ALLOW_TOOLS_SILENT

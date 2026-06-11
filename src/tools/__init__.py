@@ -28,6 +28,12 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from core.contracts import EventSink, Tool
+from tools.agent_role_tool import AgentRoleManagerLike, build_agent_role_tools
+from tools.agent_workflow_tool import (
+    AgentWorkflowHandle,
+    build_agent_workflow_tool,
+    build_run_agent_workflow_tool,
+)
 from tools.builtin.file_tool import (
     ListDirTool,
     ReadFileTool,
@@ -64,7 +70,7 @@ def build_default_registry(
 ) -> ToolRegistry:
     """按 v1-mini 默认工具集组装一个 :class:`ToolRegistry`。
 
-    装配层（例如 ``executors/agent_runtime/native_runtime.py``）只需要读配置
+    装配层（例如 ``runtime_assembly/native_runtime.py``）只需要读配置
     里的 ``tool.file.enabled`` / ``tool.shell.enabled`` 以及运行参数，
     然后把它们喂进来即可，不用在别的地方再写第二份"默认工具清单"。
 
@@ -203,9 +209,28 @@ def register_evolution_write_tool_if_enabled(
     return store
 
 
+def register_agent_workflow_tool(
+    registry: ToolRegistry,
+    handle: AgentWorkflowHandle,
+) -> None:
+    """Register the agent workflow tool with a late-bound manager handle."""
+    registry.register(cast(Tool, build_run_agent_workflow_tool(handle)))
+    registry.register(cast(Tool, build_agent_workflow_tool(handle)))
+
+
+def register_agent_role_tool(
+    registry: ToolRegistry,
+    manager: AgentRoleManagerLike,
+) -> None:
+    """Register agent role list/create tools with a shared manager."""
+    for tool in build_agent_role_tools(manager):
+        registry.register(cast(Tool, tool))
+
+
 __all__ = [
     "AutoAllowApproval",
     "AutoDenyApproval",
+    "AgentWorkflowHandle",
     "BaseBuiltinTool",
     "InteractiveApproval",
     "ListDirTool",
@@ -219,5 +244,7 @@ __all__ = [
     "build_file_tools",
     "build_shell_tool",
     "register_evolution_write_tool_if_enabled",
+    "register_agent_workflow_tool",
+    "register_agent_role_tool",
     "register_schedule_tool_if_enabled",
 ]

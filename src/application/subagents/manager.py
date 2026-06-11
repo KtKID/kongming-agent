@@ -128,6 +128,8 @@ class SubAgentManager:
                 "你是 kongming 子 agent。只处理分派给你的任务。"
                 "只使用本次派发的任务文本和必要上下文。"
                 "如果任务给出工作目录，文件写入必须位于该目录内。"
+                "任务要求输出结论或报告时，直接作为最终回复返回。"
+                "只有任务明确要求写文件且提供写入工具时才写文件。"
                 "输出包含：结论、关键依据、风险或未完成项。"
             ),
             default_model=self._runtime.agent_spec.default_model,

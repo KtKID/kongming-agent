@@ -21,6 +21,7 @@ from tools.runtime.base import BaseBuiltinTool
 _SCOPED_WORKDIR_MODE = "scoped_workdir"
 _SCOPED_TOOL_NAMES = frozenset({"read_file", "write_file", "list_dir"})
 _INLINE_INPUT_PREFIXES = ("noop://", "inline://")
+_TEMP_INLINE_INPUT_ROOTS = ("/tmp/", "/private/tmp/", "/var/tmp/")
 _MAP_REDUCE_SPEC_WRAPPER = "MapReduceWorkflowSpec"
 _ROUNDTABLE_REVIEW_SPEC_WRAPPER = "RoundtableReviewSpec"
 _MAP_REDUCE_REQUIRED_PAYLOAD_KEYS = frozenset(
@@ -127,7 +128,7 @@ _ROUNDTABLE_REVIEW_PAYLOAD_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
         "roundtable_review payload 顶层直接包含 topic、input_source、limits 等字段。"
-        "discussion_rounds 包含第 1 轮独立分析；max_discussion_rounds 默认封顶 6。"
+        "participants 子对象只支持 select 数组；discussion_rounds 包含第 1 轮独立分析。"
     ),
     "properties": {
         "mode": {"type": "string", "enum": ["roundtable_review"]},
@@ -145,7 +146,18 @@ _ROUNDTABLE_REVIEW_PAYLOAD_SCHEMA: dict[str, Any] = {
                 "max_bytes_per_file": {"type": "integer"},
             },
         },
-        "reviewers": {"type": "array"},
+        "participants": {
+            "type": "object",
+            "description": "圆桌子 agent 角色选择，只支持 select。",
+            "properties": {
+                "select": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "已保存或内置的 agent role id 列表。",
+                }
+            },
+            "required": ["select"],
+        },
         "limits": {
             "type": "object",
             "properties": {
@@ -314,6 +326,8 @@ class RunAgentWorkflowTool(BaseBuiltinTool):
                     "策略参数。parallel 使用 task_specs 或 tasks；map_reduce 的 payload 顶层"
                     "直接使用 MapReduceWorkflowSpec 字段：objective、input_source、"
                     "shard_strategy、mapper、reducer、limits、output_contract。"
+                    "roundtable_review 必须使用 participants.select 选择角色，"
+                    "不要使用 reviewers。"
                     '不要写成 {"MapReduceWorkflowSpec": {...}}。'
                 ),
                 "properties": {
@@ -657,6 +671,8 @@ def _normalize_map_reduce_tool_names(value: Any) -> Any:
 def _normalize_roundtable_review_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """归一化 roundtable_review 参数，输入为模型生成 payload，输出为 parser 友好 payload。"""
     normalized = dict(payload)
+    if "reviewers" in normalized:
+        raise ValueError("reviewers is removed; use participants.select")
     input_source = _object_copy(normalized.get("input_source"))
     if input_source is None:
         input_source = {}
@@ -675,9 +691,11 @@ def _normalize_roundtable_review_payload(payload: dict[str, Any]) -> dict[str, A
         else:
             normalized["module_path"] = _coerce_string_array(module_path)
 
-    reviewers = normalized.get("reviewers")
-    if isinstance(reviewers, tuple):
-        normalized["reviewers"] = list(reviewers)
+    participants = _object_copy(normalized.get("participants"))
+    if participants is not None:
+        if "select" in participants:
+            participants["select"] = _coerce_string_array(participants.get("select"))
+        normalized["participants"] = participants
 
     limits = _object_copy(normalized.get("limits"))
     if limits is not None:
@@ -733,9 +751,7 @@ def _contains_inline_input(value: Any) -> bool:
     """判断文件列表是否包含 inline 占位符，输入为任意值，输出为布尔值。"""
     if not isinstance(value, list):
         return False
-    return any(
-        isinstance(item, str) and item.strip().startswith(_INLINE_INPUT_PREFIXES) for item in value
-    )
+    return any(isinstance(item, str) and _is_inline_input_item(item) for item in value)
 
 
 def _inline_shard_count(files: Any, shard_strategy: Any) -> int:
@@ -743,9 +759,7 @@ def _inline_shard_count(files: Any, shard_strategy: Any) -> int:
     inline_count = 0
     if isinstance(files, list):
         inline_count = sum(
-            1
-            for item in files
-            if isinstance(item, str) and item.strip().startswith(_INLINE_INPUT_PREFIXES)
+            1 for item in files if isinstance(item, str) and _is_inline_input_item(item)
         )
     min_shards = 1
     max_shards: int | None = None
@@ -760,6 +774,27 @@ def _inline_shard_count(files: Any, shard_strategy: Any) -> int:
     if max_shards is not None:
         count = min(count, max_shards)
     return count
+
+
+def _is_inline_input_item(value: str) -> bool:
+    """识别 inline 输入占位符，输入为模型文件项，输出为是否应生成合成输入。"""
+    stripped = value.strip()
+    if stripped.startswith(_INLINE_INPUT_PREFIXES):
+        return True
+    return _is_temporary_absolute_placeholder(stripped)
+
+
+def _is_temporary_absolute_placeholder(value: str) -> bool:
+    """识别模型生成的临时绝对占位路径，输入为路径文本，输出为是否可转 inline。"""
+    if not value:
+        return False
+    path = Path(value).expanduser()
+    if not path.is_absolute() or path.exists():
+        return False
+    candidates = {path.as_posix(), path.resolve(strict=False).as_posix()}
+    return any(
+        candidate.startswith(root) for candidate in candidates for root in _TEMP_INLINE_INPUT_ROOTS
+    )
 
 
 def _write_inline_map_reduce_files(

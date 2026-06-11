@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from application.agent_roles import AgentRoleManager
 from application.agent_workflows.manager import AgentWorkflowManager
 from application.subagents.manager import SubAgentManager
 from core.agent_spec import AgentSpec
@@ -176,6 +177,7 @@ async def test_minimax_m3_map_reduce_runs_two_real_mapper_subagents(tmp_path: Pa
         subagents=SubAgentManager(runtime),
         config=cfg,
         workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
     )
 
     try:

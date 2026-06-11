@@ -67,7 +67,7 @@ class RoundtableReviewStrategy:
             title="多 Agent 圆桌评审",
             status="available",
             runnable=True,
-            summary="固定 reviewer 角色并行审查代码模块设计，通过共享 ReviewBoard 进行质询和仲裁。",
+            summary="按 participants.select 选择子 agent 角色，并行审查代码模块设计，通过共享 ReviewBoard 进行质询和仲裁。",
             when_to_use=(
                 "代码模块设计、架构边界、测试策略、性能和稳定性需要多视角审查",
                 "评审结论需要绑定源码、文档、commit 或行号证据",
@@ -101,6 +101,15 @@ class RoundtableReviewStrategy:
                     },
                 ),
                 WorkflowStrategyInputField(
+                    name="participants",
+                    required=True,
+                    type_label="object",
+                    description="子 agent 角色选择，只支持 select 数组。",
+                    example={
+                        "select": ["architecture_reviewer", "test_reviewer"],
+                    },
+                ),
+                WorkflowStrategyInputField(
                     name="limits",
                     required=False,
                     type_label="object",
@@ -127,6 +136,9 @@ class RoundtableReviewStrategy:
                     "mode": "roundtable_review",
                     "payload": {
                         "topic": "Session 模块设计是否合理",
+                        "participants": {
+                            "select": ["architecture_reviewer", "test_reviewer"],
+                        },
                         "input_source": {
                             "root_dir": ".",
                             "paths": ["src/sessions"],
@@ -149,7 +161,13 @@ class RoundtableReviewStrategy:
         payload: Mapping[str, object],
     ) -> Any:
         """执行 roundtable_review，输入为 workflow context 和 payload，输出为 AgentWorkflowResult。"""
-        spec = parse_roundtable_review_spec(payload)
+        spec = parse_roundtable_review_spec(payload, role_manager=self._manager.role_manager)
+        role_snapshot_path = self._manager.role_manager.write_workflow_snapshot(
+            context.workflow_dir,
+            self._manager.role_manager.resolve_participants(
+                tuple(reviewer.agent_id for reviewer in spec.reviewers)
+            ),
+        )
         board = ReviewBoardWriter(workflow_dir=context.workflow_dir)
         input_root, source_records, source_paths = collect_source_files(
             workspace_root=self._manager.workspace_root,
@@ -334,6 +352,7 @@ class RoundtableReviewStrategy:
                     "consensus_path": str(board.paths.consensus_path),
                     "final_report_path": str(board.paths.final_report_path),
                 },
+                "role_snapshot_path": str(role_snapshot_path),
             }
         }
         self._manager.write_workflow_result(
