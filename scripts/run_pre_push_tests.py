@@ -63,12 +63,24 @@ SENSITIVE_ENV_PREFIXES = (
     "GOOGLE_",
 )
 
+SENSITIVE_ENV_SUFFIXES = (
+    "_API_KEY",
+    "_CERT",
+    "_KEY_FILE",
+    "_PASSWORD",
+    "_PRIVATE_KEY",
+    "_SECRET",
+    "_TOKEN",
+)
+
 SMOKE_TESTS = (
     "tests/unit/test_config_loader.py",
     "tests/unit/test_arch_contracts.py",
     "tests/unit/test_runtime_home_static_guards.py",
 )
 
+# 手工维护源码到 unit 测试的兜底映射。新增 src 一级模块或高风险 web 路径时，
+# 需要同步补充这里，避免 push gate 只跑 smoke 而漏掉模块级测试。
 MODULE_TEST_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "src/infrastructure/config/",
@@ -186,7 +198,7 @@ def detect_base_ref(repo: Path, environ: Mapping[str, str] | None = None) -> str
             if not _ref_exists(repo, same_name_remote):
                 continue
             merge_base = _run_git(repo, ["merge-base", "HEAD", same_name_remote], check=False)
-            if merge_base:
+            if merge_base and _ref_exists(repo, merge_base):
                 return merge_base
     raise RuntimeError(
         "pre-push: cannot find a valid diff base; set upstream or "
@@ -378,7 +390,7 @@ def _is_sensitive_env_name(name: str) -> bool:
         return True
     if upper_name in SENSITIVE_ENV_NAMES:
         return True
-    if upper_name.endswith("_TOKEN") or upper_name.endswith("_API_KEY"):
+    if upper_name.endswith(SENSITIVE_ENV_SUFFIXES):
         return True
     return upper_name.startswith(SENSITIVE_ENV_PREFIXES)
 

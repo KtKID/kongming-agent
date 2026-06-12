@@ -163,6 +163,8 @@ def test_build_test_env_strips_real_kongming_settings(tmp_path: Path) -> None:
             "kongming_model_api_key": "lowercase-real",
             "OPENAI_API_KEY": "sk-real",
             "SOME_TOKEN": "secret",
+            "SERVICE_PASSWORD": "secret",
+            "SSH_PRIVATE_KEY": "secret",
             "AWS_ACCESS_KEY_ID": "real",
         },
     )
@@ -179,6 +181,8 @@ def test_build_test_env_strips_real_kongming_settings(tmp_path: Path) -> None:
     assert "KONGMING_WEB_PORT" not in env
     assert "OPENAI_API_KEY" not in env
     assert "SOME_TOKEN" not in env
+    assert "SERVICE_PASSWORD" not in env
+    assert "SSH_PRIVATE_KEY" not in env
     assert "AWS_ACCESS_KEY_ID" not in env
 
 
@@ -242,6 +246,7 @@ def test_local_nightly_defaults_to_port_60999() -> None:
     assert "KONGMING_[A-Z0-9_]" in script
     assert "allowed_key_pattern" in script
     assert "value_pattern" in script
+    assert "len(value) > 4096" in script
     assert 'forbidden_value_chars = {"$", chr(96), "\\r", "\\n", "\\0"}' in script
     assert 'printf -v "$key" "%s" "$value"' in script
     assert 'cat "$lock_file"' in script

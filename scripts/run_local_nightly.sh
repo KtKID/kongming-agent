@@ -97,6 +97,9 @@ for raw_line in env_path.read_text(encoding="utf-8").splitlines():
     if any(char in value for char in forbidden_value_chars):
         print(f"unsafe value for {key}", file=sys.stderr)
         sys.exit(2)
+    if len(value) > 4096:
+        print(f"value too long for {key}", file=sys.stderr)
+        sys.exit(2)
     if not value_pattern.fullmatch(value):
         print(f"unsafe value for {key}", file=sys.stderr)
         sys.exit(2)
