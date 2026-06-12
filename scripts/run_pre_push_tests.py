@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import signal
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
@@ -72,6 +73,11 @@ MODULE_TEST_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "src/infrastructure/config/",
         ("tests/unit/config/", "tests/unit/config_loader/", "tests/unit/test_config_loader.py"),
+    ),
+    ("src/config_loader/", ("tests/unit/config_loader/", "tests/unit/test_config_loader.py")),
+    (
+        "src/hosts/web/",
+        ("tests/unit/web/", "tests/unit/test_web_", "tests/unit/test_web_routers_"),
     ),
     ("src/safety/", ("tests/unit/safety/", "tests/unit/test_safety_")),
     (
@@ -213,7 +219,13 @@ def _is_gate_relevant_path(path: str) -> bool:
 
     if path in ROOT_CONFIG_FILES:
         return True
-    return path.startswith(("src/", "tests/unit/", "scripts/"))
+    if path.startswith("tests/unit/"):
+        return path.endswith(".py")
+    if path.startswith("src/"):
+        return path.endswith(".py")
+    if path.startswith("scripts/"):
+        return path.endswith((".py", ".sh"))
+    return False
 
 
 def _is_python_unit_test(path: str) -> bool:
@@ -266,7 +278,10 @@ def _tests_matching_stem(repo: Path, stem: str, *, web: bool = False) -> set[str
         if test_name == f"test_{stem}.py" or comparable.startswith(f"test-{normalized}"):
             selected.add(test_path)
             continue
-        if web and (comparable.endswith(f"-{normalized}") or f"-{normalized}-" in comparable):
+        if web and (
+            comparable.startswith(f"test-web-{normalized}")
+            or comparable.startswith(f"test-web-routers-{normalized}")
+        ):
             selected.add(test_path)
     return selected
 
@@ -402,17 +417,35 @@ def run_pytest(repo: Path, tests: Sequence[str]) -> int:
     ]
     print("pre-push pytest command:")
     print("  " + shlex.join(command))
+    proc = subprocess.Popen(
+        command,
+        cwd=repo,
+        env=build_test_env(repo),
+        start_new_session=True,
+    )
     try:
-        return subprocess.run(
-            command,
-            cwd=repo,
-            env=build_test_env(repo),
-            check=False,
-            timeout=600,
-        ).returncode
+        return proc.wait(timeout=600)
     except subprocess.TimeoutExpired:
+        _terminate_process_tree(proc)
         print("pre-push pytest timed out after 600 seconds", file=sys.stderr)
         return 124
+
+
+def _terminate_process_tree(proc: subprocess.Popen[bytes]) -> None:
+    """终止 pytest 子进程组，避免超时后留下孤儿进程污染下一次 push。"""
+
+    if proc.poll() is not None:
+        return
+    if os.name == "posix":
+        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+    else:
+        proc.kill()
+    proc.wait()
 
 
 def main() -> int:

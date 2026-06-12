@@ -73,6 +73,10 @@ import sys
 
 env_path = Path(sys.argv[1])
 key_pattern = re.compile(r"^KONGMING_[A-Z0-9_]+$")
+allowed_key_pattern = re.compile(
+    r"^KONGMING_(MODEL|TOOL|WEB|E2E|SKIP|LLM|PROVIDER)_[A-Z0-9_]+$|^KONGMING_HOME$"
+)
+value_pattern = re.compile(r"^[A-Za-z0-9._:/@?=&%#,+_-]*$")
 forbidden_value_chars = {"$", chr(96), "\r", "\n", "\0"}
 for raw_line in env_path.read_text(encoding="utf-8").splitlines():
     line = raw_line.strip()
@@ -82,12 +86,18 @@ for raw_line in env_path.read_text(encoding="utf-8").splitlines():
     key = key.strip()
     if not key_pattern.fullmatch(key):
         continue
+    if not allowed_key_pattern.fullmatch(key):
+        print(f"unsupported key for {key}", file=sys.stderr)
+        sys.exit(2)
     value = value.strip()
     if (value.startswith("'") and value.endswith("'")) or (
         value.startswith('"') and value.endswith('"')
     ):
         value = ast.literal_eval(value)
     if any(char in value for char in forbidden_value_chars):
+        print(f"unsafe value for {key}", file=sys.stderr)
+        sys.exit(2)
+    if not value_pattern.fullmatch(value):
         print(f"unsafe value for {key}", file=sys.stderr)
         sys.exit(2)
     sys.stdout.write(key + "\0" + value + "\0")

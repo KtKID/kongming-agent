@@ -108,10 +108,11 @@ def test_select_unit_tests_uses_direct_unit_test_file(tmp_path: Path) -> None:
     assert selected == ["tests/unit/safety/test_grant_cmd_prefix.py"]
 
 
-def test_select_unit_tests_keeps_web_mapping_narrow(tmp_path: Path) -> None:
+def test_select_unit_tests_includes_web_module_fallback(tmp_path: Path) -> None:
     _touch(tmp_path / "tests/unit/test_web_routers_threads.py")
     _touch(tmp_path / "tests/unit/web/test_thread_status_ws.py")
     _touch(tmp_path / "tests/unit/web/test_webhooks_dispatcher.py")
+    _touch(tmp_path / "tests/unit/web/test_archived_threads.py")
     _touch(tmp_path / "tests/unit/web/test_unrelated.py")
     _touch(tmp_path / "tests/unit/test_config_loader.py")
 
@@ -121,8 +122,21 @@ def test_select_unit_tests_keeps_web_mapping_narrow(tmp_path: Path) -> None:
     )
 
     assert "tests/unit/test_web_routers_threads.py" in selected
+    assert "tests/unit/web/test_webhooks_dispatcher.py" in selected
+    assert "tests/unit/web/test_archived_threads.py" in selected
+    assert "tests/unit/web/test_unrelated.py" in selected
+
+
+def test_web_stem_matching_stays_narrow(tmp_path: Path) -> None:
+    _touch(tmp_path / "tests/unit/test_web_routers_threads.py")
+    _touch(tmp_path / "tests/unit/web/test_webhooks_dispatcher.py")
+    _touch(tmp_path / "tests/unit/web/test_archived_threads.py")
+
+    selected = pre_push._tests_matching_stem(tmp_path, "threads", web=True)
+
+    assert "tests/unit/test_web_routers_threads.py" in selected
     assert "tests/unit/web/test_webhooks_dispatcher.py" not in selected
-    assert "tests/unit/web/test_unrelated.py" not in selected
+    assert "tests/unit/web/test_archived_threads.py" not in selected
 
 
 def test_select_unit_tests_matches_nested_stem_without_glob(tmp_path: Path) -> None:
@@ -201,6 +215,7 @@ def test_changed_files_since_filters_irrelevant_untracked_files(tmp_path: Path) 
 
     _touch(tmp_path / "web" / "node_modules" / "pkg" / "index.js")
     _touch(tmp_path / "docs" / "private-note.md")
+    _touch(tmp_path / "src" / "config" / "data.json")
     _touch(tmp_path / "tests" / "unit" / "test_config_loader.py")
 
     changed = pre_push.changed_files_since(tmp_path, "HEAD")
@@ -208,6 +223,7 @@ def test_changed_files_since_filters_irrelevant_untracked_files(tmp_path: Path) 
     assert "tests/unit/test_config_loader.py" in changed
     assert "web/node_modules/pkg/index.js" not in changed
     assert "docs/private-note.md" not in changed
+    assert "src/config/data.json" not in changed
 
 
 def test_local_nightly_defaults_to_port_60999() -> None:
@@ -224,6 +240,8 @@ def test_local_nightly_defaults_to_port_60999() -> None:
     assert "connect_ex" in script
     assert "SO_REUSEADDR" not in script
     assert "KONGMING_[A-Z0-9_]" in script
+    assert "allowed_key_pattern" in script
+    assert "value_pattern" in script
     assert 'forbidden_value_chars = {"$", chr(96), "\\r", "\\n", "\\0"}' in script
     assert 'printf -v "$key" "%s" "$value"' in script
     assert 'cat "$lock_file"' in script
