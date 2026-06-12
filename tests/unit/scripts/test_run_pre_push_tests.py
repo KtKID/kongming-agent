@@ -88,6 +88,7 @@ def test_select_unit_tests_uses_direct_unit_test_file(tmp_path: Path) -> None:
 def test_select_unit_tests_keeps_web_mapping_narrow(tmp_path: Path) -> None:
     _touch(tmp_path / "tests/unit/test_web_routers_threads.py")
     _touch(tmp_path / "tests/unit/web/test_thread_status_ws.py")
+    _touch(tmp_path / "tests/unit/web/test_webhooks_dispatcher.py")
     _touch(tmp_path / "tests/unit/web/test_unrelated.py")
     _touch(tmp_path / "tests/unit/test_config_loader.py")
 
@@ -97,6 +98,7 @@ def test_select_unit_tests_keeps_web_mapping_narrow(tmp_path: Path) -> None:
     )
 
     assert "tests/unit/test_web_routers_threads.py" in selected
+    assert "tests/unit/web/test_webhooks_dispatcher.py" not in selected
     assert "tests/unit/web/test_unrelated.py" not in selected
 
 
@@ -116,20 +118,29 @@ def test_build_test_env_strips_real_kongming_settings(tmp_path: Path) -> None:
     env = pre_push.build_test_env(
         tmp_path,
         {
+            "HOME": "/Users/kid",
             "PATH": "/bin",
             "PYTHONPATH": "/tmp/neighbor",
             "KONGMING_MODEL_NAME": "MiniMax-M3",
             "KONGMING_MODEL_BASE_URL": "https://example.invalid",
+            "OPENAI_API_KEY": "sk-real",
+            "SOME_TOKEN": "secret",
+            "AWS_ACCESS_KEY_ID": "real",
         },
     )
 
     assert env["PATH"] == "/bin"
-    assert env["PYTHONPATH"] == str(tmp_path / "src")
+    assert env["HOME"] == str(tmp_path / ".kongming" / "prepush-home")
+    assert env["PYTHONPATH"] == f"{tmp_path / 'src'}:/tmp/neighbor"
     assert env["KONGMING_HOME"] == str(tmp_path / ".kongming" / "prepush-home")
     assert env["KONGMING_E2E_REAL_MODEL"] == "0"
-    assert env["KONGMING_WEB_PORT"] == "60998"
+    assert env["KONGMING_SKIP_DOTENV"] == "1"
     assert "KONGMING_MODEL_NAME" not in env
     assert "KONGMING_MODEL_BASE_URL" not in env
+    assert "KONGMING_WEB_PORT" not in env
+    assert "OPENAI_API_KEY" not in env
+    assert "SOME_TOKEN" not in env
+    assert "AWS_ACCESS_KEY_ID" not in env
 
 
 def test_changed_files_since_includes_untracked_files(tmp_path: Path) -> None:
@@ -187,6 +198,8 @@ def test_local_nightly_defaults_to_port_60999() -> None:
     assert "connect_ex" in script
     assert "SO_REUSEADDR" not in script
     assert "KONGMING_[A-Z0-9_]" in script
+    assert 'forbidden_value_chars = {"$", chr(96), "\\r", "\\n", "\\0"}' in script
+    assert 'cat "$lock_file"' in script
 
 
 def test_pre_push_hook_runs_without_files_filter() -> None:

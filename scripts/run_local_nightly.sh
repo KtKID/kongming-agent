@@ -72,6 +72,7 @@ import sys
 
 env_path = Path(sys.argv[1])
 key_pattern = re.compile(r"^KONGMING_[A-Z0-9_]+$")
+forbidden_value_chars = {"$", chr(96), "\r", "\n", "\0"}
 for raw_line in env_path.read_text(encoding="utf-8").splitlines():
     line = raw_line.strip()
     if not line or line.startswith("#") or "=" not in line:
@@ -85,6 +86,9 @@ for raw_line in env_path.read_text(encoding="utf-8").splitlines():
         value.startswith('"') and value.endswith('"')
     ):
         value = ast.literal_eval(value)
+    if any(char in value for char in forbidden_value_chars):
+        print(f"unsafe value for {key}", file=sys.stderr)
+        sys.exit(2)
     sys.stdout.write(key + "\0" + value + "\0")
 PY
   )
@@ -125,7 +129,7 @@ require_clean_nightly_home() {
 # 退出时清理当前 nightly 可能留下的本地锁文件，关键输入是 KONGMING_HOME。
 cleanup_nightly() {
   local lock_file="$KONGMING_HOME/web/.app.lock"
-  if [[ -f "$lock_file" ]]; then
+  if [[ -f "$lock_file" ]] && [[ "$(cat "$lock_file" 2>/dev/null || true)" == "$$" ]]; then
     rm -f "$lock_file"
   fi
 }

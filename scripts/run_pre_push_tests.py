@@ -38,6 +38,26 @@ ROOT_CONFIG_FILES = {
     "README.md",
 }
 
+SENSITIVE_ENV_NAMES = {
+    "ANTHROPIC_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AZURE_CLIENT_SECRET",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "NPM_TOKEN",
+    "OPENAI_API_KEY",
+    "SSH_AUTH_SOCK",
+}
+
+SENSITIVE_ENV_PREFIXES = (
+    "AWS_",
+    "AZURE_",
+    "GCP_",
+    "GIT_",
+    "GOOGLE_",
+)
+
 SMOKE_TESTS = (
     "tests/unit/test_config_loader.py",
     "tests/unit/test_arch_contracts.py",
@@ -242,7 +262,7 @@ def _tests_matching_stem(repo: Path, stem: str, *, web: bool = False) -> set[str
         if test_name == f"test_{stem}.py" or comparable.startswith(f"test-{normalized}"):
             selected.add(test_path)
             continue
-        if web and "web" in comparable and normalized in comparable:
+        if web and (comparable.endswith(f"-{normalized}") or f"-{normalized}-" in comparable):
             selected.add(test_path)
     return selected
 
@@ -313,16 +333,42 @@ def select_unit_tests(repo: Path, changed_files: Sequence[str]) -> list[str]:
 
 
 def build_test_env(repo: Path, environ: Mapping[str, str] | None = None) -> dict[str, str]:
-    """构造隔离 pytest 环境，清除真实 ``KONGMING_*`` 配置。"""
+    """构造隔离 pytest 环境，清除真实 ``KONGMING_*`` 和常见凭证配置。"""
 
     source = environ or os.environ
-    env = {key: value for key, value in source.items() if not key.startswith("KONGMING_")}
-    env["KONGMING_HOME"] = str(repo / ".kongming" / "prepush-home")
+    env = {key: value for key, value in source.items() if not _is_sensitive_env_name(key)}
+    home = repo / ".kongming" / "prepush-home"
+    home.mkdir(parents=True, exist_ok=True)
+    env["HOME"] = str(home)
+    env["KONGMING_HOME"] = str(home)
     env["KONGMING_E2E_REAL_MODEL"] = "0"
-    env["KONGMING_WEB_HOST"] = "127.0.0.1"
-    env["KONGMING_WEB_PORT"] = "60998"
-    env["PYTHONPATH"] = str(repo / "src")
+    env["KONGMING_SKIP_DOTENV"] = "1"
+    env["PYTHONPATH"] = _prepend_pythonpath(repo / "src", env.get("PYTHONPATH"))
     return env
+
+
+def _is_sensitive_env_name(name: str) -> bool:
+    """判断环境变量名是否属于 push gate 需要隔离的真实配置或凭证。"""
+
+    if name.startswith("KONGMING_"):
+        return True
+    if name in SENSITIVE_ENV_NAMES:
+        return True
+    if name.endswith("_TOKEN") or name.endswith("_API_KEY"):
+        return True
+    return name.startswith(SENSITIVE_ENV_PREFIXES)
+
+
+def _prepend_pythonpath(src_path: Path, current: str | None) -> str:
+    """把仓库 src 放到 PYTHONPATH 最前，同时保留调用方已有搜索路径。"""
+
+    src_text = str(src_path)
+    if not current:
+        return src_text
+    parts = current.split(os.pathsep)
+    if src_text in parts:
+        return current
+    return os.pathsep.join([src_text, current])
 
 
 def run_pytest(repo: Path, tests: Sequence[str]) -> int:
