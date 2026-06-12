@@ -17,9 +17,10 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 EXCLUDED_TEST_PREFIXES = (
@@ -157,7 +158,10 @@ def detect_base_ref(repo: Path, environ: Mapping[str, str] | None = None) -> str
     for ref in candidates:
         if _ref_exists(repo, ref):
             return ref
-    return "HEAD~1"
+    raise RuntimeError(
+        "pre-push: cannot find a valid diff base; set KONGMING_PRE_PUSH_BASE "
+        "to an existing ref such as origin/main"
+    )
 
 
 def changed_files_since(repo: Path, base_ref: str) -> list[str]:
@@ -200,66 +204,77 @@ def _is_excluded_test(path: str) -> bool:
     return path.startswith(EXCLUDED_TEST_PREFIXES)
 
 
-def _existing_paths(repo: Path, hints: Iterable[str]) -> set[str]:
-    """把目录、文件和前缀 hint 展开成实际存在的 unit 测试路径。"""
+def _all_unit_test_paths(repo: Path) -> list[str]:
+    """返回当前仓库所有 unit 测试文件。"""
+
+    unit_root = repo / "tests" / "unit"
+    if not unit_root.is_dir():
+        return []
+    return sorted(
+        str(path.relative_to(repo)) for path in unit_root.rglob("test_*.py") if path.is_file()
+    )
+
+
+def _tests_under(repo: Path, relative_dir: str) -> set[str]:
+    """返回某个 unit 测试目录下的测试文件。"""
+
+    test_dir = repo / relative_dir
+    if not test_dir.is_dir():
+        return set()
+    return {str(path.relative_to(repo)) for path in test_dir.rglob("test_*.py") if path.is_file()}
+
+
+def _tests_with_prefix(repo: Path, prefix: str) -> set[str]:
+    """返回 unit 测试中路径以指定前缀开头的测试文件。"""
+
+    return {path for path in _all_unit_test_paths(repo) if path.startswith(prefix)}
+
+
+def _tests_matching_stem(repo: Path, stem: str, *, web: bool = False) -> set[str]:
+    """按文件 stem 递归匹配 unit 测试，避免 ``**`` glob 语义漂移。"""
 
     selected: set[str] = set()
-    for hint in hints:
-        hint_path = repo / hint
-        if hint_path.is_file():
-            selected.add(hint)
+    normalized = stem.replace("_", "-")
+    for test_path in _all_unit_test_paths(repo):
+        test_name = Path(test_path).name
+        test_stem = Path(test_path).stem
+        comparable = test_stem.replace("_", "-")
+        if test_name == f"test_{stem}.py" or comparable.startswith(f"test-{normalized}"):
+            selected.add(test_path)
             continue
-        if hint_path.is_dir():
-            selected.update(
-                str(path.relative_to(repo))
-                for path in hint_path.rglob("test_*.py")
-                if path.is_file()
-            )
-            continue
-        selected.update(
-            str(path.relative_to(repo))
-            for path in (repo / "tests" / "unit").rglob("test_*.py")
-            if str(path.relative_to(repo)).startswith(hint)
-        )
+        if web and "web" in comparable and normalized in comparable:
+            selected.add(test_path)
     return selected
 
 
-def _source_test_hints(path: str) -> set[str]:
-    """根据源码或脚本路径生成候选 unit 测试 hint。"""
+def _select_from_hint(repo: Path, hint: str) -> set[str]:
+    """把一个显式 hint 展开成测试文件。"""
 
-    hints: set[str] = set()
-    file_path = Path(path)
-    stem = file_path.stem
-    if path.startswith("scripts/"):
-        hints.add(f"tests/unit/scripts/test_{stem}.py")
-    if path.startswith("src/"):
-        hints.add(f"tests/unit/test_{stem}.py")
-        hints.add(f"tests/unit/**/test_{stem}.py")
-        hints.add(f"tests/unit/**/test_{stem}_")
-        if path.startswith("src/hosts/web/"):
-            hints.add(f"tests/unit/test_web_*{stem}*.py")
-            hints.add(f"tests/unit/web/**/test_*{stem}*.py")
-        for prefix, mapped_hints in MODULE_TEST_HINTS:
-            if path.startswith(prefix):
-                hints.update(mapped_hints)
-    return hints
+    hint_path = repo / hint
+    if hint_path.is_file() and _is_python_unit_test(hint):
+        return {hint}
+    if hint_path.is_dir():
+        return _tests_under(repo, hint)
+    return _tests_with_prefix(repo, hint)
 
 
-def _expand_glob_hints(repo: Path, hints: Iterable[str]) -> set[str]:
-    """展开包含 ``**`` 的测试 hint。"""
+def _source_related_tests(repo: Path, source_path: str) -> set[str]:
+    """根据源码或脚本路径生成候选 unit 测试。"""
 
+    stem = Path(source_path).stem
     selected: set[str] = set()
-    plain_hints: list[str] = []
-    for hint in hints:
-        if "**" in hint or "*" in Path(hint).name:
-            selected.update(
-                str(path.relative_to(repo))
-                for path in repo.glob(hint)
-                if path.is_file() and _is_python_unit_test(str(path.relative_to(repo)))
-            )
-        else:
-            plain_hints.append(hint)
-    selected.update(_existing_paths(repo, plain_hints))
+    if source_path.startswith("scripts/"):
+        script_test = f"tests/unit/scripts/test_{stem}.py"
+        if (repo / script_test).is_file():
+            selected.add(script_test)
+    if source_path.startswith("src/"):
+        selected.update(
+            _tests_matching_stem(repo, stem, web=source_path.startswith("src/hosts/web/"))
+        )
+        for prefix, mapped_hints in MODULE_TEST_HINTS:
+            if source_path.startswith(prefix):
+                for hint in mapped_hints:
+                    selected.update(_select_from_hint(repo, hint))
     return selected
 
 
@@ -287,7 +302,7 @@ def select_unit_tests(repo: Path, changed_files: Sequence[str]) -> list[str]:
             continue
         if path.startswith(("src/", "scripts/")) and path.endswith((".py", ".sh")):
             source_changed = True
-            selected.update(_expand_glob_hints(repo, _source_test_hints(path)))
+            selected.update(_source_related_tests(repo, path))
 
     if source_changed or config_changed:
         selected.update(_existing_smoke_tests(repo))
@@ -323,14 +338,15 @@ def run_pytest(repo: Path, tests: Sequence[str]) -> int:
         "pytest",
         *tests,
         "--import-mode=importlib",
-        "--maxfail=1",
+        "--maxfail=5",
+        "--tb=short",
         "--durations=20",
         "-q",
         "-W",
         "ignore::pytest.PytestUnraisableExceptionWarning",
     ]
     print("pre-push pytest command:")
-    print("  " + subprocess.list2cmdline(command))
+    print("  " + shlex.join(command))
     return subprocess.run(command, cwd=repo, env=build_test_env(repo), check=False).returncode
 
 
@@ -343,15 +359,22 @@ def main() -> int:
     selected = select_unit_tests(repo, changed)
 
     print(f"pre-push base: {base_ref}")
-    print(f"changed files: {len(changed)}")
-    for path in changed:
-        print(f"  {path}")
-    print(f"selected unit tests: {len(selected)}")
-    for path in selected:
-        print(f"  {path}")
+    _print_path_list("changed files", changed)
+    _print_path_list("selected unit tests", selected)
     sys.stdout.flush()
 
     return run_pytest(repo, selected)
+
+
+def _print_path_list(title: str, paths: Sequence[str], *, limit: int = 50) -> None:
+    """打印有限数量的路径，长分支输出保持可读。"""
+
+    print(f"{title}: {len(paths)}")
+    for path in paths[:limit]:
+        print(f"  {path}")
+    remaining = len(paths) - limit
+    if remaining > 0:
+        print(f"  ... and {remaining} more")
 
 
 if __name__ == "__main__":

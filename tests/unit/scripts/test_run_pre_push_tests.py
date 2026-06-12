@@ -63,6 +63,17 @@ def test_select_unit_tests_filters_non_unit_layers(tmp_path: Path) -> None:
     assert all(not path.startswith("tests/smoke/") for path in selected)
 
 
+def test_detect_base_ref_requires_existing_ref(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL)
+
+    try:
+        pre_push.detect_base_ref(tmp_path, {})
+    except RuntimeError as exc:
+        assert "cannot find a valid diff base" in str(exc)
+    else:
+        raise AssertionError("detect_base_ref should fail when no base ref exists")
+
+
 def test_select_unit_tests_uses_direct_unit_test_file(tmp_path: Path) -> None:
     _touch(tmp_path / "tests/unit/safety/test_grant_cmd_prefix.py")
 
@@ -87,6 +98,18 @@ def test_select_unit_tests_keeps_web_mapping_narrow(tmp_path: Path) -> None:
 
     assert "tests/unit/test_web_routers_threads.py" in selected
     assert "tests/unit/web/test_unrelated.py" not in selected
+
+
+def test_select_unit_tests_matches_nested_stem_without_glob(tmp_path: Path) -> None:
+    _touch(tmp_path / "tests/unit/tools/runtime/test_registry.py")
+    _touch(tmp_path / "tests/unit/test_config_loader.py")
+
+    selected = pre_push.select_unit_tests(
+        tmp_path,
+        ["src/tools/runtime/registry.py"],
+    )
+
+    assert "tests/unit/tools/runtime/test_registry.py" in selected
 
 
 def test_build_test_env_strips_real_kongming_settings(tmp_path: Path) -> None:
@@ -158,3 +181,14 @@ def test_local_nightly_defaults_to_port_60999() -> None:
     assert 'KONGMING_WEB_PORT="${KONGMING_WEB_PORT:-60999}"' in script
     assert ".env.e2e.local" in script
     assert ".kongming/nightly" in script
+    assert "require_secure_env_file" in script
+    assert "sock.bind" in script
+
+
+def test_pre_push_hook_runs_without_files_filter() -> None:
+    project_root = Path(__file__).resolve().parents[3]
+    config = (project_root / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    hook_block = config.split("- id: pre-push-unit", 1)[1]
+
+    assert "stages: [pre-push]" in hook_block
+    assert "\n        files:" not in hook_block
