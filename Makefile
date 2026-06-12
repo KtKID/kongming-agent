@@ -6,21 +6,23 @@
 SHELL := /usr/bin/env bash
 
 .PHONY: help install install-hooks fmt fmt-check lint typecheck \
-        precommit test test-unit test-e2e smoke cli clean \
+        precommit prepush-test test test-unit test-e2e nightly-local smoke cli clean \
         web-build web-dev web-test web
 
 help:
 	@echo "kongming-agent Makefile"
 	@echo ""
 	@echo "  make install       安装依赖（uv sync --all-extras）"
-	@echo "  make install-hooks 启用 pre-commit hook（commit 前自动跑软编译）"
+	@echo "  make install-hooks 启用 commit/push 两层 hook"
 	@echo "  make fmt           ruff format ."
 	@echo "  make fmt-check     ruff format --check ."
 	@echo "  make lint          ruff check . + import-linter"
 	@echo "  make typecheck     mypy 所有模块"
 	@echo "  make precommit     手动跑一次 pre-commit 全仓扫描"
+	@echo "  make prepush-test  手动跑 push 前隔离 unit 测试"
 	@echo "  make test-unit     pytest tests/unit -v"
 	@echo "  make test-e2e      pytest tests/e2e -v"
+	@echo "  make nightly-local 本地真实 e2e nightly（默认端口 60999）"
 	@echo "  make test          test-unit + test-e2e"
 	@echo "  make smoke         最小启动 smoke test"
 	@echo "  make cli           启动 CLI（MiniMax M3 默认）"
@@ -34,6 +36,9 @@ install-hooks:
 
 precommit:
 	uv run pre-commit run --all-files
+
+prepush-test:
+	uv run python scripts/run_pre_push_tests.py
 
 fmt:
 	bash scripts/fmt.sh
@@ -52,6 +57,9 @@ test-unit:
 
 test-e2e:
 	bash scripts/test-e2e.sh
+
+nightly-local:
+	bash scripts/run_local_nightly.sh
 
 test: test-unit test-e2e
 
