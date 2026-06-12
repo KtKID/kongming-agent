@@ -248,15 +248,17 @@ KONGMING_TOOL_FILE_ENABLED=false uv run python -m cli.main
 
 ```bash
 make install        # uv sync --all-extras
-make install-hooks  # 启用 pre-commit（首次 clone 后跑一次，commit 前自动软编译）
+make install-hooks  # 启用 commit/push 两层 hook（首次 clone 后跑一次）
 make cli            # 启动 CLI（本地模型基线）
 make smoke          # 冒烟验证
 make fmt            # ruff format
 make lint           # ruff check + lint-imports（架构边界）
 make typecheck      # mypy
 make precommit      # 手动跑一次 pre-commit 全仓扫描
-make test-unit      # 98 个单元测试
-make test-e2e       # 40 个 e2e（含 1 个 opt-in 真模型用例，默认 skip）
+make prepush-test   # 手动跑 push 前隔离 unit 快速门禁
+make test-unit      # 全量 unit 测试
+make test-e2e       # e2e 测试（真实模型用例默认 skip）
+make nightly-local  # 本地真实 e2e nightly，默认端口 60999
 make test           # unit + e2e 都跑
 make clean          # 清缓存
 ```
@@ -272,17 +274,40 @@ make clean          # 清缓存
 ./start.sh smoke
 ```
 
-> **软编译门槛**：`make install-hooks` 启用后，每次 `git commit` 前会自动跑
-> `ruff check --fix` + `ruff format` + `lint-imports` + `mypy src` + `pytest tests/unit`。
-> 不通过直接拒签。紧急情况用 `git commit --no-verify` 绕开，但不建议成为习惯。
+### 检查分层
+
+| 时机 | 触发方式 | 检查内容 | 速度 | 真实 key |
+|---|---|---|---|---|
+| commit 前 | `git commit` | `ruff check --fix`、`ruff format`、`lint-imports`、`mypy src` | 快 | 无 |
+| push 前 | `git push` / `make prepush-test` | 隔离环境下的受影响 `tests/unit`，清理真实 `KONGMING_*`，使用 `.kongming/prepush-home` | 快，目标 1-3 分钟 | 无 |
+| PR CI | GitHub Actions | `fmt`、`lint`、`typecheck`、全量 `tests/unit` | 中，约十几到二十多分钟 | 无 |
+| 本地 nightly | `make nightly-local` | `tests/integration`、`tests/e2e`、`tests/smoke`，读取 `.env.e2e.local` | 慢，适合夜间 | 需要 |
+| 手动真模型验证 | 单条 `KONGMING_E2E_REAL_MODEL=1 uv run pytest ...` | 指定 live/e2e 场景 | 慢，按用例计费 | 需要 |
+
+`make install-hooks` 会安装 commit 和 push 两层 hook。push gate 只跑稳定 unit 测试，适合作为提交前最后一道快速拦截；真实模型、真实 web server、packaging smoke 放在本地 nightly 或手动验证里。
+
+本地 nightly 默认固定使用 `KONGMING_WEB_PORT=60999` 和 `.kongming/nightly`：
+
+```bash
+cp .env.example .env.e2e.local
+# 编辑 .env.e2e.local，填入真实模型 provider / base_url / api_key
+make nightly-local
+```
+
+`.env.e2e.local` 由 `.gitignore` 排除。夜间定时任务可以用 macOS `launchd` 或其他本机 scheduler 调用 `make nightly-local`。
 
 ### 验证当前仓库健康状态
 
 ```bash
-make install && make lint && make typecheck && make test
+make install && make lint && make typecheck && make test-unit
 ```
 
-当前（2026-04-20）：全绿 — 137 passed, 1 skipped；其中 98 unit + 40 e2e，3 import-linter contracts kept，mypy `Success: no issues found in 40 source files`。
+完整本地验证可以按需追加：
+
+```bash
+make test-e2e
+make nightly-local
+```
 
 ### Opt-in 真模型 e2e
 
