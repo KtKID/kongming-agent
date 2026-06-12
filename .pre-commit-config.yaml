@@ -11,8 +11,8 @@
 # 临时跳过（仅紧急情况）：git commit --no-verify / git push --no-verify
 #
 # 分层设计：
-# - pre-commit 阶段（秒级，每次 commit 跑）：ruff + commit-separation + lint-imports
-# - pre-push 阶段（分钟级，push 前跑一次）：mypy + pytest（受影响测试 + 并行）
+# - pre-commit 阶段（每次 commit 跑）：ruff + commit-separation + lint-imports + mypy
+# - pre-push 阶段（push 前跑一次）：pytest（受影响测试 + 并行）
 # - CI（GitHub Actions）：全量 fmt/lint/typecheck/unit tests，终极兜底
 # - e2e 不进任何本地 hook（含 opt-in 真模型测试），只留 CI
 
@@ -59,14 +59,13 @@ repos:
         pass_filenames: false
         files: \.py$
 
-      # ----- pre-push 阶段：mypy（慢，挪到 push 前跑一次） -----
+      # ----- pre-commit 阶段：mypy（静态类型检查，提交前拦截） -----
       - id: mypy
         name: mypy (类型检查)
         entry: uv run mypy src
         language: system
         pass_filenames: false
         files: ^src/.*\.py$
-        stages: [pre-push]
 
       # ----- pre-push 阶段：pytest 受影响测试（--picked 只跑 git 改动相关） -----
       # -n 4 并行（限 4 worker 避免资源爆炸），--picked 只跑改动文件相关测试

@@ -71,7 +71,9 @@ def resolve_sitian_root(root_dir: str | Path | None = None) -> Path:
         from infrastructure.config.paths import get_kongming_home
 
         return get_kongming_home() / "sitian"
-    return Path(root_dir).expanduser().resolve()
+    from infrastructure.config.paths import resolve_kongming_path
+
+    return resolve_kongming_path(root_dir)
 
 
 class SiTianRecordsStore:

@@ -6,7 +6,8 @@ from network.network_log import log_network_event, log_network_exception
 
 
 def test_log_network_event_writes_jsonl(tmp_path, monkeypatch) -> None:
-    monkeypatch.chdir(tmp_path)
+    home = tmp_path / "home"
+    monkeypatch.setenv("KONGMING_HOME", str(home))
 
     path = log_network_event(
         "web.test",
@@ -16,7 +17,7 @@ def test_log_network_event_writes_jsonl(tmp_path, monkeypatch) -> None:
         thread_id="thread-abc",
     )
 
-    assert path == tmp_path / "log" / "network" / "network-events.jsonl"
+    assert path == home / "logs" / "network" / "network-events.jsonl"
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert rows[0]["component"] == "web.test"
     assert rows[0]["action"] == "send_failed"
@@ -24,7 +25,8 @@ def test_log_network_event_writes_jsonl(tmp_path, monkeypatch) -> None:
 
 
 def test_log_network_exception_writes_traceback(tmp_path, monkeypatch) -> None:
-    monkeypatch.chdir(tmp_path)
+    home = tmp_path / "home"
+    monkeypatch.setenv("KONGMING_HOME", str(home))
 
     try:
         raise RuntimeError("boom")

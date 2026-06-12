@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -151,6 +152,14 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("sitian", "interests", "focus"),
 )
 
+_SCHEDULER_EXTRA_ENV_NAMES: tuple[str, ...] = (
+    "KONGMING_SCHEDULER_ENABLED",
+    "KONGMING_SCHEDULER_INTERVAL",
+    "KONGMING_SCHEDULER_MAX_INFLIGHT",
+    "KONGMING_SCHEDULER_APPROVAL_MODE",
+    "KONGMING_SCHEDULER_DEFAULT_MAX_TURNS",
+)
+
 # per-module YAML 文件名 → 合并到 Config 的顶层 key。
 # 所有配置已合并到 setting.yaml，per-module 文件不再使用。保留空 map 以兼容旧路径。
 _MODULE_YAML_MAP: dict[str, str] = {}
@@ -217,13 +226,24 @@ def _set_nested(data: dict[str, Any], path: tuple[str, ...], value: Any) -> None
     cursor[path[-1]] = value
 
 
-def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
+def _config_env_names() -> tuple[str, ...]:
+    """返回 Config 字段消费的 env 名。"""
+    return tuple(_env_var_name(field_path) for field_path in _ENV_FIELD_PATHS) + tuple(
+        _SCHEDULER_EXTRA_ENV_NAMES
+    )
+
+
+def _apply_env_overrides(
+    data: dict[str, Any],
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     """对已经从 YAML 读出来的 dict 按环境变量叠加覆盖。"""
+    env_map = os.environ if env is None else env
     for field_path in _ENV_FIELD_PATHS:
         env_name = _env_var_name(field_path)
-        if env_name in os.environ:
-            _set_nested(data, field_path, os.environ[env_name])
-    _apply_scheduler_env_overrides(data)
+        if env_name in env_map:
+            _set_nested(data, field_path, env_map[env_name])
+    _apply_scheduler_env_overrides(data, env=env_map)
     return data
 
 
@@ -256,7 +276,11 @@ def _warn(msg: str) -> None:
     print(f"[infrastructure.config] warning: {msg}", file=sys.stderr)
 
 
-def _apply_scheduler_env_overrides(data: dict[str, Any]) -> None:
+def _apply_scheduler_env_overrides(
+    data: dict[str, Any],
+    *,
+    env: Mapping[str, str] | None = None,
+) -> None:
     """把 ``KONGMING_SCHEDULER_*`` env 写入 ``data["scheduler"]``。
 
     支持的 env：
@@ -269,7 +293,9 @@ def _apply_scheduler_env_overrides(data: dict[str, Any]) -> None:
 
     非法值统一 stderr warning + 不写入 dict（保留 yaml / 默认值）。
     """
-    raw_enabled = os.environ.get("KONGMING_SCHEDULER_ENABLED")
+    env_map = os.environ if env is None else env
+
+    raw_enabled = env_map.get("KONGMING_SCHEDULER_ENABLED")
     if raw_enabled is not None:
         parsed_bool = _parse_bool_env(raw_enabled)
         if parsed_bool is None:
@@ -279,7 +305,7 @@ def _apply_scheduler_env_overrides(data: dict[str, Any]) -> None:
         else:
             _set_nested(data, ("scheduler", "enabled"), parsed_bool)
 
-    raw_interval = os.environ.get("KONGMING_SCHEDULER_INTERVAL")
+    raw_interval = env_map.get("KONGMING_SCHEDULER_INTERVAL")
     if raw_interval is not None:
         try:
             value = float(raw_interval)
@@ -290,7 +316,7 @@ def _apply_scheduler_env_overrides(data: dict[str, Any]) -> None:
         else:
             _set_nested(data, ("scheduler", "interval"), value)
 
-    raw_max_inflight = os.environ.get("KONGMING_SCHEDULER_MAX_INFLIGHT")
+    raw_max_inflight = env_map.get("KONGMING_SCHEDULER_MAX_INFLIGHT")
     if raw_max_inflight is not None:
         try:
             value_int = int(raw_max_inflight)
@@ -302,7 +328,7 @@ def _apply_scheduler_env_overrides(data: dict[str, Any]) -> None:
         else:
             _set_nested(data, ("scheduler", "max_inflight"), value_int)
 
-    raw_mode = os.environ.get("KONGMING_SCHEDULER_APPROVAL_MODE")
+    raw_mode = env_map.get("KONGMING_SCHEDULER_APPROVAL_MODE")
     if raw_mode is not None:
         normalized = raw_mode.strip().lower()
         if normalized in ("fail_closed", "trust"):
@@ -313,7 +339,7 @@ def _apply_scheduler_env_overrides(data: dict[str, Any]) -> None:
                 "(expected 'fail_closed' or 'trust'); using default."
             )
 
-    raw_max_turns = os.environ.get("KONGMING_SCHEDULER_DEFAULT_MAX_TURNS")
+    raw_max_turns = env_map.get("KONGMING_SCHEDULER_DEFAULT_MAX_TURNS")
     if raw_max_turns is not None:
         try:
             value_turns = int(raw_max_turns)
@@ -373,7 +399,7 @@ def _load_module_yamls(config_dir: Path, data: dict[str, Any]) -> dict[str, Any]
     return merged
 
 
-def _maybe_load_env_file() -> None:
+def _maybe_load_env_file(config_path: Path | None = None) -> dict[str, str]:
     """尝试加载项目根的 ``.env`` 文件到 ``os.environ``。
 
     这一层的存在是为了把敏感配置（如 API key）从 YAML 代码库剥离——开发者把
@@ -387,14 +413,44 @@ def _maybe_load_env_file() -> None:
     - **不覆盖**已设置的 env 变量（``override=False``）—— 真实 env 优先于 .env，
       让 CI / 容器部署可以用 env 覆盖 .env 而无需删文件
 
-    .env 搜索路径由 :func:`dotenv.load_dotenv` 默认逻辑决定：cwd 及其祖先目录。
-    这样无论从仓库根还是子目录启动都能找到。
+    .env 搜索路径优先从配置文件目录向上查找；未传配置文件时从 cwd 向上查找。
+    这样 Web 写回临时 YAML 时也能加载同一套项目级 `.env`。
     """
+    config_env_names = _config_env_names()
+    before = {name: os.environ.get(name) for name in config_env_names}
+
     try:
-        from dotenv import load_dotenv
+        from dotenv import dotenv_values, load_dotenv
     except ImportError:
-        return
-    load_dotenv(override=False)
+        return {}
+
+    start = config_path.parent if config_path is not None else Path.cwd()
+    dotenv_path: Path | None = None
+    for candidate_dir in (start, *start.parents):
+        candidate = candidate_dir / ".env"
+        if candidate.exists():
+            dotenv_path = candidate
+            break
+
+    try:
+        if dotenv_path is not None:
+            load_dotenv(dotenv_path=dotenv_path, override=False)
+            parsed = dotenv_values(dotenv_path)
+        else:
+            load_dotenv(override=False)
+            parsed = {}
+    finally:
+        for name, old_value in before.items():
+            if old_value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = old_value
+
+    return {
+        key: value
+        for key, value in parsed.items()
+        if key in config_env_names and isinstance(value, str)
+    }
 
 
 def load_config(
@@ -418,15 +474,16 @@ def load_config(
         ConfigLoadError: 路径不存在、无法读取、YAML 解析失败。
         ConfigValidationError: 字段类型 / 约束 / 跨字段规则不满足。
     """
-    if load_env_file:
-        _maybe_load_env_file()
-
     resolved = _resolve_config_path(path)
+    dotenv_env: dict[str, str] = {}
+    if load_env_file:
+        dotenv_env = _maybe_load_env_file(resolved) or {}
+
     raw_data = _load_yaml(resolved)
     # 加载 per-module YAML 文件（context yaml / tools yaml / llm yaml / infrastructure.tracing yaml）
     config_dir = resolved.parent
     with_modules = _load_module_yamls(config_dir, raw_data)
-    merged = _apply_env_overrides(with_modules)
+    merged = _apply_env_overrides(with_modules, env={**dotenv_env, **os.environ})
 
     try:
         return Config.model_validate(merged)

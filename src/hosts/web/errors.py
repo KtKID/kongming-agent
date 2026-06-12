@@ -23,6 +23,7 @@
 | CSRFGuardError | 403 | internal | 缺 X-Requested-With |
 | ThreadNotFoundError | 404 | internal | thread_id 不存在 |
 | InvalidThreadIdError | 422 | internal | thread_id 正则不匹配 |
+| InvalidRequestError | 422 | internal | 请求字段不合法 |
 | WebAuthNotConfiguredError | 500 | internal | 启动时缺 password |
 """
 
@@ -106,6 +107,12 @@ class InvalidThreadIdError(KongmingWebError):
     status_code = 422
 
 
+class InvalidRequestError(KongmingWebError):
+    """请求字段不合法。"""
+
+    status_code = 422
+
+
 class WebAuthNotConfiguredError(KongmingWebError):
     """启动时缺密码 hash + env。"""
 
@@ -153,6 +160,7 @@ async def kongming_error_handler(
 __all__ = [
     "AuthFailedError",
     "CSRFGuardError",
+    "InvalidRequestError",
     "InvalidThreadIdError",
     "KongmingWebError",
     "NotAuthenticatedError",

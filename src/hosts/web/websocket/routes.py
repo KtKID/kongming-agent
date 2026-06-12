@@ -383,6 +383,16 @@ async def _dispatch_frame(
     """分派单个 C2S 帧。"""
     frame_type = frame.frame_type
     if frame_type == "user.input":
+        ensure_runtime = getattr(tm, "ensure_cell_runtime_preset_current", None)
+        if callable(ensure_runtime):
+            refreshed = await ensure_runtime(thread_id)
+            if refreshed is False:
+                await _send_error_frame(
+                    websocket,
+                    "internal",
+                    "模型切换尚未完成，runtime 刷新失败；请稍后重试。",
+                )
+                return
         # 后台跑 run_once；不阻塞读循环
         effort = getattr(frame, "reasoning_effort", None)
         # claude-image-paste-e2e #20：把 UserInputAttachment(BaseModel) 列表

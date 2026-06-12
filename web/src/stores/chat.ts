@@ -1,15 +1,17 @@
 import { create } from "zustand";
+import { apiGet, ApiError } from "@/lib/api";
 import type {
   ApprovalRequestFrame,
   AssistantFinalFrame,
   ErrorFrame,
   EvolutionReviewDTO,
-  HistoryMessageDTO,
+  NormalizedMessage,
   SystemNoticeFrame,
-  ThreadMetadataDTO,
+  ThreadUsage,
   ToolCallEndFrame,
   ToolCallStartFrame,
   UsageFrame,
+  UserInputAttachment,
 } from "@/protocol";
 
 /**
@@ -39,16 +41,9 @@ import type {
  * 重放路径。
  */
 
-export interface UsageSnapshot {
-  lastPrompt: number;
-  lastCompletion: number;
-  lastTotal: number;
-  cumulativePrompt: number;
-  cumulativeCompletion: number;
-  cumulativeTotal: number;
-  cumulativeCacheRead: number | null;
-  cumulativeCacheCreation: number | null;
-}
+// usage-token-v2-bigbang: v2 manager 是无状态门面，前端 store 直接持有
+// 当前最新的 ThreadUsage DTO（自带 provider discriminator）。
+// 不再有 v1 时代的 summary / lastSnapshot 分离视图——后端永远返回最新派生结果。
 
 export interface AssistantUsage {
   prompt: number;
@@ -66,6 +61,8 @@ export type ChatItem =
       threadId: string;
       content: string;
       timestampMs: number;
+      /** 用户消息附件（v0.1.5 多模态）；历史回显与实时 append 两条路径共用。 */
+      attachments?: UserInputAttachment[];
     }
   | {
       id: string;
@@ -95,6 +92,10 @@ export type ChatItem =
       result?: string;
       /** 工具产出结构化数据（ToolResult.data）；undefined = 还未结束 / 无结构化输出。 */
       resultData?: Record<string, unknown> | null;
+      /** Claude 流式 tool_use 期间累积的原始 input JSON 文本；pending=false 后清空。 */
+      partialInput?: string;
+      /** true=参数构建中（input_json delta 流式累积），false=已收到完整 tool_use 帧（区分 ok=null 的 running 子态）。 */
+      pending?: boolean;
       timestampMs: number;
     }
   | {
@@ -135,10 +136,14 @@ export type ChatItem =
 interface ChatState {
   /** thread_id → items 列表 */
   itemsByThread: Record<string, ChatItem[]>;
-  /** thread_id → 最近一次 usage 快照 */
-  usageByThread: Record<string, UsageSnapshot>;
-  setHistory: (threadId: string, history: HistoryMessageDTO[]) => void;
-  appendUser: (threadId: string, content: string) => void;
+  /** thread_id → 最新 token usage DTO（v2 派生结果，自带 provider discriminator） */
+  usageByThread: Record<string, ThreadUsage>;
+  setHistory: (threadId: string, history: NormalizedMessage[]) => void;
+  appendUser: (
+    threadId: string,
+    content: string,
+    attachments?: UserInputAttachment[],
+  ) => void;
   appendAssistantFinal: (threadId: string, frame: AssistantFinalFrame) => void;
   appendToolStart: (threadId: string, frame: ToolCallStartFrame) => void;
   appendToolEnd: (threadId: string, frame: ToolCallEndFrame) => void;
@@ -150,7 +155,17 @@ interface ChatState {
   applyEvolutionReview: (threadId: string, review: EvolutionReviewDTO) => void;
   appendError: (threadId: string, frame: ErrorFrame) => void;
   appendUsage: (threadId: string, frame: UsageFrame) => void;
-  hydrateUsageFromThreads: (threads: ThreadMetadataDTO[]) => void;
+  /**
+   * 主动拉某 thread 当前 token 用量（usage-token-v2-ui-fields）。
+   *
+   * v2 后端通过独立端点 ``GET /api/threads/<tid>/usage`` 派生最新 usage DTO。
+   * 用于打开 thread 时初始化 ``usageByThread[threadId]``，避免重启 web server 后
+   * 旧 thread 没新对话时底栏一直显示「等待对话」。
+   *
+   * - 成功且 ``usage != null`` → 写入 ``usageByThread[threadId]``
+   * - 404 / 网络失败 / usage=null → 静默忽略（等 WS UsageFrame 推送）
+   */
+  fetchThreadUsage: (threadId: string) => Promise<void>;
   /** 仅供 hooks/tests 用：清空某 thread */
   clear: (threadId: string) => void;
 }
@@ -372,11 +387,26 @@ function scheduleCommit(): void {
     testRafImpl(runCommit);
     return;
   }
-  if (typeof requestAnimationFrame === "function") {
+  // 后台 tab 时 rAF 不会被调度（浏览器规范），用 setTimeout 兜底
+  if (
+    typeof requestAnimationFrame === "function" &&
+    typeof document !== "undefined" &&
+    !document.hidden
+  ) {
     requestAnimationFrame(runCommit);
   } else {
-    setTimeout(runCommit, 16);
+    setTimeout(runCommit, 100);
   }
+}
+
+// 切回前台时立即 flush 积压的 buffer
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && buffers.size > 0) {
+      rafScheduled = false;
+      commitBuffersToStore();
+    }
+  });
 }
 
 function commitBuffersToStore(): void {
@@ -508,47 +538,50 @@ export const useChatStore = create<ChatState>((set) => ({
 
   setHistory: (threadId, history) => {
     const items: ChatItem[] = history.map((m, i) => {
-      if (m.role === "user") {
+      const parsedAt = m.timestamp ? Date.parse(m.timestamp) : Date.now();
+      const timestampMs = Number.isNaN(parsedAt) ? Date.now() : parsedAt;
+      if (m.frame_type === "text" && m.role === "user") {
         return {
-          id: `hist-${threadId}-${i}`,
+          id: m.id ?? `hist-${threadId}-${i}`,
           kind: "user",
           threadId,
-          content: m.content,
-          timestampMs: m.timestamp_ms,
+          content: String(m.content ?? ""),
+          timestampMs,
         };
       }
-      if (m.role === "assistant") {
+      if (m.frame_type === "text") {
         return {
-          id: `hist-${threadId}-${i}`,
+          id: m.id ?? `hist-${threadId}-${i}`,
           kind: "assistant",
           threadId,
-          turn: m.turn,
-          // 历史消息没有 run_id；用空串占位（不参与 buffer 匹配）
+          turn: i,
           runId: "",
-          content: m.content,
+          content: String(m.content ?? ""),
           reasoning: "",
-          timestampMs: m.timestamp_ms,
+          timestampMs,
           streaming: false,
         };
       }
-      // tool
-      // v0.1.6: 历史重放路径补齐 toolName / result(content) / resultData /
-      // errorMessage / ok。arguments 在 Message 上没存（在前面 assistant 的
-      // tool_calls 里），暂留 {} 直至跨消息重建实现。
       return {
-        id: `hist-${threadId}-${i}`,
+        id: m.id ?? `hist-${threadId}-${i}`,
         kind: "tool",
         threadId,
-        turn: m.turn,
+        turn: i,
         runId: "",
-        toolName: m.tool_name ?? "",
-        callId: m.tool_call_id ?? `hist-${i}`,
-        arguments: {},
-        ok: m.ok ?? true,
-        errorMessage: m.error_message ?? undefined,
-        result: m.content,
-        resultData: m.data ?? null,
-        timestampMs: m.timestamp_ms,
+        toolName: m.toolName ?? "",
+        callId: m.toolId ?? `hist-${i}`,
+        arguments:
+          m.toolInput && typeof m.toolInput === "object"
+            ? (m.toolInput as Record<string, unknown>)
+            : {},
+        ok: m.frame_type === "tool_use" ? null : m.isError === true ? false : true,
+        errorMessage:
+          m.frame_type === "tool_result" && m.isError === true
+            ? String(m.content ?? "")
+            : undefined,
+        result: m.frame_type === "tool_result" ? String(m.content ?? "") : undefined,
+        resultData: null,
+        timestampMs,
       };
     });
     set((s) => ({
@@ -556,13 +589,14 @@ export const useChatStore = create<ChatState>((set) => ({
     }));
   },
 
-  appendUser: (threadId, content) => {
+  appendUser: (threadId, content, attachments) => {
     const item: ChatItem = {
       id: `user-${threadId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       kind: "user",
       threadId,
       content,
       timestampMs: Date.now(),
+      attachments,
     };
     set((s) => ({
       itemsByThread: {
@@ -806,8 +840,13 @@ export const useChatStore = create<ChatState>((set) => ({
   },
 
   appendUsage: (threadId, frame) => {
+    // task#3.3+#4：WS UsageFrame.snapshot 是 UsageTokenSnapshot 嵌套结构。
+    // 把 snapshot 存为 lastSnapshot；message 卡片上的 usage 字段从 snapshot 派生
+    // usage-token-v2-bigbang: 直接把 UsageFrame.usage（ThreadUsage union DTO）
+    // 写入 store；不再有 v1 平铺累加。message 卡片上的 prompt/completion 数字
+    // 按 provider 分支提取：Claude 用 input/output，OpenAI 用 last.input/output。
     set((s) => {
-      const prev = s.usageByThread[threadId];
+      const usage: ThreadUsage = frame.usage;
       const runId = frame.run_id ?? "";
       const list = s.itemsByThread[threadId] ?? [];
       const idx = list.findIndex(
@@ -816,6 +855,17 @@ export const useChatStore = create<ChatState>((set) => ({
           it.turn === frame.turn &&
           it.runId === runId,
       );
+      // 按 provider 分支取 prompt / completion 数字
+      let prompt = 0;
+      let completion = 0;
+      if (usage.provider === "claude") {
+        prompt = usage.input_tokens;
+        completion = usage.output_tokens;
+      } else {
+        // openai 系（CodexUsage 或 GenericChatOpenAIUsage 都有 last）
+        prompt = usage.last.input_tokens;
+        completion = usage.last.output_tokens;
+      }
       const nextItemsByThread =
         idx >= 0
           ? {
@@ -825,9 +875,9 @@ export const useChatStore = create<ChatState>((set) => ({
                 {
                   ...list[idx]!,
                   usage: {
-                    prompt: frame.prompt_tokens,
-                    completion: frame.completion_tokens,
-                    total: frame.total_tokens,
+                    prompt,
+                    completion,
+                    total: prompt + completion,
                   },
                 },
                 ...list.slice(idx + 1),
@@ -838,58 +888,35 @@ export const useChatStore = create<ChatState>((set) => ({
         itemsByThread: nextItemsByThread,
         usageByThread: {
           ...s.usageByThread,
-          [threadId]: {
-            lastPrompt: frame.prompt_tokens,
-            lastCompletion: frame.completion_tokens,
-            lastTotal: frame.total_tokens,
-            cumulativePrompt: (prev?.cumulativePrompt ?? 0) + frame.prompt_tokens,
-            cumulativeCompletion: (prev?.cumulativeCompletion ?? 0) + frame.completion_tokens,
-            cumulativeTotal: (prev?.cumulativeTotal ?? 0) + frame.total_tokens,
-            cumulativeCacheRead: frame.cache_read_tokens != null
-              ? (prev?.cumulativeCacheRead ?? 0) + frame.cache_read_tokens
-              : (prev?.cumulativeCacheRead ?? null),
-            cumulativeCacheCreation: frame.cache_creation_tokens != null
-              ? (prev?.cumulativeCacheCreation ?? 0) + frame.cache_creation_tokens
-              : (prev?.cumulativeCacheCreation ?? null),
-          },
+          [threadId]: usage,
         },
       };
     });
   },
 
-  hydrateUsageFromThreads: (threads) => {
-    set((s) => {
-      const nextUsage = { ...s.usageByThread };
-      for (const thread of threads) {
-        const prev = nextUsage[thread.id];
-        nextUsage[thread.id] = {
-          lastPrompt: prev?.lastPrompt ?? 0,
-          lastCompletion: prev?.lastCompletion ?? 0,
-          lastTotal: prev?.lastTotal ?? 0,
-          cumulativePrompt: Math.max(
-            prev?.cumulativePrompt ?? 0,
-            thread.cumulative_prompt_tokens ?? 0,
-          ),
-          cumulativeCompletion: Math.max(
-            prev?.cumulativeCompletion ?? 0,
-            thread.cumulative_completion_tokens ?? 0,
-          ),
-          cumulativeTotal: Math.max(
-            prev?.cumulativeTotal ?? 0,
-            thread.cumulative_total_tokens ?? 0,
-          ),
-          cumulativeCacheRead:
-            thread.cumulative_cache_read_tokens != null
-              ? Math.max(prev?.cumulativeCacheRead ?? 0, thread.cumulative_cache_read_tokens)
-              : (prev?.cumulativeCacheRead ?? null),
-          cumulativeCacheCreation:
-            thread.cumulative_cache_creation_tokens != null
-              ? Math.max(prev?.cumulativeCacheCreation ?? 0, thread.cumulative_cache_creation_tokens)
-              : (prev?.cumulativeCacheCreation ?? null),
-        };
-      }
-      return { usageByThread: nextUsage };
-    });
+  fetchThreadUsage: async (threadId) => {
+    // usage-token-v2-ui-fields: 取代 v1 时代 ThreadMetadataDTO 上 usage 字段；
+    // 解决重启 web server 后旧 thread 底栏一直「等待对话」的问题。
+    //
+    // 端点返回 ``{"usage": ClaudeUsage | CodexUsage | GenericChat*Usage | null}``，
+    // 自带 ``provider`` discriminator；usage=null 表示 thread 没绑 SDK 真源 / 派生失败。
+    try {
+      const body = await apiGet<{ usage: ThreadUsage | null }>(
+        `/api/threads/${threadId}/usage`,
+      );
+      const usage = body?.usage;
+      if (!usage) return;
+      set((s) => ({
+        usageByThread: {
+          ...s.usageByThread,
+          [threadId]: usage,
+        },
+      }));
+    } catch (err) {
+      // 404 / 网络失败：静默；WS UsageFrame 后续推送会兜底
+      if (err instanceof ApiError) return;
+      // 其它意外保持静默，避免红屏（底栏不是 critical path）
+    }
   },
 
   clear: (threadId) => {

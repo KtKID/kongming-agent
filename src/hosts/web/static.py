@@ -25,6 +25,8 @@ dist 缺失时：
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -41,11 +43,39 @@ logger = logging.getLogger(__name__)
 DEFAULT_DIST_DIR = "web/dist"
 
 
-def _resolve_dist_dir(cfg: Config) -> Path:
-    """从 cfg.web 读 dist 路径；未来可加 ``cfg.web.dist_dir`` 字段。
+def _packaged_dist_candidates() -> list[Path]:
+    """返回包内 dist 候选路径。
 
-    v0.1.5 :class:`WebConfig` 没有 ``dist_dir`` 字段，按默认 ``web/dist``。
+    Returns:
+        按优先级排列的包内 dist 目录候选。PyInstaller onefile 启动时
+        ``sys._MEIPASS`` 指向临时解包目录。
     """
+    base = getattr(sys, "_MEIPASS", None)
+    if not base:
+        return []
+    root = Path(str(base))
+    return [
+        root / "web" / "dist",
+        root / "kongming" / "web" / "dist",
+    ]
+
+
+def _resolve_dist_dir(cfg: Config) -> Path:
+    """解析前端 dist 路径。
+
+    优先级：
+    1. ``KONGMING_WEB_DIST``（由 ``--dist-dir`` 或外部宿主注入）
+    2. PyInstaller 解包目录里的包内资源
+    3. 源码工作目录下的 ``web/dist``
+    """
+    env_dist = os.environ.get("KONGMING_WEB_DIST")
+    if env_dist and env_dist.strip():
+        return Path(env_dist).expanduser().resolve()
+
+    for candidate in _packaged_dist_candidates():
+        if (candidate / "index.html").is_file():
+            return candidate
+
     return Path(DEFAULT_DIST_DIR)
 
 

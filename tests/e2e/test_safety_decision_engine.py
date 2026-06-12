@@ -161,7 +161,7 @@ async def test_case01_tracked_write_silent_allow_intrinsic(tmp_path: Path) -> No
     cfg = _config()
     engine, _, _, _ = _build_engine(cfg)
     # 选一个项目里实际 tracked 的文件
-    tracked_path = str(Path.cwd() / "src" / "core" / "contracts.py")
+    tracked_path = str(Path.cwd() / "src" / "core" / "contracts" / "__init__.py")
     decision = await engine.decide(
         _req(tool_name="write_file", arguments={"path": tracked_path, "content": "x"}),
         _runtime(),

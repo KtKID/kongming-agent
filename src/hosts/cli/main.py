@@ -43,7 +43,12 @@ from application.subagents.permissions import SubAgentPermissionSpec
 from core.contracts import ApprovalRequest, EventSink, SupportsLLMStream, ToolContext
 from hosts.cli.adapter import CLIAdapter, CLIEventSink
 from hosts.shared.session_bridge import SessionBridge
-from infrastructure.config import Config, get_kongming_home, load_config
+from infrastructure.config import (
+    Config,
+    get_kongming_home,
+    load_config,
+    resolve_kongming_path,
+)
 from infrastructure.config.errors import ConfigLoadError, ConfigValidationError
 from infrastructure.tracing import JsonlTraceSink, PromptDebugDumpSink
 from memory import MemoryStore
@@ -66,6 +71,7 @@ from tools import (
     register_agent_workflow_tool,
     register_evolution_write_tool_if_enabled,
     register_schedule_tool_if_enabled,
+    register_task_progress_tool,
 )
 from tools.runtime.approval import PromptActionFn
 
@@ -233,7 +239,7 @@ def _build_cli_auto_approval_policy() -> Any:
     "prompt_debug",
     is_flag=True,
     default=False,
-    help="保存每轮 system prompt 和完整 history 到 .kongming/debug/。",
+    help="保存每轮 system prompt 和完整 history 到 kongming_home/debug/。",
 )
 @click.option(
     "--stream/--no-stream",
@@ -321,7 +327,7 @@ async def _run(
     workdir: Path | None = None,
 ) -> None:
     # --workdir / -C：在 load_config 之前 chdir，让 KONGMING_HOME 默认值
-    # （cwd/.kongming）和工具相对路径解析都基于新 cwd。
+    # 工具相对路径和 thread.cwd 语义基于新 cwd；kongming_home 由 get_kongming_home() 决定。
     #
     # 但必须先把 ``--config`` / ``--instructions-file`` 的相对路径基于**原
     # cwd** resolve（``cli.sh`` 写死了 ``--config config/setting.yaml`` 是相对
@@ -433,7 +439,7 @@ async def _run(
     if trace_enabled:
         event_sinks.append(
             JsonlTraceSink(
-                cfg.trace.output_path,
+                resolve_kongming_path(cfg.trace.output_path),
                 auto_flush=cfg.trace.auto_flush,
                 delta_sampling=cfg.stream.delta_sampling,
                 periodic_batch_size=cfg.stream.periodic_batch_size,
@@ -508,6 +514,7 @@ async def _run(
     )
     register_agent_role_tool(registry, agent_role_manager)
     register_agent_workflow_tool(registry, agent_workflow_handle)
+    register_task_progress_tool(registry, cfg)
 
     # approval 按配置模式选：interactive 走 ApprovalManager + CLI sink；
     # 其它模式（auto_allow / auto_deny）不需要 prompt_fn。
@@ -522,7 +529,7 @@ async def _run(
     # + KONGMING_EXTRA_INSTRUCTIONS 合成一段带来源标注的 system prompt。
     # memory 通道受 cfg.evolution.memory.enabled/inject_prompt 控制；
     # enabled=False 时 memory_store 为 None。
-    # prompts 装配（.kongming/prompts/*.md 物化 + 读取）失败时给用户友好错误消息，
+    # prompts 装配（<kongming_home>/prompts/*.md 物化 + 读取）失败时给用户友好错误消息，
     # 对齐 _load_config_or_exit 的 UX；避免裸 traceback。
     try:
         instructions, instruction_origins, memory_store = await _assemble_instructions(
@@ -532,7 +539,7 @@ async def _run(
         )
     except (PermissionError, OSError, UnicodeDecodeError, FileNotFoundError) as exc:
         click.echo(
-            f"[prompts] failed to load .kongming/prompts/ templates: {type(exc).__name__}: {exc}",
+            f"[prompts] failed to load kongming_home/prompts templates: {type(exc).__name__}: {exc}",
             err=True,
         )
         raise SystemExit(2) from exc
@@ -741,15 +748,13 @@ def _resolve_memory_dir(raw: str) -> Path:
     """把 `cfg.evolution.memory.root_path` 解析成绝对 memory 目录。
 
     - 绝对路径直接用（支持 ``~`` 展开）。
-    - 相对路径视为相对于 **当前 cwd** 的子目录。
+    - ``.kongming/*`` 相对路径派生到 ``kongming_home``。
+    - 其他相对路径按当前进程路径规则解析。
 
     这里不再追加 ``.kongming/memory``——由用户在 config 中直接写完整 memory 目录，
     让 MemoryStore 按 memory_dir 使用。
     """
-    expanded = Path(raw).expanduser()
-    if expanded.is_absolute():
-        return expanded
-    return (Path.cwd() / expanded).resolve()
+    return resolve_kongming_path(raw)
 
 
 async def _assemble_instructions(
@@ -1118,19 +1123,7 @@ def _discover_sqlite_backend_sessions(raw_path: str) -> tuple[list[SessionSummar
 
 
 def _resolve_session_candidates(raw_path: str) -> list[Path]:
-    raw = Path(raw_path).expanduser()
-    if raw.is_absolute():
-        return [raw.resolve()]
-
-    cwd_candidate = (Path.cwd() / raw).resolve()
-    candidates = [cwd_candidate]
-    parts = raw.parts
-    if parts and parts[0] == ".kongming":
-        suffix = Path(*parts[1:]) if len(parts) > 1 else Path()
-        home_candidate = (get_kongming_home() / suffix).resolve()
-        if home_candidate not in candidates:
-            candidates.append(home_candidate)
-    return candidates
+    return [resolve_kongming_path(raw_path)]
 
 
 def _print_sessions_and_exit(

@@ -1,34 +1,54 @@
+import { useEffect, useRef } from "react";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
 interface WhiteboardCardEditorProps {
   value: string;
   className?: string;
+  autoFocus?: boolean;
   onChange?: (value: string) => void;
+  onBlur?: () => void;
 }
 
 export function WhiteboardCardEditor({
   value,
   className,
+  autoFocus = false,
   onChange,
+  onBlur,
 }: WhiteboardCardEditorProps) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    if (!autoFocus || !textareaRef.current) return;
+    textareaRef.current.focus();
+    const end = textareaRef.current.value.length;
+    textareaRef.current.setSelectionRange(end, end);
+  }, [autoFocus]);
+
   return (
     <div
       className={cn(
-        "flex h-full flex-col overflow-hidden rounded-[1rem] border border-border/80 bg-background/92 text-foreground shadow-sm dark:bg-background/45",
+        "flex h-full flex-col overflow-hidden rounded-[0.95rem] border border-border/70 bg-background/95 text-foreground shadow-sm dark:bg-background/45",
         className,
       )}
     >
-      <div className="border-b border-border/80 px-3 py-2 text-[11px] font-medium uppercase tracking-[0.2em] text-muted-foreground">
-        编辑区
-      </div>
       <div className="min-h-0 flex-1">
         <Textarea
+          ref={textareaRef}
           value={value}
           onChange={(e) => onChange?.(e.target.value)}
-          className="scrollbar-overlay h-full min-h-full rounded-none border-0 bg-transparent px-3 py-3 font-mono text-xs leading-6 text-foreground shadow-none focus-visible:ring-0 placeholder:text-muted-foreground"
-          placeholder="在这里输入 markdown 内容"
-          aria-label="白板卡片内容编辑器"
+          onBlur={onBlur}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" || ((event.metaKey || event.ctrlKey) && event.key === "Enter")) {
+              event.preventDefault();
+              event.currentTarget.blur();
+            }
+          }}
+          className="scrollbar-overlay h-full min-h-full rounded-none border-0 bg-transparent px-3.5 py-3.5 font-mono text-[12px] leading-6 text-foreground shadow-none focus-visible:ring-0 placeholder:text-muted-foreground"
+          placeholder="直接写内容；待办用 - [ ]"
+          aria-label="Whiteboard card editor"
+          onPointerDown={(event) => event.stopPropagation()}
         />
       </div>
     </div>

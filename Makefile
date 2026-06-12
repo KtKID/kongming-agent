@@ -23,7 +23,7 @@ help:
 	@echo "  make test-e2e      pytest tests/e2e -v"
 	@echo "  make test          test-unit + test-e2e"
 	@echo "  make smoke         最小启动 smoke test"
-	@echo "  make cli           启动 CLI（本地模型基线配置）"
+	@echo "  make cli           启动 CLI（MiniMax M3 默认）"
 	@echo "  make clean         清理缓存产物"
 
 install:

@@ -309,8 +309,7 @@ def test_migrate_from_thread_metadata_filters_and_dedups(
     added = registry_spec.migrate_from_thread_metadata(home)
     assert added == 2
     loaded = registry_spec.load_registry(home)
-    # 注：a413c9b (windows-path) 后 migrate 新发现项 append 顺序变了
-    # （之前按 cwd 字典序，现在按发现顺序 e→f 之后是 a 落到末尾），实际产出
-    # ["/proj/existing", "/proj/fresh", "/proj/a"]。按"不扩大影响面"只改断言。
+    # list_thread_metadata 对同 updated_at 的 thread 按 id 降序兜底；
+    # migrate 继承该顺序，保证不同文件系统下迁移结果一致。
     assert [entry.cwd for entry in loaded] == ["/proj/existing", "/proj/fresh", "/proj/a"]
     assert loaded[0] == existing

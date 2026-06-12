@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,32 @@ pytestmark = pytest.mark.skipif(
     os.getenv("KONGMING_E2E_REAL_MODEL") != "1",
     reason="set KONGMING_E2E_REAL_MODEL=1 to run real agent role roundtable e2e",
 )
+
+
+def _short_e2e_root(tmp_path: Path) -> Path:
+    """创建短路径 e2e 根目录，输入为 pytest 临时路径，输出 C:/km-e2e 下的唯一目录。"""
+    safe_name = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in tmp_path.name)
+    root = Path("C:/km-e2e") / f"{safe_name[:24]}-{uuid.uuid4().hex[:8]}"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _assert_roundtable_usage_from_result(workflow_dir: Path, *, expected_runs: int) -> None:
+    """断言 roundtable result 可读子 agent usage，输入为 workflow 目录，输出为 pytest 断言。"""
+    result_payload = json.loads((workflow_dir / "result.json").read_text(encoding="utf-8"))
+    roundtable = result_payload["roundtable_review"]
+    usage_records = roundtable["child_agent_usages"]
+    assert len(usage_records) == expected_runs
+    if any(not record["usage"] for record in usage_records):
+        pytest.skip("depends on subtask #1: SubAgentRun must carry real usage")
+    summed: dict[str, int | float] = {}
+    for record in usage_records:
+        for key, value in record["usage"].items():
+            assert isinstance(value, int | float)
+            summed[key] = summed.get(key, 0) + value
+    assert summed
+    assert roundtable["child_agent_usage_totals"] == summed
+    assert roundtable["estimated_child_output_tokens"] > 0
 
 
 class _FakeRoundtableSubAgentManager:
@@ -338,16 +365,17 @@ async def test_minimax_parent_runs_real_us_iran_roundtable_and_writes_child_logs
     if not os.getenv("MINIMAX_API_KEY"):
         pytest.skip("MINIMAX_API_KEY is required for minimax-m3 preset")
 
-    brief_path = _write_us_iran_brief(tmp_path)
+    e2e_root = _short_e2e_root(tmp_path)
+    brief_path = _write_us_iran_brief(e2e_root)
     cfg = _apply_model_preset_or_exit(base_cfg, "minimax-m3")
     cfg = cfg.model_copy(
         update={
             "runner": cfg.runner.model_copy(update={"max_turns": 20}),
             "session": cfg.session.model_copy(
-                update={"backend": "file", "file_store_path": str(tmp_path / "sessions")}
+                update={"backend": "file", "file_store_path": str(e2e_root / "sessions")}
             ),
             "trace": cfg.trace.model_copy(
-                update={"raw_llm": False, "output_path": str(tmp_path / "trace.jsonl")}
+                update={"raw_llm": False, "output_path": str(e2e_root / "trace.jsonl")}
             ),
             "scheduler": cfg.scheduler.model_copy(update={"enabled": False}),
         }
@@ -358,14 +386,14 @@ async def test_minimax_parent_runs_real_us_iran_roundtable_and_writes_child_logs
         instruction_sources=[],
         instruction_text_hash="test",
         created_at=1.0,
-        cwd=str(tmp_path),
+        cwd=str(e2e_root),
     )
 
     def _session_factory(session_id: str):  # type: ignore[no-untyped-def]
         """构造 file session，输入为 session id，输出可落盘会话。"""
         return build_session(cfg, session_id, bootstrap=bootstrap)
 
-    role_manager = AgentRoleManager(role_dir=tmp_path / "roles")
+    role_manager = AgentRoleManager(role_dir=e2e_root / "roles")
     handle = AgentWorkflowHandle()
     registry = ToolRegistry(build_file_tools())
     register_agent_role_tool(registry, role_manager)
@@ -388,7 +416,7 @@ async def test_minimax_parent_runs_real_us_iran_roundtable_and_writes_child_logs
     manager = AgentWorkflowManager(
         subagents=SubAgentManager(runtime),
         config=cfg,
-        workspace_root=tmp_path,
+        workspace_root=e2e_root,
         role_manager=role_manager,
     )
     handle.bind(manager)
@@ -429,6 +457,7 @@ async def test_minimax_parent_runs_real_us_iran_roundtable_and_writes_child_logs
         "independent-escalation_risk_analyst": "completed",
         "arbiter-agent": "completed",
     }
+    _assert_roundtable_usage_from_result(workflow_dir, expected_runs=3)
     assert (workflow_dir / "review_board" / "final_report.md").is_file()
     final_report = (workflow_dir / "review_board" / "final_report.md").read_text(encoding="utf-8")
     assert "伊朗" in final_report or "Iran" in final_report

@@ -55,6 +55,8 @@ function parseInline(text: string): ReactNode[] {
           target="_blank"
           rel="noopener noreferrer"
           className="font-medium text-accent underline decoration-accent/40 underline-offset-4"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
         >
           {linkMatch[1]}
         </a>,
@@ -219,7 +221,9 @@ function renderTaskItemWithAction(
       <button
         type="button"
         className="flex w-full items-start gap-2 rounded-xl bg-muted/65 px-2.5 py-2 text-left transition-colors hover:bg-muted"
-        onClick={() => {
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
           if (onToggleTask && typeof taskIndex === "number") {
             onToggleTask(taskIndex);
           }

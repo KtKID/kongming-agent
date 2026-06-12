@@ -19,26 +19,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from importlib import import_module
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from hosts.web.dashboard.config.manager import (
+from hosts.web.dashboard.config.restart import RestartScriptNotFoundError
+from hosts.web.dashboard.config.router import router as dashboard_config_router
+from infrastructure.config.manager import (
     EffectiveResponse,
     RawResponse,
-    RestartResponse,
     SavePatchResponse,
     SchemaResponse,
 )
-from hosts.web.dashboard.config.restart import RestartScriptNotFoundError
-from hosts.web.dashboard.config.router import router as dashboard_config_router
-from hosts.web.dashboard.config.writer import (
+from infrastructure.config.writer import (
     ConflictError,
     PatchItem,
     ValidationFailedError,
 )
+
+router_mod = import_module("hosts.web.dashboard.config.router")
 
 # ---------------------------------------------------------------------------
 # fake ConfigManager
@@ -58,9 +60,7 @@ class _FakeConfigManager:
     effective_return: EffectiveResponse | None = None
     raw_return: RawResponse | None = None
     save_return: SavePatchResponse | None = None
-    restart_return: RestartResponse | None = None
     raise_on_save: Exception | None = None
-    raise_on_restart: Exception | None = None
     last_save_patch: list[PatchItem] | None = None
     last_save_expected_mtime: float | None = None
 
@@ -85,12 +85,6 @@ class _FakeConfigManager:
         assert self.save_return is not None
         return self.save_return
 
-    def trigger_restart(self) -> RestartResponse:
-        if self.raise_on_restart is not None:
-            raise self.raise_on_restart
-        assert self.restart_return is not None
-        return self.restart_return
-
 
 # ---------------------------------------------------------------------------
 # fixtures
@@ -111,6 +105,7 @@ def client(fake_manager: _FakeConfigManager) -> TestClient:
     """
     app = FastAPI()
     app.state.config_manager = fake_manager
+    app.state.config_restart_repo_root = "/tmp/fake_repo"
     app.include_router(dashboard_config_router)
     return TestClient(app)
 
@@ -125,7 +120,7 @@ def test_get_schema_returns_200_with_fields(
 ) -> None:
     """GET /schema 200，body 含 fields 与 groups 两个 key。
 
-    schema 内部由 :mod:`web.dashboard.config.schema` 真源生成，这里桩
+    schema 内部由 :mod:`infrastructure.config.schema` 真源生成，这里桩
     一个最小 SchemaResponse（fields/groups 都给空 list）即可断 200 +
     结构正确。
     """
@@ -194,20 +189,28 @@ def test_save_validation_failed_returns_422(
 
 
 def test_restart_script_not_found_returns_503(
-    client: TestClient, fake_manager: _FakeConfigManager
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """trigger_restart 抛 :class:`RestartScriptNotFoundError` → 503。"""
-    fake_manager.raise_on_restart = RestartScriptNotFoundError(
-        "./start.sh not found at /tmp/fake_repo"
+    monkeypatch.setattr(
+        router_mod,
+        "trigger_web_restart",
+        lambda repo_root: (_ for _ in ()).throw(
+            RestartScriptNotFoundError("./start.sh not found at /tmp/fake_repo")
+        ),
     )
     resp = client.post("/api/manage/config/restart")
     assert resp.status_code == 503
     assert "start.sh not found" in resp.json()["detail"]
 
 
-def test_restart_happy_returns_200(client: TestClient, fake_manager: _FakeConfigManager) -> None:
+def test_restart_happy_returns_200(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """trigger_restart 成功 → 200 + restarting/pid 字段。"""
-    fake_manager.restart_return = RestartResponse(restarting=True, pid=12345)
+    monkeypatch.setattr(
+        router_mod,
+        "trigger_web_restart",
+        lambda repo_root: 12345,
+    )
     resp = client.post("/api/manage/config/restart")
     assert resp.status_code == 200
     payload = resp.json()

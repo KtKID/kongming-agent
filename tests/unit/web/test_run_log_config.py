@@ -25,6 +25,6 @@ def test_uvicorn_log_config_includes_timestamps() -> None:
     handlers = config["handlers"]
     assert isinstance(handlers, dict)
     assert handlers["default"]["stream"] == "ext://sys.stderr"
-    assert handlers["access"]["stream"] == "ext://sys.stdout"
+    assert handlers["access"]["stream"] == "ext://sys.stderr"
 
     dictConfig(config)

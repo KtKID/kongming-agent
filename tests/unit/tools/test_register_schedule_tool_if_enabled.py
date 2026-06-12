@@ -101,6 +101,21 @@ def test_enabled_uses_default_home_when_none(monkeypatch, tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
+def test_enabled_resolves_kongming_relative_home(monkeypatch, tmp_path: Path) -> None:
+    """cfg.scheduler.home=.kongming/* → 派生到 kongming_home。"""
+    home = tmp_path / "home"
+    monkeypatch.setenv("KONGMING_HOME", str(home))
+    cfg = _make_cfg(enabled=True, home=Path(".kongming/cron-custom"))
+    reg = build_default_registry(file_enabled=False, shell_enabled=False)
+
+    store = register_schedule_tool_if_enabled(reg, cfg)
+
+    assert store is not None
+    expected_cron = home / "cron-custom"
+    assert expected_cron.exists()
+
+
+@pytest.mark.unit
 def test_enabled_passes_runtime_factory_fn(tmp_path: Path) -> None:
     """runtime_factory_fn 透传到 schedule_tool（run_now 走它装配 fresh runtime）。"""
     cron_home = tmp_path / "cron"

@@ -19,6 +19,7 @@ from evolution.skill_materializer import materialize_skill
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore, resolve_evolution_root
 from infrastructure.config.models import Config
+from infrastructure.config.paths import resolve_kongming_path
 from memory import MemoryStore
 
 
@@ -61,6 +62,7 @@ async def execute_apply_job(
     store: EvolutionStore,
     job: ApplyJob,
     nutrient: EvolutionNutrient,
+    kongming_home: Path | None = None,
 ) -> ApplyExecutionResult:
     running = await store.write_apply_job(job.mark_running(updated_at_ms=_now_ms()))
     workspace_root = Path(running.workspace_root).expanduser().resolve()
@@ -82,7 +84,13 @@ async def execute_apply_job(
         return ApplyExecutionResult(job=finished, decision_record=decision_record)
     if running.decision == "accept_memory":
         try:
-            memory_store = MemoryStore(memory_dir=_resolve_memory_dir(cfg, workspace_root))
+            memory_store = MemoryStore(
+                memory_dir=_resolve_memory_dir(
+                    cfg,
+                    workspace_root,
+                    kongming_home=kongming_home,
+                )
+            )
             outcome = await MemoryMaterializer(
                 memory_store,
                 run_id=f"decision-apply:{running.run_id}:{running.nutrient_id}",
@@ -152,8 +160,15 @@ async def execute_apply_job(
         return ApplyExecutionResult(job=failed, decision_record=decision_record)
 
 
-async def recover_pending_apply_jobs(cfg: Config) -> tuple[ApplyJob, ...]:
-    root_dir = resolve_evolution_root(cfg.evolution.learning.root_path)
+async def recover_pending_apply_jobs(
+    cfg: Config,
+    *,
+    kongming_home: Path | None = None,
+) -> tuple[ApplyJob, ...]:
+    root_dir = resolve_evolution_root(
+        cfg.evolution.learning.root_path,
+        kongming_home=kongming_home,
+    )
     store = EvolutionStore(root_dir=root_dir, state_store=EvolutionStateStore(root_dir))
     jobs = await store.list_recoverable_apply_jobs()
     recovered: list[ApplyJob] = []
@@ -193,7 +208,13 @@ async def recover_pending_apply_jobs(cfg: Config) -> tuple[ApplyJob, ...]:
             )
             recovered.append(failed)
             continue
-        outcome = await execute_apply_job(cfg=cfg, store=store, job=job, nutrient=nutrient)
+        outcome = await execute_apply_job(
+            cfg=cfg,
+            store=store,
+            job=job,
+            nutrient=nutrient,
+            kongming_home=kongming_home,
+        )
         recovered.append(outcome.job)
     return tuple(recovered)
 
@@ -202,12 +223,15 @@ def _job_id(*, review_id: str, nutrient_id: str) -> str:
     return f"apply:{review_id}:{nutrient_id}"
 
 
-def _resolve_memory_dir(cfg: Config, workspace_root: Path) -> Path:
+def _resolve_memory_dir(
+    cfg: Config,
+    workspace_root: Path,
+    *,
+    kongming_home: Path | None = None,
+) -> Path:
     raw = str(cfg.evolution.memory.root_path).strip()
-    expanded = Path(raw).expanduser()
-    if expanded.is_absolute():
-        return expanded.resolve()
-    return (workspace_root / expanded).resolve()
+    del workspace_root
+    return resolve_kongming_path(raw, kongming_home=kongming_home)
 
 
 def _now_ms() -> int:

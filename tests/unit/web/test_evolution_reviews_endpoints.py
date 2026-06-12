@@ -241,7 +241,7 @@ async def test_post_evolution_decision_accept_memory_materializes_workspace_memo
         assert item["target"] == "memory"
         assert item["applied_status"] == "written"
         assert item["applied_mode"] == "append"
-        memory_path = workspace / ".kongming" / "memory" / "MEMORY.md"
+        memory_path = tmp_path / "memory" / "MEMORY.md"
         assert item["applied_path"] == str(memory_path)
         assert memory_path.exists()
         content = memory_path.read_text(encoding="utf-8")
@@ -348,7 +348,7 @@ async def test_post_evolution_reapply_materializes_pending_memory_and_skill(tmp_
         memory_item = items["nutrient-2"]
         assert memory_item["applied_status"] == "written"
         assert memory_item["applied_mode"] == "append"
-        memory_path = workspace / ".kongming" / "memory" / "MEMORY.md"
+        memory_path = tmp_path / "memory" / "MEMORY.md"
         assert memory_item["applied_path"] == str(memory_path)
         assert memory_path.exists()
 

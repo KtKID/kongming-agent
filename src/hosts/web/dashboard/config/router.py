@@ -1,6 +1,6 @@
-"""manage-config-tab dev-checklist #6 — FastAPI 薄壳。
+"""manage 配置页 FastAPI 薄壳。
 
-把 :class:`web.dashboard.config.manager.ConfigManager` 的 5 个公开方法
+把 :class:`infrastructure.config.manager.ConfigManager` 的公开方法
 按 1:1 映射成 HTTP endpoint，挂到 ``/api/manage/config/*``：
 
 ================  ==================================  ====================
@@ -10,7 +10,7 @@ GET  /schema      :meth:`ConfigManager.read_schema`   200
 GET  /effective   :meth:`ConfigManager.read_effective` 200
 GET  /raw         :meth:`ConfigManager.read_raw`      200
 POST /save        :meth:`ConfigManager.save_patch`    200 / 409 / 422
-POST /restart     :meth:`ConfigManager.trigger_restart` 200 / 503
+POST /restart     Web restart adapter                200 / 503
 ================  ==================================  ====================
 
 设计原则：
@@ -35,23 +35,23 @@ POST /restart     :meth:`ConfigManager.trigger_restart` 200 / 503
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from hosts.web.dashboard.config.manager import (
+from hosts.web.dashboard.config.restart import RestartScriptNotFoundError
+from hosts.web.dashboard.config.restart import trigger_restart as trigger_web_restart
+from infrastructure.config.manager import (
     ConfigManager,
-    ConflictError,
     EffectiveResponse,
-    PatchItem,
     RawResponse,
-    RestartResponse,
     SavePatchResponse,
     SchemaResponse,
-    ValidationFailedError,
 )
-from hosts.web.dashboard.config.restart import RestartScriptNotFoundError
+from infrastructure.config.writer import ConflictError, PatchItem, ValidationFailedError
 
 router = APIRouter(prefix="/api/manage/config", tags=["manage-config"])
 
@@ -86,6 +86,14 @@ class SavePatchRequestBody(BaseModel):
     expected_mtime: float
 
 
+@dataclass(frozen=True)
+class RestartResponse:
+    """Web restart 响应。"""
+
+    restarting: bool
+    pid: int
+
+
 # ---------------------------------------------------------------------------
 # 端点
 # ---------------------------------------------------------------------------
@@ -117,7 +125,7 @@ async def get_schema(request: Request) -> SchemaResponse:
     """字段元数据 + group 顺序。
 
     不接受任何参数；幂等可缓存。具体 schema 内容由
-    :func:`web.dashboard.config.schema.list_field_metas` 决定。
+    :func:`infrastructure.config.schema.list_field_metas` 决定。
     """
     return _manager(request).read_schema()
 
@@ -166,9 +174,15 @@ async def trigger_restart(request: Request) -> RestartResponse:
 
     不在本端点 sleep——是否给 HTTP 响应留时间 flush 由调用方编排。
     """
-    mgr = _manager(request)
+    repo_root = getattr(request.app.state, "config_restart_repo_root", None)
+    if repo_root is None:
+        raise HTTPException(
+            status_code=500,
+            detail="config_restart_repo_root not configured on app.state",
+        )
     try:
-        return mgr.trigger_restart()
+        pid = trigger_web_restart(Path(repo_root))
+        return RestartResponse(restarting=True, pid=pid)
     except RestartScriptNotFoundError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

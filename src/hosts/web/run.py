@@ -2,19 +2,417 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import hashlib
+import json
 import logging
 import os
+import socket
 import sys
 import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-def main() -> int:
+@dataclass(frozen=True)
+class WebRuntimeOptions:
+    """Web sidecar 的运行时参数。
+
+    Args:
+        host: uvicorn 绑定地址。
+        port: uvicorn 绑定端口；允许 ``0``，由 OS 分配空闲端口。
+        home: kongming 运行时数据目录。
+        config_path: 配置文件路径。
+        dist_dir: 前端 dist 目录；为 ``None`` 时走环境变量或默认路径。
+        print_ready_json: 是否在启动成功后向 stdout 输出一次 ready JSON。
+    """
+
+    host: str
+    port: int
+    home: Path
+    config_path: Path
+    dist_dir: Path | None
+    print_ready_json: bool
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """构造 ``kongming-web`` 参数解析器。
+
+    Returns:
+        已配置运行时参数的 :class:`argparse.ArgumentParser`。
+    """
+    parser = argparse.ArgumentParser(prog="kongming-web")
+    parser.add_argument("--host", help="Web server bind host.")
+    parser.add_argument(
+        "--port",
+        type=int,
+        help="Web server bind port. Use 0 to ask the OS for a free port.",
+    )
+    parser.add_argument("--home", type=Path, help="Kongming runtime home directory.")
+    parser.add_argument("--config", type=Path, help="Explicit config file path.")
+    parser.add_argument("--dist-dir", type=Path, help="Frontend dist directory.")
+    parser.add_argument(
+        "--print-ready-json",
+        action="store_true",
+        help="Print one ready JSON line to stdout after the server starts.",
+    )
+    # 兼容早期契约名；语义与 --print-ready-json 完全一致。
+    parser.add_argument(
+        "--once-ready-json",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    return parser
+
+
+def _resolve_home(explicit_home: Path | None) -> Path:
+    """解析运行时 home，并同步写回 ``KONGMING_HOME``。
+
+    Args:
+        explicit_home: CLI 传入的 home；为 ``None`` 时读取环境变量或默认值。
+
+    Returns:
+        绝对路径形式的 home。
+    """
+    if explicit_home is not None:
+        home = explicit_home.expanduser().resolve()
+        os.environ["KONGMING_HOME"] = str(home)
+        return home
+
+    from infrastructure.config.paths import get_kongming_home
+
+    return get_kongming_home()
+
+
+def _resolve_config_path(home: Path, explicit_config: Path | None) -> Path:
+    """解析配置文件路径。
+
+    Args:
+        home: 已解析的 kongming home。
+        explicit_config: CLI 显式配置路径。
+
+    Returns:
+        实际要传入 ``load_config`` 的路径。
+    """
+    if explicit_config is not None:
+        config_path = explicit_config.expanduser().resolve()
+        os.environ["KONGMING_CONFIG"] = str(config_path)
+        return config_path
+
+    env_config = os.environ.get("KONGMING_CONFIG")
+    if env_config and env_config.strip():
+        return Path(env_config).expanduser().resolve()
+
+    home_config = home / "config" / "setting.yaml"
+    if home_config.exists():
+        os.environ["KONGMING_CONFIG"] = str(home_config)
+        return home_config
+
+    return Path("config/setting.yaml")
+
+
+def _resolve_dist_dir(explicit_dist_dir: Path | None) -> Path | None:
+    """解析前端 dist 参数，并通过 ``KONGMING_WEB_DIST`` 交给 static 模块。
+
+    Args:
+        explicit_dist_dir: CLI 显式 dist 路径。
+
+    Returns:
+        绝对路径形式的 dist 目录；未显式指定时返回环境变量或 ``None``。
+    """
+    if explicit_dist_dir is not None:
+        dist_dir = explicit_dist_dir.expanduser().resolve()
+        os.environ["KONGMING_WEB_DIST"] = str(dist_dir)
+        return dist_dir
+
+    env_dist = os.environ.get("KONGMING_WEB_DIST")
+    if env_dist and env_dist.strip():
+        return Path(env_dist).expanduser().resolve()
+    return None
+
+
+def _resolve_runtime_options(argv: list[str] | None = None) -> WebRuntimeOptions:
+    """解析 Web sidecar 运行时参数。
+
+    Args:
+        argv: 参数列表；为 ``None`` 时读取 ``sys.argv``。
+
+    Returns:
+        归一化后的运行时参数。
+    """
+    args = _build_arg_parser().parse_args(argv)
+    home = _resolve_home(args.home)
+    config_path = _resolve_config_path(home, args.config)
+    dist_dir = _resolve_dist_dir(args.dist_dir)
+    host = args.host or os.environ.get("KONGMING_WEB_HOST") or ""
+    raw_port = args.port
+    if raw_port is None:
+        env_port = os.environ.get("KONGMING_WEB_PORT")
+        raw_port = int(env_port) if env_port and env_port.strip() else -1
+    if raw_port < -1 or raw_port > 65535:
+        raise ValueError(f"web port must be 0-65535, got {raw_port}")
+    return WebRuntimeOptions(
+        host=host,
+        port=raw_port,
+        home=home,
+        config_path=config_path,
+        dist_dir=dist_dir,
+        print_ready_json=bool(args.print_ready_json or args.once_ready_json),
+    )
+
+
+def _build_uvicorn_log_config() -> dict[str, object]:
+    """Return uvicorn logging config with timestamps for server.log."""
+    fmt = "%(asctime)s %(levelname)s: %(message)s"
+    datefmt = "%Y-%m-%d %H:%M:%S"
+    return {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "default": {
+                "format": fmt,
+                "datefmt": datefmt,
+            },
+            "access": {
+                "format": fmt,
+                "datefmt": datefmt,
+            },
+        },
+        "handlers": {
+            "default": {
+                "formatter": "default",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stderr",
+            },
+            "access": {
+                "formatter": "access",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stderr",
+            },
+        },
+        "loggers": {
+            "uvicorn": {"handlers": ["default"], "level": "INFO", "propagate": False},
+            "uvicorn.error": {"handlers": ["default"], "level": "INFO", "propagate": False},
+            "uvicorn.access": {"handlers": ["access"], "level": "INFO", "propagate": False},
+        },
+    }
+
+
+def _override_web_bind_config(cfg: Any, *, host: str, port: int) -> Any:
+    """把运行时绑定地址写入 Config 副本。
+
+    Args:
+        cfg: ``load_config`` 返回的配置对象。
+        host: 实际绑定 host。
+        port: 实际绑定端口，必须大于 0。
+
+    Returns:
+        更新了 ``web.host`` / ``web.port`` 的 Config 副本。
+    """
+    web_cfg = cfg.web.model_copy(update={"host": host, "port": port})
+    return cfg.model_copy(update={"web": web_cfg})
+
+
+def _format_base_url(host: str, port: int) -> str:
+    """格式化 loopback URL，兼容 IPv6 host。
+
+    Args:
+        host: 绑定 host。
+        port: 绑定端口。
+
+    Returns:
+        HTTP base URL。
+    """
+    if ":" in host and not host.startswith("["):
+        return f"http://[{host}]:{port}"
+    return f"http://{host}:{port}"
+
+
+def _bind_runtime_socket(host: str, port: int) -> tuple[socket.socket, str, int]:
+    """预绑定 uvicorn socket，支持 ``port=0`` 的真实端口回填。
+
+    Args:
+        host: bind host。
+        port: bind port，允许 0。
+
+    Returns:
+        ``(socket, bound_host, bound_port)``。
+    """
+    last_error: OSError | None = None
+    for family, socktype, proto, _canonname, sockaddr in socket.getaddrinfo(
+        host,
+        port,
+        type=socket.SOCK_STREAM,
+    ):
+        sock = socket.socket(family, socktype, proto)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(sockaddr)
+            sock.listen(2048)
+            bound = sock.getsockname()
+            return sock, str(bound[0]), int(bound[1])
+        except OSError as exc:
+            last_error = exc
+            sock.close()
+    if last_error is not None:
+        raise last_error
+    raise OSError(f"failed to resolve bind address {host}:{port}")
+
+
+def _build_ready_payload(
+    *,
+    host: str,
+    port: int,
+    home: Path,
+    dist_dir: Path | None,
+) -> dict[str, object]:
+    """构造 ready JSON / server.json payload。
+
+    Args:
+        host: 实际绑定 host。
+        port: 实际绑定端口。
+        home: kongming home。
+        dist_dir: 前端 dist 目录。
+
+    Returns:
+        可 JSON 序列化的 ready payload。
+    """
+    base_url = _format_base_url(host, port)
+    server_json = home / "web" / "server.json"
+    return {
+        "type": "kongming_web_ready",
+        "pid": os.getpid(),
+        "host": host,
+        "port": port,
+        "base_url": base_url,
+        "health_url": f"{base_url}/health",
+        "home": str(home),
+        "server_json": str(server_json),
+        "dist_dir": str(dist_dir) if dist_dir is not None else None,
+        "started_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
+    """原子写入 JSON 文件。
+
+    Args:
+        path: 目标 JSON 文件。
+        payload: 要写入的 JSON payload。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(tmp_path, path)
+
+
+def _write_ready_payload(
+    *,
+    host: str,
+    port: int,
+    home: Path,
+    dist_dir: Path | None,
+    print_ready_json: bool,
+) -> dict[str, object]:
+    """写入 ``server.json``，并按需向 stdout 输出一次 ready JSON。
+
+    Args:
+        host: 实际绑定 host。
+        port: 实际绑定端口。
+        home: kongming home。
+        dist_dir: 前端 dist 目录。
+        print_ready_json: 是否输出 ready JSON。
+
+    Returns:
+        已写入的 ready payload。
+    """
+    payload = _build_ready_payload(host=host, port=port, home=home, dist_dir=dist_dir)
+    _write_json_atomic(home / "web" / "server.json", payload)
+    if print_ready_json:
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        sys.stdout.flush()
+    return payload
+
+
+def _write_startup_error(home: Path, message: str) -> None:
+    """写入启动失败诊断文件。
+
+    Args:
+        home: kongming home。
+        message: 错误消息。
+    """
+    payload = {
+        "type": "kongming_web_startup_error",
+        "pid": os.getpid(),
+        "error": message,
+        "started_at": datetime.now(UTC).isoformat(),
+    }
+    _write_json_atomic(home / "web" / "startup.json", payload)
+
+
+async def _serve_with_ready_payload(
+    *,
+    uvicorn_module: Any,
+    app: Any,
+    runtime_socket: socket.socket,
+    bound_host: str,
+    bound_port: int,
+    home: Path,
+    dist_dir: Path | None,
+    log_level: str,
+    print_ready_json: bool,
+) -> None:
+    """启动 uvicorn，并在 startup 后写 ready payload。
+
+    Args:
+        uvicorn_module: 已 import 的 uvicorn 模块。
+        app: FastAPI app 实例。
+        runtime_socket: 已预绑定的 socket。
+        bound_host: 实际绑定 host。
+        bound_port: 实际绑定端口。
+        home: kongming home。
+        dist_dir: 前端 dist 目录。
+        log_level: uvicorn 日志级别。
+        print_ready_json: 是否向 stdout 打印 ready payload。
+    """
+    config = uvicorn_module.Config(
+        app,
+        host=bound_host,
+        port=bound_port,
+        log_level=log_level,
+        log_config=_build_uvicorn_log_config(),
+    )
+    server = uvicorn_module.Server(config)
+    sockets = [runtime_socket]
+    with server.capture_signals():
+        if not config.loaded:
+            config.load()
+        server.lifespan = config.lifespan_class(config)
+        logging.getLogger("uvicorn.error").info("Started server process [%d]", os.getpid())
+        await server.startup(sockets=sockets)
+        if not server.should_exit:
+            _write_ready_payload(
+                host=bound_host,
+                port=bound_port,
+                home=home,
+                dist_dir=dist_dir,
+                print_ready_json=print_ready_json,
+            )
+            await server.main_loop()
+        if server.started:
+            await server.shutdown(sockets=sockets)
+            logging.getLogger("uvicorn.error").info("Finished server process [%d]", os.getpid())
+
+
+def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     try:
         import uvicorn
@@ -27,9 +425,14 @@ def main() -> int:
     from hosts.web.app_support.startup_progress import StartupProgress
     from hosts.web.threads.manager import ThreadManager
     from infrastructure.config import load_config
-    from infrastructure.config.paths import get_kongming_home
 
-    home = get_kongming_home()
+    try:
+        options = _resolve_runtime_options(argv)
+    except Exception as exc:
+        sys.stderr.write(f"invalid web runtime options: {exc}\n")
+        return 2
+
+    home = options.home
 
     # P0 #1 修复（reports/cr/cr-report-20260519-web-crash-investigation.md）：
     # 启动时抢 web app 单实例锁。防止多个 web 进程同时跑 ticker loop 抢
@@ -42,8 +445,7 @@ def main() -> int:
         progress = StartupProgress(home)
         progress.report("imports")
 
-        config_path = os.environ.get("KONGMING_CONFIG", "config/setting.yaml")
-        cfg = load_config(Path(config_path))
+        cfg = load_config(options.config_path)
         progress.report("config")
 
         if not cfg.web.enabled:
@@ -53,6 +455,11 @@ def main() -> int:
                 "or KONGMING_WEB_ENABLED=1 env to start web server\n"
             )
             return 1
+
+        bind_host = options.host or cfg.web.host or "127.0.0.1"
+        bind_port = options.port if options.port >= 0 else int(cfg.web.port)
+        runtime_socket, actual_host, actual_port = _bind_runtime_socket(bind_host, bind_port)
+        cfg = _override_web_bind_config(cfg, host=actual_host, port=actual_port)
 
         runtime_factory = _make_runtime_factory(cfg)
         progress.report("factory")
@@ -71,6 +478,8 @@ def main() -> int:
         )
 
         try:
+            from sessions import SessionTaskProgressManager
+
             app = create_app(
                 cfg,
                 tm,
@@ -78,9 +487,12 @@ def main() -> int:
                 scheduler_runtime_factory=getattr(
                     runtime_factory, "_scheduler_runtime_factory", None
                 ),
+                task_progress_manager=SessionTaskProgressManager.from_config(cfg),
             )
         except Exception as exc:
+            runtime_socket.close()
             progress.fail(f"create_app failed: {exc}")
+            _write_startup_error(home, str(exc))
             sys.stderr.write(f"create_app failed: {exc}\n")
             return 1
         # smart-approval-generic-chat-autoallow task #6：把 app 引用回挂给
@@ -95,16 +507,28 @@ def main() -> int:
         log_level = cfg.logging.level.lower()
         progress.report("uvicorn")
         try:
-            uvicorn.run(
-                app,
-                host=cfg.web.host,
-                port=cfg.web.port,
-                log_level=log_level,
+            asyncio.run(
+                _serve_with_ready_payload(
+                    uvicorn_module=uvicorn,
+                    app=app,
+                    runtime_socket=runtime_socket,
+                    bound_host=cfg.web.host,
+                    bound_port=cfg.web.port,
+                    home=home,
+                    dist_dir=options.dist_dir,
+                    log_level=log_level,
+                    print_ready_json=options.print_ready_json,
+                )
             )
         except Exception as exc:
             progress.fail(f"uvicorn.run failed: {exc}")
+            _write_startup_error(home, str(exc))
             raise
         return 0
+    except Exception as exc:
+        _write_startup_error(home, str(exc))
+        sys.stderr.write(f"web server startup failed: {exc}\n")
+        return 1
     finally:
         # 显式释放锁（进程退出 OS 也会自动释放；本句是 best-effort 兜底）
         release_app_instance_lock(app_lock_fd)
@@ -233,6 +657,7 @@ def _make_runtime_factory(cfg: object) -> object:
         build_default_registry,
         register_evolution_write_tool_if_enabled,
         register_schedule_tool_if_enabled,
+        register_task_progress_tool,
     )
 
     assert isinstance(cfg, Config)
@@ -242,6 +667,8 @@ def _make_runtime_factory(cfg: object) -> object:
 
     _registry_cache: list[ToolRegistry | None] = [None]
     _enabled_tools_cache: list[list[str] | None] = [None]
+    _agent_workflow_handle_cache: list[Any | None] = [None]
+    _agent_role_manager_cache: list[Any | None] = [None]
     _instructions_cache: list[str | None] = [None]
     _origins_cache: list[list[str] | None] = [None]
     _scheduler_runtime_factory_cache: list[object | None] = [None]
@@ -284,7 +711,10 @@ def _make_runtime_factory(cfg: object) -> object:
                 skill_specs=skill_specs or None,
                 skill_event_sinks=sink_list,
             )
-            enabled_tool_names = [name for name in registry.names() if name != "evolution_write"]
+            agent_role_manager, agent_workflow_handle = _register_agent_workflow_tools(
+                registry,
+                role_dir=home / "agent_roles",
+            )
 
             cron_dispatcher = None
             if real_cfg.scheduler.enabled:
@@ -320,9 +750,13 @@ def _make_runtime_factory(cfg: object) -> object:
                 real_cfg,
                 event_sinks=sink_list,
             )
+            register_task_progress_tool(registry, real_cfg)
+            enabled_tool_names = [name for name in registry.names() if name != "evolution_write"]
 
             _registry_cache[0] = registry
             _enabled_tools_cache[0] = enabled_tool_names
+            _agent_workflow_handle_cache[0] = agent_workflow_handle
+            _agent_role_manager_cache[0] = agent_role_manager
             _instructions_cache[0] = rendered
             _origins_cache[0] = origins
             _scheduler_runtime_factory_cache[0] = _scheduler_runtime_factory
@@ -333,12 +767,14 @@ def _make_runtime_factory(cfg: object) -> object:
         adapter: object,
         sinks: object,
     ) -> tuple[Any, Any]:
+        from infrastructure.config.paths import resolve_kongming_path
+
         preset = preset_map.get(preset_id)
         if preset is None:
             raise ValueError(f"unknown preset_id: {preset_id!r}")
 
         if isinstance(sinks, list):
-            trace_path = Path(real_cfg.trace.output_path)
+            trace_path = resolve_kongming_path(real_cfg.trace.output_path, kongming_home=home)
             stem = trace_path.stem
             suffix = trace_path.suffix
             per_thread_path = trace_path.with_name(f"{stem}.{thread_id}{suffix}")
@@ -370,6 +806,10 @@ def _make_runtime_factory(cfg: object) -> object:
         registry = _registry_cache[0]
         assert registry is not None
         enabled_tool_names = _enabled_tools_cache[0] or []
+        agent_workflow_handle = _agent_workflow_handle_cache[0]
+        agent_role_manager = _agent_role_manager_cache[0]
+        assert agent_workflow_handle is not None
+        assert agent_role_manager is not None
 
         # 阶段 1 (smart-approval-manager-v0.5)：generic_chat 通道走 ApprovalManager
         # 路径（无 feature flag；回滚 = git revert）。manager + InboxEventSink 是
@@ -413,7 +853,7 @@ def _make_runtime_factory(cfg: object) -> object:
             instruction_sources=origins,
             instruction_text_hash=f"sha256:{hashlib.sha256(instructions.encode()).hexdigest()}",
             created_at=time.time(),
-            cwd=str(Path.cwd()),
+            cwd=default_cwd,
         )
 
         def session_factory(sid: str) -> Any:
@@ -427,6 +867,14 @@ def _make_runtime_factory(cfg: object) -> object:
             enabled_tool_names=enabled_tool_names,
             session_factory=session_factory,
             instructions=instructions,
+        )
+        _bind_agent_workflow_manager(
+            handle=agent_workflow_handle,
+            thread_id=thread_id,
+            runtime=runtime,
+            config=preset_cfg,
+            workspace_root=Path(default_cwd),
+            role_manager=agent_role_manager,
         )
         bridge = SessionBridge(
             runtime=runtime,
@@ -442,6 +890,43 @@ def _make_runtime_factory(cfg: object) -> object:
         asyncio.run(_ensure_shared_assets([]))
     factory._scheduler_runtime_factory = _scheduler_runtime_factory_cache[0]  # type: ignore[attr-defined]
     return factory
+
+
+def _register_agent_workflow_tools(registry: Any, *, role_dir: Path) -> tuple[Any, Any]:
+    """注册 Web generic_chat 的 agent workflow 工具，输入为 registry 和角色目录，输出角色 manager 与 workflow handle。"""
+    from application.agent_roles import AgentRoleManager
+    from tools import register_agent_role_tool, register_agent_workflow_tool
+    from tools.agent_workflow_tool import AgentWorkflowHandle
+
+    role_manager = AgentRoleManager(role_dir=role_dir)
+    workflow_handle = AgentWorkflowHandle()
+    register_agent_role_tool(registry, role_manager)
+    register_agent_workflow_tool(registry, workflow_handle)
+    return role_manager, workflow_handle
+
+
+def _bind_agent_workflow_manager(
+    *,
+    handle: Any,
+    thread_id: str,
+    runtime: Any,
+    config: Any,
+    workspace_root: Path,
+    role_manager: Any,
+) -> None:
+    """把当前 Web thread runtime 绑定到 workflow handle，输入为运行时和工作区，输出为可执行 workflow manager。"""
+    from application.agent_workflows.manager import AgentWorkflowManager
+    from application.subagents.manager import SubAgentManager
+
+    handle.bind(
+        AgentWorkflowManager(
+            subagents=SubAgentManager(runtime),
+            config=config,
+            workspace_root=workspace_root,
+            role_manager=role_manager,
+        ),
+        session_id=thread_id,
+    )
 
 
 if __name__ == "__main__":

@@ -326,6 +326,8 @@ class RoundtableReviewStrategy:
 
         runs = tuple(all_runs)
         reports = tuple(all_reports)
+        child_agent_usages = _child_agent_usage_records(runs)
+        child_agent_usage_totals = _sum_child_agent_usage(child_agent_usages)
         finished_at = _now_iso()
         completed = final_report_path.exists() and any(
             run.status == "completed"
@@ -343,6 +345,8 @@ class RoundtableReviewStrategy:
                 "claim_count": len(claims),
                 "rebuttal_count": len(comments),
                 "estimated_child_output_tokens": used_budget,
+                "child_agent_usages": child_agent_usages,
+                "child_agent_usage_totals": child_agent_usage_totals,
                 "total_child_token_budget": spec.limits.total_child_token_budget,
                 "review_board": {
                     "context_path": str(board.paths.context_path),
@@ -394,6 +398,7 @@ class RoundtableReviewStrategy:
             runs=runs,
             reports=reports,
             report_index_path=report_index_path,
+            desc=context.desc,
             data=extra,
             completed_override=completed,
         )
@@ -681,6 +686,54 @@ def _per_agent_budget(spec: RoundtableReviewSpec, *, agent_count: int) -> int:
 def _estimated_run_tokens(runs: tuple[SubAgentRun, ...]) -> int:
     """估算子 agent 输出 token，输入为 runs，输出为总估算。"""
     return sum(estimate_tokens(run.content) for run in runs)
+
+
+def _child_agent_usage_records(runs: tuple[SubAgentRun, ...]) -> list[dict[str, object]]:
+    """生成子 agent usage 明细，输入为 runs，输出为 workflow result 可写入的列表。"""
+    records: list[dict[str, object]] = []
+    for run in runs:
+        records.append(
+            {
+                "task_id": run.task.task_id,
+                "task_name": run.task.task_name,
+                "session_id": run.session_id,
+                "run_id": run.run_id,
+                "status": run.status,
+                "stage": run.task.metadata.get("roundtable_stage"),
+                "agent": run.task.metadata.get("roundtable_agent"),
+                "usage": _numeric_usage_fields(getattr(run, "usage", None)),
+            }
+        )
+    return records
+
+
+def _sum_child_agent_usage(records: list[dict[str, object]]) -> dict[str, int]:
+    """按 usage 字段动态求和，输入为明细记录，输出为逐字段总量。"""
+    totals: dict[str, int] = {}
+    for record in records:
+        usage = record.get("usage")
+        if not isinstance(usage, Mapping):
+            continue
+        for key, value in usage.items():
+            if isinstance(key, str) and _is_usage_number(value):
+                totals[key] = totals.get(key, 0) + value
+    return totals
+
+
+def _numeric_usage_fields(raw_usage: Any) -> dict[str, int]:
+    """过滤 usage 数值字段，输入为任意 metadata usage，输出为可求和的字典。"""
+    if not isinstance(raw_usage, Mapping):
+        return {}
+    return {
+        key: value
+        for key, value in raw_usage.items()
+        if isinstance(key, str) and _is_usage_number(value)
+    }
+
+
+def _is_usage_number(value: Any) -> bool:
+    """判断 usage 值是否可累加，输入为任意值，输出为布尔值。"""
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _extract_json_object(content: str) -> dict[str, Any]:

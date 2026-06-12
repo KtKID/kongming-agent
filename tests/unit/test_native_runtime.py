@@ -48,9 +48,11 @@ class _StubLLM:
     def __init__(self, reply: str = "ok") -> None:
         self._reply = reply
         self.called = 0
+        self.requests: list[LLMRequest] = []
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         self.called += 1
+        self.requests.append(request)
         return LLMResponse(
             message=Message(role="assistant", content=self._reply),
             finish_reason="stop",
@@ -107,6 +109,29 @@ async def test_native_runtime_reuses_session_for_same_session_id() -> None:
     assert stub.called == 2
     # runtime 内部缓存了一份 session 实例
     # （这里通过公共访问点不直接断言，改为 run 结果都 completed）
+
+
+@pytest.mark.unit
+async def test_native_runtime_continue_from_last_user_message_does_not_duplicate_user() -> None:
+    runtime = NativeRuntime.build(_cfg())
+    stub = _StubLLM(reply="continued")
+    runtime._llm = stub  # type: ignore[attr-defined]
+    session = runtime._get_or_create_session("thread-1")  # type: ignore[attr-defined]
+    await session.append(Message.user("hello already stored"))
+
+    result = await runtime.continue_from_last_user_message(session_id="thread-1")
+
+    assert result.status == "completed"
+    assert result.final_message is not None
+    assert result.final_message.content == "continued"
+    history = await session.history()
+    assert [(message.role, message.content) for message in history] == [
+        ("user", "hello already stored"),
+        ("assistant", "continued"),
+    ]
+    assert stub.called == 1
+    assert stub.requests[0].messages[-1].role == "user"
+    assert stub.requests[0].messages[-1].content == "hello already stored"
 
 
 @pytest.mark.unit

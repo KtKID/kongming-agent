@@ -1,4 +1,23 @@
-"""Process manager for the web service."""
+"""Web 服务进程管理命令。
+
+功能：
+    提供 `kongming-web-ctl start|stop|restart|status|log`，管理 Web 后端进程。
+
+作用：
+    让 CLI、本地开发脚本和桌面宿主通过同一个控制入口读取状态、停止进程和查看日志。
+
+关键执行流程：
+    1. 解析 `--home`，定位运行时目录。
+    2. 读取 `server.json` 或配置文件得到 host / port / pid。
+    3. 通过端口、pid 文件和 HTTP runtime-status 判断服务状态。
+    4. start / stop / restart / log 围绕同一运行时目录操作。
+
+关键函数：
+    `_resolve_home`：解析运行时 home，并写入 `KONGMING_HOME`。
+    `_read_server_info`：读取 `<home>/web/server.json`。
+    `_read_port` / `_read_host`：解析控制命令使用的端口和 host。
+    `main`：console script 入口。
+"""
 
 from __future__ import annotations
 
@@ -11,15 +30,16 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import click
 from dotenv import load_dotenv
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 load_dotenv(_REPO_ROOT / ".env")
 
 from hosts.web.app_support.startup_progress import StartupProgress  # noqa: E402
@@ -32,36 +52,140 @@ from hosts.web.auth.secrets import load_or_init_session_secret  # noqa: E402
 from infrastructure.config import load_config  # noqa: E402
 from infrastructure.config.paths import get_kongming_home  # noqa: E402
 
-_PID_FILE = _REPO_ROOT / ".kongming" / "web" / "server.pid"
-_LOG_FILE = _REPO_ROOT / ".kongming" / "web" / "server.log"
 _STARTUP_WAIT_SECONDS = 30
 _FRONTEND_SOURCE_EXTENSIONS = (".ts", ".tsx", ".css", ".html", ".json")
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
 
 
-def _ensure_dirs() -> None:
-    (_REPO_ROOT / ".kongming" / "web").mkdir(parents=True, exist_ok=True)
+def _home_option(func: Callable[_P, _R]) -> Callable[_P, _R]:
+    """为 click 子命令增加 `--home` 参数。"""
+    decorator = click.option(
+        "--home",
+        type=click.Path(path_type=Path),
+        default=None,
+        help="Kongming runtime home directory.",
+    )
+    return decorator(func)
 
 
-def _read_port() -> int:
-    return int(load_config().web.port)
+def _resolve_home(explicit_home: Path | None) -> Path:
+    """解析运行时 home。
+
+    Args:
+        explicit_home: 命令行传入的 home。
+
+    Returns:
+        已归一化的 home 路径。
+    """
+    if explicit_home is not None:
+        home = explicit_home.expanduser().resolve()
+        os.environ["KONGMING_HOME"] = str(home)
+        return home
+    return get_kongming_home()
 
 
-def _read_host() -> str:
-    return str(load_config().web.host)
+def _pid_file(home: Path) -> Path:
+    """返回当前 home 下的 pid 文件路径。"""
+    return home / "web" / "server.pid"
 
 
-def _issue_local_status_cookie() -> str:
-    secret = load_or_init_session_secret(get_kongming_home())
+def _log_file(home: Path) -> Path:
+    """返回当前 home 下的日志文件路径。"""
+    return home / "web" / "server.log"
+
+
+def _server_json(home: Path) -> Path:
+    """返回当前 home 下的 server.json 路径。"""
+    return home / "web" / "server.json"
+
+
+def _ensure_dirs(home: Path) -> None:
+    """创建当前 home 下的 Web 运行目录。"""
+    (home / "web").mkdir(parents=True, exist_ok=True)
+
+
+def _read_server_info(home: Path) -> dict[str, Any] | None:
+    """读取 sidecar ready 写入的 server.json。
+
+    Args:
+        home: 运行时 home。
+
+    Returns:
+        读取成功时返回 JSON dict，缺失或格式错误时返回 None。
+    """
+    path = _server_json(home)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _server_info_int(server_info: dict[str, Any] | None, key: str) -> int | None:
+    """从 server info 中读取整数字段。"""
+    if server_info is None:
+        return None
+    value = server_info.get(key)
+    if value is None:
+        return None
+    with contextlib.suppress(TypeError, ValueError):
+        return int(value)
+    return None
+
+
+def _server_info_str(server_info: dict[str, Any] | None, key: str) -> str | None:
+    """从 server info 中读取非空字符串字段。"""
+    if server_info is None:
+        return None
+    value = server_info.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _resolve_config_path(home: Path) -> Path:
+    """解析 ctl 使用的配置路径。"""
+    env_config = os.environ.get("KONGMING_CONFIG")
+    if env_config and env_config.strip():
+        return Path(env_config).expanduser().resolve()
+
+    home_config = home / "config" / "setting.yaml"
+    if home_config.exists():
+        os.environ["KONGMING_CONFIG"] = str(home_config)
+        return home_config
+
+    return _REPO_ROOT / "config" / "setting.yaml"
+
+
+def _read_port(home: Path) -> int:
+    """读取当前 home 对应的 Web 端口。"""
+    port = _server_info_int(_read_server_info(home), "port")
+    if port is not None:
+        return port
+    return int(load_config(_resolve_config_path(home)).web.port)
+
+
+def _read_host(home: Path) -> str:
+    """读取当前 home 对应的 Web host。"""
+    host = _server_info_str(_read_server_info(home), "host")
+    if host is not None:
+        return host
+    return str(load_config(_resolve_config_path(home)).web.host)
+
+
+def _issue_local_status_cookie(home: Path) -> str:
+    """签发本机 status 查询 cookie。"""
+    secret = load_or_init_session_secret(home)
     serializer = make_serializer(secret)
     payload = SessionTokenPayload(iat=int(time.time()))
     return serializer.dumps(payload.model_dump())
 
 
-def _fetch_runtime_status(port: int) -> dict[str, Any] | None:
+def _fetch_runtime_status(port: int, *, home: Path) -> dict[str, Any] | None:
+    """查询 Web 运行时状态。"""
     request = Request(
         f"http://127.0.0.1:{port}/api/manage/runtime-status",
         headers={
-            "Cookie": f"{SESSION_COOKIE_NAME}={_issue_local_status_cookie()}",
+            "Cookie": f"{SESSION_COOKIE_NAME}={_issue_local_status_cookie(home)}",
         },
         method="GET",
     )
@@ -78,12 +202,21 @@ def _fetch_runtime_status(port: int) -> dict[str, Any] | None:
 
 
 def _is_port_listening(port: int, host: str = "127.0.0.1") -> bool:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(0.5)
     try:
-        return sock.connect_ex((host, port)) == 0
-    finally:
-        sock.close()
+        addr_infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except (OSError, socket.gaierror):
+        return False
+    for family, socktype, proto, _canonname, sockaddr in addr_infos:
+        sock = socket.socket(family, socktype, proto)
+        sock.settimeout(0.5)
+        try:
+            if sock.connect_ex(sockaddr) == 0:
+                return True
+        except OSError:
+            continue
+        finally:
+            sock.close()
+    return False
 
 
 def _find_pid_by_port(port: int) -> int | None:
@@ -135,6 +268,18 @@ def _find_pid_by_port_lsof(port: int) -> int | None:
 
 
 def _pid_alive(pid: int) -> bool:
+    """判断 pid 是否仍存活。"""
+    if sys.platform == "win32":
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+        return out.returncode == 0 and str(pid) in out.stdout
     try:
         os.kill(pid, 0)
         return True
@@ -142,15 +287,21 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def _resolve_running_pid(port: int) -> int | None:
+def _resolve_running_pid(port: int, *, home: Path) -> int | None:
+    """解析当前监听进程 pid。"""
     if sys.platform == "win32":
         port_pid = _find_pid_by_port(port)
         if port_pid is not None:
             return port_pid
 
-    if _PID_FILE.exists():
+    pid = _server_info_int(_read_server_info(home), "pid")
+    if pid is not None and _pid_alive(pid):
+        return pid
+
+    pid_file = _pid_file(home)
+    if pid_file.exists():
         try:
-            pid = int(_PID_FILE.read_text(encoding="utf-8").strip())
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
         except (ValueError, OSError):
             pid = None
         if pid is not None and _pid_alive(pid):
@@ -158,7 +309,7 @@ def _resolve_running_pid(port: int) -> int | None:
     return _find_pid_by_port(port)
 
 
-def _persist_running_pid(started_pid: int, port: int) -> int:
+def _persist_running_pid(started_pid: int, port: int, *, home: Path) -> int:
     """Persist the real listener pid when it differs from the shell pid.
 
     Windows may report a bootstrap shell pid from ``Popen`` while the actual
@@ -167,14 +318,18 @@ def _persist_running_pid(started_pid: int, port: int) -> int:
     observe the same process id users see from the listening port.
     """
     pid = _find_pid_by_port(port) or started_pid
-    _PID_FILE.write_text(str(pid), encoding="utf-8")
+    pid_file = _pid_file(home)
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(pid), encoding="utf-8")
     return pid
 
 
-def _tail_log(n: int) -> None:
+def _tail_log(n: int, *, home: Path) -> None:
+    """输出日志尾部。"""
+    log_file = _log_file(home)
     try:
         result = subprocess.run(
-            ["tail", f"-{n}", str(_LOG_FILE)],
+            ["tail", f"-{n}", str(log_file)],
             capture_output=True,
             text=True,
             timeout=3,
@@ -248,13 +403,15 @@ def cli() -> None:
 @click.option(
     "--rebuild", is_flag=True, default=False, help="Force rebuild frontend dist before start."
 )
-def start(rebuild: bool) -> None:
-    _ensure_dirs()
-    progress = StartupProgress(_REPO_ROOT / ".kongming")
+@_home_option
+def start(rebuild: bool, home: Path | None) -> None:
+    runtime_home = _resolve_home(home)
+    _ensure_dirs(runtime_home)
+    progress = StartupProgress(runtime_home)
     progress.report("env")
 
-    port = _read_port()
-    host = _read_host()
+    port = _read_port(runtime_home)
+    host = _read_host(runtime_home)
 
     existing = _find_pid_by_port(port)
     if existing is not None:
@@ -273,7 +430,8 @@ def start(rebuild: bool) -> None:
             raise SystemExit(1) from exc
 
     click.echo(f"Starting web server on {host}:{port}...")
-    with open(_LOG_FILE, "ab") as log_handle:
+    log_file = _log_file(runtime_home)
+    with open(log_file, "ab") as log_handle:
         popen_kwargs: dict[str, Any] = {
             "cwd": _REPO_ROOT,
             "stdout": log_handle,
@@ -287,62 +445,65 @@ def start(rebuild: bool) -> None:
             popen_kwargs["start_new_session"] = True
         proc = subprocess.Popen([sys.executable, "-m", "hosts.web.run"], **popen_kwargs)
 
-    _PID_FILE.write_text(str(proc.pid), encoding="utf-8")
+    _pid_file(runtime_home).write_text(str(proc.pid), encoding="utf-8")
 
     for _ in range(_STARTUP_WAIT_SECONDS):
         if not _pid_alive(proc.pid):
             progress.fail("Web process died during startup")
             click.echo("Failed to start. Last log lines:", err=True)
-            _tail_log(20)
-            _PID_FILE.unlink(missing_ok=True)
+            _tail_log(20, home=runtime_home)
+            _pid_file(runtime_home).unlink(missing_ok=True)
             raise SystemExit(1)
         if _is_port_listening(port):
-            running_pid = _persist_running_pid(proc.pid, port)
+            running_pid = _persist_running_pid(proc.pid, port, home=runtime_home)
             click.echo(f"Started (PID {running_pid})")
             click.echo(f"  URL: http://localhost:{port}")
-            click.echo(f"  Log: {_LOG_FILE}")
+            click.echo(f"  Log: {log_file}")
             return
         time.sleep(1)
 
-    click.echo(f"Still starting after {_STARTUP_WAIT_SECONDS}s... check {_LOG_FILE}")
+    click.echo(f"Still starting after {_STARTUP_WAIT_SECONDS}s... check {log_file}")
 
 
 @cli.command()
-def stop() -> None:
-    port = _read_port()
-    pid = _resolve_running_pid(port)
+@_home_option
+def stop(home: Path | None) -> None:
+    runtime_home = _resolve_home(home)
+    port = _read_port(runtime_home)
+    pid = _resolve_running_pid(port, home=runtime_home)
     if pid is None:
         click.echo("Not running")
-        _PID_FILE.unlink(missing_ok=True)
+        _pid_file(runtime_home).unlink(missing_ok=True)
         return
 
     click.echo(f"Stopping (PID {pid})...")
     if sys.platform == "win32":
-        _stop_win32(pid)
+        _stop_win32(pid, home=runtime_home)
         return
 
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
-        _PID_FILE.unlink(missing_ok=True)
+        _pid_file(runtime_home).unlink(missing_ok=True)
         click.echo("Stopped (already gone)")
         return
 
     for _ in range(5):
         if not _pid_alive(pid):
             click.echo("Stopped")
-            _PID_FILE.unlink(missing_ok=True)
+            _pid_file(runtime_home).unlink(missing_ok=True)
             return
         time.sleep(1)
 
     click.echo("Force killing...")
     with contextlib.suppress(ProcessLookupError):
         os.kill(pid, signal.SIGKILL)
-    _PID_FILE.unlink(missing_ok=True)
+    _pid_file(runtime_home).unlink(missing_ok=True)
     click.echo("Stopped (force)")
 
 
-def _stop_win32(pid: int) -> None:
+def _stop_win32(pid: int, *, home: Path) -> None:
+    """Windows 上停止进程树。"""
     try:
         subprocess.run(
             ["taskkill", "/F", "/T", "/PID", str(pid)],
@@ -353,7 +514,7 @@ def _stop_win32(pid: int) -> None:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.kill(pid, signal.SIGTERM)
-    _PID_FILE.unlink(missing_ok=True)
+    _pid_file(home).unlink(missing_ok=True)
     click.echo("Stopped")
 
 
@@ -361,33 +522,40 @@ def _stop_win32(pid: int) -> None:
 @click.option(
     "--rebuild", is_flag=True, default=False, help="Force rebuild frontend dist during restart."
 )
+@_home_option
 @click.pass_context
-def restart(ctx: click.Context, rebuild: bool) -> None:
-    ctx.invoke(stop)
+def restart(ctx: click.Context, rebuild: bool, home: Path | None) -> None:
+    runtime_home = _resolve_home(home)
+    ctx.invoke(stop, home=runtime_home)
     time.sleep(1)
-    ctx.invoke(start, rebuild=rebuild)
+    ctx.invoke(start, rebuild=rebuild, home=runtime_home)
 
 
 @cli.command()
-def status() -> None:
-    port = _read_port()
-    pid = _resolve_running_pid(port)
+@_home_option
+def status(home: Path | None) -> None:
+    runtime_home = _resolve_home(home)
+    port = _read_port(runtime_home)
+    host = _read_host(runtime_home)
+    pid = _resolve_running_pid(port, home=runtime_home)
     if pid is None:
         click.echo("Not running")
-        _PID_FILE.unlink(missing_ok=True)
+        _pid_file(runtime_home).unlink(missing_ok=True)
         return
-    if _is_port_listening(port):
+    if _is_port_listening(port, host=host):
         click.echo(f"Running (PID {pid}, port {port})")
-        click.echo(f"  URL: http://localhost:{port}")
+        server_info = _read_server_info(runtime_home) or {}
+        base_url = server_info.get("base_url") or f"http://localhost:{port}"
+        click.echo(f"  URL: {base_url}")
     else:
         click.echo(f"Starting (PID {pid}, port {port})")
         click.echo("  Port is not listening yet")
-    click.echo(f"  Log: {_LOG_FILE}")
+    click.echo(f"  Log: {_log_file(runtime_home)}")
 
-    if not _is_port_listening(port):
+    if not _is_port_listening(port, host=host):
         return
 
-    snapshot = _fetch_runtime_status(port)
+    snapshot = _fetch_runtime_status(port, home=runtime_home)
     if snapshot is None:
         return
 
@@ -432,13 +600,21 @@ def status() -> None:
 
 
 @cli.command()
-def log() -> None:
-    if not _LOG_FILE.exists():
-        click.echo(f"No log file at {_LOG_FILE}")
+@_home_option
+def log(home: Path | None) -> None:
+    runtime_home = _resolve_home(home)
+    log_file = _log_file(runtime_home)
+    if not log_file.exists():
+        click.echo(f"No log file at {log_file}")
         return
     with contextlib.suppress(KeyboardInterrupt):
-        subprocess.run(["tail", "-f", str(_LOG_FILE)], check=False)
+        subprocess.run(["tail", "-f", str(log_file)], check=False)
+
+
+def main() -> None:
+    """console script 入口。"""
+    cli()
 
 
 if __name__ == "__main__":
-    cli()
+    main()

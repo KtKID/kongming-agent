@@ -251,15 +251,6 @@ DEFAULT_SENSITIVE_PATHS: tuple[SensitivePathRule, ...] = (
         reason="Docker registry 凭据",
     ),
     SensitivePathRule(
-        name="kongming-global-config",
-        matcher="~/.kongming/",
-        match_mode="path_prefix",
-        ops=frozenset({"read", "write"}),
-        effect="block",
-        boundary_scope=BoundaryScope.HOST,
-        reason="agent 全局配置（用户级，不允许 agent 改）",
-    ),
-    SensitivePathRule(
         name="git-objects",
         matcher=".git/objects/",
         match_mode="project_relative",
@@ -392,6 +383,7 @@ DEFAULT_ALLOW_TOOLS_SILENT: tuple[str, ...] = (
     "list_dir",
     "list_agent_roles",
     "create_agent_role",
+    "update_task_progress",
 )
 
 

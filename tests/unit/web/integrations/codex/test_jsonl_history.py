@@ -157,3 +157,43 @@ class TestTimestampOrder:
         timestamps = [m["timestamp"] for m in msgs]
         assert timestamps == sorted(timestamps)
         assert len(timestamps) >= 1
+
+
+class TestUserMessageHistory:
+    def test_event_msg_user_message_translated_to_user_text(self, tmp_path: Path) -> None:
+        path = tmp_path / "rollout-user-message.jsonl"
+        path.write_text(
+            "\n".join(
+                [
+                    (
+                        '{"timestamp":"2026-05-30T13:47:37.457Z","type":"session_meta",'
+                        '"payload":{"id":"019e7923-e92b-7253-a712-3fcdcf60c7f8",'
+                        '"cwd":"/test/path/proj","originator":"Codex Desktop",'
+                        '"cli_version":"0.128.0","source":"exec","model_provider":"openai"}}'
+                    ),
+                    (
+                        '{"timestamp":"2026-05-30T13:47:44.712Z","type":"response_item",'
+                        '"payload":{"type":"message","role":"user","content":['
+                        '{"type":"input_text","text":"你写出来的都是已有字段吗"}]}}'
+                    ),
+                    (
+                        '{"timestamp":"2026-05-30T13:47:44.712Z","type":"event_msg",'
+                        '"payload":{"type":"user_message","message":"你写出来的都是已有字段吗",'
+                        '"images":[],"local_images":[],"text_elements":[]}}'
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        msgs = parse_codex_rollout(path, "019e7923-e92b-7253-a712-3fcdcf60c7f8")
+
+        assert len(msgs) == 1
+        assert msgs[0]["frame_type"] == "text"
+        assert msgs[0]["role"] == "user"
+        assert msgs[0]["content"] == "你写出来的都是已有字段吗"
+        assert msgs[0]["sessionId"] == "019e7923-e92b-7253-a712-3fcdcf60c7f8"
+        assert msgs[0]["provider"] == "codex"
+        assert msgs[0]["timestamp"] == "2026-05-30T13:47:44.712Z"
+        assert isinstance(msgs[0]["id"], str)

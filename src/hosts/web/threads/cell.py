@@ -65,6 +65,10 @@ class ThreadCell:
         status: cell 当前状态。
         current_run_task: 当前正在执行的 ``run_once`` task；shutdown 时
             可 cancel 它快速结束（非 None 表示有进行中的 turn）。
+        runtime_preset_id: 当前 runtime 构造时使用的 preset。thread metadata
+            允许先被 REST 更新；下一次发送前用本字段判断是否需要重建 runtime。
+        preset_refresh_lock: 串行化同一 cell 的 runtime preset 刷新，避免并发
+            rebuild 产生 runtime 泄漏或覆盖顺序不确定。
     """
 
     thread_id: str
@@ -77,6 +81,8 @@ class ThreadCell:
     last_active_at: float = field(default_factory=time.time)
     status: ThreadCellStatus = "idle"
     current_run_task: asyncio.Task[Result] | None = None
+    runtime_preset_id: str = ""
+    preset_refresh_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def attach_ws(self, new_ws: Any) -> None:
         """把一个新连接注册到 adapter / 所有 sink。

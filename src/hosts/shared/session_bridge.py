@@ -138,6 +138,19 @@ class SessionBridge:
             attachments=attachments,
         )
 
+    async def continue_from_last_user_message(
+        self,
+        *,
+        reasoning_effort: str | None = None,
+    ) -> Result:
+        """继续处理 runtime session 里已落盘的最后一条 user message。"""
+        result = await self._runtime.continue_from_last_user_message(
+            session_id=self._session_id,
+            reasoning_effort=reasoning_effort,
+        )
+        await self._write_runtime_result(result)
+        return result
+
     async def _write_runtime_result(self, result: Result) -> None:
         final = result.final_message
         if self._echo_final_content and final is not None and final.content:

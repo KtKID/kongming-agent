@@ -10,13 +10,13 @@ provider 完整返回（含厂商扩展字段如 ``logprobs`` / ``reasoning_cont
 1. 调用方在解析完 ``response.json()`` 之后调用 :func:`dump_raw_llm_interaction`
 2. 函数先检查 env ``KONGMING_TRACE_RAW_LLM=1``；没开就立刻返回 ``None``
 3. 开了就把 request payload + response body + status + headers 打包写到
-   ``.kongming/debug/raw-llm-<UTC timestamp>-<nonce>.json``
+   ``<kongming_home>/debug/raw-llm-<UTC timestamp>-<nonce>.json``
 4. 任何异常都静默（return ``None``），永远不污染主链路
 
 **安全约束**：
 - request headers 的 ``Authorization`` / ``X-API-Key`` / ``Api-Key`` 字段
   落盘前被替换为 ``<redacted>``，防止 dump 文件变成 API key 泄露源
-- dump 目录 ``.kongming/`` 已在 ``.gitignore`` 里，不会进仓库
+- dump 目录默认位于 ``kongming_home`` 下
 """
 
 from __future__ import annotations
@@ -27,6 +27,8 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+from infrastructure.config.paths import resolve_kongming_path
 
 _ENV_FLAG = "KONGMING_TRACE_RAW_LLM"
 _DEFAULT_DIR = Path(".kongming") / "debug"
@@ -72,7 +74,7 @@ def dump_raw_llm_interaction(
             可以传 ``{"__raw_text__": response.text}`` 类占位。
         error: 错误摘要字符串；成功路径传 ``None``，4xx/5xx 路径传诸如
             ``"HTTP 401"`` 的简短标识。
-        dump_dir: dump 根目录，默认 ``.kongming/debug``；测试可注入
+        dump_dir: dump 根目录，默认 ``<kongming_home>/debug``；测试可注入
             ``tmp_path`` 做隔离。
         enabled: 是否启用。调用方（provider）应传入 ``cfg.trace.raw_llm``；
             ``None`` 时 fallback 到 :func:`is_enabled` 读 env 变量。
@@ -84,7 +86,7 @@ def dump_raw_llm_interaction(
     if not resolved_enabled:
         return None
 
-    target_dir = dump_dir or _DEFAULT_DIR
+    target_dir = resolve_kongming_path(dump_dir or _DEFAULT_DIR)
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime())

@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ThreadList } from "@/components/ThreadList";
@@ -14,6 +15,15 @@ beforeEach(() => {
     createThread: vi.fn(),
     renameThread: vi.fn(),
     deleteThread: vi.fn(),
+    startPendingGenericThread: vi.fn(() => {
+      useThreadsStore.setState({
+        pendingNewSession: {
+          backendKind: "generic_chat",
+          cwd: "",
+          projectName: "",
+        },
+      });
+    }),
   });
 });
 
@@ -43,11 +53,8 @@ describe("ThreadList", () => {
           created_at: 1,
           updated_at: 100,
           message_count: 0,
-          cumulative_prompt_tokens: 0,
-          cumulative_completion_tokens: 0,
-          cumulative_total_tokens: 0,
-          cumulative_cache_read_tokens: null,
-          cumulative_cache_creation_tokens: null,
+          is_pinned: false,
+          is_archived: false,
         },
         {
           id: "thread-bbbbbb",
@@ -60,11 +67,8 @@ describe("ThreadList", () => {
           created_at: 1,
           updated_at: 50,
           message_count: 0,
-          cumulative_prompt_tokens: 0,
-          cumulative_completion_tokens: 0,
-          cumulative_total_tokens: 0,
-          cumulative_cache_read_tokens: null,
-          cumulative_cache_creation_tokens: null,
+          is_pinned: false,
+          is_archived: false,
         },
       ],
     });
@@ -80,7 +84,7 @@ describe("ThreadList", () => {
     expect(screen.getByText("beta")).toBeInTheDocument();
   });
 
-  it("按 backend_kind 渲染来源图标", () => {
+  it("只渲染 backend_kind=generic_chat 的 thread，claude_code / codex 被过滤掉", () => {
     useThreadsStore.setState({
       threads: [
         {
@@ -94,11 +98,8 @@ describe("ThreadList", () => {
           created_at: 1,
           updated_at: 100,
           message_count: 0,
-          cumulative_prompt_tokens: 0,
-          cumulative_completion_tokens: 0,
-          cumulative_total_tokens: 0,
-          cumulative_cache_read_tokens: null,
-          cumulative_cache_creation_tokens: null,
+          is_pinned: false,
+          is_archived: false,
         },
         {
           id: "thread-claude",
@@ -111,11 +112,8 @@ describe("ThreadList", () => {
           created_at: 1,
           updated_at: 90,
           message_count: 0,
-          cumulative_prompt_tokens: 0,
-          cumulative_completion_tokens: 0,
-          cumulative_total_tokens: 0,
-          cumulative_cache_read_tokens: null,
-          cumulative_cache_creation_tokens: null,
+          is_pinned: false,
+          is_archived: false,
         },
         {
           id: "thread-codex",
@@ -128,11 +126,8 @@ describe("ThreadList", () => {
           created_at: 1,
           updated_at: 80,
           message_count: 0,
-          cumulative_prompt_tokens: 0,
-          cumulative_completion_tokens: 0,
-          cumulative_total_tokens: 0,
-          cumulative_cache_read_tokens: null,
-          cumulative_cache_creation_tokens: null,
+          is_pinned: false,
+          is_archived: false,
         },
       ],
     });
@@ -143,13 +138,62 @@ describe("ThreadList", () => {
         </Routes>
       </MemoryRouter>,
     );
+    // generic_chat thread 出现
+    expect(screen.getByText("chat thread")).toBeInTheDocument();
     expect(screen.getByLabelText("普通聊天 会话")).toBeInTheDocument();
+    // claude_code / codex backend_kind 的 thread 不应出现在通用 tab
+    expect(screen.queryByText("claude thread")).not.toBeInTheDocument();
+    expect(screen.queryByText("codex thread")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Claude 会话")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Codex 会话")).not.toBeInTheDocument();
+  });
+
+  it("已绑定 claude_thread_id 的旧 thread 也渲染 Claude 图标", () => {
+    useThreadsStore.setState({
+      threads: [
+        {
+          id: "thread-legacy-claude",
+          name: "legacy claude thread",
+          preset_id: "p1",
+          backend_kind: "generic_chat",
+          claude_thread_id: "claude-legacy-1",
+          codex_thread_id: "",
+          cwd: "/repo",
+          created_at: 1,
+          updated_at: 100,
+          message_count: 0,
+          is_pinned: false,
+          is_archived: false,
+        },
+      ],
+    });
+    render(
+      <MemoryRouter initialEntries={["/chat"]}>
+        <Routes>
+          <Route path="/chat" element={<ThreadList />} />
+        </Routes>
+      </MemoryRouter>,
+    );
 
     const claudeBadge = screen.getByLabelText("Claude 会话");
-    const codexBadge = screen.getByLabelText("Codex 会话");
-    expect(claudeBadge).toBeInTheDocument();
-    expect(codexBadge).toBeInTheDocument();
     expect(claudeBadge.querySelector("img")).toHaveAttribute("src", "/brand/claude-app-icon.png");
-    expect(codexBadge.querySelector("img")).toHaveAttribute("src", "/brand/codex-app-icon.png");
+  });
+
+  it("点击新建对话进入 generic pending 空白页状态", async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/chat/thread-aaaaaaaaaaaa"]}>
+        <Routes>
+          <Route path="/chat" element={<div data-testid="chat-root" />} />
+          <Route path="/chat/:thread_id" element={<ThreadList />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "新建对话" }));
+
+    expect(useThreadsStore.getState().startPendingGenericThread).toHaveBeenCalledTimes(1);
+    expect(useThreadsStore.getState().pendingNewSession?.backendKind).toBe("generic_chat");
+    expect(screen.getByTestId("chat-root")).toBeInTheDocument();
   });
 });

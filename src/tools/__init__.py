@@ -152,11 +152,15 @@ def register_schedule_tool_if_enabled(
     if not cfg.scheduler.enabled:
         return None
 
-    from infrastructure.config.paths import get_kongming_home
+    from infrastructure.config.paths import get_kongming_home, resolve_kongming_path
     from scheduler.store import Store
     from tools.builtin.schedule_tool import build_schedule_tool
 
-    home = cfg.scheduler.home if cfg.scheduler.home is not None else (get_kongming_home() / "cron")
+    home = (
+        resolve_kongming_path(cfg.scheduler.home)
+        if cfg.scheduler.home is not None
+        else (get_kongming_home() / "cron")
+    )
     store = Store(home)
     # v0.3：把 cfg.scheduler 的默认 timezone / delivery channel 透传给 schedule_tool，
     # 让 LLM 创建任务时不必（也不应）猜时区，dispatcher 也不会因 delivery=None SKIPPED。
@@ -227,6 +231,16 @@ def register_agent_role_tool(
         registry.register(cast(Tool, tool))
 
 
+def register_task_progress_tool(
+    registry: ToolRegistry,
+    cfg: Config,
+) -> None:
+    """Register the current-session task progress tool."""
+    from tools.builtin.task_progress_tool import build_task_progress_tool_from_config
+
+    registry.register(cast(Tool, build_task_progress_tool_from_config(cfg)))
+
+
 __all__ = [
     "AutoAllowApproval",
     "AutoDenyApproval",
@@ -247,4 +261,5 @@ __all__ = [
     "register_agent_workflow_tool",
     "register_agent_role_tool",
     "register_schedule_tool_if_enabled",
+    "register_task_progress_tool",
 ]

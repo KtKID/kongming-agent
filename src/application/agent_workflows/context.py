@@ -27,6 +27,8 @@ class WorkflowExecutionContext:
     workflow_dir: Path
     # 工作流开始时间，ISO 8601 字符串。
     started_at: str
+    # LLM 填写的一句 workflow 短描述。
+    desc: str | None
     # 工作流审计写入器。
     audit_writer: Any
     # 最大并发预算，None 表示沿用策略默认值。

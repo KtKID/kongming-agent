@@ -33,16 +33,18 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from core.contracts import ApprovalAction
 from core.message import Message
 from hosts.web.app_support.host_adapter import WebHostAdapter
+from hosts.web.app_support.path_utils import is_absolute_workspace_path
 from hosts.web.integrations.claude_code.jsonl_history import jsonl_path_for
 from hosts.web.integrations.codex.projects_scanner import list_codex_projects
 from hosts.web.protocol import CellEvictedFrame, CellSummaryDTO, EvictReason
 from hosts.web.threads.cell import ThreadCell
+from hosts.web.threads.errors import ThreadPresetRefreshError
 from hosts.web.threads.metadata import (
     ThreadMetadata,
     delete_thread_metadata_dir,
@@ -237,6 +239,22 @@ def _now() -> float:
     return time.time()
 
 
+def _title_from_first_message(text: str) -> str:
+    normalized = " ".join(text.strip().split())
+    return normalized[:40] or "新会话"
+
+
+def _resolve_first_message_cwd(cwd: str) -> str:
+    normalized = cwd.strip()
+    if not normalized:
+        return str(Path.home().resolve())
+    if not is_absolute_workspace_path(normalized):
+        raise ValueError("cwd must be an absolute path")
+    if PurePosixPath(normalized).is_absolute():
+        return str(Path(normalized).expanduser().resolve())
+    return normalized
+
+
 class ThreadManager:
     """单进程 thread fleet 管理器。
 
@@ -409,6 +427,115 @@ class ThreadManager:
         await asyncio.to_thread(write_thread_metadata, self._home, meta)
         return meta
 
+    async def create_generic_thread_from_first_message(
+        self,
+        *,
+        text: str,
+        preset_id: str,
+        cwd: str = "",
+        reasoning_effort: Literal["low", "medium", "high"] | None = None,
+    ) -> ThreadMetadata:
+        """创建通用频道 thread，并在返回前持久化第一条 user message。
+
+        首发接口的成功边界是 metadata 与 user message 都已落盘；任一步失败
+        都删除 metadata，避免左侧列表出现空 thread。落盘成功后立即排队
+        后续 assistant run，但不等待 LLM 完整回复。
+        """
+        normalized_text = text.strip()
+        if not normalized_text:
+            raise ValueError("text must not be empty")
+        normalized_preset_id = preset_id.strip()
+        if not normalized_preset_id:
+            raise ValueError("preset_id must not be empty")
+        preset_ids = {preset.id for preset in getattr(self._cfg.web, "llm_presets", [])}
+        if normalized_preset_id not in preset_ids:
+            raise ValueError(f"unknown preset_id: {normalized_preset_id!r}")
+        resolved_cwd = _resolve_first_message_cwd(cwd)
+
+        meta = await self.create_thread(
+            _title_from_first_message(normalized_text),
+            normalized_preset_id,
+            backend_kind="generic_chat",
+            cwd=resolved_cwd,
+        )
+        try:
+            cell = await self.boot_or_attach(meta.id)
+            session = self._session_for_first_message(cell)
+            await session.append(Message.user(normalized_text))
+            updated = meta.model_copy(
+                update={
+                    "message_count": 1,
+                    "updated_at": _now(),
+                    "schema_version": meta.schema_version,
+                }
+            )
+            await asyncio.to_thread(write_thread_metadata, self._home, updated)
+            async with self._lock:
+                live_cell = self._cells.get(meta.id)
+                if live_cell is not None:
+                    live_cell.metadata = updated
+            self._start_first_message_run(cell, reasoning_effort=reasoning_effort)
+            return updated
+        except Exception:
+            with suppress(Exception):
+                await self.delete_thread(meta.id, keep_history=False)
+            raise
+
+    def _start_first_message_run(
+        self,
+        cell: ThreadCell,
+        *,
+        reasoning_effort: Literal["low", "medium", "high"] | None,
+    ) -> None:
+        continue_run = getattr(cell.bridge, "continue_from_last_user_message", None)
+        if not callable(continue_run):
+            raise RuntimeError("bridge does not expose continue_from_last_user_message")
+
+        task = asyncio.create_task(
+            continue_run(reasoning_effort=reasoning_effort),
+            name=f"web-first-message-run-{cell.thread_id}",
+        )
+        cell.current_run_task = task
+
+        def _clear_first_message_task(
+            t: asyncio.Task[Any],
+            *,
+            _cell: ThreadCell = cell,
+            _task: asyncio.Task[Any] = task,
+        ) -> None:
+            if getattr(_cell, "current_run_task", None) is _task:
+                _cell.current_run_task = None
+            try:
+                t.result()
+            except asyncio.CancelledError:
+                logger.info(
+                    "first message continuation cancelled for thread=%s",
+                    _cell.thread_id,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "first message continuation failed for thread=%s: %s",
+                    _cell.thread_id,
+                    exc,
+                )
+
+        task.add_done_callback(_clear_first_message_task)
+
+    @staticmethod
+    def _session_for_first_message(cell: ThreadCell) -> Any:
+        runtime = cell.runtime
+        get_or_create = getattr(runtime, "_get_or_create_session", None)
+        if callable(get_or_create):
+            return get_or_create(cell.thread_id)
+        session_factory = getattr(runtime, "_session_factory", None)
+        if callable(session_factory):
+            session = session_factory(cell.thread_id)
+            sessions = getattr(runtime, "_sessions", None)
+            if isinstance(sessions, dict):
+                sessions[cell.thread_id] = session
+            return session
+        raise RuntimeError("runtime does not expose a session factory")
+
     async def rename_thread(self, thread_id: str, new_name: str) -> ThreadMetadata:
         """重命名 thread；返回更新后的 metadata。
 
@@ -499,6 +626,88 @@ class ThreadManager:
             if cell is not None:
                 cell.metadata = updated
         return updated
+
+    async def update_thread_preset(self, thread_id: str, preset_id: str) -> ThreadMetadata:
+        """更新 Generic Chat thread 的 preset，并在可行时刷新活跃 runtime。
+
+        当前 run 已经开始时不热切换 provider；metadata 先落盘，下一次发送前
+        ``ensure_cell_runtime_preset_current`` 会重建 runtime。
+        """
+        normalized_preset_id = preset_id.strip()
+        if not normalized_preset_id:
+            raise ValueError("preset_id must not be empty")
+
+        meta = await asyncio.to_thread(read_thread_metadata, self._home, thread_id)
+        if meta is None:
+            raise KeyError(f"thread not found: {thread_id}")
+        if meta.backend_kind != "generic_chat":
+            raise ValueError("preset can only be changed for generic_chat threads")
+
+        updated = ThreadMetadata(
+            id=meta.id,
+            name=meta.name,
+            preset_id=normalized_preset_id,
+            backend_kind=meta.backend_kind,
+            claude_thread_id=meta.claude_thread_id,
+            codex_thread_id=meta.codex_thread_id,
+            cwd=meta.cwd,
+            created_at=meta.created_at,
+            updated_at=_now(),
+            message_count=meta.message_count,
+            is_pinned=meta.is_pinned,
+            is_archived=meta.is_archived,
+        )
+        await asyncio.to_thread(write_thread_metadata, self._home, updated)
+        async with self._lock:
+            cell = self._cells.get(thread_id)
+            if cell is not None:
+                cell.metadata = updated
+        refreshed = await self.ensure_cell_runtime_preset_current(thread_id)
+        if not refreshed:
+            await asyncio.to_thread(write_thread_metadata, self._home, meta)
+            async with self._lock:
+                rollback_cell = self._cells.get(thread_id)
+                if rollback_cell is not None:
+                    rollback_cell.metadata = meta
+            raise ThreadPresetRefreshError(
+                f"failed to refresh runtime for preset_id: {normalized_preset_id}"
+            )
+        return updated
+
+    async def ensure_cell_runtime_preset_current(self, thread_id: str) -> bool:
+        """让已启动 cell 的 runtime preset 与 metadata 保持一致。"""
+        async with self._lock:
+            cell = self._cells.get(thread_id)
+        if cell is None:
+            return True
+        async with cell.preset_refresh_lock:
+            if cell.runtime_preset_id == cell.metadata.preset_id:
+                return True
+            run_task = cell.current_run_task
+            if run_task is not None and not run_task.done():
+                return True
+
+            old_runtime = cell.runtime
+            try:
+                runtime, bridge = await self._runtime_factory(
+                    cell.metadata.id,
+                    cell.metadata.preset_id,
+                    cell.adapter,
+                    cell.event_sinks,
+                )
+            except Exception:
+                logger.exception(
+                    "failed to refresh thread runtime for preset switch: thread=%s preset=%s",
+                    cell.metadata.id,
+                    cell.metadata.preset_id,
+                )
+                return False
+            cell.runtime = runtime
+            cell.bridge = bridge
+            cell.runtime_preset_id = cell.metadata.preset_id
+            with suppress(Exception):
+                await old_runtime.aclose()
+            return True
 
     # task#3.3：``add_thread_usage`` 已删除——UsagePersistSink 改走
     # ``self._usage_manager.record_run_usage(channel, raw_payload, ...)``；
@@ -748,6 +957,7 @@ class ThreadManager:
             bridge=bridge,
             adapter=adapter,
             event_sinks=sinks,
+            runtime_preset_id=meta.preset_id,
         )
         return cell
 
@@ -879,8 +1089,8 @@ class ThreadManager:
         merged: dict[str, ThreadMetadata] = {m.id: m for m in disk_metas}
         merged.update(in_memory)
         out = list(merged.values())
-        # 先按 is_pinned 降序（置顶排前），再按 updated_at 降序
-        out.sort(key=lambda m: (m.is_pinned, m.updated_at), reverse=True)
+        # 与 list_thread_metadata 保持一致：置顶优先、最近活跃优先、同秒按 id 稳定排序。
+        out.sort(key=lambda m: (m.is_pinned, m.updated_at, m.id), reverse=True)
         return out
 
     def list_cells(self) -> list[CellSummaryDTO]:
@@ -1192,4 +1402,5 @@ __all__ = [
     "CodexThreadConflictError",
     "RuntimeFactory",
     "ThreadManager",
+    "ThreadPresetRefreshError",
 ]

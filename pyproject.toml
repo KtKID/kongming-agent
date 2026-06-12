@@ -62,6 +62,7 @@ dev = [
     "mypy>=1.10",
     "import-linter>=2.0",
     "pre-commit>=3.7",
+    "pyinstaller>=6.0",
 ]
 
 [project.scripts]
@@ -92,7 +93,17 @@ packages = [
     "src/memory",
     "src/prompts",
     "src/sitian",
+    "src/scheduler",
+    "src/evolution",
+    "src/network",
+    "src/commands",
+    "src/devtools",
 ]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/prompts/templates" = "prompts/templates"
+"src/safety/auto_approval/default_rules.yaml" = "safety/auto_approval/default_rules.yaml"
+"config/xspace/setting.yaml" = "config/setting.yaml"
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -108,7 +119,13 @@ include = [
     "src/memory",
     "src/prompts",
     "src/sitian",
+    "src/scheduler",
+    "src/evolution",
+    "src/network",
+    "src/commands",
+    "src/devtools",
     "config",
+    "packaging",
     "README.md",
     "pyproject.toml",
 ]
@@ -191,6 +208,7 @@ skip-magic-trailing-comma = false
 
 [tool.mypy]
 python_version = "3.11"
+platform = "linux"
 mypy_path = "src"
 strict = false
 warn_unused_ignores = true
@@ -254,15 +272,12 @@ markers = [
     "contract: 契约一致性测试（同协议多实现）",
     "smoke: 最小启动烟囱测试",
     "slow: 需要较长时间或依赖外部服务",
+    "live: 需要真实外部 provider 或真实模型服务",
 ]
 filterwarnings = [
     "error",
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
-    # 测试 teardown 时 gc 触发的 unclosed socket / event loop 警告：
-    # 测试进程短命，资源被进程退出兜底回收；生产代码（src/）使用 asyncio.run /
-    # asyncio.get_running_loop() 正确 API，不存在此类泄漏。一律忽略避免 CI 误挂。
-    "ignore::pytest.PytestUnraisableExceptionWarning",
 ]
 
 # ---------------------------------------------------------------------------

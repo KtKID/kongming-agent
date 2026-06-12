@@ -14,6 +14,8 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+from infrastructure.config.paths import get_kongming_home
+
 _LOCK = threading.Lock()
 _LOG_PATH: Path | None = None
 
@@ -38,7 +40,7 @@ def generic_channel_log_path() -> Path:
 
     if _LOG_PATH is not None:
         return _LOG_PATH
-    return Path.cwd() / ".kongming" / "logs" / "generic-channel" / "generic-channel.jsonl"
+    return get_kongming_home() / "logs" / "generic-channel" / "generic-channel.jsonl"
 
 
 def log_generic_channel_event(

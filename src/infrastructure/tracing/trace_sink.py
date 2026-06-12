@@ -37,6 +37,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from infrastructure.config.paths import resolve_kongming_path
+
 if TYPE_CHECKING:
     # 仅用于类型标注；运行时不强制存在，避免触发循环 import。
     # ``JsonlTraceSink`` 通过鸭子类型实现 EventSink Protocol，
@@ -85,7 +87,7 @@ class JsonlTraceSink:
             )
         if periodic_batch_size <= 0:
             raise ValueError(f"periodic_batch_size must be > 0, got {periodic_batch_size}")
-        self._output_path = Path(output_path)
+        self._output_path = resolve_kongming_path(output_path)
         self._auto_flush = auto_flush
         self._delta_sampling = delta_sampling
         self._periodic_batch_size = periodic_batch_size
@@ -205,7 +207,7 @@ def build_jsonl_trace_sink(config: Config) -> JsonlTraceSink:
     ``list[EventSink]``；本函数本身不做注册。
     """
     return JsonlTraceSink(
-        config.trace.output_path,
+        resolve_kongming_path(config.trace.output_path),
         auto_flush=config.trace.auto_flush,
         delta_sampling=config.stream.delta_sampling,
         periodic_batch_size=config.stream.periodic_batch_size,

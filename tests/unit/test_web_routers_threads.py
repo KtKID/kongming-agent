@@ -92,6 +92,32 @@ class FakeTM:
         self._threads[thread_id] = meta
         return meta
 
+    async def create_generic_thread_from_first_message(
+        self,
+        *,
+        text: str,
+        preset_id: str,
+        cwd: str = "",
+        reasoning_effort: str | None = None,
+    ) -> ThreadMetadata:
+        del reasoning_effort
+        if preset_id == "missing":
+            raise ValueError("unknown preset_id: 'missing'")
+        idx = len(self._threads)
+        thread_id = f"thread-{'b' * 11}{idx}"
+        meta = ThreadMetadata(
+            id=thread_id,
+            name=text.strip()[:40],
+            preset_id=preset_id,
+            backend_kind="generic_chat",
+            cwd=cwd,
+            created_at=1.0,
+            updated_at=2.0,
+            message_count=1,
+        )
+        self._threads[thread_id] = meta
+        return meta
+
     async def rename_thread(self, thread_id: str, new_name: str) -> ThreadMetadata:
         if thread_id not in self._threads:
             raise KeyError(thread_id)
@@ -253,6 +279,47 @@ def test_create_thread_returns_201(tmp_path: Path) -> None:
         assert body["name"] == "t1"
         assert body["preset_id"] == "p1"
         assert body["id"].startswith("thread-")
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_create_generic_thread_from_first_message_returns_thread(tmp_path: Path) -> None:
+    tm = FakeTM()
+    client = _login_client(tmp_path, tm)
+    try:
+        resp = client.post(
+            "/api/threads/generic/first-message",
+            json={
+                "text": "hello",
+                "preset_id": "p1",
+                "cwd": str(tmp_path),
+                "reasoning_effort": "low",
+            },
+            headers=CSRF_HEADERS,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["thread"]["name"] == "hello"
+        assert body["thread"]["preset_id"] == "p1"
+        assert body["thread"]["message_count"] == 1
+        assert body["thread"]["cwd"] == str(tmp_path)
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_create_generic_thread_from_first_message_manager_value_error_returns_400(
+    tmp_path: Path,
+) -> None:
+    tm = FakeTM()
+    client = _login_client(tmp_path, tm)
+    try:
+        resp = client.post(
+            "/api/threads/generic/first-message",
+            json={"text": "hello", "preset_id": "missing", "cwd": str(tmp_path)},
+            headers=CSRF_HEADERS,
+        )
+        assert resp.status_code == 400
+        assert "unknown preset_id" in resp.text
     finally:
         client.__exit__(None, None, None)
 

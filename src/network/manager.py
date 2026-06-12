@@ -4,12 +4,12 @@
 
 - 维护 ``conn_id → ConnectionInfo`` 映射 + ``conn_id → Heartbeat`` 映射
 - 提供 ``register / unregister`` 处理连接生命周期
-- 提供 ``handle_inbound`` 拦截 ping 帧走 heartbeat、其余帧返回 ``False``
+- 提供 ``handle_inbound`` 拦截 ping/pong 帧走 heartbeat、其余帧返回 ``False``
   让上层路由业务 handler
 - 提供 ``send`` 给业务侧统一发送出口
 
-v0.1 仅接入 Claude 频道；其他频道（``generic`` / ``codex`` / ``thread-status`` /
-``cron`` / ``scheduler`` / ``shell``）在 v0.2 才接入，**本版本不实现路由分支**。
+当前接入 Claude / generic 两类 per-thread channel；其他频道（``codex`` /
+``thread-status`` / ``cron`` / ``scheduler`` / ``shell``）按后续 task 迁移。
 
 并发安全：所有读写 ``_connections`` / ``_heartbeats`` 的入口都在 ``_lock``
 保护下；``Heartbeat`` 实例 per-connection 独立，互不串扰（spec 02
@@ -84,7 +84,7 @@ class ConnectionInfo:
     """一条已注册连接的元信息。
 
     :ivar conn_id: 全局唯一连接 ID（v0.1 用 ``uuid.uuid4().hex``）
-    :ivar channel: 频道名（v0.1 仅 ``"claude"``）
+    :ivar channel: 频道名（当前支持 ``"claude"`` / ``"generic"``）
     :ivar thread_id: 线程 ID；全局型频道传 ``None``
     :ivar websocket: 底层 FastAPI ``WebSocket`` 实例
     :ivar registered_at_ms: 注册时的服务端 wall-clock 毫秒时间戳
@@ -166,7 +166,7 @@ class NetworkManager:
     ) -> str:
         """注册一条新连接，返回 ``conn_id``。
 
-        :param channel: 频道名（v0.1 仅 ``"claude"``）
+        :param channel: 频道名（当前支持 ``"claude"`` / ``"generic"``）
         :param websocket: 已 ``accept`` 的 FastAPI ``WebSocket``
         :param thread_id: 线程 ID；全局频道传 ``None``
         :returns: 新建的 ``conn_id``（uuid4 hex）
@@ -214,7 +214,7 @@ class NetworkManager:
         )
 
     async def handle_inbound(self, conn_id: str, frame: dict[str, Any]) -> bool:
-        """处理一条入站帧；若为心跳则拦下回 pong 并返回 ``True``。
+        """处理一条入站帧；若为心跳则拦下并返回 ``True``。
 
         :param conn_id: 来源连接 ID
         :param frame: 已经被上层解析为 ``dict`` 的入站帧
@@ -233,6 +233,10 @@ class NetworkManager:
                 frame.get("frame_type") if isinstance(frame, dict) else "<not-dict>",
             )
             return False
+
+        if isinstance(frame, dict) and frame.get("frame_type") == "pong":
+            _heartbeat_logger.debug("inbound pong consumed conn_id=%s", conn_id)
+            return True
 
         response = await heartbeat.handle_inbound_frame(frame)
         if response is None:

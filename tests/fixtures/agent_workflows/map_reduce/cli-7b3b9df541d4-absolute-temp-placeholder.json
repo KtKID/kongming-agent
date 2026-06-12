@@ -1,0 +1,60 @@
+{
+  "case_name": "cli-7b3b9df541d4 absolute temp placeholder random draw",
+  "session_id": "cli-7b3b9df541d4",
+  "source_session_path": ".kongming/sessions/cli-7b3b9df541d4/cli-7b3b9df541d4.jsonl",
+  "source_call_id": "call_function_absolute_temp_placeholder",
+  "replay_scope": "minimal_tool_arguments",
+  "failure_reason_before_fix": "input file does not exist: '/tmp/kongming-map-reduce-inline-placeholder.txt'",
+  "expected_after_fix": {
+    "completed": true,
+    "report_count": 5,
+    "output_contract": "raw_text"
+  },
+  "arguments": {
+    "mode": "map_reduce",
+    "payload": {
+      "mode": "map_reduce",
+      "approval_mode": "trust",
+      "objective": "让 5 个独立子 agent 各自生成一个 1-100 的随机整数,并用一句中文说出自己抽到的数字。Reducer 汇总五个数字并求和。",
+      "input_source": {
+        "kind": "file_list",
+        "root_dir": ".",
+        "files": [
+          "/tmp/kongming-map-reduce-inline-placeholder.txt"
+        ]
+      },
+      "shard_strategy": {
+        "kind": "by_file_count",
+        "max_files_per_shard": 1,
+        "min_shards": 5,
+        "max_shards": 5
+      },
+      "mapper": {
+        "name_prefix": "random_drawer",
+        "prompt_template": "你是一个随机抽签 agent。请在 1-100 之间(含两端)随机抽取一个整数,然后用一句自然、有语气的话告诉调用方你抽到了几号。\n\n输出格式(严格遵守,只输出这两行):\n数字: <N>\n宣言: <一句中文,15 字以内,带点角色感地说出这个数字>",
+        "permission_mode": "scoped_workdir",
+        "max_turns": 2,
+        "max_output_chars": 300
+      },
+      "reducer": {
+        "kind": "deterministic",
+        "dedupe_strategy": "exact_dedupe_key",
+        "ranking_strategy": "confidence_first",
+        "max_findings": 5,
+        "reducer_prompt_template": "你是 reducer。请阅读所有 mapper 的输出,提取数字和宣言,按 mapper 顺序列出,然后计算五个数字的总和。"
+      },
+      "limits": {
+        "max_concurrency": 5,
+        "workflow_timeout_seconds": 120,
+        "mapper_timeout_seconds": 60,
+        "reducer_timeout_seconds": 60
+      },
+      "output_contract": "code_findings",
+      "audit_tags": [
+        "map_reduce_demo",
+        "random_draw",
+        "absolute_temp_placeholder"
+      ]
+    }
+  }
+}

@@ -320,6 +320,7 @@ def test_existing_default_tables_unaffected_by_consent_then_trust_tools() -> Non
         "list_dir",
         "list_agent_roles",
         "create_agent_role",
+        "update_task_progress",
     }
     # 关键回归：schedule / memory 不应被错误地放进 allow_tools_silent
     # （否则用户首次也不会被询问，破坏 consent-then-trust 语义）

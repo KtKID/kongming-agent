@@ -340,7 +340,8 @@ def list_thread_metadata(home: Path) -> list[ThreadMetadata]:
 
     实现：遍历 ``<home>/web/threads/`` 下所有目录，挨个读 metadata.json。
 
-    返回顺序：按 ``updated_at`` 降序（最近活跃排前面）。
+    返回顺序：按 ``is_pinned``、``updated_at``、``id`` 降序。
+    ``id`` 作为稳定 tie-breaker，避免同秒更新时受文件系统枚举顺序影响。
 
     损坏 / 缺失 metadata 的目录直接跳过（read_thread_metadata 返回 None）。
     若 root 目录本身不存在，返回 ``[]``。
@@ -360,8 +361,8 @@ def list_thread_metadata(home: Path) -> list[ThreadMetadata]:
             continue
         # 容错：万一目录名与 metadata.id 不一致，按 metadata 为准（不重命名目录）
         out.append(meta)
-    # 先按 is_pinned 降序（置顶排前），再按 updated_at 降序
-    out.sort(key=lambda m: (m.is_pinned, m.updated_at), reverse=True)
+    # 先按 is_pinned 降序（置顶排前），再按 updated_at 降序，最后按 id 稳定兜底。
+    out.sort(key=lambda m: (m.is_pinned, m.updated_at, m.id), reverse=True)
     return out
 
 

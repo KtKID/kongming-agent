@@ -73,10 +73,6 @@ async def test_multiple_emits_append_in_order(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    reason="并发顺序断言在 CI 上 flaky；先 xfail 让 PR #2 过，单独修",
-    strict=False,
-)
 async def test_concurrent_emits_do_not_interleave(tmp_path):
     """并发 emit 必须被 asyncio.Lock 串行，不得出现半行 JSON。"""
     from core.contracts import Event

@@ -1,24 +1,24 @@
 """:class:`safety.approval.rules.ApprovalRules` 单测（approval-rules-unified 完整重写）。
 
 覆盖 task `approval-rules-unified` 后的新接口：``ApprovalRules(policy=...)`` 注入
-:class:`_AutoApprovalPolicyProto`，``classify`` 委托 policy 并依据
+:class:`_AutoApprovalPolicyProto`，``classify`` 委托策略并依据
 ``auto_eligible`` / ``blocked_by_rule`` / ``timeout_ms`` 输出 ``_RuleDecision``。
 
 测试矩阵：
 
-1. ``test_classify_fail_closed_when_policy_none`` —— policy=None → 默认 ask + 60s。
-2. ``test_classify_returns_default_for_non_generic_chat_channels`` ——
-   claude_code / cron / evolution / cli 通道恒走默认（不调 policy.classify）。
-3. ``test_classify_blocked_forces_human_approval`` —— policy 返
-   ``blocked_by_rule="bash_rm_any"`` → matched_rule 透传 + auto_approve_at_ms=None。
+1. ``test_classify_fail_closed_when_policy_none`` —— policy=None → 默认人工审批 + 60s。
+2. ``test_classify_returns_default_for_unmanaged_channels`` ——
+   claude_code / cron / evolution 通道恒走默认（不调 policy.classify）。
+3. ``test_classify_blocked_starts_auto_reject_countdown`` —— 策略返回
+   ``blocked_by_rule="bash_rm_any"`` → matched_rule 透传 + auto_reject_at_ms≈now+timeout。
 4. ``test_classify_auto_eligible_and_enabled_starts_auto_approve_countdown``
    —— auto_eligible=True + is_enabled_for(cwd)=True → ``auto_approve_at_ms ≈ now+timeout``。
 5. ``test_classify_auto_eligible_but_disabled_returns_default`` ——
    auto_eligible=True 但 is_enabled_for(cwd)=False → 默认 ask + 60s。
 6. ``test_classify_timeout_ms_le_zero_falls_back_to_60s`` ——
-   policy 返 ``timeout_ms=0`` / 负数 → fallback 60_000（用户硬约束）。
+   策略返回 ``timeout_ms=0`` / 负数 → 兜底 60_000（用户硬约束）。
 7. ``test_classify_fail_closed_when_policy_raises`` —— policy.classify 抛异常
-   → 默认 ask + 60s（不向上抛）。
+   → 默认人工审批 + 60s（不向上抛）。
 8. ``test_classify_is_elevated_always_false`` —— 阶段 1 generic_chat 永远以
    ``is_elevated=False`` 调 policy.classify（spec 阶段 5 才区分）。
 """
@@ -34,7 +34,7 @@ import pytest
 from safety.approval.rules import ApprovalRules, _RuleDecision
 
 # ---------------------------------------------------------------------------
-# 测试用 fake：duck typing 匹配 _PolicyDecisionLike + _AutoApprovalPolicyProto
+# 测试替身：用鸭子类型匹配 _PolicyDecisionLike + _AutoApprovalPolicyProto
 # ---------------------------------------------------------------------------
 
 
@@ -42,8 +42,8 @@ from safety.approval.rules import ApprovalRules, _RuleDecision
 class _FakeDecision:
     """用鸭子类型匹配 :class:`safety.approval.rules._PolicyDecisionLike`。
 
-    字段对齐 :class:`web.approvals.auto.policy.Decision`（仅本层消费 3 字段，
-    rule_evaluation audit 快照可省略）。
+    字段对齐 :class:`safety.auto_approval.policy.Decision`（仅本层消费 3 字段，
+    rule_evaluation 审计快照可省略）。
     """
 
     auto_eligible: bool
@@ -86,7 +86,7 @@ class _FakePolicy:
 
 
 class _RaisingPolicy:
-    """``classify`` 抛异常的 policy（用例 7 fail-closed 验证）。"""
+    """``classify`` 抛异常的策略（用例 7 失败关闭验证）。"""
 
     def classify(
         self,
@@ -103,13 +103,13 @@ class _RaisingPolicy:
 
 
 # ---------------------------------------------------------------------------
-# 公共 fixture
+# 公共夹具
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def common_input() -> dict[str, Any]:
-    """classify 调用的通用参数。"""
+    """``classify`` 调用的通用参数。"""
     return {
         "thread_id": "thread-test-001",
         "tool_name": "Bash",
@@ -118,12 +118,12 @@ def common_input() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 用例 1：policy=None → fail-closed 默认 ask + 60s
+# 用例 1：policy=None → 失败关闭默认人工审批 + 60s
 # ---------------------------------------------------------------------------
 
 
 def test_classify_fail_closed_when_policy_none(common_input: dict[str, Any]) -> None:
-    """policy=None → 任何 channel 都返回默认 ask + 60s（fail-closed 安全网）。
+    """policy=None → 任何 channel 都返回默认人工审批 + 60s（失败关闭安全网）。
 
     覆盖 test 环境 / lifespan 漂移场景，保证审批主流程在配置缺失时仍可阻塞等用户。
     """
@@ -134,24 +134,24 @@ def test_classify_fail_closed_when_policy_none(common_input: dict[str, Any]) -> 
         assert dec.immediate_outcome is None
         assert dec.matched_rule is None
         assert dec.severity == "standard"
-        assert dec.auto_approve_at_ms is None, f"channel={channel} should not auto-approve"
+        assert dec.auto_approve_at_ms is None, f"channel={channel} 不应自动通过"
         assert dec.auto_reject_at_ms is None
         assert dec.timeout_ms == 60_000
 
 
 # ---------------------------------------------------------------------------
-# 用例 2：非 generic_chat 通道恒走默认（不调 policy.classify）
+# 用例 2：未托管通道恒走默认（不调 policy.classify）
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("channel", ["claude_code", "cron", "evolution", "cli"])
-def test_classify_returns_default_for_non_generic_chat_channels(
+@pytest.mark.parametrize("channel", ["claude_code", "cron", "evolution"])
+def test_classify_returns_default_for_unmanaged_channels(
     channel: str,
     common_input: dict[str, Any],
 ) -> None:
-    """非 generic_chat 通道恒走默认 ask + 60s——claude_code 自走 host_adapter，
-    cron / evolution / cli 由各自后续 task 接入；本通道防御性兜底，不让
-    "未规划路径" 走 policy 出意外。
+    """未接入审批管理器自动审批的通道恒走默认人工审批 + 60s——claude_code 自走 host_adapter，
+    cron / evolution 由各自后续 task 接入；本通道防御性兜底，不让
+    "未规划路径" 走策略出意外。
 
     断言：``policy.classify`` 未被调用（call_count=0）。
     """
@@ -163,7 +163,7 @@ def test_classify_returns_default_for_non_generic_chat_channels(
 
     dec = rules.classify(channel=channel, cwd="/any/cwd", **common_input)
 
-    assert dec.auto_approve_at_ms is None, f"channel={channel} should not auto-approve"
+    assert dec.auto_approve_at_ms is None, f"channel={channel} 不应自动通过"
     assert dec.matched_rule is None
     assert dec.timeout_ms == 60_000
     # 关键：policy.classify 未被调（防御性兜底，避免未规划通道意外触发）
@@ -171,15 +171,15 @@ def test_classify_returns_default_for_non_generic_chat_channels(
 
 
 # ---------------------------------------------------------------------------
-# 用例 3：blocked_by_rule → 强制人审（matched_rule 透传，不启 auto-approve）
+# 用例 3：blocked_by_rule → 危险待审 + 超时自动拒绝
 # ---------------------------------------------------------------------------
 
 
-def test_classify_blocked_forces_human_approval(common_input: dict[str, Any]) -> None:
-    """policy 返 blocked_by_rule="bash_rm_any" → 强制人审，``auto_approve_at_ms=None``。
+def test_classify_blocked_starts_auto_reject_countdown(common_input: dict[str, Any]) -> None:
+    """策略返回 blocked_by_rule="bash_rm_any" → 危险待审，并带自动拒绝 deadline。
 
     生产场景：用户在 Zap ON 的 cwd 下跑 ``Bash(rm -rf /tmp/foo)`` → 命中
-    24 规则中 ``bash_rm_any`` → 即使总开关 ON 也必须人审（守护危险操作）。
+    24 规则中 ``bash_rm_any`` → 终端 / Web 展示待审；用户不处理时按规则超时拒绝。
     """
     policy = _FakePolicy(
         next_decision=_FakeDecision(
@@ -191,6 +191,7 @@ def test_classify_blocked_forces_human_approval(common_input: dict[str, Any]) ->
     )
     rules = ApprovalRules(policy=policy)
 
+    before_ms = int(time.time() * 1000)
     dec = rules.classify(
         channel="generic_chat",
         cwd="/proj/foo",
@@ -198,18 +199,20 @@ def test_classify_blocked_forces_human_approval(common_input: dict[str, Any]) ->
         tool_name="Bash",
         tool_input={"command": "rm -rf /tmp/foo"},
     )
+    after_ms = int(time.time() * 1000)
 
     assert dec.matched_rule == "bash_rm_any"
-    assert dec.auto_approve_at_ms is None, "blocked rule must NOT start auto-approve countdown"
-    assert dec.auto_reject_at_ms is None
-    assert dec.severity == "standard"
+    assert dec.auto_approve_at_ms is None, "阻断规则命中时不得启动自动通过倒计时"
+    assert dec.auto_reject_at_ms is not None
+    assert before_ms + 10_000 <= dec.auto_reject_at_ms <= after_ms + 10_000 + 1
+    assert dec.severity == "elevated"
     assert dec.timeout_ms == 10_000  # 用 policy 返回的 timeout
     # is_elevated=False（阶段 1 generic_chat 都按 False）
     assert policy.classify_calls[0]["is_elevated"] is False
 
 
 # ---------------------------------------------------------------------------
-# 用例 4：auto_eligible + enabled → auto-approve 倒计时
+# 用例 4：auto_eligible + enabled → 自动通过倒计时
 # ---------------------------------------------------------------------------
 
 
@@ -245,17 +248,17 @@ def test_classify_auto_eligible_and_enabled_starts_auto_approve_countdown(
 
 
 # ---------------------------------------------------------------------------
-# 用例 5：auto_eligible 但 cwd disabled → 默认 ask（Zap OFF）
+# 用例 5：auto_eligible 但 cwd 未启用 → 默认人工审批（总开关关闭）
 # ---------------------------------------------------------------------------
 
 
 def test_classify_auto_eligible_but_disabled_returns_default(
     common_input: dict[str, Any],
 ) -> None:
-    """auto_eligible=True 但 ``is_enabled_for(cwd)=False`` → 默认 ask + 60s。
+    """auto_eligible=True 但 ``is_enabled_for(cwd)=False`` → 默认人工审批 + 60s。
 
     生产场景：用户主动关掉了此 cwd 的总开关（Zap OFF），即使 policy 评估
-    "可自动通过" 也保持 ask。
+    "可自动通过" 也保持人工审批。
     """
     policy = _FakePolicy(
         next_decision=_FakeDecision(
@@ -276,7 +279,7 @@ def test_classify_auto_eligible_but_disabled_returns_default(
 
 
 # ---------------------------------------------------------------------------
-# 用例 6：timeout_ms ≤ 0 → fallback 60_000
+# 用例 6：timeout_ms ≤ 0 → 兜底 60_000
 # ---------------------------------------------------------------------------
 
 
@@ -285,10 +288,10 @@ def test_classify_timeout_ms_le_zero_falls_back_to_60s(
     policy_timeout_ms: int,
     common_input: dict[str, Any],
 ) -> None:
-    """policy 返 ``timeout_ms ≤ 0`` → fallback 60_000（用户硬约束）。
+    """策略返回 ``timeout_ms ≤ 0`` → 兜底 60_000（用户硬约束）。
 
-    防御性兜底：避免 policy 配置漂移（如 yaml 写 ``default_timeout_ms: 0``）
-    导致 manager 用 ``actual_timeout_ms <= 0`` 注册 timeout task 立即触发。
+    防御性兜底：避免策略配置漂移（如 yaml 写 ``default_timeout_ms: 0``）
+    导致审批管理器用 ``actual_timeout_ms <= 0`` 注册超时任务立即触发。
     """
     policy = _FakePolicy(
         next_decision=_FakeDecision(
@@ -310,15 +313,15 @@ def test_classify_timeout_ms_le_zero_falls_back_to_60s(
 
 
 # ---------------------------------------------------------------------------
-# 用例 7：policy.classify 抛异常 → fail-closed 默认 ask
+# 用例 7：policy.classify 抛异常 → 失败关闭默认人工审批
 # ---------------------------------------------------------------------------
 
 
 def test_classify_fail_closed_when_policy_raises(common_input: dict[str, Any]) -> None:
-    """policy.classify 抛异常时 fail-closed 走默认 ask + 60s，**不向上抛**。
+    """policy.classify 抛异常时失败关闭走默认人工审批 + 60s，**不向上抛**。
 
     审批主流程不能因配置读取失败而中断（与 manager 用
-    ``gather(..., return_exceptions=True)`` 包裹 sink 调用同款思路）。
+    ``gather(..., return_exceptions=True)`` 包裹接收器调用同款思路）。
     """
     rules = ApprovalRules(policy=_RaisingPolicy())
 
@@ -360,7 +363,7 @@ def test_classify_is_elevated_always_false(common_input: dict[str, Any]) -> None
 
 
 # ---------------------------------------------------------------------------
-# generic-chat-session-grant：thread 级 session 同意
+# generic-chat-session-grant：thread 级本次会话同意
 # ---------------------------------------------------------------------------
 
 
@@ -368,7 +371,7 @@ def test_add_session_grant_writes_thread_overrides() -> None:
     """``add_session_grant(generic_chat, ...)`` → 写入 ``_thread_overrides``。
 
     覆盖 fix-report-20260520-generic-chat-session-grant 核心写入路径：
-    用户点弹卡「本 session 都同意」→ ApprovalManager.resolve → 本方法 →
+    用户点弹卡「本次会话都同意」→ ApprovalManager.resolve → 本方法 →
     下次同 thread + cwd + tool classify 命中 immediate allow。
     """
     rules = ApprovalRules()  # 无需 policy（grant 写入与 policy 无关）
@@ -384,20 +387,34 @@ def test_add_session_grant_writes_thread_overrides() -> None:
     assert len(rules._thread_overrides["thread-grant-001"]) == 1
 
 
-def test_add_session_grant_noop_for_non_generic_chat() -> None:
-    """非 generic_chat 通道调 ``add_session_grant`` 静默 no-op（防御性边界）。
+def test_add_session_grant_noop_for_unmanaged_channels() -> None:
+    """未接入共享自动审批的通道调 ``add_session_grant`` 静默 no-op。
 
-    claude_code 走 v2-inbox 老 grant store；cron / evolution / cli 阶段 3-4
-    才接入。其他通道误写入会污染本通道的覆盖集，必须挡住。
+    generic_chat 保留审批管理器线程级授权；CLI 终端只支持单次允许 / 拒绝。
+    claude_code 走 WebHostAdapter 直调 policy，cron / evolution 后续 task 接入。
     """
     rules = ApprovalRules()
-    for channel in ("claude_code", "cron", "evolution", "cli", "unknown"):
+    for channel in ("cli", "claude_code", "cron", "evolution", "unknown"):
         rules.add_session_grant(
             channel=channel,
             thread_id="thread-x",
             cwd="/any",
             tool_name="Bash",
         )
+    assert rules._thread_overrides == {}
+
+
+def test_add_session_grant_noop_for_cli() -> None:
+    """CLI 通道调用 ``add_session_grant`` 静默 no-op。"""
+    rules = ApprovalRules()
+
+    rules.add_session_grant(
+        channel="cli",
+        thread_id="thread-cli",
+        cwd="/proj/foo",
+        tool_name="run_shell",
+    )
+
     assert rules._thread_overrides == {}
 
 
@@ -411,13 +428,13 @@ def test_add_session_grant_noop_on_empty_keys() -> None:
 
 
 def test_classify_hits_thread_grant_returns_immediate_allow() -> None:
-    """thread grant 命中 + policy 允许 → ``is_immediate=True`` + ``immediate_outcome='allowed'``。
+    """线程级授权命中 + 策略允许 → ``is_immediate=True`` + ``immediate_outcome='approved'``。
 
-    生产场景：用户上次审批 Bash 时点了「本 session 都同意」→ 本 thread 下次
+    生产场景：用户上次审批 Bash 时点了「本次会话都同意」→ 本 thread 下次
     再 Bash → ApprovalRules.classify 命中 ``_thread_overrides`` → manager
     直接走 ``is_immediate`` 分支返 approved，不创建 pending。
     """
-    # 这里 policy 允许（非 blocked，auto_eligible 不影响 grant 命中分支）
+    # 这里策略允许（非 blocked，auto_eligible 不影响授权命中分支）
     policy = _FakePolicy(
         next_decision=_FakeDecision(auto_eligible=False, blocked_by_rule=None, timeout_ms=10_000),
         enabled_cwds=set(),
@@ -444,8 +461,12 @@ def test_classify_hits_thread_grant_returns_immediate_allow() -> None:
 
 
 def test_classify_thread_grant_isolation_per_thread() -> None:
-    """thread A 的 grant 不影响 thread B（多 tab / 多 session 隔离保证）。"""
-    rules = ApprovalRules()
+    """thread A 的授权不影响 thread B（多标签页 / 多会话隔离保证）。"""
+    policy = _FakePolicy(
+        next_decision=_FakeDecision(auto_eligible=False, blocked_by_rule=None, timeout_ms=10_000),
+        enabled_cwds=set(),
+    )
+    rules = ApprovalRules(policy=policy)
     rules.add_session_grant(
         channel="generic_chat",
         thread_id="thread-A",
@@ -477,7 +498,11 @@ def test_classify_thread_grant_isolation_per_thread() -> None:
 
 def test_classify_thread_grant_isolation_per_cwd_and_tool() -> None:
     """(cwd, tool_name) 元组完全匹配才命中；改任一字段不命中。"""
-    rules = ApprovalRules()
+    policy = _FakePolicy(
+        next_decision=_FakeDecision(auto_eligible=False, blocked_by_rule=None, timeout_ms=10_000),
+        enabled_cwds=set(),
+    )
+    rules = ApprovalRules(policy=policy)
     rules.add_session_grant(
         channel="generic_chat",
         thread_id="thread-x",
@@ -506,12 +531,12 @@ def test_classify_thread_grant_isolation_per_cwd_and_tool() -> None:
     assert dec_tool.is_immediate is False
 
 
-def test_classify_thread_grant_blocked_by_rule_overrides_grant() -> None:
-    """**关键安全证据**：thread grant 命中 + policy.blocked_by_rule → 强制人审。
+def test_classify_thread_grant_blocked_by_rule_starts_auto_reject() -> None:
+    """**关键安全证据**：线程级授权命中 + policy.blocked_by_rule → 超时自动拒绝。
 
-    防御 rm 等危险规则被 session grant 绕过——用户即使对 Bash 点了
-    「本 session 都同意」，下次跑 ``rm -rf`` 仍命中 ``bash_rm_any``
-    必须人审，不能走 immediate allow。
+    防御 rm 等危险规则被本次会话授权绕过——用户即使对 Bash 点了
+    「本次会话都同意」，下次跑 ``rm -rf`` 仍命中 ``bash_rm_any``
+    进入待审，并带自动拒绝 deadline。
     """
     policy = _FakePolicy(
         next_decision=_FakeDecision(
@@ -529,6 +554,7 @@ def test_classify_thread_grant_blocked_by_rule_overrides_grant() -> None:
         tool_name="Bash",
     )
 
+    before_ms = int(time.time() * 1000)
     dec = rules.classify(
         channel="generic_chat",
         thread_id="thread-danger",
@@ -536,23 +562,27 @@ def test_classify_thread_grant_blocked_by_rule_overrides_grant() -> None:
         tool_name="Bash",
         tool_input={"command": "rm -rf /tmp/some"},
     )
+    after_ms = int(time.time() * 1000)
 
-    # 关键断言：危险规则优先级最高，session grant 不放行
+    # 关键断言：危险规则优先级最高，本次会话授权不放行
     assert dec.is_immediate is False, (
-        "session grant 命中后，命中 blocked_by_rule 必须强制人审；"
-        "否则 rm 之类危险命令会被 session grant 绕过 → 严重安全 hole"
+        "本次会话授权命中后，命中 blocked_by_rule 必须进入待审；"
+        "rm 之类危险命令需要继续受自动拒绝 deadline 保护"
     )
     assert dec.immediate_outcome is None
     assert dec.matched_rule == "bash_rm_any"
     assert dec.auto_approve_at_ms is None
+    assert dec.auto_reject_at_ms is not None
+    assert before_ms + 15_000 <= dec.auto_reject_at_ms <= after_ms + 15_000 + 1
+    assert dec.severity == "elevated"
     assert dec.timeout_ms == 15_000  # 用 policy 返回的 timeout
 
 
-def test_classify_thread_grant_works_when_policy_none() -> None:
-    """policy=None（fail-closed 配置缺失）+ grant 命中 → immediate allow。
+def test_classify_thread_grant_fails_closed_when_policy_none() -> None:
+    """policy=None（失败关闭配置缺失）+ 授权命中 → 默认人工审批。
 
-    session grant 是用户显式授予，policy 缺失不该阻止已授予的覆盖生效；
-    blocked_by_rule 守护只在 policy 可用时触发（policy 不在等同没规则可命中）。
+    没有策略就无法检查 blocked_by_rule；本次会话授权不能在这种状态下
+    直接放行。
     """
     rules = ApprovalRules()  # policy=None
     rules.add_session_grant(
@@ -570,21 +600,34 @@ def test_classify_thread_grant_works_when_policy_none() -> None:
         tool_input={"command": "ls"},
     )
 
-    assert dec.is_immediate is True
-    assert dec.immediate_outcome == "approved"
+    assert dec.is_immediate is False
+    assert dec.immediate_outcome is None
+    assert dec.timeout_ms == 60_000
 
 
-def test_classify_thread_grant_does_not_apply_to_non_generic_chat() -> None:
-    """thread grant 写在 _thread_overrides 后，非 generic_chat 通道查不到。
+def test_classify_thread_grant_applies_to_managed_channels_only() -> None:
+    """线程级授权写入 _thread_overrides 后，仅 generic_chat 查得到。
 
-    防御：claude_code / cron / evolution / cli 不接 generic_chat 的 grant；
-    每通道审批路径相互隔离（claude_code 走自己的 grant store）。
+    CLI 接入共享自动审批规则，但终端交互不使用 session grant。
     """
-    rules = ApprovalRules()
-    # 即使绕过 add_session_grant 通道检查直写也只用于 generic_chat 命中
+    policy = _FakePolicy(
+        next_decision=_FakeDecision(auto_eligible=False, blocked_by_rule=None, timeout_ms=10_000),
+        enabled_cwds=set(),
+    )
+    rules = ApprovalRules(policy=policy)
     rules._thread_overrides.setdefault("thread-x", set()).add(("/proj/foo", "Bash"))
 
-    for channel in ("claude_code", "cron", "evolution", "cli"):
+    dec_generic = rules.classify(
+        channel="generic_chat",
+        thread_id="thread-x",
+        cwd="/proj/foo",
+        tool_name="Bash",
+        tool_input={"command": "ls"},
+    )
+    assert dec_generic.is_immediate is True
+    assert dec_generic.immediate_outcome == "approved"
+
+    for channel in ("cli", "claude_code", "cron", "evolution"):
         dec = rules.classify(
             channel=channel,
             thread_id="thread-x",
@@ -592,8 +635,7 @@ def test_classify_thread_grant_does_not_apply_to_non_generic_chat() -> None:
             tool_name="Bash",
             tool_input={"command": "ls"},
         )
-        # 非 generic_chat 不走 grant 分支，恒走默认 ask
-        assert dec.is_immediate is False, f"channel={channel} 不应命中 generic_chat grant"
+        assert dec.is_immediate is False, f"channel={channel} 不应命中 manager grant"
         assert dec.immediate_outcome is None
 
 

@@ -235,7 +235,7 @@ KONGMING_TOOL_FILE_ENABLED=false uv run python -m hosts.cli.main
 .\SiTianRun.ps1 -Action loop
 ```
 
-默认配置文件是 [config/sitian.local.yaml](/E:/xgt/proj/agent-proj/kongming-agent/config/sitian.local.yaml)，默认记录目录是 `~/.kongming/SiTian/`。司天产物全部使用 JSON / JSONL / Markdown：
+默认配置文件是 [config/sitian.local.yaml](/E:/xgt/proj/agent-proj/kongming-agent/config/sitian.local.yaml)，默认记录目录是 `<kongming_home>/sitian/`，`kongming_home` 默认是用户目录下的 `.kongming`。司天产物全部使用 JSON / JSONL / Markdown：
 - `observations.jsonl`
 - `runtime_state.json`
 - `workspace_state.json`

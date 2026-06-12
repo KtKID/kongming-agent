@@ -2,7 +2,7 @@
 
 覆盖：
 
-1. ``GET /api/health`` 返回 ``200 + {"status": "ok"}``
+1. ``GET /health`` / ``GET /api/health`` 返回 ``200 + {"status": "ok"}``
 2. **未登录**（无 cookie）也能拿到 200，不返回 401/403——前端在重启
    探测时 cookie 可能失效 / lifespan 未完成。
 """
@@ -75,6 +75,10 @@ def test_health_returns_ok(tmp_path: Path) -> None:
     """正常调用应返回 200 + {"status": "ok"}。"""
     client = _make_client(tmp_path)
     try:
+        root_resp = client.get("/health")
+        assert root_resp.status_code == 200
+        assert root_resp.json() == {"status": "ok"}
+
         resp = client.get("/api/health")
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
@@ -87,6 +91,11 @@ def test_health_works_without_auth(tmp_path: Path) -> None:
     client = _make_client(tmp_path)
     try:
         # 显式不带任何 cookie / 不调 /api/auth/login
+        root_resp = client.get("/health")
+        assert root_resp.status_code == 200
+        assert root_resp.status_code not in (401, 403)
+        assert root_resp.json() == {"status": "ok"}
+
         resp = client.get("/api/health")
         assert resp.status_code == 200, f"health 应公开，实际拿到 {resp.status_code}：{resp.text}"
         assert resp.status_code not in (401, 403)

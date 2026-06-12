@@ -26,6 +26,7 @@ import hosts.web.protocol as protocol
 import hosts.web.protocol.rest_models as rest_models
 from hosts.web.protocol.rest_models import (
     CellSummaryDTO,
+    CreateGenericThreadFromFirstMessageRequest,
     CreateThreadRequest,
     ErrorResponseDTO,
     LLMPresetDTO,
@@ -181,6 +182,11 @@ def test_reject_wrong_field_type(model: Any, kwargs: dict[str, Any]) -> None:
         (LoginRequest, {"password": "x", "another": "y"}),
         # CreateThreadRequest：额外字段
         (CreateThreadRequest, {"name": "n", "preset_id": "p", "rogue": True}),
+        # CreateGenericThreadFromFirstMessageRequest：额外字段
+        (
+            CreateGenericThreadFromFirstMessageRequest,
+            {"text": "hello", "preset_id": "p", "rogue": True},
+        ),
         # TurnStartFrame：额外字段
         (TurnStartFrame, {"turn": 1, "timestamp_ms": 1, "boom": "boom"}),
     ],
@@ -189,6 +195,7 @@ def test_reject_wrong_field_type(model: Any, kwargs: dict[str, Any]) -> None:
         "pong_extra_field",
         "login_extra_field",
         "create_thread_extra_field",
+        "create_generic_thread_from_first_message_extra_field",
         "turn_start_extra_field",
     ],
 )
@@ -439,6 +446,22 @@ def test_reject_cell_summary_negative_pending_approval_count() -> None:
             last_active_at=0.0,
             pending_approval_count=-1,
             status="idle",
+        )
+
+
+def test_reject_create_generic_thread_from_first_message_blank_text() -> None:
+    """首发文本 trim 后为空时拒绝。"""
+    with pytest.raises(ValidationError):
+        CreateGenericThreadFromFirstMessageRequest(text="   ", preset_id="p")
+
+
+def test_reject_create_generic_thread_from_first_message_relative_cwd() -> None:
+    """首发 cwd 为相对路径时拒绝。"""
+    with pytest.raises(ValidationError):
+        CreateGenericThreadFromFirstMessageRequest(
+            text="hello",
+            preset_id="p",
+            cwd="relative/project",
         )
 
 

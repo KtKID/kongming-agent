@@ -45,7 +45,7 @@ from hosts.web.auth.secrets import (
     load_or_init_session_secret,
 )
 from hosts.web.errors import KongmingWebError, kongming_error_handler
-from infrastructure.config.paths import get_kongming_home
+from infrastructure.config.paths import get_kongming_home, resolve_kongming_path
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -132,6 +132,7 @@ def create_app(
     home_dir: Path | None = None,
     rate_limiter: LoginRateLimiter | None = None,
     scheduler_runtime_factory: SchedulerRuntimeFactory | None = None,
+    task_progress_manager: object | None = None,
     lifespan_shutdown_timeout: float = DEFAULT_LIFESPAN_SHUTDOWN_TIMEOUT,
 ) -> FastAPI:
     """装配 FastAPI app。
@@ -144,6 +145,8 @@ def create_app(
             :func:`infrastructure.config.paths.get_kongming_home`。测试时建议显式
             传 ``tmp_path / ".kongming"`` 隔离。
         rate_limiter: 自定义限流器；为 None 时构造默认实例。
+        task_progress_manager: 当前 thread 任务进度服务；生产入口由 run.py 注入，
+            测试可传 fake 或真实 Manager。
         lifespan_shutdown_timeout: shutdown 调 aclose_all 的超时秒。
 
     Returns:
@@ -188,7 +191,17 @@ def create_app(
             try:
                 from devtools import init_full_logger
 
-                _full_logger = init_full_logger(cfg.web.full_log)
+                full_log_cfg = cfg.web.full_log.model_copy(
+                    update={
+                        "path": str(
+                            resolve_kongming_path(
+                                cfg.web.full_log.path,
+                                kongming_home=home,
+                            )
+                        )
+                    }
+                )
+                _full_logger = init_full_logger(full_log_cfg)
                 await _full_logger.start()
                 if _full_logger.enabled:
                     logger.info(
@@ -203,7 +216,10 @@ def create_app(
             try:
                 from evolution.apply_executor import recover_pending_apply_jobs
 
-                recovered_jobs = await recover_pending_apply_jobs(cfg)
+                recovered_jobs = await recover_pending_apply_jobs(
+                    cfg,
+                    kongming_home=home,
+                )
                 if recovered_jobs:
                     logger.info("Recovered %d evolution apply jobs", len(recovered_jobs))
             except Exception:
@@ -268,7 +284,9 @@ def create_app(
                 from scheduler.ticker import run_ticker_loop
 
                 cron_home = (
-                    cfg.scheduler.home if cfg.scheduler.home is not None else (home / "cron")
+                    resolve_kongming_path(cfg.scheduler.home, kongming_home=home)
+                    if cfg.scheduler.home is not None
+                    else (home / "cron")
                 )
                 scheduler_store = Store(cron_home)
                 # v0.3 cron-delivery M4：lifespan ticker 主路径必须传 dispatcher，
@@ -325,7 +343,9 @@ def create_app(
                 from hosts.web.workflow.store import WorkflowStore
 
                 wf_home = (
-                    cfg.workflow.home if cfg.workflow.home is not None else (home / "workflows")
+                    resolve_kongming_path(cfg.workflow.home, kongming_home=home)
+                    if cfg.workflow.home is not None
+                    else (home / "workflows")
                 )
                 wf_store = WorkflowStore(wf_home)
                 wf_service = WorkflowService(Path.cwd(), wf_store)
@@ -451,6 +471,7 @@ def create_app(
     app.state.password_hash = password_hash
     app.state.rate_limiter = rate_limiter
     app.state.thread_manager = thread_manager
+    app.state.task_progress_manager = task_progress_manager
     app.state.kongming_home = home
     app.state.claude_home = Path.home() / ".claude"
     app.state.workspace_root = Path.cwd()
@@ -463,15 +484,15 @@ def create_app(
     # （与 ./start.sh web restart 的物理位置同源）。
     import os as _os
 
-    from hosts.web.dashboard.config import ConfigManager
+    from infrastructure.config import ConfigManager
 
     _config_yaml_path = Path(
         _os.environ.get("KONGMING_CONFIG", str(_REPO_ROOT / "config" / "setting.yaml")),
     )
     app.state.config_manager = ConfigManager(
         yaml_path=_config_yaml_path,
-        repo_root=_REPO_ROOT,
     )
+    app.state.config_restart_repo_root = _REPO_ROOT
 
     # full-log-v0.2 log viewer：LogSourceRegistry + LogReadService 单例。
     # registry 持静态 source 目录 + resolve 函数；service 读文件尾部 + 过滤。
@@ -521,7 +542,7 @@ def create_app(
     from hosts.web.uploads.storage import AssetStorage
     from hosts.web.uploads.validation import MediaUploadValidator
 
-    app.state.asset_storage = AssetStorage()
+    app.state.asset_storage = AssetStorage(base_dir=home / "web" / "uploads")
     app.state.asset_registry = AssetRegistry()
     app.state.upload_validator = MediaUploadValidator(thread_manager)
 
@@ -542,9 +563,9 @@ def create_app(
             max_missed=cfg.web.ws_heartbeat_max_missed,
         ),
     )
-    # 心跳诊断日志：写 .kongming/logs/heartbeat/heartbeat.log
+    # 心跳诊断日志：写 <kongming_home>/logs/heartbeat/heartbeat.log
     # （旁路设计；删除本调用 + 重启即关闭日志，不影响功能）
-    configure_heartbeat_log(get_kongming_home() / "logs" / "heartbeat")
+    configure_heartbeat_log(home / "logs" / "heartbeat")
     from hosts.web.generic_channel_log import configure_generic_channel_log
 
     configure_generic_channel_log(home / "logs" / "generic-channel")
@@ -572,6 +593,7 @@ def create_app(
     from hosts.web.dashboard.logs.router import router as logs_router
     from hosts.web.integrations.claude_code import router as claude_code_router
     from hosts.web.integrations.codex import router as codex_router
+    from hosts.web.routers.agent_workflows import router as agent_workflows_router
     from hosts.web.routers.auth import router as auth_router
     from hosts.web.routers.claude import router as claude_router
     from hosts.web.routers.codex import router as codex_rest_router
@@ -580,10 +602,12 @@ def create_app(
     from hosts.web.routers.diagrams import router as diagrams_router
     from hosts.web.routers.health import router as health_router
     from hosts.web.routers.manage import router as manage_router
+    from hosts.web.routers.model_providers import router as model_providers_router
     from hosts.web.routers.presets import router as presets_router
     from hosts.web.routers.server_info import router as server_info_router
     from hosts.web.routers.sitian import router as sitian_router
     from hosts.web.routers.slash_candidates import router as slash_candidates_router
+    from hosts.web.routers.thread_task_progress import router as thread_task_progress_router
     from hosts.web.routers.threads import router as threads_router
     from hosts.web.routers.uploads import router as uploads_router
     from hosts.web.routers.whiteboard import router as whiteboard_router
@@ -592,7 +616,10 @@ def create_app(
 
     app.include_router(auth_router)
     app.include_router(threads_router)
+    app.include_router(thread_task_progress_router)
+    app.include_router(agent_workflows_router)
     app.include_router(presets_router)
+    app.include_router(model_providers_router)
     app.include_router(config_router)
     app.include_router(manage_router)
     # manage-config-tab #6：挂 /api/manage/config/* 5 个端点

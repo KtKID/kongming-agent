@@ -34,7 +34,7 @@ rollout payload type          NormalizedMessage kind
 ``token_count``               ``complete`` + ``tokenBudget``
 ``task_started``              *跳过（session_meta 已用过 / 回放不需要）*
 ``task_complete``             *跳过（token_count 已发 complete）*
-``user_message``              *跳过（history 不含 user 输入）*
+``user_message``              ``text`` (role=user)
 ============================  =============================================
 
 每条输出统一附 ``sessionId`` / ``provider="codex"`` / ``timestamp`` /
@@ -236,7 +236,9 @@ def _translate_payload(
         return _handle_todo_list(payload, session_id, timestamp)
     if payload_type == "error":
         return _handle_error(payload, session_id, timestamp)
-    # token_count / task_started / task_complete / user_message 等 → 跳过
+    if payload_type == "user_message":
+        return _handle_user_message(payload, session_id, timestamp)
+    # token_count / task_started / task_complete 等 → 跳过
     # token_count 在历史回放中不需要（每 turn 一条，会产出大量 complete 冲掉正常内容）
     return []
 
@@ -274,6 +276,22 @@ def _handle_reasoning(
     out = _base(session_id, timestamp)
     out["frame_type"] = "thinking"
     out["role"] = "assistant"
+    out["content"] = text
+    return [out]
+
+
+def _handle_user_message(
+    payload: dict[str, Any],
+    session_id: str,
+    timestamp: str,
+) -> list[dict[str, Any]]:
+    text = payload.get("message") or payload.get("text") or ""
+    text = str(text).strip()
+    if not text:
+        return []
+    out = _base(session_id, timestamp)
+    out["frame_type"] = "text"
+    out["role"] = "user"
     out["content"] = text
     return [out]
 

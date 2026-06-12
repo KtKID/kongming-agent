@@ -167,10 +167,8 @@ class TestTrustResolverCommandPrefixIsolation:
         assert decision is not None
         assert decision.outcome == "approved"
 
-    def test_non_shell_wildcard_grant_not_reachable_for_unknown_tool(self) -> None:
-        """已知限制：memory 等未在 _derive_capability_and_target 注册的工具，
-        session grant 的 tool:* 通配不可达（_lookup_grant early return）。
-        这是预留 bug，不在本次 P0 修复范围。"""
+    def test_non_shell_wildcard_grant_matches_unknown_tool_by_tool_name(self) -> None:
+        """非 shell 工具按 tool_name 派生 capability，session 通配 grant 可命中。"""
         trust = _make_trust_with_grant(capability="tool:memory", matcher="*")
         req = ApprovalRequest(
             run_id="r1",
@@ -181,9 +179,8 @@ class TestTrustResolverCommandPrefixIsolation:
             arguments={"action": "write"},
         )
         decision = trust.evaluate(req, _runtime())
-        # 预期 None：_derive_capability_and_target 对 memory 返回 (None, None)
-        # 导致 early return，step 2 wildcard 不可达
-        assert decision is None
+        assert decision is not None
+        assert decision.outcome == "approved"
 
     def test_session_isolation_between_sessions(self) -> None:
         """session grant 不跨 session。"""

@@ -1,38 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import type { JSX } from "react";
 import { ChevronRight, PanelLeftClose } from "lucide-react";
-import { useNavigate } from "react-router-dom";
-import { toast } from "sonner";
 
 import { ThreadList } from "@/components/ThreadList";
-import {
-  LeftSidebarTabs,
-  loadPersistedTab,
-  persistTab,
-  type LeftSidebarTab,
-} from "@/components/LeftSidebarTabs";
-import { ClaudeProjectsTree } from "@/components/ClaudeProjectsTree";
-import {
-  CodexProjectsTree,
-  type CodexProjectSummary,
-  type CodexSessionSummary,
-} from "@/components/CodexProjectsTree";
-import { apiPost } from "@/lib/api";
 import { useThreadsStore } from "@/stores/threads";
-import type {
-  ClaudeProjectSummaryDTO,
-  ClaudeSessionSummaryDTO,
-  ImportClaudeSessionRequest,
-  ImportClaudeSessionResponse,
-} from "@/protocol";
 import { cn } from "@/lib/utils";
 
 /**
- * 左栏总入口：通用（ThreadList）/ Claude（ClaudeProjectsTree）双 Tab。
- *
- * - tab 选中态走 localStorage 持久化（loadPersistedTab / persistTab）
- * - Claude tab 内点击 session 卡片 → POST /api/threads/import-claude-session
- *   → 拿到 thread → 刷新 threads store → navigate /chat/{thread.id}
+ * 左栏总入口：显示通用对话列表和新建对话入口。
  */
 interface LeftSidebarProps {
   isOpen?: boolean;
@@ -47,80 +22,12 @@ export function LeftSidebar({
   mobileMode = false,
   onToggleOpen,
 }: LeftSidebarProps): JSX.Element {
-  const [tab, setTab] = useState<LeftSidebarTab>(() => loadPersistedTab());
-  const navigate = useNavigate();
   const fetchThreads = useThreadsStore((s) => s.fetchThreads);
-  const setPendingNewClaudeSession = useThreadsStore((s) => s.setPendingNewClaudeSession);
 
-  // mount 时无条件 fetch threads —— Claude tab 下 ThreadList 不渲染时也要拿
-  // 数据，否则 Chat.tsx 在刷新页面后找不到当前 thread 的 backend_kind，
-  // 会回退 generic_chat 走错 ws endpoint（被后端 403）。
+  // mount 时无条件 fetch threads，保证刷新页面后 Chat.tsx 可拿到当前 thread 元数据。
   useEffect(() => {
     void fetchThreads();
   }, [fetchThreads]);
-
-  const handleTabChange = (next: LeftSidebarTab): void => {
-    setTab(next);
-    persistTab(next);
-  };
-
-  const handleNewSession = (project: ClaudeProjectSummaryDTO): void => {
-    setPendingNewClaudeSession({
-      cwd: project.cwd,
-      projectName: project.display_name,
-    });
-    navigate("/chat");
-  };
-
-  const handleSessionClick = async (
-    project: ClaudeProjectSummaryDTO,
-    session: ClaudeSessionSummaryDTO,
-  ): Promise<void> => {
-    try {
-      const body: ImportClaudeSessionRequest = {
-        claude_thread_id: session.claude_thread_id,
-        cwd: project.cwd,
-        name: session.title,
-      };
-      const resp = await apiPost<ImportClaudeSessionResponse>(
-        "/api/threads/import-claude-session",
-        body,
-      );
-      await fetchThreads();
-      navigate(`/chat/${resp.thread.id}`);
-      if (!resp.imported) {
-        toast.info("已打开已绑定的会话");
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      toast.error(`导入会话失败：${msg}`);
-    }
-  };
-
-  const handleCodexSessionClick = async (
-    project: CodexProjectSummary,
-    session: CodexSessionSummary,
-  ): Promise<void> => {
-    try {
-      const body = {
-        codex_thread_id: session.session_id,
-        cwd: project.cwd,
-        name: session.title,
-      };
-      const resp = await apiPost<ImportClaudeSessionResponse>(
-        "/api/threads/import-codex-session",
-        body,
-      );
-      await fetchThreads();
-      navigate(`/chat/${resp.thread.id}`);
-      if (!resp.imported) {
-        toast.info("已打开已绑定的会话");
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      toast.error(`导入 Codex 会话失败：${msg}`);
-    }
-  };
 
   return (
     <>
@@ -134,7 +41,7 @@ export function LeftSidebar({
       ) : null}
       <aside
       className={cn(
-        "relative z-20 flex h-full shrink-0 flex-col border-r border-border bg-card transition-[width,min-width,transform] duration-300 ease-out",
+        "obsidian-panel obsidian-hairline relative z-20 flex h-full shrink-0 flex-col rounded-xl transition-[width,min-width,transform] duration-300 ease-out",
         compactMode ? "absolute inset-y-0 left-0 shadow-xl" : "shadow-none",
         isOpen
           ? mobileMode
@@ -153,7 +60,7 @@ export function LeftSidebar({
           type="button"
           onClick={onToggleOpen}
           aria-label="收起左侧栏"
-          className="absolute right-0 top-5 z-20 inline-flex h-11 w-11 translate-x-1/2 items-center justify-center rounded-[1.3rem] border border-border/80 bg-background/92 text-foreground shadow-sm backdrop-blur-sm transition-colors hover:bg-card"
+          className="absolute right-0 top-4 z-20 inline-flex h-8 w-8 translate-x-1/2 items-center justify-center rounded-lg border border-border/80 bg-card/90 text-foreground shadow-glass backdrop-blur-xl transition-colors hover:bg-card"
         >
           <PanelLeftClose className="h-4.5 w-4.5" />
         </button>
@@ -166,17 +73,8 @@ export function LeftSidebar({
             : "pointer-events-none -translate-x-8 opacity-0",
         )}
       >
-        <div className="border-b border-border p-2 pr-8">
-          <LeftSidebarTabs active={tab} onChange={handleTabChange} />
-        </div>
         <div className="min-h-0 flex-1 overflow-hidden">
-          {tab === "generic" ? (
-            <ThreadList />
-          ) : tab === "claude" ? (
-            <ClaudeProjectsTree onSessionClick={handleSessionClick} onNewSession={handleNewSession} />
-          ) : (
-            <CodexProjectsTree onSessionClick={handleCodexSessionClick} />
-          )}
+          <ThreadList />
         </div>
       </div>
       <div
@@ -193,10 +91,10 @@ export function LeftSidebar({
           aria-label="展开左侧栏"
           data-testid="left-edge-handle"
           className={cn(
-            "inline-flex items-center justify-center border border-border/80 bg-card/88 text-foreground shadow-sm backdrop-blur-sm transition-colors hover:bg-card",
+            "inline-flex items-center justify-center border border-border/80 bg-card/90 text-foreground shadow-glass backdrop-blur-xl transition-colors hover:bg-card",
             mobileMode
-              ? "absolute left-0 top-5 h-20 w-6 rounded-r-2xl border-l-0"
-              : "mt-5 ml-2 h-12 w-12 rounded-[1.4rem]",
+              ? "absolute left-0 top-4 h-16 w-5 rounded-r-lg border-l-0"
+              : "mt-4 ml-2 h-8 w-8 rounded-lg",
           )}
         >
           <ChevronRight className={cn(mobileMode ? "h-4 w-4" : "h-4.5 w-4.5")} />

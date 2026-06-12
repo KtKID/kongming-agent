@@ -56,7 +56,10 @@ class EvolutionManager:
         self._bg_tasks: set[asyncio.Task[Any]] = set()
 
         # 内部装配 state_store / evolution_store / mini_registry
-        root_dir = resolve_evolution_root(self._learning.root_path)
+        root_dir = resolve_evolution_root(
+            self._learning.root_path,
+            kongming_home=kongming_home,
+        )
         self._state_store = EvolutionStateStore(root_dir)
         self._evolution_store = EvolutionStore(
             root_dir=root_dir,

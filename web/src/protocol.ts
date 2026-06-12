@@ -32,7 +32,10 @@
  *
  * - 对象类型用 `interface`（便于扩展 / 工具类型）
  * - union / 字面量别名用 `type`
- * - `kind` 字段是 discriminated union 的判别 tag，外层用 switch / 类型守卫 narrow
+ * - `frame_type` 字段是 wire 帧 discriminated union 的判别 tag（v0.2 起统一），
+ *   外层用 switch / 类型守卫 narrow；REST DTO / render item 的 `kind`/`type`
+ *   字段是业务属性（如 `WorkspaceTreeNodeDTO.kind`、`UserInputAttachment.kind`），
+ *   不参与 wire 判别
  * - Python `dict[str, Any]` → TS `Record<string, unknown>`（避免 `any` 污染下游）
  * - Python `int` / `float` → TS `number`（TS 没有 int 区分）
  */
@@ -76,8 +79,6 @@ export type ApprovalOutcome = "approved" | "rejected" | "cancelled";
 
 /**
  * 历史消息角色（与 Python `HistoryMessageRole` 一致）。
- *
- * 用于 `HistoryMessageDTO.role`。
  */
 export type HistoryMessageRole = "user" | "assistant" | "tool";
 
@@ -114,26 +115,20 @@ export type SystemNoticeIcon = "running" | "success" | "warning" | "error";
 // ============================================================================
 
 /**
- * 单条历史消息 DTO（user / assistant / tool 三类）。
- *
- * 既用于 `GET /api/threads/{id}/history` REST 响应，也作为
- * `ThreadHistoryFrame.messages` 的元素。
- * `tool_call_id` / `tool_name` / `ok` / `data` / `error_message` 仅
- * `role === "tool"` 时有意义，其它角色应为 undefined。
- *
- * v0.1.6 加 `tool_name` / `ok` / `data` / `error_message`：让前端历史重放
- * 路径能恢复 tool 卡片的工具名 + 结果状态 + 结构化数据。
+ * 用户消息附件引用（图片/视频/文件，Phase 1 只支持 image）。
+ * 与 Python `web.protocol.ws_frames.UserInputAttachment` 一一对齐。
+ * kind 字段为 union，已为未来 video/file 预留位。
  */
-export interface HistoryMessageDTO {
-  role: HistoryMessageRole;
-  content: string;
-  turn: number;
-  timestamp_ms: number;
-  tool_call_id?: string | null;
-  tool_name?: string | null;
-  ok?: boolean | null;
-  data?: Record<string, unknown> | null;
-  error_message?: string | null;
+export interface UserInputAttachment {
+  asset_id: string;
+  kind: "image" | "video" | "file";
+  mime_type: string;
+  size_bytes: number;
+  width?: number;
+  height?: number;
+  duration_ms?: number;
+  preview_url: string;
+  status: "ready" | "processing" | "failed";
 }
 
 /**
@@ -154,6 +149,56 @@ export interface CellSummaryDTO {
   status: "idle" | "running" | "awaiting_approval";
 }
 
+export interface RuntimeStatusPollingDTO {
+  interval_seconds: number;
+}
+
+export interface RuntimeStatusProcessDTO {
+  running: boolean;
+  pid: number;
+  host: string;
+  port: number;
+  url: string;
+  log_path: string;
+}
+
+export interface RuntimeStatusGlobalWSDTO {
+  thread_status_connections: number;
+  cron_connections: number;
+  approval_subscribers: number;
+}
+
+export interface RuntimeStatusProviderSessionsDTO {
+  claude_active_sessions: number;
+  codex_active_sessions: number;
+}
+
+export interface ActiveCellStatusDTO {
+  thread_id: string;
+  thread_name: string;
+  backend_kind: BackendKind;
+  preset_id: string;
+  cwd?: string;
+  created_at: number;
+  last_active_at: number;
+  pending_approval_count: number;
+  status: "idle" | "running" | "awaiting_approval";
+  chat_ws_connections: number;
+}
+
+export interface RuntimeStatusSnapshotDTO {
+  process: RuntimeStatusProcessDTO;
+  polling: RuntimeStatusPollingDTO;
+  global_ws: RuntimeStatusGlobalWSDTO;
+  provider_sessions: RuntimeStatusProviderSessionsDTO;
+  cells_total: number;
+  chat_ws_connections_total: number;
+  approval_pending_total: number;
+  workspace_shell_connections?: number | null;
+  cells: ActiveCellStatusDTO[];
+  generated_at_ms: number;
+}
+
 /**
  * 创建 thread 请求体（`POST /api/threads`）。
  *
@@ -170,6 +215,21 @@ export interface CreateThreadRequest {
   preset_id?: string;
   backend_kind?: BackendKind;
   cwd?: string;
+}
+
+export interface CreateGenericThreadFromFirstMessageRequest {
+  text: string;
+  preset_id: string;
+  cwd?: string;
+  reasoning_effort?: "low" | "medium" | "high" | null;
+}
+
+export interface CreateGenericThreadFromFirstMessageResponse {
+  thread: ThreadMetadataDTO;
+}
+
+export interface UpdateThreadPresetRequest {
+  preset_id: string;
 }
 
 /**
@@ -217,12 +277,78 @@ export interface ResetPasswordRequest {
 }
 
 /**
- * 重命名 thread 请求体（`PATCH /api/threads/{id}`）。
+ * 更新 thread 属性请求体（`PATCH /api/threads/{id}`）。
+ *
+ * 支持重命名（`name`）和/或切换置顶（`is_pinned`）和/或归档（`is_archived`），
+ * 至少传一个；多个可同请求一并提交。
  *
  * `name.length <= 200`（Python 侧 Pydantic 校验）。
  */
 export interface RenameThreadRequest {
-  name: string;
+  name?: string;
+  is_pinned?: boolean;
+  is_archived?: boolean;
+}
+
+export type ThreadTaskProgressStatus =
+  | "pending"
+  | "in_progress"
+  | "completed";
+
+export type ThreadTaskProgressSource = "llm" | "workflow" | "api";
+
+export interface ThreadTaskProgressCounts {
+  pending: number;
+  in_progress: number;
+  completed: number;
+  total: number;
+}
+
+export interface ThreadTaskProgressItem {
+  id: string;
+  orchestration_task_id: string;
+  workflow_id?: string | null;
+  task_id: string;
+  task_run_id: string;
+  desc: string;
+  status: ThreadTaskProgressStatus;
+  source_status?: string | null;
+  error_message?: string | null;
+  display_order: number;
+  updated_at_ms?: number | null;
+}
+
+export interface ThreadTaskProgressSnapshot {
+  schema_version: 1;
+  session_id: string;
+  updated_at_ms: number;
+  source: ThreadTaskProgressSource;
+  tasks: ThreadTaskProgressItem[];
+  counts: ThreadTaskProgressCounts;
+}
+
+export type ThreadTaskProgressIconVariant =
+  | "check_circle"
+  | "ring"
+  | "active_ring";
+
+export interface ThreadTaskProgressDisplayItem {
+  key: string;
+  orchestration_task_id: string;
+  task_id: string;
+  desc: string;
+  status: ThreadTaskProgressStatus;
+  status_label: "未完成" | "进行中" | "已完成";
+  icon_variant: ThreadTaskProgressIconVariant;
+  order: number;
+  aria_label: string;
+}
+
+export interface ThreadTaskProgressViewModel {
+  title: "进度";
+  variant: "compact_checklist";
+  items: ThreadTaskProgressDisplayItem[];
+  empty: { title: string; desc?: string };
 }
 
 /**
@@ -239,6 +365,8 @@ export interface RenameThreadRequest {
  * v0.2.1 新增 thread 级累计 `cumulative_*_tokens`；老 v3 文件读入默认 0。
  * v0.2.2 新增 `codex_thread_id`，`backend_kind` 支持 `codex`。
  * v0.2.3 将旧 `sdk_session_id` 改名为 `claude_thread_id`。
+ * v0.2.x（schema v10）新增 `is_archived`，作为归档真源（替代旧 jsonl ``archived``
+ * 事件方案）；老 v9 文件懒升级补 `is_archived=false`。
  * `preset_id` 在 `backend_kind="claude_code"` 时允许空字符串占位。
  */
 export interface ThreadMetadataDTO {
@@ -268,19 +396,102 @@ export interface ThreadMetadataDTO {
   updated_at: number;
   /** 历史消息总数（≥0），UI 上"X 条消息"展示用 */
   message_count: number;
-  /** thread 级累计输入 token 总量，每次 run 结束后累加 */
-  cumulative_prompt_tokens: number;
-  /** thread 级累计输出 token 总量 */
-  cumulative_completion_tokens: number;
-  /** thread 级累计总 token */
-  cumulative_total_tokens: number;
-  /** cache read token 累计；null 表示数据不可用（前端显示 "-"） */
-  cumulative_cache_read_tokens: number | null;
-  /** cache creation token 累计；null 表示数据不可用（前端显示 "-"） */
-  cumulative_cache_creation_tokens: number | null;
-  /** 元数据 schema 版本号，当前 6；接受 1-6（老文件兼容），写盘永远写最新版 */
-  schema_version?: 1 | 2 | 3 | 4 | 5 | 6;
+  /** 是否置顶；置顶的 thread 在列表中排在最前面 */
+  is_pinned: boolean;
+  /** 是否归档；归档的 thread 不在历史列表中显示（claude_code 真源由本字段决定，不再读 jsonl ``archived`` 事件） */
+  is_archived: boolean;
+  /** 元数据 schema 版本号，当前 10（新增 is_archived 作为归档真源） */
+  schema_version?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
 }
+
+// usage-token-v2-bigbang: token 数据通过独立端点 GET /threads/<tid>/usage 拿，
+// 返回 ClaudeUsage / CodexUsage / GenericChat*Usage 之一（自带 provider discriminator）
+
+/**
+ * Anthropic prompt cache TTL 细分（cache_creation 子结构）。
+ * 后端真源：`web.usage_token_v2._models.ClaudeCacheCreation`。
+ */
+export interface ClaudeCacheCreation {
+  ephemeral_1h_input_tokens: number;
+  ephemeral_5m_input_tokens: number;
+}
+
+/**
+ * Claude 系 token 用量（claude_code / generic_chat-anthropic）。
+ * 后端真源：`web.usage_token_v2.ClaudeUsage` / `GenericChatAnthropicUsage`。
+ *
+ * 取最后一条 SDK assistant message 的 usage，不累加。
+ * `context_usage = input + cache_read + cache_creation`（当前 context 占用）。
+ */
+export interface ClaudeUsage {
+  provider: "claude";
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_creation: ClaudeCacheCreation;
+  context_usage: number;
+  model: string;
+  context_window: number;
+}
+
+/** Codex token 用量 5 字段细分（OpenAI 语义）。 */
+export interface CodexTokenBreakdown {
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  reasoning_output_tokens: number;
+  total_tokens: number;
+}
+
+/** Codex 速率限制单窗口（5h 或 7d）。 */
+export interface CodexRateLimitWindow {
+  used_percent: number;
+  window_minutes: number;
+  resets_at: number;
+}
+
+/** Codex 速率限制（两个窗口 + 计划等级）。 */
+export interface CodexRateLimits {
+  primary: CodexRateLimitWindow;
+  secondary: CodexRateLimitWindow;
+  plan_type: string;
+}
+
+/**
+ * Codex（OpenAI 系）token 用量。
+ * 后端真源：`web.usage_token_v2.CodexUsage`。
+ * codex 自带 total/last/model_context_window/rate_limits 累加。
+ */
+export interface CodexUsage {
+  provider: "openai";
+  total: CodexTokenBreakdown;
+  last: CodexTokenBreakdown;
+  model_context_window: number;
+  rate_limits: CodexRateLimits | null;
+}
+
+/**
+ * generic_chat 通道 token 用量（底层 LLMProvider 是 OpenAI 系）。
+ * 后端真源：`web.usage_token_v2.GenericChatOpenAIUsage`。
+ * 形态比 CodexUsage 简化：只有 last（无 total/rate_limits）。
+ */
+export interface GenericChatOpenAIUsage {
+  provider: "openai";
+  last: CodexTokenBreakdown;
+  model: string;
+  context_window: number;
+}
+
+/**
+ * manager.get_thread_usage 返回类型（前端按 provider discriminator 分支）。
+ *
+ * GenericChatAnthropicUsage 跟 ClaudeUsage 平行（discriminator 都是 "claude"），
+ * 前端复用 StatusLineClaude 组件渲染；GenericChatOpenAIUsage 跟 CodexUsage
+ * discriminator 同为 "openai" 但形态不同，前端需要按是否有 `total`/`rate_limits`
+ * 区分（或在 v3 加额外 discriminator 字段）。
+ */
+export type ThreadUsage = ClaudeUsage | CodexUsage | GenericChatOpenAIUsage;
 
 /**
  * 当前 thread 的共享 workspace 上下文。
@@ -487,12 +698,22 @@ export type WorkspaceShellS2CFrame =
     };
 
 /**
+ * 卡片作用域：
+ * - `global`：所有项目可见，layout 存 `<root>/global/board.json`
+ * - `project`：仅当前 cwd 可见，layout 存 `<root>/projects/<encoded>/board.json`
+ *
+ * 由 Manager 运行时按卡片所在 workspace 目录推断，不持久化到 board.json。
+ */
+export type CardScope = "project" | "global";
+
+/**
  * 白板中的单张卡片。
  *
- * 一个卡片对应一个 markdown 文件；布局和内容一并由 `GET /api/whiteboard`
- * 返回，避免前端首屏多请求。
+ * 一个卡片对应一个 markdown 文件；布局和内容一并由
+ * `GET /api/threads/{thread_id}/whiteboard` 返回，避免前端首屏多请求。
  */
 export interface WhiteboardCardDTO {
+  scope: CardScope;
   id: string;
   title: string;
   category: string;
@@ -507,18 +728,26 @@ export interface WhiteboardCardDTO {
 }
 
 /**
- * workspace 级白板快照。
+ * thread-scoped 白板聚合快照。
+ *
+ * - `global_title`：global board.json 的 title
+ * - `project_title`：当前 thread.cwd 对应 project board.json 的 title；
+ *   thread.cwd 为空或项目目录不存在时为 `null`
  */
 export interface WhiteboardDTO {
-  title: string;
+  global_title: string;
+  project_title: string | null;
   cards: WhiteboardCardDTO[];
   schema_version?: 1;
 }
 
 /**
  * 新建白板卡片请求体。
+ *
+ * `scope` 必填——前端必须显式选择 project 还是 global。
  */
 export interface CreateWhiteboardCardRequest {
+  scope: CardScope;
   title: string;
   category: string;
   content: string;
@@ -552,10 +781,59 @@ export interface WhiteboardCardLayoutDTO {
 
 /**
  * 白板布局更新请求体。
+ *
+ * `scope` 必填——前端拖拽事件本来就知道是在 global 还是 project 卡上发生的，
+ * 显式传比让后端通过遍历两份 board.json 推断更安全。
  */
 export interface UpdateWhiteboardLayoutRequest {
+  scope: CardScope;
   title?: string | null;
   cards: WhiteboardCardLayoutDTO[];
+}
+
+// ----------------------------------------------------------------------------
+// 项目登记 / Server info DTO（v0.1，web-projects-registry-v0.1）
+//
+// 这些类型对应 Python `ProjectRegistryEntryDTO` / `AddProjectRequest`
+// / `ServerInfoResponse`，覆盖 `/api/{claude,codex}/projects` (POST) 与
+// `/api/server/info` (GET) 端点。
+//
+// 字段名与 Python 端**严格一致**（snake_case），不要驼峰化——pydantic 没设
+// alias_generator，且与现有 `cwd` / `claude_thread_id` 等保持一致。
+// ----------------------------------------------------------------------------
+
+/**
+ * 项目登记条目（`GET /api/{claude,codex}/projects` 嵌入用，可选）。
+ *
+ * 主 list 接口仍返回 `ProjectSummary` 形态；本 interface 是给将来纯 registry
+ * list 端点预留 + 客户端内部 typing 用。
+ */
+export interface ProjectRegistryEntry {
+  cwd: string;
+  alias: string;
+  added_at: number;
+}
+
+/**
+ * `POST /api/{claude,codex}/projects` 请求体。
+ *
+ * `cwd` 必须以 `/` 开头（绝对路径）；后端再做 is_dir 校验，不存在则返 400。
+ * `alias` 可选，缺省空串。
+ */
+export interface AddProjectRequest {
+  cwd: string;
+  alias?: string;
+}
+
+/**
+ * `GET /api/server/info` 响应体。
+ *
+ * `repo_root` 是 web server 进程的项目根绝对路径，用于前端 "📍 一键填当前
+ * worktree" 按钮；`schema_version` 当前固定为 1。
+ */
+export interface ServerInfoResponse {
+  repo_root: string;
+  schema_version: number;
 }
 
 // ----------------------------------------------------------------------------
@@ -573,6 +851,7 @@ export interface ClaudeSessionSummaryDTO {
   title: string;
   last_modified: number; // Unix 秒
   message_count: number;
+  is_pinned: boolean;
 }
 
 /** 单个项目目录的 Claude session 列表（按 last_modified desc 排序）。 */
@@ -630,7 +909,7 @@ export type ApprovalAckAction =
   | "reject";
 
 export interface ApprovalAckFrame {
-  kind: "approval.ack";
+  frame_type: "approval.ack";
   call_id: string;
   action: ApprovalAckAction;
 }
@@ -639,17 +918,38 @@ export interface ApprovalAckFrame {
  * 浏览器侧 keep-alive 心跳；后端以 `pong` 回应。
  */
 export interface PingFrame {
-  kind: "ping";
+  frame_type: "ping";
+  ts?: number;  // 客户端时间戳，用于 RTT 计算
 }
 
 /**
  * 浏览器提交一轮用户输入；后端按 `request_id` 关联回执。
+ *
+ * `attachments`：多模态输入（Phase 1 仅图片）。前端粘贴/上传后填入
+ * 已 ready 的 `UserInputAttachment`，后端按 `asset_id` 反查实际资源。
  */
 export interface UserInputFrame {
-  kind: "user.input";
+  frame_type: "user.input";
   text: string;
   request_id: string;
   reasoning_effort?: "low" | "medium" | "high" | null;
+  attachments?: UserInputAttachment[];
+}
+
+/**
+ * 浏览器请求打断当前 thread 上正在进行的 run（interrupt-run-v0.1）。
+ *
+ * UX：cell.status 处于 running / awaiting_approval 时显示 Stop 按钮，
+ * 点击后发本帧。后端收到 → cancel 当前 run task → runner 顶层 except 收尾
+ * → emit run.cancelled → WSEventSink fanout 转 RunInterruptedFrame
+ * （多 tab 自动同步）。
+ *
+ * `run_id` 可选，主要给后端做诊断日志；后端不依赖它做正确性。
+ * 没有 active run 时后端推 SystemNoticeFrame(notice_key="no_active_run")。
+ */
+export interface InterruptFrame {
+  frame_type: "interrupt";
+  run_id?: string | null;
 }
 
 // ============================================================================
@@ -664,7 +964,7 @@ export interface UserInputFrame {
  * 一轮 assistant 输出收尾的最终内容（非流式或流式累计完成态）。
  */
 export interface AssistantFinalFrame {
-  kind: "assistant.final";
+  frame_type: "assistant.final";
   timestamp_ms: number;
   content: string;
   turn: number;
@@ -676,7 +976,7 @@ export interface AssistantFinalFrame {
  * 审批结局通知（approved / rejected / cancelled）。
  */
 export interface ApprovalDecisionFrame {
-  kind: "approval.decision";
+  frame_type: "approval.decision";
   timestamp_ms: number;
   call_id: string;
   outcome: ApprovalOutcome;
@@ -687,7 +987,7 @@ export interface ApprovalDecisionFrame {
  * 工具执行前向用户请求审批，浏览器需回 `approval.ack`。
  */
 export interface ApprovalRequestFrame {
-  kind: "approval.request";
+  frame_type: "approval.request";
   timestamp_ms: number;
   call_id: string;
   tool_name: string;
@@ -704,11 +1004,33 @@ export interface ApprovalRequestFrame {
  * thread cell 被回收（idle / 手动停止 / shutdown / 错误）。
  */
 export interface CellEvictedFrame {
-  kind: "cell.evicted";
+  frame_type: "cell.evicted";
   timestamp_ms: number;
   thread_id: string;
   reason: EvictReason;
   message?: string;
+}
+
+/**
+ * run 被用户 interrupt 后的收尾通知（interrupt-run-v0.1）。
+ *
+ * 触发路径：runner 顶层 `except asyncio.CancelledError` → emit `run.cancelled`
+ * event → WSEventSink fanout 转本帧给该 thread 名下所有 attach 的 ws
+ * （A tab 点 Stop → B tab 也收到）。
+ *
+ * 后续 runner 还会 emit `run.end`（status="cancelled"），cell.status 切回 idle；
+ * 前端可隐藏 Stop 按钮、显示"已中断"提示。
+ *
+ * `cancelled_tool_call_id` 为 null 表示打断在 LLM / approval 阶段
+ * （pending tool 已被 runner 写占位 tool_result）。
+ */
+export interface RunInterruptedFrame {
+  frame_type: "run.interrupted";
+  timestamp_ms: number;
+  run_id: string;
+  cancelled_at_turn: number;
+  cancelled_tool_call_id?: string | null;
+  cancel_reason: string;
 }
 
 /**
@@ -718,7 +1040,7 @@ export interface CellEvictedFrame {
  * drain_timeout 显式送到聊天时间线。
  */
 export interface SystemNoticeFrame {
-  kind: "system.notice";
+  frame_type: "system.notice";
   timestamp_ms: number;
   notice_key: string;
   source: string;
@@ -734,7 +1056,7 @@ export interface SystemNoticeFrame {
  * assistant 文本流式增量（按 `seq` 重排）。
  */
 export interface ContentDeltaFrame {
-  kind: "content.delta";
+  frame_type: "content.delta";
   timestamp_ms: number;
   delta: string;
   turn: number;
@@ -747,7 +1069,7 @@ export interface ContentDeltaFrame {
  * 错误事件（network / llm_error / tool_error / approval_timeout / internal）。
  */
 export interface ErrorFrame {
-  kind: "error";
+  frame_type: "error";
   timestamp_ms: number;
   error_code: ErrorCode;
   message: string;
@@ -758,15 +1080,16 @@ export interface ErrorFrame {
  * 对 `ping` 的应答；仅含 `timestamp_ms`。
  */
 export interface PongFrame {
-  kind: "pong";
+  frame_type: "pong";
   timestamp_ms: number;
+  ts?: number;  // 原样回传客户端的 ts，用于 RTT 计算
 }
 
 /**
  * assistant reasoning 流式增量（按 `seq` 重排）。
  */
 export interface ReasoningDeltaFrame {
-  kind: "reasoning.delta";
+  frame_type: "reasoning.delta";
   timestamp_ms: number;
   delta: string;
   turn: number;
@@ -778,9 +1101,9 @@ export interface ReasoningDeltaFrame {
  * 连接建立 / resume 后下发的历史消息列表。
  */
 export interface ThreadHistoryFrame {
-  kind: "thread.history";
+  frame_type: "thread.history";
   timestamp_ms: number;
-  messages: HistoryMessageDTO[];
+  messages: NormalizedMessage[];
 }
 
 /**
@@ -790,7 +1113,7 @@ export interface ThreadHistoryFrame {
  * 展开框退化为显示 `arguments`（入参）造成 `{}` 假象。
  */
 export interface ToolCallEndFrame {
-  kind: "tool.call.end";
+  frame_type: "tool.call.end";
   timestamp_ms: number;
   call_id: string;
   turn: number;
@@ -807,7 +1130,7 @@ export interface ToolCallEndFrame {
  * 单次工具执行开始（在 `approval.decision` approved 之后）。
  */
 export interface ToolCallStartFrame {
-  kind: "tool.call.start";
+  frame_type: "tool.call.start";
   timestamp_ms: number;
   tool_name: string;
   call_id: string;
@@ -820,7 +1143,7 @@ export interface ToolCallStartFrame {
  * 一轮 turn 结束标记。
  */
 export interface TurnEndFrame {
-  kind: "turn.end";
+  frame_type: "turn.end";
   timestamp_ms: number;
   turn: number;
   run_id?: string;
@@ -830,36 +1153,44 @@ export interface TurnEndFrame {
  * 一轮 turn 开始标记。
  */
 export interface TurnStartFrame {
-  kind: "turn.start";
+  frame_type: "turn.start";
   timestamp_ms: number;
   turn: number;
   run_id?: string;
 }
 
 /**
- * 一轮 token 用量回报（prompt / completion / total）。
+ * 一轮 token 用量回报（usage-token-v2-bigbang 重构）。
+ *
+ * 后端真源：`web.protocol.ws_frames.UsageFrame`（usage 字段是 v2
+ * channel-specific DTO dict，含 provider discriminator）。
+ *
+ * 前端按 `usage.provider` 分支：
+ * - `"claude"` → 渲染 StatusLineClaude（用 ClaudeUsage 字段）
+ * - `"openai"` → 渲染 StatusLineCodex 或 StatusLineGenericChat
+ *   （按是否有 `total` / `rate_limits` 字段区分）
  */
 export interface UsageFrame {
-  kind: "usage";
+  frame_type: "usage";
   timestamp_ms: number;
-  prompt_tokens: number;
-  completion_tokens: number;
-  total_tokens: number;
-  cache_read_tokens?: number | null;
-  cache_creation_tokens?: number | null;
   turn: number;
   run_id?: string;
+  usage: ThreadUsage;
 }
 
 // ============================================================================
 // ===== Unions（对应 Python ws_frames.py 的 WSFrameC2S / WSFrameS2C）=====
 //
-// 在 TS 侧用 discriminated union（discriminant = `kind`），消费方可用
-// switch (frame.kind) 或类型守卫函数把 union 收窄到具体帧类型。
+// 在 TS 侧用 discriminated union（discriminant = `frame_type`，v0.2 起统一），
+// 消费方可用 switch (frame.frame_type) 或类型守卫函数把 union 收窄到具体帧类型。
 // ============================================================================
 
 /** C2S 帧 union（浏览器 → 后端）。 */
-export type WSFrameC2S = UserInputFrame | ApprovalAckFrame | PingFrame;
+export type WSFrameC2S =
+  | UserInputFrame
+  | ApprovalAckFrame
+  | PingFrame
+  | InterruptFrame;
 
 /** S2C 帧 union（后端 → 浏览器）。 */
 export type WSFrameS2C =
@@ -877,13 +1208,14 @@ export type WSFrameS2C =
   | TurnStartFrame
   | TurnEndFrame
   | PongFrame
-  | CellEvictedFrame;
+  | CellEvictedFrame
+  | RunInterruptedFrame;
 
 // ============================================================================
 // ===== 类型守卫示例（Type Guards）=====
 //
 // 这里给每个 S2C 帧提供一个 narrow 函数；C2S 也类似。
-// 业务代码也可以直接用 `switch (frame.kind)`，TS 编译器会自动 narrow，
+// 业务代码也可以直接用 `switch (frame.frame_type)`，TS 编译器会自动 narrow，
 // 不一定要走 isXxx 函数。两种姿势都对，按团队风格选一即可。
 //
 // 示例：
@@ -897,7 +1229,7 @@ export type WSFrameS2C =
 //
 //   // 或直接用 switch（更紧凑，编译器会做穷尽性检查）：
 //   function handleS2CSwitch(frame: WSFrameS2C) {
-//     switch (frame.kind) {
+//     switch (frame.frame_type) {
 //       case "content.delta": return frame.delta;
 //       case "reasoning.delta": return frame.delta;
 //       // ...其它 case
@@ -907,75 +1239,75 @@ export type WSFrameS2C =
 // ============================================================================
 
 export function isContentDelta(f: WSFrameS2C): f is ContentDeltaFrame {
-  return f.kind === "content.delta";
+  return f.frame_type === "content.delta";
 }
 
 export function isReasoningDelta(f: WSFrameS2C): f is ReasoningDeltaFrame {
-  return f.kind === "reasoning.delta";
+  return f.frame_type === "reasoning.delta";
 }
 
 export function isAssistantFinal(f: WSFrameS2C): f is AssistantFinalFrame {
-  return f.kind === "assistant.final";
+  return f.frame_type === "assistant.final";
 }
 
 export function isApprovalRequest(f: WSFrameS2C): f is ApprovalRequestFrame {
-  return f.kind === "approval.request";
+  return f.frame_type === "approval.request";
 }
 
 export function isApprovalDecision(f: WSFrameS2C): f is ApprovalDecisionFrame {
-  return f.kind === "approval.decision";
+  return f.frame_type === "approval.decision";
 }
 
 export function isToolCallStart(f: WSFrameS2C): f is ToolCallStartFrame {
-  return f.kind === "tool.call.start";
+  return f.frame_type === "tool.call.start";
 }
 
 export function isSystemNotice(f: WSFrameS2C): f is SystemNoticeFrame {
-  return f.kind === "system.notice";
+  return f.frame_type === "system.notice";
 }
 
 export function isToolCallEnd(f: WSFrameS2C): f is ToolCallEndFrame {
-  return f.kind === "tool.call.end";
+  return f.frame_type === "tool.call.end";
 }
 
 export function isUsage(f: WSFrameS2C): f is UsageFrame {
-  return f.kind === "usage";
+  return f.frame_type === "usage";
 }
 
 export function isError(f: WSFrameS2C): f is ErrorFrame {
-  return f.kind === "error";
+  return f.frame_type === "error";
 }
 
 export function isTurnStart(f: WSFrameS2C): f is TurnStartFrame {
-  return f.kind === "turn.start";
+  return f.frame_type === "turn.start";
 }
 
 export function isTurnEnd(f: WSFrameS2C): f is TurnEndFrame {
-  return f.kind === "turn.end";
+  return f.frame_type === "turn.end";
 }
 
 export function isPong(f: WSFrameS2C): f is PongFrame {
-  return f.kind === "pong";
+  return f.frame_type === "pong";
 }
 
 export function isCellEvicted(f: WSFrameS2C): f is CellEvictedFrame {
-  return f.kind === "cell.evicted";
+  return f.frame_type === "cell.evicted";
 }
 
 export function isThreadHistory(f: WSFrameS2C): f is ThreadHistoryFrame {
-  return f.kind === "thread.history";
+  return f.frame_type === "thread.history";
 }
 
 export function isUserInput(f: WSFrameC2S): f is UserInputFrame {
-  return f.kind === "user.input";
+  return f.frame_type === "user.input";
 }
 
 export function isApprovalAck(f: WSFrameC2S): f is ApprovalAckFrame {
-  return f.kind === "approval.ack";
+  return f.frame_type === "approval.ack";
 }
 
 export function isPing(f: WSFrameC2S): f is PingFrame {
-  return f.kind === "ping";
+  return f.frame_type === "ping";
 }
 
 // ============================================================================
@@ -994,7 +1326,7 @@ export function isPing(f: WSFrameC2S): f is PingFrame {
  *
  * v0.1 仅 claude；保留 codex/gemini/cursor 占位以便后续扩展同协议接入。
  */
-export type NormalizedProvider = "claude" | "codex" | "gemini" | "cursor";
+export type NormalizedProvider = "claude" | "codex" | "gemini" | "cursor" | "generic_chat";
 
 /**
  * `NormalizedMessage` 的 15 种 kind（与 Python `MessageKind` 一致）。
@@ -1037,7 +1369,7 @@ export type NormalizedMessageKind =
  */
 export interface NormalizedMessage {
   /** 消息类型；用作前端 switch 分支主键 */
-  kind: NormalizedMessageKind;
+  frame_type: NormalizedMessageKind;
   /** SDK provider（v0.1 总是 "claude"） */
   provider?: NormalizedProvider;
   /** SDK session_id（首条 session_created 之后切换到真实 id） */
@@ -1054,7 +1386,7 @@ export interface NormalizedMessage {
   toolName?: string;
   /** kind="tool_use" 的工具入参；与 `input` 同义（normalizer 出 toolInput） */
   toolInput?: unknown;
-  /** kind="tool_use" / "tool_result" 关联的 SDK tool_use_id */
+  /** kind="tool_use" / "tool_result" / "stream_status"(phase=tool_calling) 关联的 SDK tool_use_id */
   toolId?: string;
   /** kind="tool_result" 是否错误 */
   isError?: boolean;
@@ -1096,8 +1428,79 @@ export type ThreadStatusPhase =
   | "error";
 
 export interface ThreadStatusFrame {
-  type: "thread-status";
+  frame_type: "thread-status";
   threadId: string;
   phase: ThreadStatusPhase;
   toolName?: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Claude Code WebSocket 协议（v0.1.6；原 `web/src/lib/claude-ws.ts` 内业务类型，
+// network-layer v0.1 重构时迁入 protocol 真源以便随 Python 端协议同步维护。
+// ---------------------------------------------------------------------------
+
+/**
+ * Claude Code endpoint 客户端帧（v0.1.6）。
+ *
+ * 这是 `/ws/claude-code` 接受的 6 类入站帧，对应 `src/web/claude_code/route.py::_dispatch`。
+ *
+ * 跟 generic_chat 的 WSFrameC2S **完全独立** —— 字段命名走 SDK / ccui 风格
+ * （camelCase + `frame_type` 判别字段，v0.2 统一）。
+ *
+ * 网络层 v0.1 之后，心跳帧 `{ frame_type: "ping", ts }` 走 NetworkManager 透明拦截，
+ * 不进入本 union。
+ */
+export type ClaudeCodeC2SFrame =
+  | {
+      frame_type: "claude-command";
+      command: string;
+      options?: Record<string, unknown>;
+      /**
+       * 图片附件（claude-code-channel-image-paste）。
+       *
+       * 后端 `_dispatch` 解析后传给 `service.query(attachments=...)`，
+       * 由 `AttachmentPrefixBuilder` 拼成 `@<abs_path>` 注入 prompt 头部。
+       * 缺省 / 空数组 → 走纯文本 prompt 路径，向后兼容。
+       */
+      attachments?: UserInputAttachment[];
+    }
+  | {
+      frame_type: "claude-permission-response";
+      requestId: string;
+      allow: boolean;
+      message?: string;
+      rememberEntry?: string;
+    }
+  | { frame_type: "abort-session"; sessionId: string }
+  | { frame_type: "check-session-status"; sessionId: string }
+  /* smart-approval-v1 */
+  | { frame_type: "auto-approval-toggle"; cwd: string; enabled: boolean }
+  | { frame_type: "auto-approval-query"; cwd: string };
+
+/**
+ * 后端到前端的两类帧：NormalizedMessage（主流）+ session-status（特殊）+
+ * auto_approval_state（smart-approval-v1）。
+ *
+ * `session-status` 是 `check-session-status` 的应答；v0.2 起所有 wire 帧
+ * 都用 `frame_type` 判别字段，单独建模便于不同字段集独立演化。
+ */
+export interface SessionStatusFrame {
+  frame_type: "session-status";
+  sessionId: string;
+  isProcessing: boolean;
+}
+
+/** smart-approval-v1 状态帧（per-cwd toggle 配置） */
+export interface AutoApprovalStateWireFrame {
+  frame_type: "auto_approval_state";
+  channel: "claude_code" | "generic_chat";
+  cwd: string;
+  enabled: boolean;
+  timeoutMs: number;
+  ruleOverrides: Record<string, boolean>;
+}
+
+export type ClaudeCodeS2CFrame =
+  | NormalizedMessage
+  | SessionStatusFrame
+  | AutoApprovalStateWireFrame;

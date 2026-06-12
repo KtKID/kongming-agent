@@ -24,6 +24,11 @@ _INLINE_INPUT_PREFIXES = ("noop://", "inline://")
 _TEMP_INLINE_INPUT_ROOTS = ("/tmp/", "/private/tmp/", "/var/tmp/")
 _MAP_REDUCE_SPEC_WRAPPER = "MapReduceWorkflowSpec"
 _ROUNDTABLE_REVIEW_SPEC_WRAPPER = "RoundtableReviewSpec"
+_WORKFLOW_DESC_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "description": "一句 workflow 简短描述，用于 Workflow Viewer 展示，建议 20-60 个中文字符。",
+    "maxLength": 120,
+}
 _MAP_REDUCE_REQUIRED_PAYLOAD_KEYS = frozenset(
     {
         "objective",
@@ -177,13 +182,22 @@ _ROUNDTABLE_REVIEW_PAYLOAD_SCHEMA: dict[str, Any] = {
 
 
 class AgentWorkflowHandle:
-    """Mutable binding used by CLI after NativeRuntime is built."""
+    """工作流 manager 的延迟绑定句柄，输入为 runtime 装配结果，输出为 tool 可用 manager。"""
 
     def __init__(self) -> None:
         self.manager: Any | None = None
+        self._managers_by_session_id: dict[str, Any] = {}
 
-    def bind(self, manager: Any) -> None:
-        self.manager = manager
+    def bind(self, manager: Any, *, session_id: str | None = None) -> None:
+        """绑定 workflow manager；session_id 为空时写入默认 manager，有值时写入 thread 专属 manager。"""
+        if session_id is None:
+            self.manager = manager
+            return
+        self._managers_by_session_id[session_id] = manager
+
+    def get(self, ctx: ToolContext) -> Any | None:
+        """按 ToolContext 查找 manager；优先返回当前 session 的绑定，其次返回默认绑定。"""
+        return self._managers_by_session_id.get(ctx.session_id) or self.manager
 
 
 class RunParallelSubagentsTool(BaseBuiltinTool):
@@ -236,6 +250,7 @@ class RunParallelSubagentsTool(BaseBuiltinTool):
                 "enum": ["parallel"],
                 "description": "Workflow orchestration mode. V1 implements parallel.",
             },
+            "desc": _WORKFLOW_DESC_SCHEMA,
         },
         "required": ["tasks"],
     }
@@ -248,7 +263,7 @@ class RunParallelSubagentsTool(BaseBuiltinTool):
         args: dict[str, Any],
         ctx: ToolContext,
     ) -> tuple[str, dict[str, Any] | None]:
-        manager = self._handle.manager
+        manager = self._handle.get(ctx)
         if manager is None:
             raise RuntimeError("agent workflow manager is not bound")
 
@@ -256,15 +271,19 @@ class RunParallelSubagentsTool(BaseBuiltinTool):
         mode = args.get("mode", "parallel")
         if not isinstance(mode, str):
             raise ValueError("'mode' must be a string")
-        result = await manager.run_workflow_specs(
-            mode=mode,
-            parent_session_id=ctx.session_id,
-            task_specs=task_specs,
-        )
+        kwargs: dict[str, Any] = {
+            "mode": mode,
+            "parent_session_id": ctx.session_id,
+            "task_specs": task_specs,
+        }
+        if isinstance(args.get("desc"), str):
+            kwargs["desc"] = args["desc"]
+        result = await manager.run_workflow_specs(**kwargs)
         content = _format_result(result)
         data = {
             "workflow_id": result.workflow_id,
             "mode": result.mode,
+            "desc": getattr(result, "desc", None),
             "workflow_dir": str(result.workflow_dir),
             "report_index_path": str(result.report_index_path),
             "completed": result.completed,
@@ -331,6 +350,7 @@ class RunAgentWorkflowTool(BaseBuiltinTool):
                     '不要写成 {"MapReduceWorkflowSpec": {...}}。'
                 ),
                 "properties": {
+                    "desc": _WORKFLOW_DESC_SCHEMA,
                     "task_specs": {
                         "type": "array",
                         "description": "parallel 任务规格数组。",
@@ -355,7 +375,7 @@ class RunAgentWorkflowTool(BaseBuiltinTool):
         args: dict[str, Any],
         ctx: ToolContext,
     ) -> tuple[str, dict[str, Any] | None]:
-        manager = self._handle.manager
+        manager = self._handle.get(ctx)
         if manager is None:
             raise RuntimeError("agent workflow manager is not bound")
         mode = args.get("mode")
@@ -496,7 +516,11 @@ def _normalize_workflow_payload(
 ) -> dict[str, object]:
     if mode == "parallel":
         raw_tasks = payload.get("task_specs", payload.get("tasks"))
-        return {"task_specs": _parse_tasks(raw_tasks)}
+        normalized: dict[str, object] = {"task_specs": _parse_tasks(raw_tasks)}
+        desc = payload.get("desc")
+        if isinstance(desc, str):
+            normalized["desc"] = desc
+        return normalized
     if mode == "map_reduce":
         payload = _unwrap_map_reduce_spec_payload(payload)
         payload = _normalize_map_reduce_payload(
@@ -907,7 +931,10 @@ def _unwrap_map_reduce_spec_payload(payload: dict[str, Any]) -> dict[str, Any]:
     has_required_top_level = any(key in payload for key in _MAP_REDUCE_REQUIRED_PAYLOAD_KEYS)
     if has_required_top_level:
         return payload
-    return dict(nested)
+    unwrapped = dict(nested)
+    if isinstance(payload.get("desc"), str) and "desc" not in unwrapped:
+        unwrapped["desc"] = payload["desc"]
+    return unwrapped
 
 
 def _unwrap_roundtable_review_spec_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -917,12 +944,16 @@ def _unwrap_roundtable_review_spec_payload(payload: dict[str, Any]) -> dict[str,
         return payload
     if any(key in payload for key in ("topic", "input_source", "module_path")):
         return payload
-    return dict(nested)
+    unwrapped = dict(nested)
+    if isinstance(payload.get("desc"), str) and "desc" not in unwrapped:
+        unwrapped["desc"] = payload["desc"]
+    return unwrapped
 
 
 def _format_result(result: Any) -> str:
     lines = [
         f"workflow_id: {result.workflow_id}",
+        f"desc: {getattr(result, 'desc', None) or ''}",
         f"workflow_dir: {result.workflow_dir}",
         f"report_index: {result.report_index_path}",
         f"completed: {result.completed}",
@@ -965,6 +996,7 @@ def _result_data(result: Any) -> dict[str, Any]:
     data = {
         "workflow_id": result.workflow_id,
         "mode": result.mode,
+        "desc": getattr(result, "desc", None),
         "workflow_dir": str(result.workflow_dir),
         "report_index_path": str(result.report_index_path),
         "completed": result.completed,

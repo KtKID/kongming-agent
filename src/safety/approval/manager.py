@@ -182,6 +182,10 @@ class ApprovalManager:
         """
         self._event_sinks.append(sink)
 
+    def has_event_sink_type(self, sink_type: type[object]) -> bool:
+        """判断指定类型的事件接收器是否已经注册。"""
+        return any(isinstance(s, sink_type) for s in self._event_sinks)
+
     @property
     def pending_count(self) -> int:
         """当前 pending 审批数（仅供监控 / 测试断言用）。"""
@@ -373,11 +377,11 @@ class ApprovalManager:
             ApprovalDecision(outcome=outcome, metadata=meta)  # type: ignore[arg-type]
         )
 
-        # generic-chat-session-grant：用户点「本 session 都同意」+ allow=True
-        # → 触发 thread 级 grant 写入；下次同 thread + cwd + tool 的
-        # classify 命中 _thread_overrides → immediate allow。
+        # generic-chat-session-grant：用户点「本次会话都同意」+ allow=True
+        # → 触发 thread 级授权写入；下次同 thread + cwd + tool 的
+        # classify 命中 _thread_overrides → 立即允许。
         # 仅 allow=True + rememberScope="session" 时写入（拒绝时即使带
-        # rememberScope 也不写——拒绝没有 remember 语义）。
+        # rememberScope 也不写——拒绝没有记忆语义）。
         if allow and remember_scope == "session":
             try:
                 self._rules.add_session_grant(
@@ -387,7 +391,7 @@ class ApprovalManager:
                     tool_name=pending.tool_name,
                 )
             except Exception:
-                # fail-open：grant 写入失败不影响本次 resolve 的成功结果
+                # 失败开放：授权写入失败不影响本次 resolve 的成功结果
                 # （下次仍弹卡，等同没记住——可接受降级）
                 logger.exception(
                     "add_session_grant failed: thread=%s cwd=%s tool=%s",
@@ -445,7 +449,7 @@ class ApprovalManager:
         for req_id in targets:
             if self.cancel(req_id, reason=reason):
                 count += 1
-        # 清 thread 级 session grants（R10 同款防内存泄漏）；失败不抛
+        # 清 thread 级本次会话授权（R10 同款防内存泄漏）；失败不抛
         try:
             self._rules.clear_thread_grants(thread_id)
         except Exception:
@@ -560,7 +564,7 @@ def get_approval_manager(
     event_sinks: list[ApprovalEventSink] | None = None,
     default_timeout_ms: int = 60_000,
 ) -> ApprovalManager:
-    """获取或创建 manager 单例。
+    """获取或创建审批管理器单例。
 
     首次调用必须传 ``rules``（懒构造）；之后调用忽略所有参数，
     返回已构造实例。装配点（``src/hosts/web/run.py`` 等）首次调用时初始化；
@@ -572,13 +576,13 @@ def get_approval_manager(
         default_timeout_ms: 首次调用时使用
 
     Returns:
-        per-process 单例 ApprovalManager
+        进程级单例 ApprovalManager
     """
     global _singleton
     if _singleton is None:
         if rules is None:
             # approval-rules-unified：ApprovalRules 不再持 default_timeout_ms，
-            # 走 fail-closed 默认 60s（policy=None 时安全网）。manager 自己的
+            # 走失败关闭默认 60s（policy=None 时安全网）。manager 自己的
             # default_timeout_ms 仍按入参生效。
             rules = ApprovalRules()
         _singleton = ApprovalManager(
@@ -596,7 +600,7 @@ def reset_for_testing() -> None:
 
 
 # ---------------------------------------------------------------------------
-# make_manager_prompt_fn 工厂（reviewer 必修 #2）
+# make_manager_prompt_fn 工厂（评审必修 #2）
 # ---------------------------------------------------------------------------
 
 
@@ -607,7 +611,7 @@ def make_manager_prompt_fn(
     channel: str = "generic_chat",
     default_cwd: str = "",
 ) -> Callable[[ApprovalRequest], Awaitable[ApprovalAction]]:
-    """生成 prompt_fn，内部调 ``manager.request``；返回值映射成 :class:`ApprovalAction`。
+    """生成提示函数，内部调 ``manager.request``；返回值映射成 :class:`ApprovalAction`。
 
     替代现有 :meth:`web.app_support.host_adapter.WebHostAdapter.prompt_approval`
     （推 per-thread WS 旧模态）。``src/hosts/web/run.py`` 装配点用法：
@@ -628,50 +632,68 @@ def make_manager_prompt_fn(
          阶段 1 generic_chat 前端 Card 已隐藏「本 session」按钮，
          理论上不会触发此分支；留 TODO 标 stage 5 协议演进时接 GrantStore.put_session
 
-    返回的 prompt_fn 通过 ``__action_aware__`` 属性自动被
-    :class:`tools.runtime.approval.InteractiveApproval` 识别为 action-aware
-    （返回 ApprovalAction 而非 bool）。
+    CLI 通道的本 session 授权已由 :class:`ApprovalRules` 的线程级覆盖接管。
+    CLI 提示函数遇到 ``remember_for_session`` 时返回 ``ACCEPT_ONCE``，让后续
+    调用继续进入审批管理器规则层，保证阻断规则每次都有机会先判定。
 
-    cwd 解析优先级（thread-cwd-fallback 任务 #3）:
+    返回的提示函数通过 ``__action_aware__`` 属性自动被
+    :class:`tools.runtime.approval.InteractiveApproval` 识别为动作感知函数
+    （返回 ApprovalAction）。
+
+    工作目录解析优先级（thread-cwd-fallback 任务 #3）:
 
     1. ``req.metadata["cwd"]``：运行时显式传入，优先级最高
-    2. ``default_cwd``：装配时由调用方解析后传入的 fallback（通常是 thread.cwd
+    2. ``default_cwd``：装配时由调用方解析后传入的兜底值（通常是 thread.cwd
        或 server 启动目录 ``app.state.workspace_root``）
     3. ``""``：两者都空时落到空字符串（与改前行为一致，兼容老调用方）
 
     Args:
         manager: ApprovalManager 单例
-        thread_id: 该 prompt_fn 绑定的 thread（多 thread 一个 thread 一个 prompt_fn）
+        thread_id: 该提示函数绑定的 thread（多 thread 一个 thread 一个提示函数）
         channel: 通道名（默认 ``"generic_chat"``，阶段 2 改 ``"claude_code"``）
-        default_cwd: thread.cwd 空时的 fallback（由装配点解析传入；
+        default_cwd: thread.cwd 空时的兜底工作目录（由装配点解析传入；
             通常是 server 启动目录 ``app.state.workspace_root``）；
-            空字符串 = 不 fallback（保持原行为，兼容旧调用方）
+            空字符串 = 不启用兜底（保持原行为，兼容旧调用方）
 
     Returns:
-        action-aware prompt_fn，签名 ``(ApprovalRequest) -> Awaitable[ApprovalAction]``
+        动作感知提示函数，签名 ``(ApprovalRequest) -> Awaitable[ApprovalAction]``
     """
 
     async def prompt_fn(req: ApprovalRequest) -> ApprovalAction:
         """从 ApprovalRequest 提取信息调 manager.request，映射回 ApprovalAction。"""
-        # cwd 优先级：req.metadata.cwd（运行时显式传） > default_cwd（装配时 thread.cwd 解析后的值）
+        # 工作目录优先级：req.metadata.cwd（运行时显式传） > default_cwd（装配时 thread.cwd 解析后的值）
         req_cwd = (req.metadata or {}).get("cwd", "")
         resolved_cwd = req_cwd if req_cwd else default_cwd
+        request_metadata = dict(req.metadata) if req.metadata else {}
+        request_metadata.setdefault("run_id", req.run_id)
+        request_metadata.setdefault("session_id", req.session_id)
+        request_metadata.setdefault("turn", req.turn)
+        request_metadata.setdefault("call_id", req.call_id)
+        if req.reason:
+            request_metadata.setdefault("reason", req.reason)
         decision = await manager.request(
             channel=channel,
             thread_id=thread_id,
             cwd=resolved_cwd,
             tool_name=req.tool_name,
             tool_input=dict(req.arguments),
-            metadata=dict(req.metadata) if req.metadata else {},
+            metadata=request_metadata,
         )
-        return _decision_to_action(decision)
+        return _decision_to_action(
+            decision,
+            allow_session_action=channel != "cli",
+        )
 
-    # 标记为 action-aware（让 InteractiveApproval 走 ApprovalAction 分支）
+    # 标记为动作感知函数（让 InteractiveApproval 走 ApprovalAction 分支）
     prompt_fn.__action_aware__ = True  # type: ignore[attr-defined]
     return prompt_fn
 
 
-def _decision_to_action(decision: ApprovalDecision) -> ApprovalAction:
+def _decision_to_action(
+    decision: ApprovalDecision,
+    *,
+    allow_session_action: bool = True,
+) -> ApprovalAction:
     """ApprovalDecision → ApprovalAction 二态映射（reviewer 必修 #2）。
 
     阶段 1 仅二态（ACCEPT_ONCE / REJECT）；ACCEPT_FOR_SESSION 受协议帧 v0.5
@@ -681,12 +703,12 @@ def _decision_to_action(decision: ApprovalDecision) -> ApprovalAction:
         decision: manager.request 返回的 ApprovalDecision
 
     Returns:
-        对应的 ApprovalAction；未知 outcome 一律映射为 REJECT（fail-closed）
+        对应的 ApprovalAction；未知 outcome 一律映射为 REJECT（失败关闭）
     """
     if decision.outcome == "approved":
         # TODO(stage 5)：协议帧 v0.5 上线后，按 decision.metadata.remember_for_session
         # 返回 ACCEPT_FOR_SESSION（接 GrantStore.put_session）
-        if decision.metadata.get("remember_for_session"):
+        if decision.metadata.get("remember_for_session") and allow_session_action:
             return ApprovalAction.ACCEPT_FOR_SESSION
         if decision.metadata.get("remember_persistent"):
             return ApprovalAction.ACCEPT_PERSIST

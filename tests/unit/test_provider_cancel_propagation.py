@@ -60,6 +60,7 @@ def _names_in_except_type(t: ast.AST) -> list[str]:
 
 
 @pytest.mark.unit
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
 def test_no_provider_module_catches_baseexception() -> None:
     """provider 层（src/infrastructure/llm_providers/）不许 ``except BaseException``（任何形式）。
 
@@ -84,6 +85,7 @@ def test_no_provider_module_catches_baseexception() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
 def test_no_provider_module_catches_cancelled_error_silently() -> None:
     """provider 层不许 ``except asyncio.CancelledError`` 然后**不**重新 raise。
 

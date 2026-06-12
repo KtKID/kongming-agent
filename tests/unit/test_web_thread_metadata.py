@@ -244,6 +244,20 @@ def test_list_sorted_by_updated_at_desc(tmp_path: Path) -> None:
     ]
 
 
+def test_list_uses_thread_id_as_stable_tiebreaker(tmp_path: Path) -> None:
+    a = _make_meta("thread-aaaaaaaaaaaa", updated_at=100.0)
+    c = _make_meta("thread-cccccccccccc", updated_at=100.0)
+    b = _make_meta("thread-bbbbbbbbbbbb", updated_at=100.0)
+    for m in (a, c, b):
+        write_thread_metadata(tmp_path, m)
+    out = list_thread_metadata(tmp_path)
+    assert [m.id for m in out] == [
+        "thread-cccccccccccc",
+        "thread-bbbbbbbbbbbb",
+        "thread-aaaaaaaaaaaa",
+    ]
+
+
 def test_list_pinned_threads_sorted_first(tmp_path: Path) -> None:
     a = _make_meta("thread-aaaaaaaaaaaa", updated_at=100.0, is_pinned=False)
     b = _make_meta("thread-bbbbbbbbbbbb", updated_at=300.0, is_pinned=False)

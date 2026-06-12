@@ -246,6 +246,33 @@ async def test_elevated_kongming_config_yaml_write() -> None:
     assert md[ApprovalMetadataKeys.MATCHED_RULE] == "config-self-protection-config.yaml"
 
 
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_user_kongming_home_config_write_is_standard(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """写用户级 kongming_home/config.yaml → standard，支持默认同意审批 lane。"""
+    monkeypatch.setenv("KONGMING_HOME", str(tmp_path / ".kongming"))
+    resolver, fake = _make_resolver()
+    decision = await resolver.evaluate(
+        _req(
+            tool_name="write_file",
+            arguments={
+                "path": str(tmp_path / ".kongming" / "config.yaml"),
+                "content": "session:\n  backend: file\n",
+            },
+        ),
+        _approval_zone(),
+        _runtime(),
+    )
+
+    md = decision.metadata
+    assert md[ApprovalMetadataKeys.DECISION_SOURCE] == "standard"
+    assert md[ApprovalMetadataKeys.MATCHED_RULE] == "write-default"
+    assert "confirm_token" not in md
+    assert fake.decided_requests[0].metadata["severity"] == "standard"
+
+
 # ---------------------------------------------------------------------------
 # §5 elevated path - pyproject.toml [tool.kongming.safety] 段
 # ---------------------------------------------------------------------------
@@ -393,6 +420,36 @@ async def test_command_unknown_default_standard() -> None:
     md = decision.metadata
     assert md[ApprovalMetadataKeys.DECISION_SOURCE] == "standard"
     assert md[ApprovalMetadataKeys.MATCHED_RULE] == "shell-command-default"
+
+
+# ---------------------------------------------------------------------------
+# §10b agent workflow 工具 - 已知 workflow 编排工具
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_agent_workflow_tool_standard() -> None:
+    """剧本 10b：run_agent_workflow → standard, matched_rule=agent-workflow-default。"""
+    resolver, fake = _make_resolver()
+    decision = await resolver.evaluate(
+        _req(
+            tool_name="run_agent_workflow",
+            arguments={
+                "mode": "map_reduce",
+                "payload": {"objective": "分析 src/executors"},
+            },
+        ),
+        _approval_zone(),
+        _runtime(),
+    )
+
+    md = decision.metadata
+    assert md[ApprovalMetadataKeys.DECISION_SOURCE] == "standard"
+    assert md[ApprovalMetadataKeys.MATCHED_RULE] == "agent-workflow-default"
+    assert "未知工具" not in md[ApprovalMetadataKeys.REASON]
+    enriched = fake.decided_requests[0]
+    assert enriched.metadata["severity"] == "standard"
 
 
 # ---------------------------------------------------------------------------

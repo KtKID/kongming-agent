@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   AlertTriangle,
   ArrowDown,
@@ -6,18 +15,25 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Copy,
+  FileText,
   LoaderCircle,
   Sigma,
   XCircle,
 } from "lucide-react";
 import { EvolutionDecisionModal } from "@/components/EvolutionDecisionModal";
+import { ImageLightbox } from "@/components/ImageLightbox";
 import { Markdown } from "@/lib/markdown";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ChatAvatar } from "@/components/ChatAvatar";
 import { useChatStore, type ChatItem } from "@/stores/chat";
+import type { UserInputAttachment } from "@/protocol";
 import { isDebugMode } from "@/lib/debug";
 import { cn } from "@/lib/utils";
+import { useWorkspaceStore } from "@/stores/workspace";
+import { ModifiedFilesSummary } from "@/components/ModifiedFilesSummary";
+import { useItemsWithFileSummary } from "@/hooks/useItemsWithFileSummary";
 
 /**
  * 消息列表：按 ChatItem.kind 分类渲染。
@@ -37,6 +53,17 @@ import { cn } from "@/lib/utils";
  */
 const EMPTY_ITEMS: ChatItem[] = [];
 const NEAR_BOTTOM_PX = 80;
+
+/**
+ * Lightbox 打开回调上下文。
+ *
+ * 真源放在 `MessageList` 顶层（一份 state），通过 context 注入到深层
+ * `MessageContent` user 分支；避免每条消息独立 useState 或一路 prop drilling。
+ * Provider 缺失时回退为 noop，方便在 Storybook / 单测里渲染 `ChatMessageItem`。
+ */
+const LightboxContext = createContext<(src: string, alt?: string) => void>(
+  () => {},
+);
 
 interface MessageViewportProps<T> {
   items: T[];
@@ -105,8 +132,10 @@ export function MessageViewport<T>({
 
   if (items.length === 0) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        {emptyText}
+      <div className="flex h-full items-center justify-center p-6">
+        <div className="obsidian-panel-soft max-w-md rounded-[1.6rem] px-6 py-8 text-center text-sm text-muted-foreground">
+          {emptyText}
+        </div>
       </div>
     );
   }
@@ -118,7 +147,7 @@ export function MessageViewport<T>({
         onScroll={checkNearBottom}
         className="h-full overflow-y-auto scrollbar-overlay"
       >
-        <div className="mx-auto w-full max-w-3xl p-6">
+        <div className="w-full p-7">
           <div className="flex flex-col gap-4">
             {items.map((item, index) => renderItem(item, index))}
           </div>
@@ -128,7 +157,7 @@ export function MessageViewport<T>({
         <button
           type="button"
           onClick={scrollToBottom}
-          className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1 rounded-full border border-border bg-background/90 px-3 py-1.5 text-xs text-muted-foreground shadow-md backdrop-blur-sm transition-colors hover:bg-secondary"
+          className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full border border-border/80 bg-card/90 px-3 py-1.5 text-xs text-muted-foreground shadow-glass backdrop-blur-xl transition-colors hover:bg-secondary"
           aria-label="回到底部"
         >
           <ChevronDown className="h-3.5 w-3.5" />
@@ -141,29 +170,73 @@ export function MessageViewport<T>({
 
 export function MessageList({
   threadId,
+  items: injectedItems,
+  timezone,
 }: {
   threadId: string | undefined;
+  /**
+   * chat-receive-side-unify #5：可选注入的渲染清单。
+   *
+   * 传了就用注入的（generic 频道走 ChatTimelineStore→adapter 投影），
+   * 没传退回 `useChatStore` 读取（claude / codex 等其它调用方现状不变）。
+   * 注入态下 useChatStore selector 仍订阅但返回稳定 EMPTY_ITEMS 引用（threadId
+   * 在注入侧的 itemsByThread 不再写入），不会引入额外重渲染。
+   */
+  items?: ChatItem[];
+  timezone?: string;
 }) {
-  const items = useChatStore((s) =>
+  const storeItems = useChatStore((s) =>
     threadId ? (s.itemsByThread[threadId] ?? EMPTY_ITEMS) : EMPTY_ITEMS,
   );
+  const items = injectedItems ?? storeItems;
+  const [lightbox, setLightbox] = useState<{ src: string; alt?: string } | null>(
+    null,
+  );
+  const openLightbox = useCallback((src: string, alt?: string) => {
+    setLightbox({ src, alt });
+  }, []);
+  const closeLightbox = useCallback(() => setLightbox(null), []);
+
+  // 通用 hook：按 user 消息分界插入文件汇总
+  const renderItems = useItemsWithFileSummary(items, threadId, (it) => it.kind === "user");
 
   if (!threadId) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        在左侧选择或创建一个 thread
+      <div className="flex h-full items-center justify-center p-6">
+        <div className="obsidian-panel-soft max-w-md rounded-[1.6rem] px-6 py-8 text-center text-sm text-muted-foreground">
+          在左侧选择或创建一个 thread
+        </div>
       </div>
     );
   }
 
   return (
-    <MessageViewport
-      items={items}
-      emptyText="说点什么开始"
-      resetKey={threadId}
-      getUserMessageCount={(list) => list.filter((it) => it.kind === "user").length}
-      renderItem={(item) => <ChatMessageItem key={item.id} item={item} />}
-    />
+    <LightboxContext.Provider value={openLightbox}>
+      <MessageViewport
+        items={renderItems}
+        emptyText="说点什么开始"
+        resetKey={threadId}
+        getUserMessageCount={(list) =>
+          list.filter((it) => it.kind === "user").length
+        }
+        renderItem={(item) =>
+          item.kind === "files-summary" ? (
+            <ModifiedFilesSummary
+              key={item.id}
+              files={item.files}
+              threadId={item.threadId}
+            />
+          ) : (
+            <ChatMessageItem key={item.id} item={item} timezone={timezone} />
+          )
+        }
+      />
+      <ImageLightbox
+        src={lightbox?.src ?? null}
+        alt={lightbox?.alt}
+        onClose={closeLightbox}
+      />
+    </LightboxContext.Provider>
   );
 }
 
@@ -174,11 +247,17 @@ export function MessageList({
  * 用途：肉眼验证 (threadId, runId, turn) 复合 key 是否正确生成；修非流式
  * 多轮覆盖 bug 后的快速回归手段。
  */
-export function ChatMessageItem({ item }: { item: ChatItem }) {
+export function ChatMessageItem({
+  item,
+  timezone,
+}: {
+  item: ChatItem;
+  timezone?: string;
+}) {
   // 同步读一次 debug 开关；不响应式，避免不必要的 re-render
   const debug = useMemo(() => isDebugMode(), []);
   if (!debug) {
-    return <MessageContent item={item} />;
+    return <MessageContent item={item} timezone={timezone} />;
   }
 
   const turn =
@@ -189,7 +268,7 @@ export function ChatMessageItem({ item }: { item: ChatItem }) {
 
   return (
     <div className="relative" data-testid="debug-badge-wrap">
-      <MessageContent item={item} />
+      <MessageContent item={item} timezone={timezone} />
       <div
         data-testid="debug-badge"
         className="pointer-events-none absolute right-0 top-0 z-10 rounded-bl-md rounded-tr-md border border-border bg-background/90 px-1.5 py-0.5 font-mono text-[10px] leading-tight text-muted-foreground shadow-sm backdrop-blur-sm"
@@ -200,14 +279,31 @@ export function ChatMessageItem({ item }: { item: ChatItem }) {
   );
 }
 
-function MessageContent({ item }: { item: ChatItem }) {
+function MessageContent({
+  item,
+  timezone,
+}: {
+  item: ChatItem;
+  timezone?: string;
+}) {
   switch (item.kind) {
     case "user":
       return (
         <div className="flex items-end justify-end gap-2">
-          <div className="max-w-[80%] rounded-2xl rounded-br-md bg-accent px-4 py-2 text-sm text-accent-foreground shadow-sm">
-            <Markdown text={item.content} className="leading-relaxed" />
-          </div>
+          <MessageBubbleFrame
+            content={item.content}
+            timestampMs={item.timestampMs}
+            timezone={timezone}
+            align="right"
+            bubbleClassName="max-w-[80%] rounded-[1.4rem] rounded-br-md border border-primary/20 bg-primary px-4 py-3 text-sm text-primary-foreground shadow-sm"
+          >
+            {item.attachments && item.attachments.length > 0 ? (
+              <UserAttachmentThumbnails attachments={item.attachments} />
+            ) : null}
+            {item.content ? (
+              <Markdown text={item.content} className="leading-relaxed" />
+            ) : null}
+          </MessageBubbleFrame>
           <ChatAvatar role="user" />
         </div>
       );
@@ -218,7 +314,7 @@ function MessageContent({ item }: { item: ChatItem }) {
         <div className="flex items-start gap-2">
           <ChatAvatar role="assistant" />
           <div className="min-w-0 flex-1">
-            <AssistantMessage item={item} />
+            <AssistantMessage item={item} timezone={timezone} />
           </div>
         </div>
       );
@@ -254,10 +350,139 @@ function MessageContent({ item }: { item: ChatItem }) {
   }
 }
 
+function MessageBubbleFrame({
+  children,
+  content,
+  timestampMs,
+  timezone,
+  align,
+  bubbleClassName,
+}: {
+  children: ReactNode;
+  content: string;
+  timestampMs: number;
+  timezone?: string;
+  align: "left" | "right";
+  bubbleClassName: string;
+}) {
+  const formattedTime = useMemo(
+    () => formatMessageTime(timestampMs, timezone),
+    [timestampMs, timezone],
+  );
+  const copyMessage = useCallback(() => {
+    if (!content) return;
+    void navigator.clipboard?.writeText(content);
+  }, [content]);
+  const isRight = align === "right";
+
+  return (
+    <div
+      className={cn(
+        "group flex min-w-0 flex-col gap-1",
+        isRight ? "items-end" : "items-start",
+      )}
+    >
+      <div className={bubbleClassName}>{children}</div>
+      <div
+        data-testid="message-hover-meta"
+        className={cn(
+          "flex h-5 items-center gap-2 text-[11px] text-muted-foreground opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100",
+          isRight ? "justify-end pr-2" : "justify-start pl-2",
+        )}
+      >
+        {content ? (
+          <button
+            type="button"
+            onClick={copyMessage}
+            className="inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            aria-label="复制消息"
+            title="复制"
+          >
+            <Copy className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
+        <span>{formattedTime}</span>
+      </div>
+    </div>
+  );
+}
+
+function normalizeMessageTimezone(timezone: string | undefined): string {
+  if (!timezone) return "UTC";
+  try {
+    new Intl.DateTimeFormat("zh-CN", { timeZone: timezone }).format(0);
+    return timezone;
+  } catch {
+    return "UTC";
+  }
+}
+
+function formatMessageTime(timestampMs: number, timezone: string | undefined): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: normalizeMessageTimezone(timezone),
+  }).format(new Date(timestampMs));
+}
+
+/**
+ * 历史用户消息内的附件缩略图（仅 image kind）。
+ *
+ * 与 Composer 的 `ThumbnailStrip` 不同：
+ * - 数据源是 `UserInputAttachment.preview_url`（远端 /api/uploads/{asset_id}），
+ *   不是 object URL；刷新后仍可恢复
+ * - 点击图片调用 `LightboxContext` 打开全屏预览，避免每条消息独立 lightbox state
+ */
+function UserAttachmentThumbnails({
+  attachments,
+}: {
+  attachments: UserInputAttachment[];
+}) {
+  const openLightbox = useContext(LightboxContext);
+  // Phase 1 仅 image；其他 kind 暂时跳过（防御未来 union 扩展）
+  const images = attachments.filter((a) => a.kind === "image");
+  if (images.length === 0) return null;
+  return (
+    <div
+      data-testid="message-attachment-strip"
+      className="mb-2 flex flex-wrap gap-2"
+    >
+      {images.map((att) => (
+        <button
+          key={att.asset_id}
+          type="button"
+          data-testid="message-attachment-thumb"
+          data-asset-id={att.asset_id}
+          onClick={() => openLightbox(att.preview_url, att.mime_type)}
+          className="block overflow-hidden rounded-lg border border-primary-foreground/20 bg-primary-foreground/5 transition-transform hover:scale-[1.02] focus:outline-none focus:ring-2 focus:ring-primary-foreground/50"
+        >
+          <img
+            src={att.preview_url}
+            alt={att.mime_type}
+            loading="lazy"
+            className="h-[200px] max-h-[200px] w-[200px] max-w-[200px] object-cover"
+            onError={(e) => {
+              // 历史消息图片 404 / 网络失败兜底：缩略图变灰 + data-error 标记。
+              // 不加 retry 按钮（Phase 2），只视觉提示用户"这张图加载失败"，避免
+              // 默认的破损 alt 图标看着像 bug。
+              const img = e.currentTarget as HTMLImageElement;
+              img.style.opacity = "0.3";
+              img.setAttribute("data-error", "true");
+            }}
+          />
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function AssistantMessage({
   item,
+  timezone,
 }: {
   item: Extract<ChatItem, { kind: "assistant" }>;
+  timezone?: string;
 }) {
   const [reasoningOpen, setReasoningOpen] = useState(false);
   // v0.1.6：assistant 只发 tool_calls 时 content 为空字符串（语义"无文本输出"）。
@@ -267,14 +492,6 @@ function AssistantMessage({
   const hasContent = Boolean(item.content);
   const hasReasoning = Boolean(item.reasoning);
   const hasUsage = Boolean(item.usage);
-  const formattedTime = useMemo(
-    () =>
-      new Date(item.timestampMs).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
-    [item.timestampMs],
-  );
   if (!hasContent && !item.streaming && !hasReasoning) return null;
   return (
     <div className="flex flex-col gap-2">
@@ -282,7 +499,7 @@ function AssistantMessage({
         <button
           type="button"
           onClick={() => setReasoningOpen((v) => !v)}
-          className="inline-flex w-fit items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-secondary"
+          className="inline-flex w-fit items-center gap-1 rounded-xl border border-border/70 bg-card/62 px-2.5 py-1.5 text-xs text-muted-foreground shadow-sm hover:bg-secondary"
         >
           {reasoningOpen ? (
             <ChevronDown className="h-3 w-3" />
@@ -293,13 +510,19 @@ function AssistantMessage({
         </button>
       ) : null}
       {reasoningOpen && hasReasoning ? (
-        <pre className="whitespace-pre-wrap rounded-md border border-border bg-muted p-3 text-xs text-muted-foreground">
+        <pre className="whitespace-pre-wrap rounded-2xl border border-border/70 bg-muted/72 p-3 text-xs text-muted-foreground">
           {item.reasoning}
         </pre>
       ) : null}
       {hasContent || item.streaming ? (
         <div className="w-full">
-          <div className="rounded-2xl rounded-bl-md bg-card px-4 py-2 text-sm shadow-sm">
+          <MessageBubbleFrame
+            content={item.content}
+            timestampMs={item.timestampMs}
+            timezone={timezone}
+            align="left"
+            bubbleClassName="obsidian-panel-soft rounded-[1.45rem] rounded-bl-md px-4 py-3 text-sm"
+          >
             <Markdown text={item.content} />
             {item.streaming ? (
               <span
@@ -307,13 +530,12 @@ function AssistantMessage({
                 className="ml-1 inline-block h-4 w-1 animate-pulse bg-accent align-middle"
               />
             ) : null}
-          </div>
+          </MessageBubbleFrame>
           {hasUsage ? (
             <div
               className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 pl-2 text-[11px] text-muted-foreground"
               data-testid="assistant-usage-footer"
             >
-              <span>{formattedTime}</span>
               <span className="inline-flex items-center gap-1">
                 <ArrowUp className="h-3 w-3" />
                 {fmtCompact(item.usage!.prompt)}
@@ -348,6 +570,10 @@ function ToolCard({
   item: Extract<ChatItem, { kind: "tool" }>;
 }) {
   const [open, setOpen] = useState(false);
+  const openFileDrawer = useWorkspaceStore((s) => s.openFileDrawer);
+  const workspaceRoot = useWorkspaceStore((s) =>
+    item.threadId ? s.contextsByThread[item.threadId]?.workspace_root : undefined
+  );
   const status =
     item.ok === null
       ? "running"
@@ -360,41 +586,74 @@ function ToolCard({
       : status === "ok"
         ? "success"
         : "destructive";
+  const canViewFile =
+    item.toolName === "write_file" &&
+    item.ok === true &&
+    typeof item.resultData?.path === "string";
   return (
-    <div className="rounded-md border border-border bg-card px-4 py-2 text-xs">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2"
-      >
-        {open ? (
-          <ChevronDown className="h-3 w-3" />
-        ) : (
-          <ChevronRight className="h-3 w-3" />
-        )}
-        <span className="font-mono font-semibold">{item.toolName}</span>
-        <Badge variant={variant} className={cn("ml-auto")}>
+    <div className="obsidian-panel-soft rounded-[1.3rem] px-4 py-3 text-xs">
+      <div className="flex w-full items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex items-center gap-2"
+        >
+          {open ? (
+            <ChevronDown className="h-3 w-3" />
+          ) : (
+            <ChevronRight className="h-3 w-3" />
+          )}
+          <span className="font-mono font-semibold">{item.toolName}</span>
+        </button>
+        {canViewFile ? (
+          <button
+            type="button"
+            className="ml-auto flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-primary hover:bg-accent hover:text-accent-foreground transition-colors"
+            onClick={() => {
+              const absPath = item.resultData!.path as string;
+              openFileDrawer(item.threadId, absPath, workspaceRoot ?? "");
+            }}
+          >
+            <FileText className="h-3 w-3" />
+            查看文件
+          </button>
+        ) : null}
+        <Badge variant={variant} className={cn(canViewFile ? "ml-2" : "ml-auto")}>
           {status}
         </Badge>
-      </button>
+      </div>
       {open ? (
         <div className="mt-2 space-y-2">
-          {/* 入参（arguments） */}
-          <div>
-            <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
-              arguments
+          {/* 入参（pending 模式显示 partialInput；正式模式显示 arguments） */}
+          {item.pending ? (
+            <div>
+              <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                构建参数中…
+              </div>
+              <pre
+                data-testid="tool-partial-input"
+                className="overflow-x-auto rounded-xl bg-muted/72 p-2.5 font-mono text-[11px]"
+              >
+                {item.partialInput || "(尚无内容)"}
+              </pre>
             </div>
-            <pre className="overflow-x-auto rounded bg-muted p-2 font-mono text-[11px]">
-              {JSON.stringify(item.arguments, null, 2)}
-            </pre>
-          </div>
+          ) : (
+            <div>
+              <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                arguments
+              </div>
+              <pre className="overflow-x-auto rounded-xl bg-muted/72 p-2.5 font-mono text-[11px]">
+                {JSON.stringify(item.arguments, null, 2)}
+              </pre>
+            </div>
+          )}
           {/* 结果文本（content）；只有 tool.call.end 后才会出现 */}
           {item.result ? (
             <div>
               <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
                 result
               </div>
-              <pre className="max-h-80 overflow-auto rounded bg-muted p-2 font-mono text-[11px]">
+              <pre className="max-h-80 overflow-auto rounded-xl bg-muted/72 p-2.5 font-mono text-[11px]">
                 {item.result}
               </pre>
             </div>
@@ -405,7 +664,7 @@ function ToolCard({
               <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
                 data
               </div>
-              <pre className="max-h-60 overflow-auto rounded bg-muted p-2 font-mono text-[11px]">
+              <pre className="max-h-60 overflow-auto rounded-xl bg-muted/72 p-2.5 font-mono text-[11px]">
                 {JSON.stringify(item.resultData, null, 2)}
               </pre>
             </div>
@@ -445,7 +704,7 @@ function SystemNoticeCard({
       <div className="flex justify-center" data-testid="system-notice-wrap">
         <div
           className={cn(
-            "w-full max-w-2xl rounded-2xl border px-4 py-3 shadow-sm",
+            "w-full max-w-2xl rounded-[1.5rem] border px-4 py-3 shadow-glass",
             cardTone.container,
           )}
           data-testid="system-notice-card"

@@ -57,6 +57,7 @@ from infrastructure.config.models import (
     SafetySensitivePathConfig,
     SafetySkillCallConfig,
 )
+from infrastructure.config.paths import get_kongming_home
 from safety.approval.default_rules import (
     DEFAULT_APPROVAL_REQUIRED_COMMANDS,
     DEFAULT_SENSITIVE_PATHS,
@@ -81,6 +82,7 @@ _READ_TOOLS: frozenset[str] = frozenset({"read_file", "list_dir"})
 _WRITE_TOOLS: frozenset[str] = frozenset({"write_file"})
 _SHELL_TOOLS: frozenset[str] = frozenset({"run_shell"})
 _SKILL_TOOLS: frozenset[str] = frozenset({"skill"})
+_AGENT_WORKFLOW_TOOLS: frozenset[str] = frozenset({"run_agent_workflow", "run_parallel_subagents"})
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +333,14 @@ class ConsentResolver:
         if tool in _SKILL_TOOLS:
             return self._classify_skill(args)
 
+        if tool in _AGENT_WORKFLOW_TOOLS:
+            return _ConsentHit(
+                severity="standard",
+                matched_rule="agent-workflow-default",
+                reason="Agent workflow 编排工具，需用户确认",
+                target_value=tool,
+            )
+
         if tool in _SHELL_TOOLS:
             return self._classify_command(args)
 
@@ -555,8 +565,7 @@ class ConsentResolver:
         basename = normalized.name
         path_str = str(normalized)
 
-        # 1. CLAUDE.md / AGENTS.md（不限定项目根，只看 basename，已包含项目自有
-        # 防误删——HardBlock 已禁 ~/.kongming/，这里只剩项目自有路径）
+        # 1. CLAUDE.md / AGENTS.md（不限定项目根，只看 basename）
         if basename in _CONFIG_SELF_PROTECTION_FILES:
             return _ConsentHit(
                 severity="elevated",
@@ -565,17 +574,18 @@ class ConsentResolver:
                 target_value=path_str,
             )
 
-        # 2. .kongming/config.{yaml,yml,json,toml}
-        # 用字符串前缀检测：path 中含 ".kongming/config.<ext>"
+        # 2. 项目级 .kongming/config.{yaml,yml,json,toml}
+        # 用户级 kongming_home 是运行数据目录，走普通 standard 审批 lane。
         normalized_for_match = path_str.replace("\\", "/")
-        for cfg_basename in _KONGMING_CONFIG_BASENAMES:
-            if f".kongming/{cfg_basename}" in normalized_for_match:
-                return _ConsentHit(
-                    severity="elevated",
-                    matched_rule=f"config-self-protection-{cfg_basename}",
-                    reason=f"修改项目级 agent 配置 {cfg_basename}",
-                    target_value=path_str,
-                )
+        if not _is_under_kongming_home(raw_path):
+            for cfg_basename in _KONGMING_CONFIG_BASENAMES:
+                if f".kongming/{cfg_basename}" in normalized_for_match:
+                    return _ConsentHit(
+                        severity="elevated",
+                        matched_rule=f"config-self-protection-{cfg_basename}",
+                        reason=f"修改项目级 agent 配置 {cfg_basename}",
+                        target_value=path_str,
+                    )
 
         # 3. .kongming/safety/...
         normalized_str = path_str.replace("\\", "/")
@@ -708,6 +718,8 @@ def _match_path_rule(
         return _is_under(resolved_target, absolute_rule_path)
 
     if rule.match_mode == "project_relative":
+        if _project_relative_rule_skips_user_kongming_home(rule, resolved_target):
+            return False
         # 主路径：以 project_root 为基拼接，再做前缀比较
         relative_rule_path: Path | None
         try:
@@ -741,6 +753,30 @@ def _is_under(target: Path, prefix: Path) -> bool:
         return target == prefix or target.is_relative_to(prefix)
     except ValueError:
         return False
+
+
+def _project_relative_rule_skips_user_kongming_home(
+    rule: SensitivePathRule, resolved_target: Path
+) -> bool:
+    """项目级 .kongming 规则不消费用户级 kongming_home 运行数据。"""
+    matcher = rule.matcher.replace("\\", "/")
+    if not matcher.startswith(".kongming/"):
+        return False
+    try:
+        home = get_kongming_home().resolve(strict=False)
+    except (OSError, RuntimeError):
+        return False
+    return _is_under(resolved_target, home)
+
+
+def _is_under_kongming_home(raw_path: str) -> bool:
+    """判断目标是否位于用户级 kongming_home 运行数据目录。"""
+    try:
+        resolved = Path(raw_path).expanduser().resolve(strict=False)
+        home = get_kongming_home().resolve(strict=False)
+    except (OSError, RuntimeError):
+        return False
+    return _is_under(resolved, home)
 
 
 def _content_touches_safety_section(content: str) -> bool:

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from core.message import Message
+from infrastructure.config.paths import resolve_kongming_path
 
 _DEFAULT_DEBUG_DIR = Path(".kongming/debug")
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -19,7 +20,7 @@ class PromptDebugDumpSink:
     """把每个 LLM turn 的 prompt build 快照写成 JSON。"""
 
     def __init__(self, output_dir: str | Path = _DEFAULT_DEBUG_DIR) -> None:
-        self._output_dir = Path(output_dir)
+        self._output_dir = resolve_kongming_path(output_dir)
 
     def dump(
         self,

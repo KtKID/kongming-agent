@@ -14,7 +14,6 @@
   - 每个 segment 独立用 ``re.search`` 比对 regex matcher
   - 防 ``pytest tests/ && rm -rf /`` 逃逸
 - **ConfigSelfProtection 子集**
-  - ``write_file`` 落在 ``~/.kongming/`` → 命中 ``kongming-global-config`` rule
   - ``write_file`` 目标是项目级 ``.kongming/config*`` 且 ``content`` 含 ``allow_writes:``
     + 根级路径前缀（``/``、``/etc``、``/usr``、``~``、``$HOME``）→ 命中
     ``config-self-escalation`` profile rule
@@ -470,7 +469,7 @@ def _alternatives_for_path(rule: SensitivePathRule) -> tuple[str, ...]:
     if name == "kongming-global-config":
         return (
             "建议改写到项目级 .kongming/config.yaml（需 elevated 审批）",
-            "建议改用 elevated ask 提示用户手工编辑 ~/.kongming/",
+            "建议改用用户审批访问 ~/.kongming/",
         )
     if name == "docker-config":
         return (

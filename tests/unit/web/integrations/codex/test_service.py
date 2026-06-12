@@ -1,15 +1,3 @@
-"""CodexService 主路径单测（v0.1 最小覆盖）。
-
-mock ``asyncio.create_subprocess_exec`` 验证：
-
-- spawn args + stdin 装配（permission_mode 三档 / resume / model / 中文 cwd）
-- 主路径 query：thread.started → text → complete 序列
-- abort：SIGTERM → 2s 超时 → SIGKILL
-- 错误处理：FileNotFoundError / 认证失败 / exit_code != 0 / jsonl parse failed
-
-完整 25 边界用例在 T4。
-"""
-
 from __future__ import annotations
 
 from typing import Any
@@ -20,14 +8,8 @@ import pytest
 from hosts.web.integrations.codex.service import CodexService
 from hosts.web.shared.session_manager import SessionManager
 
-# ---------------------------------------------------------------------------
-# Fixtures + helpers
-# ---------------------------------------------------------------------------
-
 
 class _MockStdout:
-    """模拟 ``asyncio.subprocess.PIPE`` 的异步行迭代。"""
-
     def __init__(self, lines: list[bytes]) -> None:
         self._lines = lines
 
@@ -40,8 +22,6 @@ class _MockStdout:
 
 
 class _MockStderr:
-    """空 stderr，配合 ``async for`` 迭代。"""
-
     def __init__(self, lines: list[bytes] | None = None) -> None:
         self._lines = lines or []
 
@@ -54,8 +34,6 @@ class _MockStderr:
 
 
 class _MockStdin:
-    """模拟 subprocess stdin：记录写入内容，并支持 drain/close/wait_closed。"""
-
     def __init__(self) -> None:
         self.buffer = bytearray()
         self.closed = False
@@ -78,7 +56,6 @@ def _make_mock_proc(
     stderr_lines: list[bytes] | None = None,
     exit_code: int = 0,
 ) -> MagicMock:
-    """构造 mock subprocess：stdout 异步迭代 + wait/terminate/kill。"""
     proc = MagicMock()
     proc.stdin = _MockStdin()
     proc.stdout = _MockStdout(stdout_lines)
@@ -113,14 +90,7 @@ def writer() -> _FakeWriter:
     return _FakeWriter()
 
 
-# ---------------------------------------------------------------------------
-# 1. spawn args 构造
-# ---------------------------------------------------------------------------
-
-
 class TestSpawnArgs:
-    """验证 ``_build_invocation`` 构造的 codex 启动参数与 stdin。"""
-
     def test_default_mode(self, codex_service: CodexService) -> None:
         invocation = codex_service._build_invocation(
             session_id="pending-1",
@@ -130,8 +100,7 @@ class TestSpawnArgs:
             model=None,
             resume=False,
         )
-        assert invocation.argv == [
-            "codex",
+        assert invocation.argv[1:] == [
             "exec",
             "--json",
             "--skip-git-repo-check",
@@ -153,9 +122,7 @@ class TestSpawnArgs:
             model=None,
             resume=False,
         )
-        assert "--sandbox" in invocation.argv
         assert invocation.argv[invocation.argv.index("--sandbox") + 1] == "workspace-write"
-        assert "--config" in invocation.argv
         assert 'approval_policy="never"' in invocation.argv
 
     def test_bypass_permissions_mode(self, codex_service: CodexService) -> None:
@@ -170,10 +137,7 @@ class TestSpawnArgs:
         assert invocation.argv[invocation.argv.index("--sandbox") + 1] == "danger-full-access"
         assert 'approval_policy="never"' in invocation.argv
 
-    def test_resume_inserts_session_id_after_exec(
-        self,
-        codex_service: CodexService,
-    ) -> None:
+    def test_resume_inserts_session_id_after_exec(self, codex_service: CodexService) -> None:
         invocation = codex_service._build_invocation(
             session_id="abc",
             command="hi",
@@ -197,10 +161,7 @@ class TestSpawnArgs:
         assert invocation.argv[invocation.argv.index("--model") + 1] == "o3"
         assert invocation.stdin_text == "hi"
 
-    def test_command_is_sent_via_stdin(
-        self,
-        codex_service: CodexService,
-    ) -> None:
+    def test_command_is_sent_via_stdin(self, codex_service: CodexService) -> None:
         invocation = codex_service._build_invocation(
             session_id="pending-1",
             command="--ask-for-approval",
@@ -221,7 +182,6 @@ class TestSpawnArgs:
             model=None,
             resume=False,
         )
-        # subprocess.exec 自动处理 quote，参数原样
         assert invocation.argv[invocation.argv.index("--cd") + 1] == "/tmp/中文目录"
 
     def test_resume_keeps_image_flags_in_argv(self, codex_service: CodexService) -> None:
@@ -298,8 +258,6 @@ class TestSpawnArgs:
 
 
 class TestQueryHappyPath:
-    """主路径：spawn → 4 行 jsonl → writer 收到 session_created/text/complete。"""
-
     async def test_full_flow(
         self,
         codex_service: CodexService,
@@ -324,18 +282,16 @@ class TestQueryHappyPath:
                 writer=writer,
             )
 
-        kinds = [m.get("frame_type") for m in writer.sent]
-        # 至少包含 session_created / text / complete
+        kinds = [message.get("frame_type") for message in writer.sent]
         assert "session_created" in kinds
         assert "text" in kinds
         assert "complete" in kinds
-        # 最后一条是 complete（turn.completed normalize 出来的，service 不补发）
         assert kinds[-1] == "complete"
-        # session_created 携带 newSessionId == thread_id
-        sc = next(m for m in writer.sent if m["frame_type"] == "session_created")
-        assert sc.get("newSessionId") == "019dee"
-        # complete 含 tokenBudget
-        complete = next(m for m in writer.sent if m["frame_type"] == "complete")
+        session_created = next(
+            message for message in writer.sent if message["frame_type"] == "session_created"
+        )
+        assert session_created.get("newSessionId") == "019dee"
+        complete = next(message for message in writer.sent if message["frame_type"] == "complete")
         assert "tokenBudget" in complete
         assert proc.stdin.buffer == b"hi"
         assert proc.stdin.closed is True
@@ -346,7 +302,6 @@ class TestQueryHappyPath:
         session_manager: SessionManager,
         writer: _FakeWriter,
     ) -> None:
-        """thread.started 后 SessionManager 中的 session_id 被替换。"""
         stdout_lines = [
             b'{"type":"thread.started","thread_id":"real-019dee"}\n',
             b'{"type":"turn.completed","usage":{}}\n',
@@ -364,14 +319,8 @@ class TestQueryHappyPath:
                 writer=writer,
             )
 
-        # query 完成后两个 id 都已 unregister
         assert session_manager.is_active("pending-1") is False
         assert session_manager.is_active("real-019dee") is False
-
-
-# ---------------------------------------------------------------------------
-# 3. abort 路径
-# ---------------------------------------------------------------------------
 
 
 class TestAbort:
@@ -380,12 +329,10 @@ class TestAbort:
         codex_service: CodexService,
         session_manager: SessionManager,
     ) -> None:
-        """terminate 后 wait_for 超时 → 调 kill。"""
         proc = MagicMock()
         proc.returncode = None
         proc.terminate = MagicMock()
         proc.kill = MagicMock()
-        # proc.wait 返回 0；fake_wait_for 第一次抛 TimeoutError，第二次正常 await
         proc.wait = AsyncMock(return_value=0)
 
         codex_service._processes["sid-1"] = proc
@@ -396,9 +343,6 @@ class TestAbort:
         async def _fake_wait_for(coro: Any, *args: Any, **kwargs: Any) -> Any:
             nonlocal call_count
             call_count += 1
-            # 第一次（SIGTERM 后等 2s）抛 TimeoutError
-            # 第二次（kill 后的 await proc.wait()，不经 wait_for）不会进这里
-            # 关掉 coro 避免 "never awaited" 警告
             coro.close()
             raise TimeoutError
 
@@ -415,7 +359,6 @@ class TestAbort:
         codex_service: CodexService,
         session_manager: SessionManager,
     ) -> None:
-        """SIGTERM 后子进程及时退出 → 不调 kill。"""
         proc = MagicMock()
         proc.returncode = None
         proc.terminate = MagicMock()
@@ -435,16 +378,8 @@ class TestAbort:
         proc.terminate.assert_called_once()
         proc.kill.assert_not_called()
 
-    async def test_abort_unknown_session_returns_false(
-        self,
-        codex_service: CodexService,
-    ) -> None:
+    async def test_abort_unknown_session_returns_false(self, codex_service: CodexService) -> None:
         assert await codex_service.abort("nope") is False
-
-
-# ---------------------------------------------------------------------------
-# 4. 错误处理
-# ---------------------------------------------------------------------------
 
 
 class TestErrorHandling:
@@ -464,7 +399,7 @@ class TestErrorHandling:
                 writer=writer,
             )
 
-        errors = [m for m in writer.sent if m.get("frame_type") == "error"]
+        errors = [message for message in writer.sent if message.get("frame_type") == "error"]
         assert len(errors) >= 1
         assert "codex CLI not installed" in errors[0]["error"]
 
@@ -473,10 +408,7 @@ class TestErrorHandling:
         codex_service: CodexService,
         writer: _FakeWriter,
     ) -> None:
-        """stderr 含 'Not authenticated' → emit codex login 引导。"""
-        stdout_lines: list[bytes] = []
-        stderr_lines = [b"Error: Not authenticated. Please run codex login.\n"]
-        proc = _make_mock_proc(stdout_lines, stderr_lines, exit_code=1)
+        proc = _make_mock_proc([], [b"Error: Not authenticated. Please run codex login.\n"], 1)
 
         with patch(
             "hosts.web.integrations.codex.service.asyncio.create_subprocess_exec",
@@ -489,7 +421,7 @@ class TestErrorHandling:
                 writer=writer,
             )
 
-        errors = [m for m in writer.sent if m.get("frame_type") == "error"]
+        errors = [message for message in writer.sent if message.get("frame_type") == "error"]
         assert len(errors) == 1
         assert "codex login" in errors[0]["error"]
 
@@ -498,10 +430,7 @@ class TestErrorHandling:
         codex_service: CodexService,
         writer: _FakeWriter,
     ) -> None:
-        """子进程 exit_code != 0 且没收到 turn.completed → emit error 含 stderr 末尾。"""
-        stdout_lines: list[bytes] = []
-        stderr_lines = [b"some random failure happened\n"]
-        proc = _make_mock_proc(stdout_lines, stderr_lines, exit_code=42)
+        proc = _make_mock_proc([], [b"some random failure happened\n"], 42)
 
         with patch(
             "hosts.web.integrations.codex.service.asyncio.create_subprocess_exec",
@@ -514,7 +443,7 @@ class TestErrorHandling:
                 writer=writer,
             )
 
-        errors = [m for m in writer.sent if m.get("frame_type") == "error"]
+        errors = [message for message in writer.sent if message.get("frame_type") == "error"]
         assert len(errors) == 1
         assert "exited with code 42" in errors[0]["error"]
         assert "some random failure" in errors[0]["error"]
@@ -524,7 +453,6 @@ class TestErrorHandling:
         codex_service: CodexService,
         writer: _FakeWriter,
     ) -> None:
-        """jsonl 单行 parse 失败 → emit error 但主循环继续读下一行。"""
         stdout_lines = [
             b"not-a-json-line\n",
             b'{"type":"thread.started","thread_id":"019dee"}\n',
@@ -543,22 +471,15 @@ class TestErrorHandling:
                 writer=writer,
             )
 
-        kinds = [m.get("frame_type") for m in writer.sent]
-        # parse 失败 emit 一条 error 但后续 thread.started / complete 仍然正常处理
+        kinds = [message.get("frame_type") for message in writer.sent]
         assert "error" in kinds
         assert "session_created" in kinds
         assert "complete" in kinds
-        # 验证错误消息含 jsonl parse 提示
-        errors = [m for m in writer.sent if m.get("frame_type") == "error"]
-        assert any("jsonl parse failed" in e["error"] for e in errors)
-
-
-# ---------------------------------------------------------------------------
-# 5. 重复 session 保护（v0.1 service 未实现保护，标 skip）
-# ---------------------------------------------------------------------------
+        errors = [message for message in writer.sent if message.get("frame_type") == "error"]
+        assert any("jsonl parse failed" in message["error"] for message in errors)
 
 
 class TestDuplicateSession:
-    @pytest.mark.skip(reason="not implemented in v0.1 — SessionManager.register 直接覆盖")
+    @pytest.mark.skip(reason="not implemented in v0.1 - SessionManager.register overwrites")
     async def test_duplicate_query_rejected(self) -> None:
-        """v0.2+ 若加保护再启用。"""
+        pass

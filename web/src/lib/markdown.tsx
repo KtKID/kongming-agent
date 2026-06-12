@@ -1,10 +1,16 @@
-import { Fragment, type ReactNode } from "react";
+import { Fragment, Suspense, lazy, type ReactNode } from "react";
+
+// mermaid 走独立 chunk（vite.config manualChunks），按需异步加载
+const MermaidBlock = lazy(() => import("@/components/MermaidBlock"));
 
 /**
  * kongming-agent v0.1.5 精简 markdown
  *
  * 支持：
- * - 代码块 ```lang\ncode\n```（lang 可选）
+ * - 标题 # ~ ###### (h1-h6)
+ * - 引用块 > text
+ * - 水平分割线 --- / *** / ___
+ * - 代码块 ```lang\ncode\n```（lang 可选，lang===mermaid 时走 MermaidBlock 渲染 SVG）
  * - 行内代码 `code`
  * - 链接 [text](url)
  * - 加粗 **text**
@@ -12,7 +18,7 @@ import { Fragment, type ReactNode } from "react";
  * - 列表 `- item` / `1. item`
  * - 段落（空行分隔）
  *
- * 不支持：表格、引用块、HTML 嵌入、setext 标题。
+ * 不支持：表格、HTML 嵌入、setext 标题。
  *
  * ## XSS 防御
  *
@@ -102,8 +108,9 @@ function parseInline(text: string): ReactNode[] {
 }
 
 interface BlockToken {
-  type: "p" | "code" | "ul" | "ol" | "blank";
+  type: "p" | "code" | "ul" | "ol" | "blank" | "heading" | "blockquote" | "hr";
   lang?: string;
+  level?: 1 | 2 | 3 | 4 | 5 | 6;
   lines: string[];
 }
 
@@ -128,6 +135,36 @@ function parseBlocks(src: string): BlockToken[] {
       // 跳过 close fence
       if (i < lines.length) i++;
       tokens.push({ type: "code", lang, lines: codeLines });
+      continue;
+    }
+
+    // 标题 # ~ ######
+    const heading = /^(#{1,6})\s+(.+?)\s*$/.exec(line);
+    if (heading) {
+      tokens.push({
+        type: "heading",
+        level: heading[1]!.length as 1 | 2 | 3 | 4 | 5 | 6,
+        lines: [heading[2]!],
+      });
+      i++;
+      continue;
+    }
+
+    // 水平分割线 ---  ***  ___
+    if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      tokens.push({ type: "hr", lines: [] });
+      i++;
+      continue;
+    }
+
+    // 引用块 > text
+    if (/^\s*>\s?/.test(line)) {
+      const quoteLines: string[] = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i]!)) {
+        quoteLines.push(lines[i]!.replace(/^\s*>\s?/, ""));
+        i++;
+      }
+      tokens.push({ type: "blockquote", lines: quoteLines });
       continue;
     }
 
@@ -158,12 +195,15 @@ function parseBlocks(src: string): BlockToken[] {
       continue;
     }
 
-    // 段落：连续非空行
+    // 段落：连续非空行（遇到其它块级语法时停止）
     const paraLines: string[] = [];
     while (
       i < lines.length &&
       lines[i]!.trim() !== "" &&
       !/^```/.test(lines[i]!) &&
+      !/^#{1,6}\s+/.test(lines[i]!) &&
+      !/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(lines[i]!) &&
+      !/^\s*>\s?/.test(lines[i]!) &&
       !/^\s*[-*]\s+/.test(lines[i]!) &&
       !/^\s*\d+\.\s+/.test(lines[i]!)
     ) {
@@ -189,15 +229,66 @@ export function Markdown({ text, className }: MarkdownProps) {
         switch (tok.type) {
           case "blank":
             return null;
-          case "code":
+          case "heading": {
+            const HeadingTag = `h${tok.level ?? 1}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
+            const headingClass: Record<number, string> = {
+              1: "mt-3 mb-1 text-lg font-semibold leading-snug",
+              2: "mt-3 mb-1 text-base font-semibold leading-snug",
+              3: "mt-2 mb-1 text-sm font-semibold leading-snug",
+              4: "mt-2 mb-1 text-sm font-medium leading-snug",
+              5: "mt-2 mb-1 text-xs font-medium leading-snug text-muted-foreground",
+              6: "mt-2 mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground",
+            };
+            return (
+              <HeadingTag key={key++} className={headingClass[tok.level ?? 1]}>
+                {parseInline(tok.lines[0] ?? "")}
+              </HeadingTag>
+            );
+          }
+          case "hr":
+            return (
+              <hr
+                key={key++}
+                className="my-3 border-0 border-t border-border"
+              />
+            );
+          case "blockquote":
+            return (
+              <blockquote
+                key={key++}
+                className="my-2 border-l-[3px] border-accent rounded-r-md bg-accent/10 px-3 py-2 text-sm text-muted-foreground"
+              >
+                {tok.lines.map((line, i) => (
+                  <Fragment key={i}>
+                    {i > 0 ? <br /> : null}
+                    {parseInline(line)}
+                  </Fragment>
+                ))}
+              </blockquote>
+            );
+          case "code": {
+            const source = tok.lines.join("\n");
+            if (tok.lang === "mermaid") {
+              const fallback = (
+                <pre className="my-2 overflow-x-auto rounded-md border border-border bg-muted p-3 text-xs">
+                  <code className="font-mono">{source}</code>
+                </pre>
+              );
+              return (
+                <Suspense key={key++} fallback={fallback}>
+                  <MermaidBlock source={source} />
+                </Suspense>
+              );
+            }
             return (
               <pre
                 key={key++}
                 className="my-2 overflow-x-auto rounded-md border border-border bg-muted p-3 text-xs"
               >
-                <code className="font-mono">{tok.lines.join("\n")}</code>
+                <code className="font-mono">{source}</code>
               </pre>
             );
+          }
           case "ul":
             return (
               <ul

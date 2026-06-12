@@ -4,7 +4,8 @@
 - `cfg.evolution.memory.enabled=False` 时 `_assemble_instructions` 返回 memory_store=None
 - `inject_prompt=False` 时仍加载活态 entries，但不向 sources 追加 memory block
 - `root_path` 绝对路径直接作为 memory_dir（不再拼 `.kongming/memory`）
-- `root_path` 相对路径与 cwd 拼接
+- `root_path` 字面 `.kongming/*` 派生到 kongming_home
+- 其他自定义相对路径按进程 cwd 解析
 - `view_max_chars` 透传给 MemoryTool
 - `read_max_chars` 生效于 MemoryStore 文件读取
 
@@ -121,7 +122,7 @@ async def test_root_path_absolute_used_as_memory_dir(tmp_path: Path) -> None:
 
 
 async def test_root_path_relative_joined_with_cwd(tmp_path: Path, monkeypatch) -> None:
-    """相对 root_path 视为 cwd 子目录。"""
+    """自定义相对 root_path 按进程 cwd 解析。"""
     # 用 tmp_path 当 cwd，避免污染真实项目目录
     monkeypatch.chdir(tmp_path)
     rel = "memory-rel"
@@ -137,6 +138,29 @@ async def test_root_path_relative_joined_with_cwd(tmp_path: Path, monkeypatch) -
     _, _, memory_store = await cli_main._assemble_instructions(cfg, [])
     assert memory_store is not None
     assert memory_store.memory_dir == (tmp_path / rel).resolve()
+
+
+async def test_root_path_kongming_relative_uses_kongming_home(tmp_path: Path, monkeypatch) -> None:
+    """`.kongming/*` root_path 派生到 kongming_home。"""
+    home = tmp_path / "home"
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.setenv("KONGMING_HOME", str(home))
+    monkeypatch.chdir(cwd)
+
+    mem_dir = home / "memory"
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "MEMORY.md").write_text("home path works", encoding="utf-8")
+
+    cfg = _build_cfg(
+        EvolutionMemoryConfig(
+            enabled=True,
+            root_path=".kongming/memory",
+        )
+    )
+    _, _, memory_store = await cli_main._assemble_instructions(cfg, [])
+    assert memory_store is not None
+    assert memory_store.memory_dir == mem_dir.resolve()
 
 
 # ---------------------------------------------------------------------------

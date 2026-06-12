@@ -28,7 +28,9 @@ from __future__ import annotations
 import asyncio
 import select
 import sys
+import termios
 import time
+import tty
 from dataclasses import dataclass
 from typing import Any
 
@@ -117,7 +119,91 @@ async def _wait_until_deadline(deadline_ms: int) -> None:
 
 
 def _blocking_cli_manager_readline_with_countdown(timeout: _CliManagerTimeout) -> str | None:
-    """单行动态倒计时读取输入，避免每秒刷出新行。"""
+    """动态倒计时读取输入，刷新时保留用户已输入内容。"""
+    try:
+        return _blocking_cli_manager_readline_with_live_buffer(timeout)
+    except (termios.error, OSError, ValueError, AttributeError):
+        return _blocking_cli_manager_readline_without_terminal_control(timeout)
+
+
+def _blocking_cli_manager_readline_with_live_buffer(
+    timeout: _CliManagerTimeout,
+) -> str | None:
+    """用 cbreak 模式维护输入缓冲，倒计时刷新时重画缓冲内容。"""
+    fd = sys.stdin.fileno()
+    old_attrs = termios.tcgetattr(fd)
+    typed: list[str] = []
+    last_seconds: int | None = None
+    try:
+        tty.setcbreak(fd)
+        while True:
+            now_ms = int(time.time() * 1000)
+            remaining_ms = timeout.deadline_ms - now_ms
+            if remaining_ms <= 0:
+                final_text = (
+                    "自动同意"
+                    if timeout.default_action is ApprovalAction.ACCEPT_ONCE
+                    else "自动拒绝"
+                )
+                sys.stdout.write(f"\r\033[K[approval] {final_text}。\n")
+                sys.stdout.flush()
+                return None
+
+            remaining_seconds = max(0, (remaining_ms + 999) // 1000)
+            if remaining_seconds != last_seconds:
+                _render_cli_manager_prompt_with_buffer(
+                    remaining_ms=remaining_ms,
+                    default_action=timeout.default_action,
+                    typed="".join(typed),
+                )
+                last_seconds = remaining_seconds
+
+            wait_seconds = min(0.2, max(0.0, remaining_ms / 1000.0))
+            readable, _, _ = select.select([sys.stdin], [], [], wait_seconds)
+            if not readable:
+                continue
+
+            char = sys.stdin.read(1)
+            if char == "":
+                raise EOFError from None
+            if char in {"\r", "\n"}:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return "".join(typed)
+            if char == "\x03":
+                raise KeyboardInterrupt
+            if char == "\x04":
+                raise EOFError from None
+            if char in {"\x7f", "\b"}:
+                if typed:
+                    typed.pop()
+                    _render_cli_manager_prompt_with_buffer(
+                        remaining_ms=remaining_ms,
+                        default_action=timeout.default_action,
+                        typed="".join(typed),
+                    )
+                continue
+            if char.isprintable():
+                typed.append(char)
+                sys.stdout.write(char)
+                sys.stdout.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+
+
+def _blocking_cli_manager_readline_without_terminal_control(
+    timeout: _CliManagerTimeout,
+) -> str | None:
+    """终端控制不可用时保留 deadline 语义，读取完整行。"""
+    now_ms = int(time.time() * 1000)
+    remaining_ms = timeout.deadline_ms - now_ms
+    if remaining_ms > 0:
+        prompt_text = _format_cli_manager_prompt(
+            remaining_ms=remaining_ms,
+            default_action=timeout.default_action,
+        )
+        sys.stdout.write(prompt_text)
+        sys.stdout.flush()
     while True:
         now_ms = int(time.time() * 1000)
         remaining_ms = timeout.deadline_ms - now_ms
@@ -125,16 +211,9 @@ def _blocking_cli_manager_readline_with_countdown(timeout: _CliManagerTimeout) -
             final_text = (
                 "自动同意" if timeout.default_action is ApprovalAction.ACCEPT_ONCE else "自动拒绝"
             )
-            sys.stdout.write(f"\r\033[K[approval] {final_text}。\n")
+            sys.stdout.write(f"\n[approval] {final_text}。\n")
             sys.stdout.flush()
             return None
-
-        prompt_text = _format_cli_manager_prompt(
-            remaining_ms=remaining_ms,
-            default_action=timeout.default_action,
-        )
-        sys.stdout.write("\r\033[K" + prompt_text)
-        sys.stdout.flush()
 
         wait_seconds = min(1.0, max(0.0, remaining_ms / 1000.0))
         try:
@@ -152,6 +231,21 @@ def _blocking_cli_manager_readline_with_countdown(timeout: _CliManagerTimeout) -
         if line == "":
             raise EOFError from None
         return line.rstrip("\n")
+
+
+def _render_cli_manager_prompt_with_buffer(
+    *,
+    remaining_ms: int,
+    default_action: ApprovalAction,
+    typed: str,
+) -> None:
+    """重画倒计时 prompt，并把用户已输入内容放回光标前。"""
+    prompt_text = _format_cli_manager_prompt(
+        remaining_ms=remaining_ms,
+        default_action=default_action,
+    )
+    sys.stdout.write("\r\033[K" + prompt_text + typed)
+    sys.stdout.flush()
 
 
 def _format_cli_manager_prompt(

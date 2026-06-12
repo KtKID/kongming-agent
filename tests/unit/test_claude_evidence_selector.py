@@ -120,7 +120,7 @@ class TestHappyPath:
 
 class TestFilterLogic:
     def test_with_tool_use_filtered(self, tmp_path: Path) -> None:
-        """tool_use 和 tool_result 被过滤，只保留 kind=="text"。"""
+        """tool_use 和 tool_result 被过滤，只保留 frame_type=="text"。"""
         _setup_fixture(tmp_path, "with_tool_use.jsonl")
         window = _build(tmp_path)
 
@@ -136,7 +136,7 @@ class TestFilterLogic:
         assert turns == [1, 1, 1, 2, 2]
 
     def test_with_thinking_filtered(self, tmp_path: Path) -> None:
-        """thinking block 被过滤，只保留 kind=="text"。"""
+        """thinking block 被过滤，只保留 frame_type=="text"。"""
         _setup_fixture(tmp_path, "with_thinking.jsonl")
         window = _build(tmp_path)
 

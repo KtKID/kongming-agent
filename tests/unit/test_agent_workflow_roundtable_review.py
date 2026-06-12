@@ -131,6 +131,7 @@ class _FakeRoundtableSubAgentManager:
             content=content,
             error_message=None,
             turn_count=1,
+            usage=_usage_for_fake_run(stage),
         )
 
 
@@ -255,6 +256,33 @@ def _write_sample_source(tmp_path: Path) -> None:
     )
 
 
+def _usage_for_fake_run(stage: str) -> dict[str, int]:
+    """构造 fake 子 agent usage，输入为 roundtable stage，输出含动态字段的 usage。"""
+    if stage == "independent":
+        return {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "cache_read_tokens": 3,
+            "cache_creation_tokens": 5,
+            "provider_extra_tokens": 7,
+        }
+    if stage == "rebuttal":
+        return {
+            "input_tokens": 80,
+            "output_tokens": 10,
+            "cache_read_tokens": 2,
+            "cache_creation_tokens": 1,
+            "provider_extra_tokens": 4,
+        }
+    return {
+        "input_tokens": 200,
+        "output_tokens": 50,
+        "cache_read_tokens": 6,
+        "cache_creation_tokens": 2,
+        "provider_extra_tokens": 9,
+    }
+
+
 def _role_manager(tmp_path: Path) -> AgentRoleManager:
     """构造带 code review 内置角色的 manager，输入为 tmp_path，输出角色门户。"""
     return AgentRoleManager(
@@ -287,6 +315,7 @@ async def test_roundtable_review_strategy_writes_review_board(tmp_path: Path) ->
         len([task for task in fake.tasks if task.metadata["roundtable_stage"] == "independent"])
         == 5
     )
+    assert all(task.metadata["max_turns"] == 8 for task in fake.tasks)
     board = result.workflow_dir / "review_board"
     claims = (board / "claims.jsonl").read_text(encoding="utf-8").strip().splitlines()
     rebuttals = (board / "rebuttals.jsonl").read_text(encoding="utf-8").strip().splitlines()
@@ -303,6 +332,28 @@ async def test_roundtable_review_strategy_writes_review_board(tmp_path: Path) ->
     assert result.data is not None
     assert result.data["roundtable_review"]["claim_count"] == 5  # type: ignore[index]
     assert Path(result.data["roundtable_review"]["role_snapshot_path"]).exists()  # type: ignore[index]
+    roundtable_data = result.data["roundtable_review"]  # type: ignore[index]
+    assert roundtable_data["estimated_child_output_tokens"] > 0
+    assert len(roundtable_data["child_agent_usages"]) == 11
+    assert roundtable_data["child_agent_usage_totals"] == {
+        "input_tokens": 1100,
+        "output_tokens": 200,
+        "cache_read_tokens": 31,
+        "cache_creation_tokens": 32,
+        "provider_extra_tokens": 64,
+    }
+    result_payload = json.loads((result.workflow_dir / "result.json").read_text(encoding="utf-8"))
+    assert result_payload["roundtable_review"]["child_agent_usages"][0]["usage"] == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cache_read_tokens": 3,
+        "cache_creation_tokens": 5,
+        "provider_extra_tokens": 7,
+    }
+    assert (
+        result_payload["roundtable_review"]["child_agent_usage_totals"]
+        == roundtable_data["child_agent_usage_totals"]
+    )
 
 
 def test_agent_workflow_manager_registers_roundtable_review(tmp_path: Path) -> None:

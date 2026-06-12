@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from infrastructure.config.paths import get_kongming_home, resolve_kongming_path
+
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
@@ -226,11 +228,12 @@ class MemoryStore:
     - ``load()`` / ``ensure()`` 保持向后兼容。
 
     Args:
-        base_path: 项目根目录。默认为当前工作目录；实际 memory 目录会拼为
+        base_path: 显式项目根目录；实际 memory 目录会拼为
             ``base_path / .kongming/memory``。仅在 ``memory_dir`` 为 ``None`` 时生效。
         memory_dir: 直接指定 memory 目录的绝对路径。若提供，则忽略 ``base_path``
             且不再追加 ``.kongming/memory``，让调用方（例如 cli 按 config
             ``evolution.memory.root_path`` 配置绝对路径）自由选择任意目录。
+        默认路径: ``get_kongming_home() / "memory"``。
         read_max_chars: 单文件读取最大字符数。超出部分按字符截断，防止异常巨大的
             memory 文件吃掉 prompt 预算。
     """
@@ -243,10 +246,13 @@ class MemoryStore:
         read_max_chars: int = 65536,
     ) -> None:
         if memory_dir is not None:
-            self._memory_dir = Path(memory_dir).resolve()
+            self._memory_dir = resolve_kongming_path(memory_dir)
             self._base = self._memory_dir  # 保留属性以便老代码访问，语义不再重要
+        elif base_path is None:
+            self._base = get_kongming_home()
+            self._memory_dir = self._base / "memory"
         else:
-            self._base = (base_path or Path.cwd()).resolve()
+            self._base = Path(base_path).expanduser().resolve()
             self._memory_dir = self._base / _DEFAULT_MEMORY_DIR
 
         self._read_max_chars = int(read_max_chars)

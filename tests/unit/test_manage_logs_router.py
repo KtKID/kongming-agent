@@ -61,12 +61,13 @@ class TestListSources:
 
         data = resp.json()
         assert isinstance(data, list)
-        assert len(data) == 7
+        assert len(data) == 8
 
         types = {item["type"] for item in data}
         assert "web_server" in types
         assert "full_log" in types
         assert "trace" in types
+        assert "generic_channel" in types
 
 
 class TestReadLogValidType:

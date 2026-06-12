@@ -12,7 +12,7 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from application.agent_workflows.context import WorkflowExecutionContext
 from application.agent_workflows.strategies.description import (
@@ -26,6 +26,7 @@ from application.agent_workflows.strategies.map_reduce.artifacts import (
 from application.agent_workflows.strategies.map_reduce.contracts import (
     CoverageSummary,
     FailedShardReport,
+    MapperCoverage,
     MapperInputManifest,
     MapperOutputEnvelope,
     MapperValidationResult,
@@ -246,58 +247,78 @@ class MapReduceStrategy:
         failed_shards = self._failed_mapper_runs(shards, runs)
         validation_results: list[MapperValidationResult] = []
         shard_by_id = {shard.shard_id: shard for shard in shards}
-        for run in runs:
-            if run.status != "completed":
-                continue
-            shard_id = str(run.task.metadata.get("map_reduce_shard_id", ""))
-            if len(run.content) > spec.mapper.max_output_chars:
-                failed_shards.append(
-                    _oversized_output_failed_shard(
-                        shard_by_id[shard_id], spec.mapper.max_output_chars
-                    )
-                )
+        if spec.output_contract == "raw_text":
+            for run in runs:
+                if run.status != "completed":
+                    continue
+                shard_id = str(run.task.metadata.get("map_reduce_shard_id", ""))
                 context.audit_writer.write_event(
                     {
-                        "action": "map_mapper_output_rejected",
+                        "action": "map_mapper_output_collected",
                         "payload": {
                             "workflow_id": context.workflow_id,
                             "mode": self.mode,
                             "output_contract": spec.output_contract,
                             "shard_id": shard_id,
-                            "valid": False,
-                            "errors": [
-                                {
-                                    "error_type": "output_too_large",
-                                    "message": "mapper output exceeds mapper.max_output_chars",
-                                    "actual_chars": len(run.content),
-                                    "max_output_chars": spec.mapper.max_output_chars,
-                                }
-                            ],
+                            "content_chars": len(run.content),
                         },
                     }
                 )
-                continue
-            validation = validator.validate(run.content, expected_shard_id=shard_id)
-            validation_results.append(validation)
-            if validation.valid and validation.output is not None:
-                valid_outputs.append(validation.output)
-                action = "map_mapper_output_validated"
-            else:
-                failed_shards.append(_validation_failed_shard(shard_by_id[shard_id], validation))
-                action = "map_mapper_output_rejected"
-            context.audit_writer.write_event(
-                {
-                    "action": action,
-                    "payload": {
-                        "workflow_id": context.workflow_id,
-                        "mode": self.mode,
-                        "output_contract": spec.output_contract,
-                        "shard_id": shard_id,
-                        "valid": validation.valid,
-                        "errors": [to_jsonable(error) for error in validation.errors],
-                    },
-                }
-            )
+        else:
+            for run in runs:
+                if run.status != "completed":
+                    continue
+                shard_id = str(run.task.metadata.get("map_reduce_shard_id", ""))
+                if len(run.content) > spec.mapper.max_output_chars:
+                    failed_shards.append(
+                        _oversized_output_failed_shard(
+                            shard_by_id[shard_id], spec.mapper.max_output_chars
+                        )
+                    )
+                    context.audit_writer.write_event(
+                        {
+                            "action": "map_mapper_output_rejected",
+                            "payload": {
+                                "workflow_id": context.workflow_id,
+                                "mode": self.mode,
+                                "output_contract": spec.output_contract,
+                                "shard_id": shard_id,
+                                "valid": False,
+                                "errors": [
+                                    {
+                                        "error_type": "output_too_large",
+                                        "message": "mapper output exceeds mapper.max_output_chars",
+                                        "actual_chars": len(run.content),
+                                        "max_output_chars": spec.mapper.max_output_chars,
+                                    }
+                                ],
+                            },
+                        }
+                    )
+                    continue
+                validation = validator.validate(run.content, expected_shard_id=shard_id)
+                validation_results.append(validation)
+                if validation.valid and validation.output is not None:
+                    valid_outputs.append(validation.output)
+                    action = "map_mapper_output_validated"
+                else:
+                    failed_shards.append(
+                        _validation_failed_shard(shard_by_id[shard_id], validation)
+                    )
+                    action = "map_mapper_output_rejected"
+                context.audit_writer.write_event(
+                    {
+                        "action": action,
+                        "payload": {
+                            "workflow_id": context.workflow_id,
+                            "mode": self.mode,
+                            "output_contract": spec.output_contract,
+                            "shard_id": shard_id,
+                            "valid": validation.valid,
+                            "errors": [to_jsonable(error) for error in validation.errors],
+                        },
+                    }
+                )
 
         context.audit_writer.write_event(
             {
@@ -311,45 +332,55 @@ class MapReduceStrategy:
                 },
             }
         )
-        try:
-            reducer_output = await asyncio.wait_for(
-                asyncio.to_thread(
-                    lambda: MapReduceReducer().reduce(
-                        workflow_id=context.workflow_id,
-                        spec=spec,
-                        shards=shards,
-                        valid_outputs=tuple(valid_outputs),
-                        failed_shards=tuple(failed_shards),
-                    )
-                ),
-                timeout=min(
-                    spec.limits.reducer_timeout_seconds,
-                    _remaining_timeout(workflow_deadline),
-                ),
-            )
-        except TimeoutError:
-            reducer_output = _reducer_timeout_output(
+        if spec.output_contract == "raw_text":
+            reducer_output = _raw_text_reducer_output(
                 workflow_id=context.workflow_id,
                 spec=spec,
                 shards=shards,
-                valid_outputs=tuple(valid_outputs),
+                runs=runs,
                 failed_shards=tuple(failed_shards),
             )
-            context.audit_writer.write_event(
-                {
-                    "action": "map_reduce_reducer_failed",
-                    "payload": {
-                        "workflow_id": context.workflow_id,
-                        "mode": self.mode,
-                        "output_contract": spec.output_contract,
-                        "reason": "reducer timed out",
-                    },
-                }
-            )
+        else:
+            try:
+                reducer_output = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        lambda: MapReduceReducer().reduce(
+                            workflow_id=context.workflow_id,
+                            spec=spec,
+                            shards=shards,
+                            valid_outputs=tuple(valid_outputs),
+                            failed_shards=tuple(failed_shards),
+                        )
+                    ),
+                    timeout=min(
+                        spec.limits.reducer_timeout_seconds,
+                        _remaining_timeout(workflow_deadline),
+                    ),
+                )
+            except TimeoutError:
+                reducer_output = _reducer_timeout_output(
+                    workflow_id=context.workflow_id,
+                    spec=spec,
+                    shards=shards,
+                    valid_outputs=tuple(valid_outputs),
+                    failed_shards=tuple(failed_shards),
+                )
+                context.audit_writer.write_event(
+                    {
+                        "action": "map_reduce_reducer_failed",
+                        "payload": {
+                            "workflow_id": context.workflow_id,
+                            "mode": self.mode,
+                            "output_contract": spec.output_contract,
+                            "reason": "reducer timed out",
+                        },
+                    }
+                )
         artifact_writer = MapReduceArtifactWriter(workflow_dir=context.workflow_dir)
         artifact_paths = artifact_writer.write_all(
             shards=shards,
             mapper_records=_mapper_artifact_records(
+                output_contract=spec.output_contract,
                 shards=shards,
                 runs=runs,
                 reports=reports,
@@ -425,6 +456,7 @@ class MapReduceStrategy:
             runs=runs,
             reports=reports,
             report_index_path=report_index_path,
+            desc=context.desc,
             data=extra,
             completed_override=completed,
         )
@@ -735,8 +767,68 @@ def _reducer_timeout_output(
     )
 
 
+def _raw_text_reducer_output(
+    *,
+    workflow_id: str,
+    spec: Any,
+    shards: tuple[Any, ...],
+    runs: tuple[SubAgentRun, ...],
+    failed_shards: tuple[FailedShardReport, ...],
+) -> ReducerOutput:
+    """生成 raw_text reducer 收口结果，输入为 mapper runs，输出为状态型 ReducerOutput。"""
+    completed_shard_ids = {
+        str(run.task.metadata.get("map_reduce_shard_id", ""))
+        for run in runs
+        if run.status == "completed"
+    }
+    per_shard = tuple(
+        MapperCoverage(
+            files_assigned=len(shard.files),
+            files_seen_count=len(shard.files) if shard.shard_id in completed_shard_ids else 0,
+            symbols_seen_count=0,
+            skipped_files=(),
+            skip_reasons=(),
+        )
+        for shard in shards
+    )
+    total_assigned = sum(coverage.files_assigned for coverage in per_shard)
+    total_seen = sum(coverage.files_seen_count for coverage in per_shard)
+    failed_count = len(failed_shards)
+    status: Literal["completed", "partial", "failed"]
+    if not failed_shards:
+        status = "completed"
+    elif completed_shard_ids:
+        status = "partial"
+    else:
+        status = "failed"
+    return ReducerOutput(
+        status=status,
+        workflow_id=workflow_id,
+        output_contract=spec.output_contract,
+        total_shards=len(shards),
+        completed_shards=len(completed_shard_ids),
+        failed_shards=failed_count,
+        deduped_findings=(),
+        top_findings=(),
+        coverage_summary=CoverageSummary(
+            total_files_assigned=total_assigned,
+            total_files_seen=total_seen,
+            total_symbols_seen=0,
+            per_shard=per_shard,
+            notes=(
+                "raw_text mapper 输出已收集；父 agent 应读取 subagent reports "
+                "中的 summary/content 完成最终汇总。"
+            ),
+        ),
+        failed_shard_reports=failed_shards,
+        followups=() if not failed_shards else ("补跑失败 raw_text shard",),
+        reduced_at=_now_iso(),
+    )
+
+
 def _mapper_artifact_records(
     *,
+    output_contract: str,
     shards: tuple[Any, ...],
     runs: tuple[SubAgentRun, ...],
     reports: tuple[Any, ...],
@@ -758,6 +850,9 @@ def _mapper_artifact_records(
         run = run_by_shard_id.get(shard.shard_id)
         report = report_by_task_id.get(shard.shard_id)
         validation = validation_by_expected_shard_id.get(shard.shard_id)
+        raw_text_valid = (
+            output_contract == "raw_text" and run is not None and run.status == "completed"
+        )
         records.append(
             {
                 "shard_id": shard.shard_id,
@@ -767,7 +862,13 @@ def _mapper_artifact_records(
                 "run_status": run.status if run is not None else "missing",
                 "error_message": run.error_message if run is not None else "mapper did not run",
                 "report_path": report.report_path if report is not None else None,
-                "validation_valid": validation.valid if validation is not None else False,
+                "validation_valid": (
+                    True
+                    if raw_text_valid
+                    else validation.valid
+                    if validation is not None
+                    else False
+                ),
                 "validation_error_count": (len(validation.errors) if validation is not None else 0),
                 "raw_content_digest": (
                     validation.raw_content_digest if validation is not None else None

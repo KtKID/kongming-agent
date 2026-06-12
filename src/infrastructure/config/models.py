@@ -352,9 +352,11 @@ class SessionConfig(BaseModel):
         backend: ``memory`` 使用 :class:`core.session.InMemorySession`；
             ``sqlite`` 交给 ``sessions/session_store.py`` 的工程化实现承接；
             ``file`` 使用 append-only JSONL 文件持久化（v0.1.1 新增）。
-        store_path: sqlite 后端的持久化数据库文件路径。
+        store_path: sqlite 后端的持久化数据库文件路径；`.kongming/*` 派生到
+            `kongming_home`。
             memory 和 file 后端忽略此项。
-        file_store_path: file 后端的 session 目录父路径。
+        file_store_path: file 后端的 session 目录父路径；`.kongming/*` 派生到
+            `kongming_home`。
             每个 session 会在该目录下创建 ``<session_id>/`` 子目录。
             仅 file 后端使用。
     """
@@ -372,7 +374,7 @@ class SessionConfig(BaseModel):
 
 
 class TraceConfig(BaseModel):
-    """trace 落盘配置。"""
+    """trace 落盘配置；`.kongming/*` 派生到 `kongming_home`。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -556,7 +558,7 @@ class EvolutionMemoryConfig(BaseModel):
 
     Attributes:
         enabled: 是否启用 memory 加载和注入。
-        root_path: memory 根目录路径（相对于项目根目录）。
+        root_path: memory 根目录路径；`.kongming/*` 派生到 `kongming_home`。
         inject_prompt: 是否将 memory snapshot 注入 system prompt。
         read_max_chars: 单文件读取最大字符数。
         view_max_chars: memory tool view 返回的最大字符数。
@@ -608,7 +610,7 @@ class EvolutionLearningConfig(BaseModel):
     )  # app 关闭时等待后台 reviewer 的最大时间
 
     # --- 存储 ---
-    root_path: str = ".kongming/evolution"  # evolution 产物根目录（reviews / nutrients / state）
+    root_path: str = ".kongming/evolution"  # `.kongming/*` 派生到 kongming_home
 
 
 class EvolutionConfig(BaseModel):
@@ -838,7 +840,8 @@ class SchedulerConfig(BaseModel):
         enabled: 是否启用 cron 模块。``False`` 时 registry 不注册
             ``schedule_tool`` 也不在 cli/web 入口装配 ticker。
         home: cron 数据根目录（``tasks.json`` / ``audit.jsonl`` 落盘位置）。
-            ``None`` 时由调用方走 ``get_kongming_home() / "cron"``。
+            ``None`` 时由调用方走 ``get_kongming_home() / "cron"``；
+            `.kongming/*` 派生到 `kongming_home`。
         interval: ticker 扫描间隔（秒），下限 ``0.1s`` 防误配把 CPU 烧穿。
         max_inflight: 同时并发跑的 cron 任务上限，由 ``asyncio.Semaphore`` 在
             ticker 内限流。下限 ``1``。
@@ -882,7 +885,7 @@ class SchedulerConfig(BaseModel):
 
 
 class WorkflowConfig(BaseModel):
-    """工作流看板配置。"""
+    """工作流看板配置；`.kongming/*` home 派生到 `kongming_home`。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -948,8 +951,8 @@ class WebFullLogConfig(BaseModel):
 
     Attributes:
         enabled: 是否启用全量日志。默认 ``False``，开发期通过 env 临时开启。
-        path: 日志文件路径（相对当前工作目录）。默认走 ``.kongming/logs/`` 与
-            ``trace.jsonl`` 同 home；父目录不存在时由 FullLogger 装配阶段
+        path: 日志文件路径。默认走 ``.kongming/logs/`` 与
+            ``trace.jsonl`` 同 `kongming_home`；父目录不存在时由 FullLogger 装配阶段
             ``mkdir -p``；无写权限时降级为 ``enabled=False`` + warning。
         rotate_daily: 是否按 UTC+8 自然日切分日志文件（追加日期后缀）。默认
             ``True``——长期开启时避免单文件无限增长。

@@ -1,6 +1,6 @@
 """Network exception/event audit log.
 
-Writes JSONL records to ``<cwd>/log/network/network-events.jsonl`` so runtime
+Writes JSONL records to ``<kongming_home>/logs/network/network-events.jsonl`` so runtime
 network failures are visible even when callers deliberately swallow them.
 """
 
@@ -15,15 +15,16 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+from infrastructure.config.paths import get_kongming_home
+
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.Lock()
-_LOG_DIR = ("log", "network")
 _LOG_FILE = "network-events.jsonl"
 
 
 def _log_path() -> Path:
-    return Path.cwd().joinpath(*_LOG_DIR, _LOG_FILE)
+    return get_kongming_home().joinpath("logs", "network", _LOG_FILE)
 
 
 def log_network_event(

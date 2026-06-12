@@ -94,6 +94,7 @@ def _context_factory(request: WorkflowRunRequest) -> WorkflowExecutionContext:
         mode=request.mode,
         workflow_dir=Path("/tmp/wf-test"),
         started_at="2026-06-07T00:00:00+00:00",
+        desc=request.desc,
         audit_writer=_AuditWriter(),
     )
 

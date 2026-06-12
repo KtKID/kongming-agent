@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 InputSourceKind = Literal["path_glob", "file_list"]
 ShardStrategyKind = Literal["by_directory", "by_file_count"]
-OutputContract = Literal["code_findings"]
+OutputContract = Literal["code_findings", "raw_text"]
 MapperStatus = Literal["completed", "partial", "failed"]
 FindingCategory = Literal[
     "bug",
@@ -31,7 +31,7 @@ FailedShardStage = Literal["mapper", "validation", "reducer"]
 
 _INPUT_SOURCE_KINDS = frozenset({"path_glob", "file_list"})
 _SHARD_STRATEGY_KINDS = frozenset({"by_directory", "by_file_count"})
-_OUTPUT_CONTRACTS = frozenset({"code_findings"})
+_OUTPUT_CONTRACTS = frozenset({"code_findings", "raw_text"})
 _MAPPER_STATUSES = frozenset({"completed", "partial", "failed"})
 _FINDING_CATEGORIES = frozenset(
     {"bug", "architecture", "security", "test_gap", "performance", "maintainability"}
@@ -178,7 +178,7 @@ class MapReduceWorkflowSpec:
     input_source: MapReduceInputSource
     # 分片策略，描述如何把输入拆成同构 shard。
     shard_strategy: ShardStrategy
-    # 输出契约，v0.1 固定为 code_findings。
+    # 输出契约，v0.1 支持 code_findings 和 raw_text。
     output_contract: OutputContract
     # mapper 子 agent 配置。
     mapper: MapperSpec
@@ -308,7 +308,7 @@ class MapperError:
 
 @dataclass(frozen=True)
 class MapperOutputEnvelope:
-    # 输出契约名称，v0.1 固定为 code_findings。
+    # 输出契约名称。
     output_contract: OutputContract
     # mapper 处理的 shard ID。
     shard_id: str

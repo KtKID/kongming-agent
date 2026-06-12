@@ -30,25 +30,25 @@ export function WorkspaceTabs({
     <Tabs
       value={active}
       onValueChange={(value) => onChange(value as WorkspaceTab)}
-      className="flex items-center"
+      className="flex w-full min-w-0 flex-col gap-2 lg:flex-row lg:items-center lg:gap-3"
     >
       {threadId && (
-        <div className="mr-auto flex min-w-0 items-center gap-1 pl-1">
-          <span className="truncate text-xs text-muted-foreground" title={threadId}>
+        <div className="flex min-w-0 items-center gap-2 rounded-xl border border-border/60 bg-background/38 px-3 py-2 shadow-sm lg:mr-auto">
+          <span className="truncate font-mono text-[11px] text-muted-foreground" title={threadId}>
             {threadId}
           </span>
           <button
             type="button"
-            aria-label="复制 ID"
-            title="复制 ID"
-            className="shrink-0 rounded p-0.5 text-muted-foreground/60 hover:text-muted-foreground"
+            aria-label="Copy ID"
+            title="Copy ID"
+            className="shrink-0 rounded-lg p-1 text-muted-foreground/60 transition-colors hover:bg-secondary hover:text-muted-foreground"
             onClick={handleCopy}
           >
             {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
           </button>
         </div>
       )}
-      <TabsList className="inline-flex w-auto shrink-0">
+      <TabsList className="inline-flex w-full shrink-0 justify-between lg:ml-auto lg:w-auto lg:justify-start">
         <TabsTrigger value="chat" className="gap-1.5" disabled={disabled}>
           <MessageSquare className="h-3.5 w-3.5" />
           Chat

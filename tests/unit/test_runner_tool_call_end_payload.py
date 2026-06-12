@@ -93,10 +93,11 @@ async def test_tool_call_end_payload_carries_content_and_data() -> None:
         ]
     )
     sink = _RecordingSink()
+    session = InMemorySession("s")
     runner = Runner(event_sinks=[sink])
     await runner.run(
         "hi",
-        session=InMemorySession("s"),
+        session=session,
         agent_spec=AgentSpec(
             name="t",
             instructions="",
@@ -128,10 +129,11 @@ async def test_tool_call_end_payload_unknown_tool_carries_error_message() -> Non
         ]
     )
     sink = _RecordingSink()
+    session = InMemorySession("s")
     runner = Runner(event_sinks=[sink])
     await runner.run(
         "hi",
-        session=InMemorySession("s"),
+        session=session,
         agent_spec=AgentSpec(
             name="t",
             instructions="",
@@ -152,6 +154,10 @@ async def test_tool_call_end_payload_unknown_tool_carries_error_message() -> Non
     assert payload["data"] is None
     assert payload["error_message"] is not None
     assert "not registered" in payload["error_message"]
+    tool_messages = [message for message in await session.history() if message.role == "tool"]
+    assert len(tool_messages) == 1
+    assert "工具执行失败" in (tool_messages[0].content or "")
+    assert "禁止声称工具已经成功执行" in (tool_messages[0].content or "")
 
 
 @pytest.mark.asyncio
@@ -164,10 +170,11 @@ async def test_tool_call_end_payload_approval_rejected_carries_error_message() -
         ]
     )
     sink = _RecordingSink()
+    session = InMemorySession("s")
     runner = Runner(event_sinks=[sink])
     await runner.run(
         "hi",
-        session=InMemorySession("s"),
+        session=session,
         agent_spec=AgentSpec(
             name="t",
             instructions="",
@@ -188,3 +195,7 @@ async def test_tool_call_end_payload_approval_rejected_carries_error_message() -
     assert payload["data"] is None
     assert payload["error_message"] is not None
     assert "approval rejected" in payload["error_message"]
+    tool_messages = [message for message in await session.history() if message.role == "tool"]
+    assert len(tool_messages) == 1
+    assert "工具执行失败" in (tool_messages[0].content or "")
+    assert "禁止声称工具已经成功执行" in (tool_messages[0].content or "")

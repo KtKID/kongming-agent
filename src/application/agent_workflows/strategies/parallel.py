@@ -99,6 +99,7 @@ class ParallelWorkflowStrategy:
         return await self._manager.run_parallel_specs(
             parent_session_id=context.parent_session_id,
             task_specs=raw_task_specs,
+            desc=context.desc,
         )
 
 

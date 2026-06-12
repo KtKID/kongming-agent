@@ -56,19 +56,27 @@ class BaseBuiltinTool:
         try:
             validated = self._validate_args(args)
         except Exception as exc:
+            error_message = f"argument validation failed: {exc}"
             return ToolResult(
                 ok=False,
-                content="",
-                error_message=f"argument validation failed: {exc}",
+                content=self._format_failure_content(
+                    stage="参数校验",
+                    error_message=error_message,
+                ),
+                error_message=error_message,
             )
 
         try:
             content, data = await self._run(validated, ctx)
         except Exception as exc:
+            error_message = str(exc)
             return ToolResult(
                 ok=False,
-                content="",
-                error_message=str(exc),
+                content=self._format_failure_content(
+                    stage="工具执行",
+                    error_message=error_message,
+                ),
+                error_message=error_message,
             )
 
         return ToolResult(ok=True, content=content, data=data)
@@ -104,6 +112,20 @@ class BaseBuiltinTool:
         if missing:
             raise ValueError(f"missing required args: {missing}")
         return args
+
+    def _format_failure_content(self, *, stage: str, error_message: str) -> str:
+        """生成给模型读取的中文失败提示，输入为失败阶段和原因，输出为 tool content。"""
+        tool_name = self.name or type(self).__name__
+        return (
+            f"工具执行失败：{tool_name}\n"
+            f"失败阶段：{stage}\n"
+            f"失败原因：{error_message}\n\n"
+            "后续处理要求：\n"
+            "1. 必须先向用户说明工具执行失败和失败原因。\n"
+            "2. 禁止声称工具已经成功执行、任务已经完成或产物已经生成。\n"
+            "3. 禁止编造工具输出、文件路径、报告、子 agent 结果或审计日志。\n"
+            "4. 需要继续时，先修正参数或请求用户补充信息，再重新调用工具。"
+        )
 
 
 __all__ = ["BaseBuiltinTool"]

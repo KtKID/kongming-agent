@@ -3,7 +3,7 @@
 
 与 ``test_router.py``（#6 smoke 层）的区别：
 后者 mock 整个 ``ConfigManager`` 验证 router 的异常翻译；本文件构造**真实**
-:class:`web.dashboard.config.manager.ConfigManager`，搭一份 tmp yaml + 真实
+:class:`infrastructure.config.manager.ConfigManager`，搭一份 tmp yaml + 真实
 ``round_trip_update`` + 真 pydantic 校验 + 真 ``read_effective`` 路径，
 端到端确认 HTTP ↔ 文件系统全链路：
 
@@ -34,6 +34,7 @@ manager**，只需 ``monkeypatch.setenv`` 后再发 HTTP 请求即可生效。
 from __future__ import annotations
 
 import time
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -42,9 +43,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hosts.web.dashboard.config import restart as restart_mod
-from hosts.web.dashboard.config.manager import ConfigManager
 from hosts.web.dashboard.config.restart import RestartScriptNotFoundError
 from hosts.web.dashboard.config.router import router as dashboard_config_router
+from infrastructure.config.manager import ConfigManager
+
+router_mod = import_module("hosts.web.dashboard.config.router")
 
 # ---------------------------------------------------------------------------
 # fixtures
@@ -119,7 +122,10 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     for var in _ENV_VARS_TO_CLEAN:
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr("infrastructure.config.loader._maybe_load_env_file", lambda: None)
+    monkeypatch.setattr(
+        "infrastructure.config.loader._maybe_load_env_file",
+        lambda *_args, **_kwargs: {},
+    )
 
 
 @pytest.fixture
@@ -143,7 +149,8 @@ def app_with_manager(tmp_yaml_path: Path, tmp_path: Path) -> FastAPI:
     本测试只关心 dashboard.config 子模块的端到端行为，所以最小化装配。
     """
     app = FastAPI()
-    app.state.config_manager = ConfigManager(yaml_path=tmp_yaml_path, repo_root=tmp_path)
+    app.state.config_manager = ConfigManager(yaml_path=tmp_yaml_path, env_path=tmp_path / ".env")
+    app.state.config_restart_repo_root = tmp_path
     app.include_router(dashboard_config_router)
     return app
 
@@ -375,15 +382,14 @@ def test_post_save_returns_restart_required_fields(client: TestClient, tmp_yaml_
 
 
 def test_post_restart_happy(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """让 ``restart.trigger_restart`` 返回 fake pid → 200 + restarting/pid。
+    """让 Web restart adapter 返回 fake pid → 200 + restarting/pid。
 
-    monkeypatch 打到 ``web.dashboard.config.manager.restart.trigger_restart``
-    （manager.py 内 ``from hosts.web.dashboard.config import restart``，调用走
-    ``restart.trigger_restart`` 属性查找，patch manager 引用的 module 即可）。
+    monkeypatch 打到 ``web.dashboard.config.router.trigger_web_restart``。
     """
     fake_pid = 99887
     monkeypatch.setattr(
-        "hosts.web.dashboard.config.manager.restart.trigger_restart",
+        router_mod,
+        "trigger_web_restart",
         lambda repo_root: fake_pid,
     )
     resp = client.post("/api/manage/config/restart")
@@ -401,19 +407,16 @@ def test_post_restart_happy(client: TestClient, monkeypatch: pytest.MonkeyPatch)
 def test_post_restart_script_missing_returns_503(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """让 ``restart.trigger_restart`` 抛 :class:`RestartScriptNotFoundError`
+    """让 Web restart adapter 抛 :class:`RestartScriptNotFoundError`
     → router 翻译成 503。
 
-    走 manager 真实 ``trigger_restart`` 链路；只在最底层 spawn 处 monkeypatch
-    抛异常，验证 manager 不吞、router 翻译 503 的完整链路。
+    只在最底层 spawn 处 monkeypatch 抛异常，验证 router 翻译 503 的链路。
     """
 
     def _raise_missing(repo_root: Any) -> int:
         raise RestartScriptNotFoundError(f"./start.sh missing under {repo_root}")
 
-    monkeypatch.setattr(
-        "hosts.web.dashboard.config.manager.restart.trigger_restart", _raise_missing
-    )
+    monkeypatch.setattr(router_mod, "trigger_web_restart", _raise_missing)
     resp = client.post("/api/manage/config/restart")
     assert resp.status_code == 503
     detail = resp.json()["detail"]

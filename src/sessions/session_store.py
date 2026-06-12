@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 
 from core.contracts import Session
 from core.message import Message, ToolCall
+from infrastructure.config.paths import resolve_kongming_path
 
 if TYPE_CHECKING:
     from infrastructure.config.models import Config
@@ -332,7 +333,7 @@ def build_session(
     if backend == "sqlite":
         return SQLiteSession(
             session_id,
-            config.session.store_path,
+            resolve_kongming_path(config.session.store_path),
         )
     if backend == "file":
         if bootstrap is None:
@@ -342,7 +343,7 @@ def build_session(
         return FileSession(
             session_id,
             bootstrap,
-            config.session.file_store_path,
+            str(resolve_kongming_path(config.session.file_store_path)),
         )
     raise ValueError(f"unknown session backend: {backend!r}")
 

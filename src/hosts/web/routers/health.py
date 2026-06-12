@@ -2,6 +2,7 @@
 
 端点：
 
+- ``GET /health`` — sidecar / desktop host 启动探测端点。
 - ``GET /api/health`` — 仅返回 ``200 + {"status": "ok"}``，**不依赖任何
   ``app.state.*``**，用于"重启按钮"流程的恢复探测。
 
@@ -19,15 +20,16 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-router = APIRouter(prefix="/api", tags=["health"])
+router = APIRouter(tags=["health"])
 
 
 @router.get("/health")
+@router.get("/api/health")
 async def get_health() -> dict[str, str]:
-    """重启探测端点：返回 ``200 + {"status": "ok"}``。
+    """健康探测端点：返回 ``200 + {"status": "ok"}``。
 
     Returns:
-        固定 ``{"status": "ok"}``；前端只需断言 HTTP 200 即可触发自动 reload。
+        固定 ``{"status": "ok"}``；宿主只需断言 HTTP 200 即可继续启动流程。
     """
     return {"status": "ok"}
 

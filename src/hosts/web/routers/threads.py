@@ -51,6 +51,8 @@ from hosts.web.app_support.path_utils import is_absolute_workspace_path
 from hosts.web.errors import InvalidThreadIdError, ThreadNotFoundError
 from hosts.web.integrations.claude_code.jsonl_history import jsonl_path_for, parse_jsonl_history
 from hosts.web.protocol import (
+    CreateGenericThreadFromFirstMessageRequest,
+    CreateGenericThreadFromFirstMessageResponse,
     CreateThreadRequest,
     EvolutionDecisionItemDTO,
     EvolutionDecisionRequest,
@@ -64,12 +66,14 @@ from hosts.web.protocol import (
     ImportCodexSessionResponse,
     RenameThreadRequest,
     ThreadMetadataDTO,
+    UpdateThreadPresetRequest,
     UpdateWorkspaceFileRequest,
     WorkspaceContextDTO,
     WorkspaceFileDTO,
     WorkspaceTreeDTO,
     WorkspaceTreeNodeDTO,
 )
+from hosts.web.threads.errors import ThreadPresetRefreshError
 from hosts.web.workspace.model import (
     WorkspaceError,
     get_thread_meta,
@@ -214,6 +218,7 @@ async def _apply_decision_item(
         store=store,
         job=job,
         nutrient=nutrient,
+        kongming_home=request.app.state.kongming_home,
     )
     return outcome.decision_record
 
@@ -308,6 +313,31 @@ async def create_thread(
         cwd=normalized_cwd,
     )
     return await _to_dto(meta, tm)
+
+
+@router.post("/generic/first-message")
+async def create_generic_thread_from_first_message(
+    body: CreateGenericThreadFromFirstMessageRequest,
+    request: Request,
+) -> CreateGenericThreadFromFirstMessageResponse:
+    """通用频道空白页首发创建。
+
+    路由层只做 HTTP 错误映射；创建、cwd 解析、metadata 与首条 user message
+    持久化都由 ThreadManager 门户方法收口。
+    """
+    tm: ThreadManagerProtocol = request.app.state.thread_manager
+    try:
+        meta = await tm.create_generic_thread_from_first_message(
+            text=body.text,
+            preset_id=body.preset_id,
+            cwd=body.cwd,
+            reasoning_effort=body.reasoning_effort,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return CreateGenericThreadFromFirstMessageResponse(thread=await _to_dto(meta, tm))
 
 
 @router.post("/import-claude-session")
@@ -416,6 +446,34 @@ async def rename_thread(
             raise ThreadNotFoundError(f"thread not found: {thread_id}")
         return await _to_dto(meta_read, tm)
 
+    return await _to_dto(meta, tm)
+
+
+@router.patch("/{thread_id}/preset")
+async def update_thread_preset(
+    thread_id: str,
+    body: UpdateThreadPresetRequest,
+    request: Request,
+) -> ThreadMetadataDTO:
+    """更新 Generic Chat thread 的模型 preset。
+
+    运行中的 turn 保持原 provider；下一次 ``user.input`` 前 ThreadManager 会
+    确保 cell runtime 已按新 preset 重建。
+    """
+    _validate_thread_id(thread_id)
+    cfg = request.app.state.config
+    preset_id = body.preset_id.strip()
+    if not any(p.id == preset_id for p in cfg.web.llm_presets):
+        raise HTTPException(status_code=400, detail=f"unknown preset_id: {preset_id!r}")
+    tm: ThreadManagerProtocol = request.app.state.thread_manager
+    try:
+        meta = await tm.update_thread_preset(thread_id, preset_id)
+    except KeyError as exc:
+        raise ThreadNotFoundError(f"thread not found: {thread_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ThreadPresetRefreshError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     return await _to_dto(meta, tm)
 
 

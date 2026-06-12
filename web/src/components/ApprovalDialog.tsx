@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { AlertTriangle } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -12,8 +13,15 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useApprovalDialogStore } from "@/hooks/useApprovalDialog";
-import type { ThreadSocket } from "@/lib/ws";
 import type { ApprovalAckAction } from "@/protocol";
+
+export interface ApprovalAckSocket {
+  send(frame: {
+    frame_type: "approval.ack";
+    call_id: string;
+    action: ApprovalAckAction;
+  }): boolean | void;
+}
 
 /**
  * 审批 modal（v0.1.6 三按钮 + elevated 模式）：
@@ -28,7 +36,7 @@ import type { ApprovalAckAction } from "@/protocol";
  * - **ESC 键 = 拒绝**（安全约定：默认拒绝，避免误确认）
  * - blocking modal（点遮罩不关；只能用按钮 / ESC）
  */
-export function ApprovalDialog({ socket }: { socket: ThreadSocket | null }) {
+export function ApprovalDialog({ socket }: { socket: ApprovalAckSocket | null }) {
   const head = useApprovalDialogStore((s) => s.pending[0]);
   const shift = useApprovalDialogStore((s) => s.shift);
   const [busy, setBusy] = useState(false);
@@ -62,15 +70,24 @@ export function ApprovalDialog({ socket }: { socket: ThreadSocket | null }) {
     if (busy || !head) return;
     setBusy(true);
     try {
-      if (socket) {
-        socket.send({
-          kind: "approval.ack",
-          call_id: head.call_id,
-          action,
-        });
+      if (!socket) {
+        toast.error("审批连接未就绪，请稍后重试");
+        return;
       }
-    } finally {
+      const sent = socket.send({
+        frame_type: "approval.ack",
+        call_id: head.call_id,
+        action,
+      });
+      if (sent === false) {
+        toast.error("审批发送失败，请稍后重试");
+        return;
+      }
       shift();
+    } catch (err) {
+      console.error("[ApprovalDialog] approval ack send failed", err);
+      toast.error("审批发送失败，请稍后重试");
+    } finally {
       setBusy(false);
     }
   };

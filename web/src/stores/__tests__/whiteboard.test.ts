@@ -17,12 +17,16 @@ vi.mock("@/lib/api", () => ({
   apiDelete: apiMocks.apiDelete,
 }));
 
+const TEST_THREAD_ID = "thread-test-id";
+
 function makeBoard() {
   return {
-    title: "白板",
+    global_title: "Whiteboard",
+    project_title: "白板",
     schema_version: 1,
     cards: [
       {
+        scope: "project" as const,
         id: "card-1",
         title: "发版前检查",
         category: "todo",
@@ -48,7 +52,9 @@ describe("stores/whiteboard", () => {
     apiMocks.apiPatch.mockReset();
     apiMocks.apiDelete.mockReset();
     useWhiteboardStore.setState({
-      boardTitle: "白板",
+      currentThreadId: TEST_THREAD_ID,
+      globalTitle: "Whiteboard",
+      projectTitle: "白板",
       boardUpdatedAt: 0,
       cards: [],
       loading: false,
@@ -58,18 +64,93 @@ describe("stores/whiteboard", () => {
     });
   });
 
-  it("fetchBoard 拉取白板快照", async () => {
+  it("fetchBoard 拉取白板快照（含 global/project titles 与 scope）", async () => {
     apiMocks.apiGet.mockResolvedValue(makeBoard());
-    await useWhiteboardStore.getState().fetchBoard();
+    await useWhiteboardStore.getState().fetchBoard(TEST_THREAD_ID);
     const state = useWhiteboardStore.getState();
-    expect(state.boardTitle).toBe("白板");
+    expect(state.currentThreadId).toBe(TEST_THREAD_ID);
+    expect(state.globalTitle).toBe("Whiteboard");
+    expect(state.projectTitle).toBe("白板");
     expect(state.cards).toHaveLength(1);
     expect(state.cards[0]!.title).toBe("发版前检查");
+    expect(state.cards[0]!.scope).toBe("project");
+  });
+
+  // R2 P0 修复回归：fetchBoard 响应到达时校验 currentThreadId，
+  // 避免慢网下切 thread A → B 后 A 的旧响应污染 B 的 state
+  it("fetchBoard race guard：旧 thread 响应被丢弃，不污染新 thread", async () => {
+    const boardA = {
+      ...makeBoard(),
+      global_title: "Board A",
+      project_title: "Project A",
+    };
+    const boardB = {
+      ...makeBoard(),
+      global_title: "Board B",
+      project_title: "Project B",
+    };
+
+    // 构造受控 promise：A 慢、B 快
+    let resolveA!: (value: typeof boardA) => void;
+    const pendingA = new Promise<typeof boardA>((res) => {
+      resolveA = res;
+    });
+    apiMocks.apiGet
+      .mockReturnValueOnce(pendingA) // fetchBoard(A) 挂起
+      .mockResolvedValueOnce(boardB); // fetchBoard(B) 立即返回
+
+    // 1. 启动 fetchBoard(A)（不 await，模拟用户切走）
+    const aPromise = useWhiteboardStore.getState().fetchBoard("thread-a");
+    expect(useWhiteboardStore.getState().currentThreadId).toBe("thread-a");
+
+    // 2. 用户立刻切到 thread B
+    await useWhiteboardStore.getState().fetchBoard("thread-b");
+    expect(useWhiteboardStore.getState().currentThreadId).toBe("thread-b");
+    expect(useWhiteboardStore.getState().globalTitle).toBe("Board B");
+
+    // 3. A 的旧响应这时才回来
+    resolveA(boardA);
+    await aPromise;
+
+    // 4. 关键断言：B 的 state 没被 A 污染
+    const state = useWhiteboardStore.getState();
+    expect(state.currentThreadId).toBe("thread-b");
+    expect(state.globalTitle).toBe("Board B");
+    expect(state.projectTitle).toBe("Project B");
+  });
+
+  // R2 P0 修复回归：clearBoard 后旧 fetchBoard 响应不应回填 state
+  it("fetchBoard race guard：clearBoard 后旧响应不污染空白态", async () => {
+    let resolveA!: (value: ReturnType<typeof makeBoard>) => void;
+    const pendingA = new Promise<ReturnType<typeof makeBoard>>((res) => {
+      resolveA = res;
+    });
+    apiMocks.apiGet.mockReturnValueOnce(pendingA);
+
+    // 1. 启动 fetchBoard(thread-a)（挂起）
+    const aPromise = useWhiteboardStore.getState().fetchBoard("thread-a");
+
+    // 2. 用户切到纯聊天 tab → Chat.tsx 调 clearBoard
+    useWhiteboardStore.getState().clearBoard();
+    expect(useWhiteboardStore.getState().currentThreadId).toBe(null);
+    expect(useWhiteboardStore.getState().cards).toEqual([]);
+
+    // 3. A 的响应回来
+    resolveA(makeBoard());
+    await aPromise;
+
+    // 4. 关键断言：cards / titles 仍是 clearBoard 的空白态
+    const state = useWhiteboardStore.getState();
+    expect(state.currentThreadId).toBe(null);
+    expect(state.cards).toEqual([]);
+    expect(state.globalTitle).toBe("Whiteboard"); // clearBoard 的默认
+    expect(state.projectTitle).toBe(null);
   });
 
   it("createCard 用返回快照回填 store", async () => {
     const board = makeBoard();
     const card = {
+      scope: "project" as const,
       id: "card-2",
       title: "新卡片",
       category: "note",
@@ -83,8 +164,11 @@ describe("stores/whiteboard", () => {
       updated_at: 1200,
     };
     useWhiteboardStore.setState({
-      boardTitle: "白板",
+      currentThreadId: TEST_THREAD_ID,
+      globalTitle: "Whiteboard",
+      projectTitle: "白板",
       cards: board.cards.map((item) => ({
+        scope: item.scope,
         id: item.id,
         title: item.title,
         category: item.category,
@@ -104,6 +188,7 @@ describe("stores/whiteboard", () => {
     });
     apiMocks.apiPost.mockResolvedValue(card);
     await useWhiteboardStore.getState().createCard({
+      scope: "project",
       title: "新卡片",
       category: "note",
       content: "hello",
@@ -115,6 +200,7 @@ describe("stores/whiteboard", () => {
     useWhiteboardStore.setState({
       cards: [
         {
+          scope: "project",
           id: "card-1",
           title: "A",
           category: "note",
@@ -134,6 +220,7 @@ describe("stores/whiteboard", () => {
       ],
     });
     apiMocks.apiPut.mockResolvedValue({
+      scope: "project",
       id: "card-1",
       title: "A",
       category: "note",
@@ -155,10 +242,11 @@ describe("stores/whiteboard", () => {
     expect(useWhiteboardStore.getState().cards[0]!.content).toBe("new");
   });
 
-  it("saveLayout 节流后提交布局快照", async () => {
+  it("saveLayout 节流后提交布局快照（scope=project）", async () => {
     useWhiteboardStore.setState({
       cards: [
         {
+          scope: "project",
           id: "card-1",
           title: "A",
           category: "note",
@@ -178,10 +266,12 @@ describe("stores/whiteboard", () => {
       ],
     });
     apiMocks.apiPatch.mockResolvedValue({
-      title: "白板",
+      global_title: "Whiteboard",
+      project_title: "白板",
       schema_version: 1,
       cards: [
         {
+          scope: "project",
           id: "card-1",
           title: "A",
           category: "note",
@@ -216,6 +306,7 @@ describe("stores/whiteboard", () => {
         }),
     );
     apiMocks.apiPut.mockResolvedValueOnce({
+      scope: "project",
       id: "card-1",
       title: "A",
       category: "note",
@@ -231,6 +322,7 @@ describe("stores/whiteboard", () => {
     useWhiteboardStore.setState({
       cards: [
         {
+          scope: "project",
           id: "card-1",
           title: "A",
           category: "note",
@@ -257,6 +349,7 @@ describe("stores/whiteboard", () => {
     useWhiteboardStore.getState().updateCardContentLocal("card-1", "newer");
 
     resolveFirstSave({
+      scope: "project",
       id: "card-1",
       title: "A",
       category: "note",
@@ -293,10 +386,12 @@ describe("stores/whiteboard", () => {
         }),
     );
     apiMocks.apiPatch.mockResolvedValueOnce({
-      title: "白板",
+      global_title: "Whiteboard",
+      project_title: "白板",
       schema_version: 1,
       cards: [
         {
+          scope: "project",
           id: "card-1",
           title: "A",
           category: "note",
@@ -314,6 +409,7 @@ describe("stores/whiteboard", () => {
     useWhiteboardStore.setState({
       cards: [
         {
+          scope: "project",
           id: "card-1",
           title: "A",
           category: "note",
@@ -340,10 +436,12 @@ describe("stores/whiteboard", () => {
     useWhiteboardStore.getState().updateCardLayoutLocal("card-1", { x: 20, y: 30 });
 
     resolveFirstLayout({
-      title: "白板",
+      global_title: "Whiteboard",
+      project_title: "白板",
       schema_version: 1,
       cards: [
         {
+          scope: "project",
           id: "card-1",
           title: "A",
           category: "note",
@@ -382,6 +480,7 @@ describe("stores/whiteboard", () => {
     useWhiteboardStore.setState({
       cards: [
         {
+          scope: "project",
           id: "card-1",
           title: "A",
           category: "note",

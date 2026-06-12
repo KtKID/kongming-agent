@@ -414,6 +414,49 @@ class NativeRuntime:
         await self._maybe_start_evolution_review(session=session, result=result)
         return result
 
+    async def continue_from_last_user_message(
+        self,
+        *,
+        session_id: str,
+        reasoning_effort: str | None = None,
+    ) -> Result:
+        """继续处理 session 里已持久化的最后一条 user message。
+
+        Web 首发创建会先把 user message 写入 session，再调用本入口启动后续
+        assistant run。这里复用 Runner 的继续入口，避免再次 append user message。
+        """
+        session = self._get_or_create_session(session_id)
+        result: Result
+
+        if reasoning_effort is not None:
+            saved = self._config.model.reasoning_effort
+            self._config.model.reasoning_effort = reasoning_effort  # type: ignore[assignment]
+            try:
+                result = await self._runner.continue_from_last_user_message(
+                    session=session,
+                    agent_spec=self._agent_spec,
+                    llm=self._llm,
+                    tools=self._tools,
+                    approval=self._approval,
+                    max_turns=self._config.runner.max_turns,
+                    enabled_tools=self._resolve_enabled_tools(),
+                )
+            finally:
+                self._config.model.reasoning_effort = saved
+        else:
+            result = await self._runner.continue_from_last_user_message(
+                session=session,
+                agent_spec=self._agent_spec,
+                llm=self._llm,
+                tools=self._tools,
+                approval=self._approval,
+                max_turns=self._config.runner.max_turns,
+                enabled_tools=self._resolve_enabled_tools(),
+            )
+
+        await self._maybe_start_evolution_review(session=session, result=result)
+        return result
+
     # ------------------------------------------------------------------
     # 访问器（便于 host / cli / tests 观察装配结果）
     # ------------------------------------------------------------------

@@ -335,7 +335,7 @@ def test_lifespan_startup_recovers_pending_evolution_apply_jobs(tmp_path: Path) 
     with TestClient(app):
         pass
 
-    memory_path = workspace / ".kongming" / "memory" / "MEMORY.md"
+    memory_path = tmp_path / "memory" / "MEMORY.md"
     assert memory_path.exists()
     content = memory_path.read_text(encoding="utf-8")
     assert "workspace keeps a stable note layout" in content

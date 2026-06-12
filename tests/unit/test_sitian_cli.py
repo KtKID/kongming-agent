@@ -100,7 +100,7 @@ def test_sitian_cli_output_subdir_routes_to_subdir(
     state_payload = json.loads(state.output)
     assert state_payload["workspaceState"]["sources"]["total"] == 1
     # rootDir 字段应包含 claude 子目录
-    assert state_payload["rootDir"].endswith("/claude")
+    assert Path(state_payload["rootDir"]).name == "claude"
 
 
 def test_sitian_cli_no_output_subdir_keeps_root_layout(

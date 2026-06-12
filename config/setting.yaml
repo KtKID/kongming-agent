@@ -118,10 +118,12 @@ runner:
 session:
   # memory | sqlite | file
   backend: file
+  # .kongming/* 运行数据路径统一派生到 kongming_home（默认 ~/.kongming）。
   store_path: .kongming/sessions.db
   file_store_path: .kongming/sessions
 
 trace:
+  # .kongming/* 运行数据路径统一派生到 kongming_home。
   output_path: .kongming/trace.jsonl
   auto_flush: true
   # 是否 dump 每次 LLM 交互到 .kongming/debug/raw-llm-*.json（含完整 request+response）
@@ -206,7 +208,7 @@ evolution:
     # 是否启用 memory 模块（跨会话长期记忆）。False 时：不加载 memory 目录、
     # 不注册 memory tool、不 emit snapshot 事件。
     enabled: true
-    # memory 根目录。相对路径视为 cwd 子目录；绝对路径直接使用。
+    # memory 根目录。.kongming/* 派生到 kongming_home；绝对路径直接使用。
     root_path: .kongming/memory
     # 是否将 memory snapshot 注入 system prompt。
     # False 时 memory tool 仍可用，但 prompt 不含 memory block。
@@ -261,7 +263,7 @@ evolution:
     drain_on_close_seconds: 120.0
 
     # ---------- 存储 ----------
-    # evolution 产物根目录。包含 reviews/ / evolution-nutrients.jsonl / evolution.state.json。
+    # evolution 产物根目录。.kongming/* 派生到 kongming_home。
     root_path: .kongming/evolution
 
 # ---------------------------------------------------------------------------

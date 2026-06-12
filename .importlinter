@@ -216,6 +216,7 @@ ignore_imports =
     hosts.web.app -> scheduler.delivery
     hosts.web.app -> evolution.apply_executor
     hosts.web.app -> evolution.evolution_manager
+    hosts.web.app -> infrastructure.config
     hosts.web.routers.threads -> evolution.apply_executor
     hosts.web.routers.threads -> evolution.models
     hosts.web.routers.threads -> evolution.state_store
@@ -263,13 +264,10 @@ ignore_imports =
     hosts.web.approvals.auto -> safety.auto_approval.config_store
     hosts.web.approvals.auto -> safety.auto_approval.policy
     hosts.web.approvals.auto -> safety.auto_approval.rules
-; manage-config-tab #6：hosts.web.app + dashboard/config/router 都需要触达 manager / writer
-; / restart / schema 子模块。其中 writer 走 infrastructure.config.{loader,errors} 做
-; pydantic 校验闭环——``infrastructure.config.errors -> core.errors`` 的传递链触发
-; Contract 6。dashboard/config 是 task 单点真源（操作 setting.yaml 的唯一入口），
+; config-management-foundation：hosts.web.app 装配 dashboard config router；
+; router 只保留 Web restart 宿主适配，通用配置读写入口迁到 infrastructure.config。
 ; 与 hosts.web.uploads 同模式单点白名单放行。
-    hosts.web.app -> hosts.web.dashboard.config
-    hosts.web.dashboard.config.router -> hosts.web.dashboard.config.manager
+    hosts.web.app -> hosts.web.dashboard.config.router
     hosts.web.dashboard.config.router -> hosts.web.dashboard.config.restart
 
 ; ---------------------------------------------------------------------------

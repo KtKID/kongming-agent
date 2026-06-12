@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from hosts.web.app import create_app
 from hosts.web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
 from hosts.web.threads.metadata import ThreadMetadata
 from infrastructure.config.models import Config
+from network.manager import reset_network_manager_for_test
 from tests.unit.test_web_app_lifespan import _seed_password
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
@@ -197,6 +199,7 @@ def _make_cfg() -> Config:
 
 
 def _login(tmp_path: Path, tm: WSFakeTM) -> TestClient:
+    reset_network_manager_for_test()
     _seed_password(tmp_path, "pwd")
     cfg = _make_cfg()
     app = create_app(cfg, tm, home_dir=tmp_path)
@@ -277,6 +280,42 @@ def test_ws_user_input_with_reasoning_effort(tmp_path: Path) -> None:
         assert ("think hard", "high") in cell.bridge.run_once_calls
     finally:
         client.__exit__(None, None, None)
+
+
+def test_ws_generic_channel_writes_local_log(tmp_path: Path) -> None:
+    tm = WSFakeTM()
+    client = _login(tmp_path, tm)
+    try:
+        with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
+            _ = ws.receive_json()  # history
+            ws.send_json(
+                {
+                    "frame_type": "user.input",
+                    "text": "hello local log",
+                    "request_id": "req-log-1",
+                    "reasoning_effort": "medium",
+                }
+            )
+            import time
+
+            time.sleep(0.2)
+    finally:
+        client.__exit__(None, None, None)
+
+    path = tmp_path / "logs" / "generic-channel" / "generic-channel.jsonl"
+    rows = [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
+    events = [row["event"] for row in rows]
+    assert "registered" in events
+    assert "frame_dispatch" in events
+    assert "run_task_started" in events
+    dispatch = next(row for row in rows if row["event"] == "frame_dispatch")
+    assert dispatch["frame_type"] == "user.input"
+    assert dispatch["thread_id"] == THREAD_ID
+    assert dispatch["request_id"] == "req-log-1"
+    assert dispatch["text_len"] == len("hello local log")
+    assert "text" not in dispatch
 
 
 def test_ws_user_input_without_reasoning_effort(tmp_path: Path) -> None:
@@ -388,10 +427,71 @@ def test_ws_ping_receives_pong(tmp_path: Path) -> None:
     try:
         with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
             _ = ws.receive_json()  # history
-            ws.send_json({"frame_type": "ping"})
+            manager = client.app.state.network_manager  # type: ignore[attr-defined]
+            assert len(manager._connections) == 1
+            conn = next(iter(manager._connections.values()))
+            assert conn.channel == "generic"
+            assert conn.thread_id == THREAD_ID
+
+            ws.send_json({"frame_type": "ping", "ts": 1700000000000})
             pong = ws.receive_json()
             assert pong["frame_type"] == "pong"
+            assert pong["ts"] == 1700000000000
             assert "timestamp_ms" in pong
+            assert isinstance(pong["timestamp_ms"], int)
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_ws_pong_consumed_by_network_manager(tmp_path: Path) -> None:
+    """inbound pong 由 NetworkManager 消费，不进入业务 union 产生 error。"""
+    tm = WSFakeTM()
+    client = _login(tmp_path, tm)
+    try:
+        manager = client.app.state.network_manager  # type: ignore[attr-defined]
+        original_handle_inbound = manager.handle_inbound
+        inbound_calls: list[tuple[str | None, bool]] = []
+
+        async def recording_handle_inbound(conn_id: str, frame: dict[str, Any]) -> bool:
+            consumed = await original_handle_inbound(conn_id, frame)
+            raw_type = frame.get("frame_type")
+            inbound_calls.append((raw_type if isinstance(raw_type, str) else None, consumed))
+            return consumed
+
+        manager.handle_inbound = recording_handle_inbound
+        with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
+            _ = ws.receive_json()  # history
+            ws.send_json({"frame_type": "pong", "ts": 1700000000000})
+            ws.send_json(
+                {
+                    "frame_type": "approval.ack",
+                    "call_id": "call-after-pong",
+                    "action": "reject",
+                }
+            )
+            import time
+
+            time.sleep(0.05)
+
+        assert (THREAD_ID, "call-after-pong", "reject") in tm.resolve_calls
+        assert inbound_calls[0] == ("pong", True)
+        assert ("approval.ack", False) in inbound_calls
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_ws_unregisters_network_manager_on_disconnect(tmp_path: Path) -> None:
+    tm = WSFakeTM()
+    client = _login(tmp_path, tm)
+    try:
+        manager = client.app.state.network_manager  # type: ignore[attr-defined]
+        assert len(manager._connections) == 0
+        with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
+            _ = ws.receive_json()
+            assert len(manager._connections) == 1
+            assert len(manager._heartbeats) == 1
+        assert len(manager._connections) == 0
+        assert len(manager._heartbeats) == 0
     finally:
         client.__exit__(None, None, None)
 

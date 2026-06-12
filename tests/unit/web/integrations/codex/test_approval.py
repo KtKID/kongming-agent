@@ -1,5 +1,3 @@
-"""Codex approval 三档映射测试（v0.1 主路径）。"""
-
 from __future__ import annotations
 
 from hosts.web.integrations.codex.approval import map_permission_mode
@@ -16,7 +14,6 @@ class TestPermissionModeMapping:
         assert map_permission_mode("bypassPermissions") == ("danger-full-access", "never")
 
     def test_unknown_mode_falls_back(self) -> None:
-        # 未知 mode 走 default 兜底
         assert map_permission_mode("unknown") == ("workspace-write", "untrusted")
 
     def test_empty_string_falls_back(self) -> None:

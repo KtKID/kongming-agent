@@ -5,14 +5,22 @@ import { LoginPage } from "@/pages/Login";
 import { ChatPage } from "@/pages/Chat";
 import { ManagePage } from "@/pages/Manage";
 import { NotFoundPage } from "@/pages/NotFound";
+import { RuntimeStatusPage } from "@/modules/dashboard";
+import { ConfigPage } from "@/modules/dashboard/config";
+import { ModelProvidersPage } from "@/modules/model-providers";
+import { WorkflowRunViewerPage } from "@/modules/agent-workflow-viewer";
 
 /**
- * v0.1.5 路由表：
- * - /login          公开
+ * v0.1.5 路由表（manage-config-tab #19 后）：
+ * - /login                          公开
  * - /(任何其它) → AuthGuard 包裹 → Layout → 子路由
- * - /              → /chat（默认重定向）
+ * - /                                → /chat（默认重定向）
  * - /chat[/:thread_id]
- * - /manage
+ * - /manage                          → /manage/config（默认重定向）
+ * - /manage/config                   → /manage/config/model（section 兜底）
+ * - /manage/config/:section          ConfigPage（5 个合法 section：model/runtime/tool_approval/safety/host_observ）
+ * - /manage/model-providers          ModelProvidersPage
+ * - /manage/network                  RuntimeStatusPage（原 /manage/runtime-status，破坏性更名，无兼容 alias）
  * - 其它 → NotFound
  */
 export const router = createBrowserRouter([
@@ -26,7 +34,25 @@ export const router = createBrowserRouter([
           { index: true, element: <Navigate to="/chat" replace /> },
           { path: "chat", element: <ChatPage /> },
           { path: "chat/:thread_id", element: <ChatPage /> },
-          { path: "manage", element: <ManagePage /> },
+          {
+            path: "chat/:thread_id/agent-workflows",
+            element: <WorkflowRunViewerPage />,
+          },
+          {
+            path: "chat/:thread_id/agent-workflows/:workflow_id",
+            element: <WorkflowRunViewerPage />,
+          },
+          {
+            path: "manage",
+            element: <ManagePage />,
+            children: [
+              { index: true, element: <Navigate to="config" replace /> },
+              { path: "config", element: <Navigate to="model" replace /> },
+              { path: "config/:section", element: <ConfigPage /> },
+              { path: "model-providers", element: <ModelProvidersPage /> },
+              { path: "network", element: <RuntimeStatusPage /> },
+            ],
+          },
         ],
       },
     ],

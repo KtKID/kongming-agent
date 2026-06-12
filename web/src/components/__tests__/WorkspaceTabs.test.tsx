@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { WorkspaceTabs } from "@/components/WorkspaceTabs";
 
 describe("WorkspaceTabs", () => {
-  it("渲染 Chat / Files / Git / Shell 四个 tab", () => {
+  it("renders Chat / Files / Git / Shell tabs", () => {
     render(<WorkspaceTabs active="chat" onChange={vi.fn()} />);
     expect(screen.getByText("Chat")).toBeInTheDocument();
     expect(screen.getByText("Files")).toBeInTheDocument();
@@ -12,10 +12,16 @@ describe("WorkspaceTabs", () => {
     expect(screen.getByText("Shell")).toBeInTheDocument();
   });
 
-  it("点击 Git 触发 onChange('git')", async () => {
+  it("calls onChange('git') when Git is clicked", async () => {
     const onChange = vi.fn();
     render(<WorkspaceTabs active="chat" onChange={onChange} />);
     await userEvent.click(screen.getByText("Git"));
     expect(onChange).toHaveBeenCalledWith("git");
+  });
+
+  it("renders the thread id toolbar when thread id exists", () => {
+    render(<WorkspaceTabs active="chat" onChange={vi.fn()} threadId="thread-123" />);
+    expect(screen.getByText("thread-123")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy ID" })).toBeInTheDocument();
   });
 });
