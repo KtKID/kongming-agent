@@ -284,7 +284,7 @@ make clean          # 清缓存
 |---|---|---|---|---|
 | commit 前 | `git commit` | `ruff check --fix`、`ruff format`、`lint-imports`、`mypy src` | 快 | 无 |
 | push 前 | `git push` / `make prepush-test` | 隔离环境下的受影响 `tests/unit`，清理真实 `KONGMING_*`，使用 `.kongming/prepush-home` | 快，目标 1-3 分钟 | 无 |
-| PR CI | GitHub Actions | `fmt`、`lint`、`typecheck`、全量 `tests/unit` | 中，约十几到二十多分钟 | 无 |
+| PR CI | GitHub Actions | `fmt`、`lint`、`typecheck`、隔离环境下的受影响 `tests/unit` | 快，目标 1-3 分钟 | 无 |
 | 本地 nightly | `make nightly-local` | `tests/integration`、`tests/e2e`、`tests/smoke`，读取 `.env.e2e.local` | 慢，适合夜间 | 需要 |
 | 手动真模型验证 | 单条 `KONGMING_E2E_REAL_MODEL=1 uv run pytest ...` | 指定 live/e2e 场景 | 慢，按用例计费 | 需要 |
 
