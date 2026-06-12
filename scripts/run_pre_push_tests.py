@@ -347,14 +347,28 @@ def run_pytest(repo: Path, tests: Sequence[str]) -> int:
     ]
     print("pre-push pytest command:")
     print("  " + shlex.join(command))
-    return subprocess.run(command, cwd=repo, env=build_test_env(repo), check=False).returncode
+    try:
+        return subprocess.run(
+            command,
+            cwd=repo,
+            env=build_test_env(repo),
+            check=False,
+            timeout=600,
+        ).returncode
+    except subprocess.TimeoutExpired:
+        print("pre-push pytest timed out after 600 seconds", file=sys.stderr)
+        return 124
 
 
 def main() -> int:
     """命令行入口，完成 diff、选择测试并执行 pytest。"""
 
     repo = repo_root()
-    base_ref = detect_base_ref(repo)
+    try:
+        base_ref = detect_base_ref(repo)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     changed = changed_files_since(repo, base_ref)
     selected = select_unit_tests(repo, changed)
 

@@ -182,7 +182,11 @@ def test_local_nightly_defaults_to_port_60999() -> None:
     assert ".env.e2e.local" in script
     assert ".kongming/nightly" in script
     assert "require_secure_env_file" in script
-    assert "sock.bind" in script
+    assert "path.is_symlink()" in script
+    assert "st.st_uid != os.getuid()" in script
+    assert "connect_ex" in script
+    assert "SO_REUSEADDR" not in script
+    assert "KONGMING_[A-Z0-9_]" in script
 
 
 def test_pre_push_hook_runs_without_files_filter() -> None:

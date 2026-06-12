@@ -9,7 +9,7 @@
 #   4. 分段运行 integration、e2e、smoke，并把日志写入 .kongming/test-logs/。
 #
 # 关键函数：
-#   load_e2e_env：加载本地真实 e2e 环境变量文件。
+#   load_e2e_env：只加载本地真实 e2e 环境变量文件中的 KONGMING_* 变量。
 #   require_secure_env_file：检查 env 文件权限。
 #   require_port_free：跨平台检查固定测试端口是否空闲。
 #   require_clean_nightly_home：检查 nightly home 中是否已有运行锁。
@@ -28,21 +28,33 @@ export KONGMING_E2E_REAL_MODEL="${KONGMING_E2E_REAL_MODEL:-1}"
 
 # 检查 env 文件权限，关键输入是 NIGHTLY_ENV_FILE，输出是安全或失败。
 require_secure_env_file() {
-  local mode
+  local status
   if [[ ! -f "$NIGHTLY_ENV_FILE" ]]; then
     echo "missing $NIGHTLY_ENV_FILE; create it with real model provider settings" >&2
     exit 2
   fi
-  mode="$(python - "$NIGHTLY_ENV_FILE" <<'PY'
+  status="$(python - "$NIGHTLY_ENV_FILE" <<'PY'
 from pathlib import Path
+import os
 import stat
 import sys
-mode = stat.S_IMODE(Path(sys.argv[1]).stat().st_mode)
-print(oct(mode))
+path = Path(sys.argv[1])
+if path.is_symlink():
+    print("symlink")
+    sys.exit(1)
+st = path.stat()
+mode = stat.S_IMODE(st.st_mode)
+if st.st_uid != os.getuid() and st.st_uid != 0:
+    print(f"owner:{st.st_uid}")
+    sys.exit(1)
+if mode != 0o600:
+    print(f"mode:{oct(mode)}")
+    sys.exit(1)
+print("ok")
 PY
 )"
-  if [[ "$mode" != "0o600" ]]; then
-    echo "insecure permissions on $NIGHTLY_ENV_FILE: $mode; run chmod 600 $NIGHTLY_ENV_FILE" >&2
+  if [[ "$status" != "ok" ]]; then
+    echo "insecure $NIGHTLY_ENV_FILE ($status); use a regular file owned by you with chmod 600" >&2
     exit 2
   fi
 }
@@ -50,10 +62,32 @@ PY
 # 加载本地真实 e2e 环境变量文件，关键输出是当前 shell 中可见的 KONGMING_* 配置。
 load_e2e_env() {
   require_secure_env_file
-  set -a
-  # shellcheck disable=SC1090
-  source "$NIGHTLY_ENV_FILE"
-  set +a
+  while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+    export "$key=$value"
+  done < <(python - "$NIGHTLY_ENV_FILE" <<'PY'
+from pathlib import Path
+import ast
+import re
+import sys
+
+env_path = Path(sys.argv[1])
+key_pattern = re.compile(r"^KONGMING_[A-Z0-9_]+$")
+for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+    line = raw_line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    key = key.strip()
+    if not key_pattern.fullmatch(key):
+        continue
+    value = value.strip()
+    if (value.startswith("'") and value.endswith("'")) or (
+        value.startswith('"') and value.endswith('"')
+    ):
+        value = ast.literal_eval(value)
+    sys.stdout.write(key + "\0" + value + "\0")
+PY
+  )
 }
 
 # 跨平台检查固定测试端口是否空闲，关键输入是 KONGMING_WEB_HOST / KONGMING_WEB_PORT。
@@ -64,13 +98,13 @@ import sys
 host = sys.argv[1]
 port = int(sys.argv[2])
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.settimeout(0.2)
 try:
-    sock.bind((host, port))
-except OSError:
-    sys.exit(1)
+    busy = sock.connect_ex((host, port)) == 0
 finally:
     sock.close()
+if busy:
+    sys.exit(1)
 PY
   then
     echo "port $KONGMING_WEB_HOST:$KONGMING_WEB_PORT is already in use; stop that process before nightly" >&2
