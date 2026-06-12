@@ -128,6 +128,29 @@ def test_changed_files_since_includes_untracked_files(tmp_path: Path) -> None:
     assert "scripts/run_pre_push_tests.py" in changed
 
 
+def test_changed_files_since_filters_irrelevant_untracked_files(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"], cwd=tmp_path, check=True
+    )
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+    _touch(tmp_path / "README.md")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL
+    )
+
+    _touch(tmp_path / "web" / "node_modules" / "pkg" / "index.js")
+    _touch(tmp_path / "docs" / "private-note.md")
+    _touch(tmp_path / "tests" / "unit" / "test_config_loader.py")
+
+    changed = pre_push.changed_files_since(tmp_path, "HEAD")
+
+    assert "tests/unit/test_config_loader.py" in changed
+    assert "web/node_modules/pkg/index.js" not in changed
+    assert "docs/private-note.md" not in changed
+
+
 def test_local_nightly_defaults_to_port_60999() -> None:
     project_root = Path(__file__).resolve().parents[3]
     script = (project_root / "scripts" / "run_local_nightly.sh").read_text(encoding="utf-8")

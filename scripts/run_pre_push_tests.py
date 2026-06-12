@@ -33,6 +33,8 @@ UNIT_TEST_PREFIX = "tests/unit/"
 ROOT_CONFIG_FILES = {
     ".pre-commit-config.yaml",
     "pyproject.toml",
+    "Makefile",
+    "README.md",
 }
 
 SMOKE_TESTS = (
@@ -169,8 +171,21 @@ def changed_files_since(repo: Path, base_ref: str) -> list[str]:
         _run_git(repo, ["diff", "--name-only", "--diff-filter=ACMR"], check=False),
         _run_git(repo, ["ls-files", "--others", "--exclude-standard"], check=False),
     ]
-    files = {line.strip() for output in outputs for line in output.splitlines() if line.strip()}
+    files = {
+        line.strip()
+        for output in outputs
+        for line in output.splitlines()
+        if line.strip() and _is_gate_relevant_path(line.strip())
+    }
     return sorted(files)
+
+
+def _is_gate_relevant_path(path: str) -> bool:
+    """判断路径是否值得进入 push gate 选择和日志输出。"""
+
+    if path in ROOT_CONFIG_FILES:
+        return True
+    return path.startswith(("src/", "tests/unit/", "scripts/"))
 
 
 def _is_python_unit_test(path: str) -> bool:
