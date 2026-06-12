@@ -14,60 +14,87 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 240 10% 4%;
-    --card: 0 0% 100%;
-    --card-foreground: 240 10% 4%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 240 10% 4%;
-    --primary: 240 6% 10%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 240 5% 96%;
-    --secondary-foreground: 240 6% 10%;
-    --muted: 240 5% 96%;
-    --muted-foreground: 240 4% 46%;
-    --accent: 217 91% 60%;
-    --accent-foreground: 0 0% 100%;
-    --destructive: 0 72% 51%;
+    --background: 39 41% 93%;
+    --foreground: 24 17% 18%;
+    --card: 43 35% 95%;
+    --card-foreground: 24 18% 20%;
+    --popover: 43 37% 96%;
+    --popover-foreground: 24 18% 20%;
+    --primary: 164 21% 45%;
+    --primary-foreground: 39 41% 96%;
+    --secondary: 150 18% 88%;
+    --secondary-foreground: 24 18% 22%;
+    --muted: 38 28% 89%;
+    --muted-foreground: 28 11% 41%;
+    --accent: 196 54% 31%;
+    --accent-foreground: 41 30% 96%;
+    --destructive: 2 61% 47%;
     --destructive-foreground: 0 0% 98%;
-    --warning: 38 92% 50%;
-    --warning-foreground: 240 10% 4%;
-    --success: 142 71% 45%;
+    --warning: 33 73% 46%;
+    --warning-foreground: 40 34% 95%;
+    --success: 148 31% 42%;
     --success-foreground: 0 0% 100%;
-    --border: 240 6% 90%;
-    --input: 240 6% 90%;
-    --ring: 217 91% 60%;
-    --scrollbar-thumb: 240 6% 18% / 0.18;
-    --scrollbar-thumb-hover: 240 6% 18% / 0.28;
+    --border: 35 20% 78%;
+    --input: 35 22% 80%;
+    --ring: 164 21% 45%;
+    --scrollbar-thumb: 164 14% 36% / 0.18;
+    --scrollbar-thumb-hover: 164 14% 36% / 0.28;
     --radius: 0.625rem;
+    --panel: 43 33% 95% / 0.84;
+    --panel-strong: 44 38% 96% / 0.95;
+    --glow: 164 21% 45% / 0.12;
+    --panel-shadow:
+      0 22px 48px -34px hsl(32 24% 32% / 0.28),
+      inset 0 1px 0 hsl(0 0% 100% / 0.48),
+      inset 0 0 0 1px hsl(164 21% 45% / 0.05);
+    --panel-soft-shadow:
+      0 16px 34px -28px hsl(32 24% 32% / 0.22),
+      inset 0 1px 0 hsl(0 0% 100% / 0.34);
+    --page-surface: hsl(39 42% 91%);
+    /* 白板 scope=global 卡片的 1px 差异色边框（淡蓝，亮色主题）。
+     * 仅 global 卡片用，project 卡片视觉不变。 */
+    --whiteboard-scope-global-border: 164 24% 52%;
   }
 
   .dark {
-      --background: 240 10% 4%;
-      --foreground: 0 0% 98%;
-      --card: 240 8% 7%;
-      --card-foreground: 0 0% 98%;
-      --popover: 240 8% 7%;
-      --popover-foreground: 0 0% 98%;
-      --primary: 0 0% 98%;
-      --primary-foreground: 240 6% 10%;
-      --secondary: 240 4% 12%;
-      --secondary-foreground: 0 0% 98%;
-      --muted: 240 4% 12%;
-      --muted-foreground: 240 5% 65%;
-      --accent: 217 91% 60%;
-      --accent-foreground: 0 0% 100%;
-      --destructive: 0 63% 45%;
-      --destructive-foreground: 0 0% 98%;
-      --warning: 38 92% 50%;
-      --warning-foreground: 240 10% 4%;
-      --success: 142 71% 45%;
-      --success-foreground: 0 0% 100%;
-      --border: 240 4% 16%;
-      --input: 240 4% 16%;
-      --ring: 217 91% 60%;
-      --scrollbar-thumb: 0 0% 100% / 0.16;
-      --scrollbar-thumb-hover: 0 0% 100% / 0.26;
+      --background: 228 36% 7%;
+      --foreground: 220 26% 94%;
+      --card: 229 30% 11%;
+      --card-foreground: 220 24% 95%;
+      --popover: 229 31% 10%;
+      --popover-foreground: 220 24% 95%;
+      --primary: 258 85% 73%;
+      --primary-foreground: 232 42% 8%;
+      --secondary: 228 24% 15%;
+      --secondary-foreground: 220 22% 92%;
+      --muted: 228 22% 13%;
+      --muted-foreground: 224 14% 70%;
+      --accent: 214 92% 67%;
+      --accent-foreground: 228 44% 8%;
+      --destructive: 0 73% 60%;
+      --destructive-foreground: 0 0% 100%;
+      --warning: 40 93% 63%;
+      --warning-foreground: 228 44% 9%;
+      --success: 148 59% 53%;
+      --success-foreground: 228 44% 9%;
+      --border: 228 22% 20%;
+      --input: 228 22% 18%;
+      --ring: 258 85% 73%;
+      --scrollbar-thumb: 220 20% 100% / 0.12;
+      --scrollbar-thumb-hover: 220 20% 100% / 0.2;
+      --panel: 229 34% 11% / 0.76;
+      --panel-strong: 229 34% 13% / 0.9;
+      --glow: 258 85% 73% / 0.18;
+      --panel-shadow:
+        0 24px 64px -42px hsl(236 35% 2% / 0.92),
+        inset 0 1px 0 hsl(0 0% 100% / 0.08),
+        inset 0 0 0 1px hsl(var(--glow));
+      --panel-soft-shadow:
+        0 22px 44px -36px hsl(236 35% 2% / 0.92),
+        inset 0 1px 0 hsl(0 0% 100% / 0.06);
+      --page-surface: hsl(var(--background));
+      /* 白板 scope=global 边框（暗色主题，降饱和避免黑底刺眼）。 */
+      --whiteboard-scope-global-border: 257 55% 58%;
   }
 
   * {
@@ -80,11 +107,27 @@
     height: 100%;
   }
 
+  html,
   body {
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  #root {
+    min-height: var(--app-height, 100dvh);
+    height: var(--app-height, 100dvh);
+    overflow: hidden;
+  }
+
+  body {
+    min-height: var(--app-height, 100dvh);
+    position: relative;
     background-color: hsl(var(--background));
     color: hsl(var(--foreground));
+    background-image: var(--page-surface);
+    background-attachment: fixed;
     font-family:
-      -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI",
+      "Avenir Next", "SF Pro Display", -apple-system, BlinkMacSystemFont,
       "PingFang SC", "Helvetica Neue", sans-serif;
     font-size: 0.9375rem;
     line-height: 1.5;
@@ -95,11 +138,48 @@
     -moz-osx-font-smoothing: grayscale;
   }
 
+  html[data-kongming-theme="guofeng-light"] body::before {
+    content: none;
+  }
+
   code,
   pre,
   kbd {
     font-family:
-      "SF Mono", "JetBrains Mono", ui-monospace, Menlo, monospace;
+      "JetBrains Mono", "SF Mono", "Berkeley Mono", ui-monospace, Menlo, monospace;
+  }
+}
+
+@layer components {
+  .obsidian-panel {
+    background: hsl(var(--panel-strong));
+    border: 1px solid hsl(var(--border) / 0.92);
+    box-shadow: var(--panel-shadow);
+    backdrop-filter: blur(22px);
+  }
+
+  .obsidian-panel-soft {
+    background: hsl(var(--panel));
+    border: 1px solid hsl(var(--border) / 0.82);
+    box-shadow: var(--panel-soft-shadow);
+    backdrop-filter: blur(18px);
+  }
+
+  .obsidian-grid {
+    background-image: none;
+  }
+
+  .obsidian-hairline {
+    position: relative;
+  }
+
+  .obsidian-hairline::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border-radius: inherit;
+    border: 1px solid hsl(0 0% 100% / 0.045);
   }
 }
 
@@ -141,5 +221,9 @@
   }
   .scrollbar-overlay::-webkit-scrollbar-corner {
     background-color: transparent;
+  }
+
+  .text-glow {
+    text-shadow: 0 0 18px hsl(var(--glow));
   }
 }

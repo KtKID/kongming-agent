@@ -64,7 +64,7 @@ export function ApprovalDialog({ socket }: { socket: ThreadSocket | null }) {
     try {
       if (socket) {
         socket.send({
-          kind: "approval.ack",
+          frame_type: "approval.ack",
           call_id: head.call_id,
           action,
         });

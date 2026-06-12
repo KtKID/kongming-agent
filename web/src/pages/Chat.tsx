@@ -1,64 +1,76 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { LeftSidebar } from "@/components/LeftSidebar";
-import { MessageList } from "@/components/MessageList";
-import { Composer } from "@/components/Composer";
+import { toast } from "sonner";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { ClaudeCodeView } from "@/components/ClaudeCodeView";
 import { CodexView } from "@/components/CodexView";
+import { Composer } from "@/components/Composer";
+import { FileDrawer } from "@/components/FileDrawer";
+import { LeftSidebar } from "@/components/LeftSidebar";
+import { MessageList } from "@/components/MessageList";
+import { WhiteboardPanel, type WhiteboardCardItem } from "@/components/WhiteboardPanel";
 import { WorkspaceFilesPanel } from "@/components/WorkspaceFilesPanel";
 import { WorkspaceGitPanel } from "@/components/WorkspaceGitPanel";
 import { WorkspaceShellPanel } from "@/components/WorkspaceShellPanel";
 import { WorkspaceTabs } from "@/components/WorkspaceTabs";
-import {
-  WhiteboardPanel,
-  type WhiteboardCardItem,
-} from "@/components/WhiteboardPanel";
+import { AutoApprovalToggle } from "@/features/auto-approval/AutoApprovalToggle";
+import type { AutoApprovalSocket } from "@/features/auto-approval/useAutoApproval";
+import { useApprovalDialogStore } from "@/hooks/useApprovalDialog";
+import { useChatLayout } from "@/hooks/useChatLayout";
 import { useWS } from "@/hooks/useWS";
-import { useStreamingRender } from "@/hooks/useStreamingRender";
+import { buildWhiteboardCardDraft, type WhiteboardCardKind } from "@/lib/whiteboard-card-templates";
 import { cn } from "@/lib/utils";
+import { ChatManager } from "@/chat/ChatManager";
+import { makeNetworkHandle, getTimelineStore, useChatTimeline } from "@/chat/runtimeWiring";
+import { toViewModel, toGenericRenderItems } from "@/chat/ChatRenderAdapter";
+import type { CardScope, WSFrameC2S } from "@/protocol";
 import { useChatStore } from "@/stores/chat";
 import { useThreadsStore } from "@/stores/threads";
+import { useThreadRunning } from "@/hooks/useThreadRunning";
 import { useWhiteboardStore } from "@/stores/whiteboard";
 import { useWorkspaceStore } from "@/stores/workspace";
 
-/**
- * Chat 页：
- * - 左 24rem ThreadList
- * - 右：根据 thread.backend_kind 分支：
- *   - generic_chat → MessageList + Composer + ApprovalDialog（v0.1.5 既有）
- *   - claude_code  → ClaudeCodeView（v0.1.6 新增；走 /ws/claude-code）
- *
- * useParams<thread_id> 切换右侧；ws 在 hook 内部按 threadId 重建。
- */
 export function ChatPage() {
+  const { isMobileLayout, isCompactLayout, shouldOpenWhiteboard } = useChatLayout();
+  const useCompactToolbar = isCompactLayout;
+
   const params = useParams<{ thread_id?: string }>();
   const threadId = params.thread_id;
   const thread = useThreadsStore((s) =>
-    threadId ? s.threads.find((t) => t.id === threadId) : undefined,
+    threadId ? s.threads.find((item) => item.id === threadId) : undefined,
   );
-  const pendingNewClaudeSession = useThreadsStore((s) => s.pendingNewClaudeSession);
+  const pendingNewSession = useThreadsStore((s) => s.pendingNewSession);
+  const setPendingNewSession = useThreadsStore((s) => s.setPendingNewSession);
   const backendKind = thread?.backend_kind ?? "generic_chat";
   const isClaudeCode = backendKind === "claude_code";
   const isCodex = backendKind === "codex";
 
-  // generic_chat 路径：维持原 ws + streaming 连接（不动）
-  // claude_code 路径：传 undefined 让 useWS 不连，避免对错路径开 ws
-  // thread 还没 fetch 完成时（store 暂为 undefined）也不连 —— 否则 backend_kind
-  // 默认值 generic_chat 会触发错误的 /ws/threads/{id} 连接（claude_code thread
-  // 被后端 403 拒）。fetch 完成 re-render 后会用真实 backend_kind 重新评估。
   const genericWsId = thread && !isClaudeCode && !isCodex ? threadId : undefined;
   const { socket } = useWS(genericWsId);
-  useStreamingRender(genericWsId, socket);
-  const [isMobileLayout, setIsMobileLayout] = useState(false);
-  const [isCompactLayout, setIsCompactLayout] = useState(false);
-  const [isLeftSidebarOpen, setIsLeftSidebarOpen] = useState(true);
-  const [isWhiteboardOpen, setIsWhiteboardOpen] = useState(true);
 
-  const appendUser = useChatStore((s) => s.appendUser);
-  const boardTitle = useWhiteboardStore((s) => s.boardTitle);
+  const autoApprovalSocket = useMemo<AutoApprovalSocket | null>(() => {
+    if (!socket) return null;
+    return {
+      send: (frame) => {
+        socket.send(frame as unknown as WSFrameC2S);
+      },
+    };
+  }, [socket]);
+
+  const [isLeftSidebarOpen, setIsLeftSidebarOpen] = useState(!isCompactLayout);
+  const [isWhiteboardOpen, setIsWhiteboardOpen] = useState(shouldOpenWhiteboard);
+
+  // chat-receive-side-unify #5：appendUser 退役——用户气泡改由 ChatManager.sendMessage
+  // 往时间线灌 user_message 事件（见下方 onSend）。底栏 token 仍由 appendUsage 喂养
+  // （useChatStore.usageByThread 是 StatusLine 数据源，与气泡页脚是两个展示位）。
+  const fetchThreadUsage = useChatStore((s) => s.fetchThreadUsage);
+  const appendUsage = useChatStore((s) => s.appendUsage);
+  const pushApproval = useApprovalDialogStore((s) => s.push);
+  const globalTitle = useWhiteboardStore((s) => s.globalTitle);
+  const projectTitle = useWhiteboardStore((s) => s.projectTitle);
   const cards = useWhiteboardStore((s) => s.cards);
   const fetchBoard = useWhiteboardStore((s) => s.fetchBoard);
+  const clearBoard = useWhiteboardStore((s) => s.clearBoard);
   const createCard = useWhiteboardStore((s) => s.createCard);
   const updateCardContentLocal = useWhiteboardStore((s) => s.updateCardContentLocal);
   const updateCardMetaLocal = useWhiteboardStore((s) => s.updateCardMetaLocal);
@@ -82,13 +94,17 @@ export function ChatPage() {
     threadId ? s.fileOpenRequestByThread[threadId] : undefined,
   );
 
-  const items = useChatStore((s) =>
-    threadId ? (s.itemsByThread[threadId] ?? null) : null,
-  );
+  const effectiveCwd = useMemo(() => {
+    const threadCwd = thread?.cwd?.trim();
+    if (threadCwd) return threadCwd;
+    return workspaceContext?.workspace_root?.trim() ?? "";
+  }, [thread?.cwd, workspaceContext?.workspace_root]);
+
   const whiteboardCards = useMemo<WhiteboardCardItem[]>(
     () =>
       cards.map((card) => ({
         id: card.id,
+        scope: card.scope,
         title: card.title,
         category: card.category,
         content: card.content,
@@ -97,26 +113,23 @@ export function ChatPage() {
         y: card.y,
         zIndex: card.zIndex,
         height: card.height,
-        updatedLabel: card.saving
-          ? "保存中"
-          : card.error
-            ? "保存失败"
-            : "已同步",
+        updatedLabel: card.saving ? "Saving" : card.error ? "Save failed" : "Synced",
       })),
     [cards],
   );
-  const lastAssistantStreaming = useMemo(() => {
-    if (!items) return false;
-    for (let i = items.length - 1; i >= 0; i--) {
-      const it = items[i]!;
-      if (it.kind === "assistant") return it.streaming;
-    }
-    return false;
-  }, [items]);
+
+  // chat-running-state-unify #2：generic 频道的「是否运行中」改用共享 hook
+  // （后端 thread-status phase 为唯一真源）。原前端推导的 lastAssistantStreaming
+  // 在对话结束后不可靠复位，会把停止按钮卡住——已删除。
+  const isRunning = useThreadRunning(threadId);
 
   useEffect(() => {
-    void fetchBoard();
-  }, [fetchBoard]);
+    if (threadId) {
+      void fetchBoard(threadId);
+      return;
+    }
+    clearBoard();
+  }, [clearBoard, fetchBoard, threadId]);
 
   useEffect(() => {
     if (!threadId) return;
@@ -124,33 +137,26 @@ export function ChatPage() {
   }, [fetchWorkspaceContext, threadId]);
 
   useEffect(() => {
-    // 首次同步布局：compact 模式关闭侧边栏
-    const initWidth = window.innerWidth;
-    const initMobile = initWidth < 768;
-    const initCompact = initWidth < 1080;
-    setIsMobileLayout(initMobile);
-    setIsCompactLayout(initCompact);
-    if (initCompact) {
+    if (!threadId) return;
+    void fetchThreadUsage(threadId);
+  }, [fetchThreadUsage, threadId]);
+
+  useEffect(() => {
+    if (!threadId || !thread || !pendingNewSession) return;
+    setPendingNewSession(null);
+  }, [threadId, thread, pendingNewSession, setPendingNewSession]);
+
+  useEffect(() => {
+    if (isCompactLayout) {
       setIsLeftSidebarOpen(false);
+    }
+  }, [isCompactLayout]);
+
+  useEffect(() => {
+    if (!shouldOpenWhiteboard) {
       setIsWhiteboardOpen(false);
     }
-    // 后续 resize：只在宽度真正变化时关闭（排除虚拟键盘弹出只改高度的 resize）
-    let lastWidth = initWidth;
-    const onResize = () => {
-      const width = window.innerWidth;
-      const mobile = width < 768;
-      const compact = width < 1080;
-      setIsMobileLayout(mobile);
-      setIsCompactLayout(compact);
-      if (compact && width !== lastWidth) {
-        setIsLeftSidebarOpen(false);
-        setIsWhiteboardOpen(false);
-      }
-      lastWidth = width;
-    };
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
+  }, [shouldOpenWhiteboard]);
 
   const toggleLeftSidebar = () => {
     setIsLeftSidebarOpen((open) => {
@@ -168,32 +174,114 @@ export function ChatPage() {
     });
   };
 
-  const onSend = (text: string, reasoningEffort: "low" | "medium" | "high" | null) => {
-    if (!threadId || !socket) return;
-    appendUser(threadId, text);
-    socket.send({
-      kind: "user.input",
-      text,
-      request_id: `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+  // generic 频道走统一的 ChatManager 发送入口：视图不再手写 user.input 帧，
+  // 字段组装收口到 GenericChatProvider（message-runtime-v0.1 #5）。
+  const chatManager = useMemo(() => {
+    if (!socket) return null;
+    return new ChatManager({
+      resolveHandle: (_kind, tid) =>
+        makeNetworkHandle(tid, (frame) => socket.send(frame as WSFrameC2S)),
+      ensureThread: async (req) => req.provider.threadId,
+      timelineFor: (tid) => getTimelineStore(tid),
+    });
+  }, [socket]);
+
+  // chat-receive-side-unify #5：generic 接收侧统一链路
+  // socket.on(frame) → chatManager.ingestFrame → ChatTimelineStore →
+  // useChatTimeline + adapter 投影 → MessageList。退役 useStreamingRender。
+  //
+  // 用 ref 持 chatManager，断开 useEffect 对 chatManager 的依赖，避免每次渲染
+  // 重新 on/off 抖动（项目记忆：React useEffect 不稳定回调死循环）。effect 只在
+  // (genericWsId, socket) 变化时重订阅。
+  const chatManagerRef = useRef(chatManager);
+  chatManagerRef.current = chatManager;
+
+  useEffect(() => {
+    if (!genericWsId || !socket) return;
+    const off = socket.on((frame) => {
+      const manager = chatManagerRef.current;
+      if (!manager) return;
+      // 主链路：原始帧灌入统一状态机（user/assistant/tool/notice/error/usage record）。
+      manager.ingestFrame({
+        connectionId: genericWsId,
+        channel: "generic",
+        threadId: genericWsId,
+        frame,
+        receivedAt: Date.now(),
+      });
+      // 时间线之外的副作用（dialog 队列 / toast / 底栏 token），逐条保等价语义：
+      switch (frame.frame_type) {
+        case "approval.request":
+          // 审批 dialog 弹窗队列不属于时间线（横幅 record 由 provider 翻成 status）。
+          pushApproval(frame);
+          break;
+        case "error":
+          // 横幅 record 由 provider 翻成 error record；这里补 toast（旧链路语义）。
+          toast.error(frame.message);
+          break;
+        case "cell.evicted":
+          // thread cell 回收：toast.warning + 清该 thread 的临时流式态。
+          // resetThread 会清空整条时间线（含已 commit 消息），语义过狠；旧链路
+          // clearBuffers 只清 streaming buffer。这里保持「只 toast，不清已落消息」
+          // ——已提交消息保留，下次 thread.history 重连会带回最新真源。
+          toast.warning(`cell 已回收（${frame.reason}）：${frame.message ?? ""}`);
+          break;
+        case "usage":
+          // 底栏 StatusLine 读 useChatStore.usageByThread，与气泡页脚（时间线 record）
+          // 是两个展示位；这里保留 appendUsage 副作用，保证底栏 token 不回归。
+          appendUsage(genericWsId, frame);
+          break;
+        default:
+          break;
+      }
+    });
+    return () => {
+      off();
+    };
+  }, [genericWsId, socket, pushApproval, appendUsage]);
+
+  // chat-receive-side-unify #5：generic items 投影。
+  // useChatTimeline 只订 generic threadId（claude/codex 时 genericWsId=undefined
+  // → 回退稳定空 store，不影响）。组件侧 useMemo 投影，store getSnapshot 保持纯净。
+  const timelineState = useChatTimeline(genericWsId);
+  const timelineView = useMemo(() => toViewModel(timelineState), [timelineState]);
+  const genericItems = useMemo(
+    () => toGenericRenderItems(timelineView),
+    [timelineView],
+  );
+
+  const onSend = (
+    text: string,
+    reasoningEffort: "low" | "medium" | "high" | null,
+    attachments?: import("@/protocol").UserInputAttachment[],
+  ) => {
+    if (!threadId || !socket || !chatManager) return;
+    void chatManager.sendMessage({
+      common: { text, reasoningEffort, attachments },
+      provider: { provider: "generic", threadId },
     });
   };
 
-  const onCreateWhiteboardCard = async () => {
+  // message-runtime #9：generic 打断改走 chatManager.interrupt 统一接口
+  // （三频道一致），不再视图层直接 socket.send。
+  const onInterrupt = () => {
+    if (!threadId || !chatManager) return;
+    void chatManager.interrupt({ threadId, provider: "generic" });
+  };
+
+  const onCreateWhiteboardCard = async (
+    scope: CardScope,
+    kind: WhiteboardCardKind,
+  ) => {
+    const draft = buildWhiteboardCardDraft(kind, cards.length + 1);
     await createCard({
-      title: `新卡片 ${cards.length + 1}`,
-      category: "note",
-      content: [
-        "# 新建卡片",
-        "",
-        "- [ ] 这里是 workspace 级 markdown 文件",
-        "- [ ] 可以继续补待办、细节或笔记",
-        "",
-        "> 这张卡片会保存在当前 workspace 的 whiteboard/cards 目录",
-      ].join("\n"),
+      scope,
+      title: draft.title,
+      category: draft.category,
+      content: draft.content,
       x: 24 + cards.length * 18,
       y: 24 + cards.length * 18,
-      height: 280,
+      height: draft.height,
     });
   };
 
@@ -210,10 +298,6 @@ export function ChatPage() {
     if (typeof patch.content === "string") {
       updateCardContentLocal(cardId, patch.content);
     }
-  };
-
-  const onToggleWhiteboardCard = (cardId: string) => {
-    toggleCollapsed(cardId);
   };
 
   const onDeleteWhiteboardCard = async (cardId: string) => {
@@ -233,93 +317,113 @@ export function ChatPage() {
   };
 
   return (
-    <div className="flex h-full min-w-0 overflow-hidden">
+    <div className="flex h-full min-w-0 gap-3 overflow-hidden px-3 pt-3">
       <LeftSidebar
         isOpen={isLeftSidebarOpen}
         compactMode={isCompactLayout}
         mobileMode={isMobileLayout}
         onToggleOpen={toggleLeftSidebar}
       />
-      <div className="relative flex min-w-0 flex-1 overflow-hidden bg-background">
-        <div
-          className={cn(
-            "flex min-w-[18rem] flex-1 flex-col overflow-hidden",
-            isCompactLayout && !isMobileLayout ? "px-[4.75rem]" : "px-0",
-          )}
-        >
-          {threadId ? (
-            <div className="border-b border-border px-4 py-3">
-              <WorkspaceTabs
-                active={activeWorkspaceTab}
-                onChange={(tab) => setActiveWorkspaceTab(threadId, tab)}
-                threadId={thread?.claude_thread_id || thread?.codex_thread_id || threadId}
-              />
-            </div>
-          ) : null}
-          <div className="min-h-0 flex-1">
-            {activeWorkspaceTab === "files" ? (
-              <WorkspaceFilesPanel
-                context={workspaceContext}
-                loading={workspaceLoading}
-                openRequest={workspaceFileOpenRequest}
-              />
-            ) : activeWorkspaceTab === "git" ? (
-              <WorkspaceGitPanel
-                context={workspaceContext}
-                loading={workspaceLoading}
-                onOpenFile={(path) => {
-                  if (!threadId) return;
-                  requestOpenWorkspaceFile(threadId, path);
-                  setActiveWorkspaceTab(threadId, "files");
-                }}
-              />
-            ) : activeWorkspaceTab === "shell" ? (
-              <WorkspaceShellPanel
-                context={workspaceContext}
-                loading={workspaceLoading}
-              />
-            ) : !threadId && pendingNewClaudeSession ? (
-              <ClaudeCodeView />
-            ) : isClaudeCode && threadId ? (
-              <ClaudeCodeView threadId={threadId} thread={thread} />
-            ) : isCodex && threadId ? (
-              <CodexView threadId={threadId} thread={thread} />
-            ) : (
-              <div className="flex h-full min-h-0 flex-col overflow-hidden">
-                <div className="min-h-0 flex-1">
-                  <MessageList threadId={threadId} />
-                </div>
-                <Composer
-                  disabled={!threadId || !socket || lastAssistantStreaming}
-                  onSubmit={onSend}
-                  threadId={threadId}
-                />
-              </div>
-            )}
+
+      <div className="relative flex min-w-0 flex-1 flex-col gap-3 overflow-hidden">
+        {threadId && !useCompactToolbar ? (
+          <div className="obsidian-panel obsidian-hairline shrink-0 rounded-[1.6rem] px-4 py-3">
+            <WorkspaceTabs
+              active={activeWorkspaceTab}
+              onChange={(tab) => setActiveWorkspaceTab(threadId, tab)}
+              threadId={thread?.claude_thread_id || thread?.codex_thread_id || threadId}
+            />
           </div>
+        ) : null}
+
+        <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+          <div
+            className={cn(
+              "obsidian-panel obsidian-hairline flex min-w-0 flex-1 flex-col overflow-hidden rounded-[1.85rem]",
+              isCompactLayout && !isMobileLayout ? "px-[4.75rem]" : "px-0",
+            )}
+          >
+            <div className="min-h-0 flex-1">
+              {activeWorkspaceTab === "files" ? (
+                <WorkspaceFilesPanel
+                  context={workspaceContext}
+                  loading={workspaceLoading}
+                  openRequest={workspaceFileOpenRequest}
+                />
+              ) : activeWorkspaceTab === "git" ? (
+                <WorkspaceGitPanel
+                  context={workspaceContext}
+                  loading={workspaceLoading}
+                  onOpenFile={(path) => {
+                    if (!threadId) return;
+                    requestOpenWorkspaceFile(threadId, path);
+                    setActiveWorkspaceTab(threadId, "files");
+                  }}
+                />
+              ) : activeWorkspaceTab === "shell" ? (
+                <WorkspaceShellPanel
+                  context={workspaceContext}
+                  loading={workspaceLoading}
+                />
+              ) : !threadId && pendingNewSession?.backendKind === "claude_code" ? (
+                <ClaudeCodeView />
+              ) : !threadId && pendingNewSession?.backendKind === "codex" ? (
+                <CodexView />
+              ) : isClaudeCode && threadId ? (
+                <ClaudeCodeView threadId={threadId} thread={thread} />
+              ) : isCodex && threadId ? (
+                <CodexView threadId={threadId} thread={thread} />
+              ) : (
+                <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background/10">
+                  <div className="min-h-0 flex-1">
+                    <MessageList threadId={threadId} items={genericItems} />
+                  </div>
+                  <Composer
+                    disabled={!threadId || !socket || isRunning}
+                    onSubmit={onSend}
+                    threadId={threadId}
+                    isRunning={isRunning}
+                    onInterrupt={onInterrupt}
+                    leftActions={
+                      effectiveCwd && autoApprovalSocket ? (
+                        <AutoApprovalToggle
+                          cwd={effectiveCwd}
+                          socket={autoApprovalSocket}
+                        />
+                      ) : null
+                    }
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+
+          <WhiteboardPanel
+            title={projectTitle ?? globalTitle}
+            projectTitle={projectTitle}
+            cards={threadId ? whiteboardCards : []}
+            isOpen={isWhiteboardOpen}
+            compactMode={isCompactLayout}
+            mobileMode={isMobileLayout}
+            canCreate={Boolean(threadId)}
+            onToggleOpen={toggleWhiteboard}
+            onCreateCard={threadId ? onCreateWhiteboardCard : undefined}
+            onToggleCollapse={toggleCollapsed}
+            onDeleteCard={onDeleteWhiteboardCard}
+            onUpdateCard={onUpdateWhiteboardCard}
+            onUpdateCardLayout={onUpdateWhiteboardCardLayout}
+            onBringToFront={bringCardToFront}
+            emptyTitle={threadId ? "No whiteboard cards yet" : "Open a thread first"}
+            emptyDescription={
+              threadId
+                ? "Keep whiteboard collapsed by default so the chat area keeps more width."
+                : "Whiteboard belongs to the workspace. Open a thread, then start organizing cards."
+            }
+          />
+          <FileDrawer mobileMode={isMobileLayout} />
         </div>
-        <WhiteboardPanel
-          title={boardTitle}
-          cards={threadId ? whiteboardCards : []}
-          isOpen={isWhiteboardOpen}
-          compactMode={isCompactLayout}
-          mobileMode={isMobileLayout}
-          canCreate={Boolean(threadId)}
-          onToggleOpen={toggleWhiteboard}
-          onCreateCard={threadId ? onCreateWhiteboardCard : undefined}
-          onToggleCollapse={onToggleWhiteboardCard}
-          onDeleteCard={onDeleteWhiteboardCard}
-          onUpdateCard={onUpdateWhiteboardCard}
-          onUpdateCardLayout={onUpdateWhiteboardCardLayout}
-          onBringToFront={bringCardToFront}
-          emptyTitle={threadId ? "还没有白板卡片" : "先打开一个会话"}
-          emptyDescription={
-            threadId
-              ? "卡片内容会落到当前 workspace；右侧区域是 markdown 便签白板。"
-              : "白板是 workspace 级区域。先在左侧进入一个 thread，再开始摆放卡片。"
-          }
-        />
       </div>
+
       {isClaudeCode || isCodex || activeWorkspaceTab !== "chat" ? null : (
         <ApprovalDialog socket={socket} />
       )}

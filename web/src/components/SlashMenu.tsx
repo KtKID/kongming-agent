@@ -41,6 +41,10 @@ export function SlashMenu({
   const [candidates, setCandidates] = useState<SlashCandidate[]>([]);
   const [filtered, setFiltered] = useState<SlashCandidate[]>([]);
   const menuRef = useRef<HTMLDivElement>(null);
+  // 父组件常以匿名函数传入 onFilteredChange，每次渲染都是新引用。
+  // 用 ref 持有最新值，避免它进 useEffect 依赖触发死循环。
+  const onFilteredChangeRef = useRef(onFilteredChange);
+  onFilteredChangeRef.current = onFilteredChange;
 
   useEffect(() => {
     if (!visible) return;
@@ -56,8 +60,8 @@ export function SlashMenu({
         c.description.toLowerCase().includes(q),
     );
     setFiltered(result);
-    onFilteredChange(result);
-  }, [query, candidates, onFilteredChange]);
+    onFilteredChangeRef.current(result);
+  }, [query, candidates]);
 
   useEffect(() => {
     if (!visible) return;
