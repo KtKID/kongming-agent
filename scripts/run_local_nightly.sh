@@ -44,7 +44,7 @@ if path.is_symlink():
     sys.exit(1)
 st = path.stat()
 mode = stat.S_IMODE(st.st_mode)
-if st.st_uid != os.getuid() and st.st_uid != 0:
+if st.st_uid != os.getuid():
     print(f"owner:{st.st_uid}")
     sys.exit(1)
 if mode != 0o600:
@@ -63,7 +63,8 @@ PY
 load_e2e_env() {
   require_secure_env_file
   while IFS= read -r -d '' key && IFS= read -r -d '' value; do
-    export "$key=$value"
+    printf -v "$key" "%s" "$value"
+    export "$key"
   done < <(python - "$NIGHTLY_ENV_FILE" <<'PY'
 from pathlib import Path
 import ast

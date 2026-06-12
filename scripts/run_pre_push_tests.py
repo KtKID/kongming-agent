@@ -38,6 +38,10 @@ ROOT_CONFIG_FILES = {
     "README.md",
 }
 
+WEB_SOURCE_TEST_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("src/hosts/web/routers/threads.py", ("tests/unit/test_web_routers_threads.py",)),
+)
+
 SENSITIVE_ENV_NAMES = {
     "ANTHROPIC_API_KEY",
     "AWS_ACCESS_KEY_ID",
@@ -69,7 +73,6 @@ MODULE_TEST_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "src/infrastructure/config/",
         ("tests/unit/config/", "tests/unit/config_loader/", "tests/unit/test_config_loader.py"),
     ),
-    ("src/hosts/web/", ()),
     ("src/safety/", ("tests/unit/safety/", "tests/unit/test_safety_")),
     (
         "src/tools/",
@@ -159,7 +162,7 @@ def _upstream_ref(repo: Path) -> str | None:
 
 
 def detect_base_ref(repo: Path, environ: Mapping[str, str] | None = None) -> str:
-    """选择 pre-push diff 基准，优先使用显式环境变量和当前分支 upstream。"""
+    """选择 pre-push diff 基准，只接受显式 base、upstream 或同名远端分支。"""
 
     env = environ or os.environ
     explicit = env.get("KONGMING_PRE_PUSH_BASE") or env.get("PRE_PUSH_BASE")
@@ -171,16 +174,17 @@ def detect_base_ref(repo: Path, environ: Mapping[str, str] | None = None) -> str
         return upstream
 
     branch = _current_branch(repo)
-    candidates = []
-    if branch == "private-main":
-        candidates.append("origin/private-main")
-    candidates.extend(("origin/private-main", "origin/main", "main"))
-    for ref in candidates:
-        if _ref_exists(repo, ref):
-            return ref
+    if branch:
+        for remote_name in ("origin", "public"):
+            same_name_remote = f"{remote_name}/{branch}"
+            if not _ref_exists(repo, same_name_remote):
+                continue
+            merge_base = _run_git(repo, ["merge-base", "HEAD", same_name_remote], check=False)
+            if merge_base:
+                return merge_base
     raise RuntimeError(
-        "pre-push: cannot find a valid diff base; set KONGMING_PRE_PUSH_BASE "
-        "to an existing ref such as origin/main"
+        "pre-push: cannot find a valid diff base; set upstream or "
+        "KONGMING_PRE_PUSH_BASE to an existing ref"
     )
 
 
@@ -288,6 +292,10 @@ def _source_related_tests(repo: Path, source_path: str) -> set[str]:
         if (repo / script_test).is_file():
             selected.add(script_test)
     if source_path.startswith("src/"):
+        for path, mapped_hints in WEB_SOURCE_TEST_HINTS:
+            if source_path == path:
+                for hint in mapped_hints:
+                    selected.update(_select_from_hint(repo, hint))
         selected.update(
             _tests_matching_stem(repo, stem, web=source_path.startswith("src/hosts/web/"))
         )
@@ -350,13 +358,14 @@ def build_test_env(repo: Path, environ: Mapping[str, str] | None = None) -> dict
 def _is_sensitive_env_name(name: str) -> bool:
     """判断环境变量名是否属于 push gate 需要隔离的真实配置或凭证。"""
 
-    if name.startswith("KONGMING_"):
+    upper_name = name.upper()
+    if upper_name.startswith("KONGMING_"):
         return True
-    if name in SENSITIVE_ENV_NAMES:
+    if upper_name in SENSITIVE_ENV_NAMES:
         return True
-    if name.endswith("_TOKEN") or name.endswith("_API_KEY"):
+    if upper_name.endswith("_TOKEN") or upper_name.endswith("_API_KEY"):
         return True
-    return name.startswith(SENSITIVE_ENV_PREFIXES)
+    return upper_name.startswith(SENSITIVE_ENV_PREFIXES)
 
 
 def _prepend_pythonpath(src_path: Path, current: str | None) -> str:

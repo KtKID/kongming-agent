@@ -142,6 +142,9 @@ Config——所以填进 `.env` 的变量和直接 `export` 同效。
 生产/CI 部署不需要 `.env` 文件，直接从 secret store 注入 env 变量即可（真实
 env 优先于 `.env`，`.env` 永远不覆盖已设值）。
 
+push gate 会设置 `KONGMING_SKIP_DOTENV=1`，强制 `load_config()` 跳过项目
+`.env`，确保单元测试只使用隔离环境和测试内显式设置的变量。
+
 ### 7. 换模型 / 换后端
 
 **不改 YAML，用环境变量覆盖**（16 个统一配置项，见 `config/README.md`）：

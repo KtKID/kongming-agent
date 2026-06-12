@@ -74,6 +74,29 @@ def test_detect_base_ref_requires_existing_ref(tmp_path: Path) -> None:
         raise AssertionError("detect_base_ref should fail when no base ref exists")
 
 
+def test_detect_base_ref_does_not_guess_main_without_upstream(tmp_path: Path) -> None:
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"], cwd=tmp_path, check=True
+    )
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+    _touch(tmp_path / "README.md")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL
+    )
+    subprocess.run(["git", "checkout", "-b", "feature"], cwd=tmp_path, check=True)
+
+    try:
+        pre_push.detect_base_ref(tmp_path, {})
+    except RuntimeError as exc:
+        assert "cannot find a valid diff base" in str(exc)
+    else:
+        raise AssertionError("detect_base_ref should not guess main without upstream")
+
+
 def test_select_unit_tests_uses_direct_unit_test_file(tmp_path: Path) -> None:
     _touch(tmp_path / "tests/unit/safety/test_grant_cmd_prefix.py")
 
@@ -123,6 +146,7 @@ def test_build_test_env_strips_real_kongming_settings(tmp_path: Path) -> None:
             "PYTHONPATH": "/tmp/neighbor",
             "KONGMING_MODEL_NAME": "MiniMax-M3",
             "KONGMING_MODEL_BASE_URL": "https://example.invalid",
+            "kongming_model_api_key": "lowercase-real",
             "OPENAI_API_KEY": "sk-real",
             "SOME_TOKEN": "secret",
             "AWS_ACCESS_KEY_ID": "real",
@@ -137,6 +161,7 @@ def test_build_test_env_strips_real_kongming_settings(tmp_path: Path) -> None:
     assert env["KONGMING_SKIP_DOTENV"] == "1"
     assert "KONGMING_MODEL_NAME" not in env
     assert "KONGMING_MODEL_BASE_URL" not in env
+    assert "kongming_model_api_key" not in env
     assert "KONGMING_WEB_PORT" not in env
     assert "OPENAI_API_KEY" not in env
     assert "SOME_TOKEN" not in env
@@ -195,10 +220,12 @@ def test_local_nightly_defaults_to_port_60999() -> None:
     assert "require_secure_env_file" in script
     assert "path.is_symlink()" in script
     assert "st.st_uid != os.getuid()" in script
+    assert "st.st_uid != os.getuid() and st.st_uid != 0" not in script
     assert "connect_ex" in script
     assert "SO_REUSEADDR" not in script
     assert "KONGMING_[A-Z0-9_]" in script
     assert 'forbidden_value_chars = {"$", chr(96), "\\r", "\\n", "\\0"}' in script
+    assert 'printf -v "$key" "%s" "$value"' in script
     assert 'cat "$lock_file"' in script
 
 
