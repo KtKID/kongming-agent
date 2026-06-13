@@ -28,7 +28,7 @@ from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
-_AUTO_APPROVAL_CHANNELS: frozenset[str] = frozenset({"generic_chat", "cli"})
+_AUTO_APPROVAL_CHANNELS: frozenset[str] = frozenset({"generic_chat"})
 _SESSION_GRANT_CHANNELS: frozenset[str] = frozenset({"generic_chat"})
 
 
@@ -181,9 +181,9 @@ class ApprovalRules:
         语义（与 :meth:`AutoApprovalPolicy.classify` 对齐）::
 
             if policy is None:                     → 失败关闭默认 ask + 60s
-            elif channel not in {'generic_chat','cli'}:
+            elif channel != 'generic_chat':
                                                      → 默认 ask + 60s
-            elif pdec.blocked_by_rule:             → 危险待审 + 超时自动拒绝（matched_rule 透传）
+            elif pdec.blocked_by_rule:             → 强制人审（matched_rule 透传）
             elif pdec.auto_eligible and enabled:   → 自动通过倒计时（timeout 兜底 60s）
             else:                                  → 默认 ask + 60s
 
@@ -207,13 +207,21 @@ class ApprovalRules:
         # 0. thread 级本次会话授权（manager-session-grant）：
         #    用户在此 thread 之前点过「本次会话都同意」→ 命中后**仍要查
         #    策略的 blocked_by_rule**，危险规则（rm 等）优先级最高，绝不允许
-        #    本次会话授权绕过守护；策略缺失时无法检查危险规则，默认 ask。
+        #    本次会话授权绕过守护；策略缺失时沿用用户显式授权，立即允许。
         if channel in _SESSION_GRANT_CHANNELS and (
             cwd,
             tool_name,
         ) in self._thread_overrides.get(thread_id, set()):
             if self._policy is None:
-                return self._default_decision()
+                return _RuleDecision(
+                    is_immediate=True,
+                    immediate_outcome="approved",
+                    matched_rule=None,
+                    severity="standard",
+                    auto_approve_at_ms=None,
+                    auto_reject_at_ms=None,
+                    timeout_ms=60_000,
+                )
 
             # 仍要查策略是否命中 blocked_by_rule（防止本次会话授权绕过 rm 守护）
             try:
@@ -231,10 +239,15 @@ class ApprovalRules:
                 )
                 return self._default_decision()
             if pdec_guard.blocked_by_rule:
-                # 危险规则命中 → 等待用户明确允许；超时按规则默认拒绝。
+                # 危险规则命中 → 强制人审，即使本次会话授权也不放行。
                 timeout_ms_guard = pdec_guard.timeout_ms if pdec_guard.timeout_ms > 0 else 60_000
-                return self._blocked_decision(
+                return _RuleDecision(
+                    is_immediate=False,
+                    immediate_outcome=None,
                     matched_rule=pdec_guard.blocked_by_rule,
+                    severity="standard",
+                    auto_approve_at_ms=None,
+                    auto_reject_at_ms=None,
                     timeout_ms=timeout_ms_guard,
                 )
 
@@ -281,10 +294,15 @@ class ApprovalRules:
         # timeout 兜底：策略返回 ≤0 时降级 60s（用户硬约束）
         timeout_ms = pdec.timeout_ms if pdec.timeout_ms > 0 else 60_000
 
-        # 4. 命中危险规则 → 等待用户明确允许；超时按规则默认拒绝。
+        # 4. 命中危险规则 → 强制人审，不启动自动通过或自动拒绝倒计时。
         if pdec.blocked_by_rule:
-            return self._blocked_decision(
+            return _RuleDecision(
+                is_immediate=False,
+                immediate_outcome=None,
                 matched_rule=pdec.blocked_by_rule,
+                severity="standard",
+                auto_approve_at_ms=None,
+                auto_reject_at_ms=None,
                 timeout_ms=timeout_ms,
             )
 
