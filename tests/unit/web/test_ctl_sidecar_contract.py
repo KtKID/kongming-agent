@@ -67,6 +67,8 @@ web:
         encoding="utf-8",
     )
     monkeypatch.delenv("KONGMING_CONFIG", raising=False)
+    monkeypatch.delenv("KONGMING_WEB_PORT", raising=False)
+    monkeypatch.setenv("KONGMING_SKIP_DOTENV", "1")
 
     result = CliRunner().invoke(ctl.cli, ["status", "--home", str(home)])
 
