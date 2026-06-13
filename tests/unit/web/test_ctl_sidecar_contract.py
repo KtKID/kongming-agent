@@ -16,6 +16,17 @@ def test_main_exports_click_cli() -> None:
     assert callable(ctl.main)
 
 
+def test_repo_dotenv_load_respects_skip_env(monkeypatch) -> None:
+    """pre-push 隔离环境设置 KONGMING_SKIP_DOTENV 时，ctl 不读取仓库 .env。"""
+    calls: list[Path] = []
+    monkeypatch.setenv("KONGMING_SKIP_DOTENV", "1")
+    monkeypatch.setattr(ctl, "load_dotenv", lambda path: calls.append(path))
+
+    ctl._load_repo_dotenv()
+
+    assert calls == []
+
+
 def test_status_accepts_home_and_reads_server_json(tmp_path: Path) -> None:
     """`status --home` 读取指定 home 下的 server.json。"""
     home = tmp_path / "kongming-home"
