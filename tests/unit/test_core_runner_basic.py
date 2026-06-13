@@ -12,7 +12,13 @@ from __future__ import annotations
 import pytest
 
 from core import AgentSpec, InMemorySession, Runner, ToolCall
-from core.contracts import ApprovalDecision, ApprovalRequest, LLMRequest, LLMResponse
+from core.contracts import (
+    ApprovalDecision,
+    ApprovalRequest,
+    AssembledInput,
+    LLMRequest,
+    LLMResponse,
+)
 from core.errors import MaxTurnsExceededError
 from core.message import Message
 
@@ -27,8 +33,10 @@ class _StubLLM:
     ) -> None:
         self._responses = list(responses or [])
         self._usage = usage or {}
+        self.calls: list[LLMRequest] = []
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
+        self.calls.append(request)
         if not self._responses:
             return LLMResponse(
                 message=Message(role="assistant", content=""),
@@ -45,6 +53,29 @@ class _StubLLM:
 class _AllowApproval:
     async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
         return ApprovalDecision(outcome="approved")
+
+
+class _CaptureAssembler:
+    """测试用 assembler，记录输入来源并注入 system 消息。"""
+
+    def __init__(self) -> None:
+        """初始化 assembler，输入为空，输出为可记录 sources 的实例。"""
+        self.sources: list[list[object]] = []
+
+    async def assemble(
+        self,
+        history: list[Message],
+        instructions: list[object] = (),
+    ) -> AssembledInput:
+        """装配消息，输入为历史和指令来源，输出含 system 的消息列表。"""
+        self.sources.append(list(instructions))
+        system_text = "\n".join(str(source.content) for source in instructions)
+        messages = [Message.system(system_text), *history] if system_text else list(history)
+        return AssembledInput(
+            messages=messages,
+            metadata={"original_count": len(history), "compacted_count": len(messages)},
+            system_message=messages[0] if system_text else None,
+        )
 
 
 @pytest.mark.unit
@@ -68,6 +99,33 @@ async def test_runner_happy_path_single_turn() -> None:
     assert result.final_message.content == "hello"
     assert result.turn_count == 1
     assert result.error is None
+
+
+@pytest.mark.unit
+async def test_runner_assembler_uses_per_run_agent_spec_instructions() -> None:
+    """同一个 runner 跑子 agent 时，assembler 必须使用本次 agent_spec 指令。"""
+    llm = _StubLLM([("ok", None)])
+    assembler = _CaptureAssembler()
+    runner = Runner(
+        input_assembler=assembler,
+        instruction_sources=[type("Source", (), {"origin": "", "content": "parent tools"})()],
+    )
+    session = InMemorySession("child")
+    spec = AgentSpec(name="child", instructions="child-only instructions", default_model="m")
+
+    result = await runner.run(
+        "task",
+        session=session,
+        agent_spec=spec,
+        llm=llm,
+        tools={},
+        approval=_AllowApproval(),
+    )
+
+    assert result.status == "completed"
+    assert assembler.sources
+    assert getattr(assembler.sources[0][0], "content") == "child-only instructions"
+    assert llm.calls[0].messages[0].content == "child-only instructions"
 
 
 @pytest.mark.unit

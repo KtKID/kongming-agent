@@ -32,12 +32,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from web.auth import SessionTokenPayload
-from web.routers.uploads import router as uploads_router
-from web.thread_metadata import ThreadMetadata
-from web.uploads.registry import EXT_BY_MIME, AssetRegistry, compute_sha256
-from web.uploads.storage import AssetStorage, AttachmentAsset
-from web.uploads.validation import (
+from hosts.web.auth.middleware import SessionTokenPayload
+from hosts.web.routers.uploads import router as uploads_router
+from hosts.web.threads.metadata import ThreadMetadata
+from hosts.web.uploads.registry import EXT_BY_MIME, AssetRegistry, compute_sha256
+from hosts.web.uploads.storage import AssetStorage, AttachmentAsset
+from hosts.web.uploads.validation import (
     ALLOWED_IMAGE_MIME_TYPES,
     MAX_IMAGE_SIZE_BYTES,
     MediaUploadValidator,
@@ -376,7 +376,7 @@ class TestMediaUploadValidator:
 
 
 class _FakeAuthMiddleware(BaseHTTPMiddleware):
-    """简化 :class:`web.auth.AuthMiddleware`：
+    """简化 :class:`web.auth.middleware.AuthMiddleware`：
 
     - ``authenticated=True``  → 给 ``request.state.session_payload`` 塞合法
       :class:`SessionTokenPayload`
@@ -697,7 +697,7 @@ class TestUploadImageDeclaredSizeEarlyReject:
 
         from fastapi import HTTPException
 
-        from web.routers import uploads as uploads_router_mod
+        from hosts.web.routers import uploads as uploads_router_mod
 
         storage = AssetStorage(base_dir=tmp_path / "uploads")
         registry = AssetRegistry()
@@ -790,8 +790,8 @@ class TestThreadManagerDeleteThreadCleansAssets:
 
         from unittest.mock import AsyncMock, MagicMock
 
-        from config_loader.models import Config
-        from web.thread_manager import ThreadManager
+        from hosts.web.threads.manager import ThreadManager
+        from infrastructure.config.models import Config
 
         cfg = Config.model_validate(
             {
@@ -878,8 +878,8 @@ class TestThreadManagerDeleteThreadCleansAssets:
 
         from unittest.mock import AsyncMock, MagicMock
 
-        from config_loader.models import Config
-        from web.thread_manager import ThreadManager
+        from hosts.web.threads.manager import ThreadManager
+        from infrastructure.config.models import Config
 
         cfg = Config.model_validate(
             {

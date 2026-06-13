@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from web.auth_secrets import (
+from hosts.web.auth.secrets import (
     ENV_SESSION_SECRET,
     ENV_WEB_PASSWORD,
     PASSWORD_HASH_FILENAME,

@@ -79,8 +79,6 @@ export type ApprovalOutcome = "approved" | "rejected" | "cancelled";
 
 /**
  * 历史消息角色（与 Python `HistoryMessageRole` 一致）。
- *
- * 用于 `HistoryMessageDTO.role`。
  */
 export type HistoryMessageRole = "user" | "assistant" | "tool";
 
@@ -131,32 +129,6 @@ export interface UserInputAttachment {
   duration_ms?: number;
   preview_url: string;
   status: "ready" | "processing" | "failed";
-}
-
-/**
- * 单条历史消息 DTO（user / assistant / tool 三类）。
- *
- * 既用于 `GET /api/threads/{id}/history` REST 响应，也作为
- * `ThreadHistoryFrame.messages` 的元素。
- * `tool_call_id` / `tool_name` / `ok` / `data` / `error_message` 仅
- * `role === "tool"` 时有意义，其它角色应为 undefined。
- *
- * v0.1.6 加 `tool_name` / `ok` / `data` / `error_message`：让前端历史重放
- * 路径能恢复 tool 卡片的工具名 + 结果状态 + 结构化数据。
- *
- * attachments：仅 `role === "user"` 时可能有，用于历史回显图片缩略图。
- */
-export interface HistoryMessageDTO {
-  role: HistoryMessageRole;
-  content: string;
-  turn: number;
-  timestamp_ms: number;
-  tool_call_id?: string | null;
-  tool_name?: string | null;
-  ok?: boolean | null;
-  data?: Record<string, unknown> | null;
-  error_message?: string | null;
-  attachments?: UserInputAttachment[];
 }
 
 /**
@@ -245,6 +217,21 @@ export interface CreateThreadRequest {
   cwd?: string;
 }
 
+export interface CreateGenericThreadFromFirstMessageRequest {
+  text: string;
+  preset_id: string;
+  cwd?: string;
+  reasoning_effort?: "low" | "medium" | "high" | null;
+}
+
+export interface CreateGenericThreadFromFirstMessageResponse {
+  thread: ThreadMetadataDTO;
+}
+
+export interface UpdateThreadPresetRequest {
+  preset_id: string;
+}
+
 /**
  * REST 通用错误响应。
  *
@@ -301,6 +288,67 @@ export interface RenameThreadRequest {
   name?: string;
   is_pinned?: boolean;
   is_archived?: boolean;
+}
+
+export type ThreadTaskProgressStatus =
+  | "pending"
+  | "in_progress"
+  | "completed";
+
+export type ThreadTaskProgressSource = "llm" | "workflow" | "api";
+
+export interface ThreadTaskProgressCounts {
+  pending: number;
+  in_progress: number;
+  completed: number;
+  total: number;
+}
+
+export interface ThreadTaskProgressItem {
+  id: string;
+  orchestration_task_id: string;
+  workflow_id?: string | null;
+  task_id: string;
+  task_run_id: string;
+  desc: string;
+  status: ThreadTaskProgressStatus;
+  source_status?: string | null;
+  error_message?: string | null;
+  display_order: number;
+  updated_at_ms?: number | null;
+}
+
+export interface ThreadTaskProgressSnapshot {
+  schema_version: 1;
+  session_id: string;
+  updated_at_ms: number;
+  source: ThreadTaskProgressSource;
+  tasks: ThreadTaskProgressItem[];
+  counts: ThreadTaskProgressCounts;
+}
+
+export type ThreadTaskProgressIconVariant =
+  | "check_circle"
+  | "ring"
+  | "active_ring";
+
+export interface ThreadTaskProgressDisplayItem {
+  key: string;
+  orchestration_task_id: string;
+  task_id: string;
+  desc: string;
+  status: ThreadTaskProgressStatus;
+  status_label: "未完成" | "进行中" | "已完成";
+  icon_variant: ThreadTaskProgressIconVariant;
+  order: number;
+  aria_label: string;
+}
+
+export interface ThreadTaskProgressViewModel {
+  title: "进度";
+  variant: "compact_checklist";
+  items: ThreadTaskProgressDisplayItem[];
+  empty: { title: string; desc?: string };
 }
 
 /**
@@ -1055,7 +1103,7 @@ export interface ReasoningDeltaFrame {
 export interface ThreadHistoryFrame {
   frame_type: "thread.history";
   timestamp_ms: number;
-  messages: HistoryMessageDTO[];
+  messages: NormalizedMessage[];
 }
 
 /**
@@ -1278,7 +1326,7 @@ export function isPing(f: WSFrameC2S): f is PingFrame {
  *
  * v0.1 仅 claude；保留 codex/gemini/cursor 占位以便后续扩展同协议接入。
  */
-export type NormalizedProvider = "claude" | "codex" | "gemini" | "cursor";
+export type NormalizedProvider = "claude" | "codex" | "gemini" | "cursor" | "generic_chat";
 
 /**
  * `NormalizedMessage` 的 15 种 kind（与 Python `MessageKind` 一致）。

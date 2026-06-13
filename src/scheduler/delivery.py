@@ -105,8 +105,8 @@ class DeliverySink(ABC):
 
     每个 channel 一个具体实现：
 
-    - ``WebDeliverySink``（M4 in src/web/）：通过 WS 广播 + RunRecord 落盘
-    - ``CliDeliverySink``（M5 in src/cli/）：buffer + REPL 提示符前 flush
+    - ``WebDeliverySink``（M4 in src/hosts/web/）：通过 WS 广播 + RunRecord 落盘
+    - ``CliDeliverySink``（M5 in src/hosts/cli/）：buffer + REPL 提示符前 flush
 
     不用 :class:`typing.Protocol` 因为 ``DeliveryDispatcher`` 当前硬编码两
     channel 路由（spec 决策 2）；ABC 让"忘记实现 deliver"在装配时即抛错。
@@ -155,7 +155,7 @@ class DeliveryDispatcher:
     调一次 :meth:`deliver`，按 ``task.delivery.channel`` 选 sink + 处理
     silent_marker / 无 sink / sink 异常等分支。
 
-    调用约定（与 :class:`scheduler.execution_bridge.ExecutionBridge` 协作）：
+    调用约定（与 :class:`application.scheduled_runs.execution_bridge.ExecutionBridge` 协作）：
 
     1. 仅在 ``run.status`` 进入终态后调用（COMPLETED / FAILED / SILENT 等）
     2. 返回的 :class:`DeliveryResult` 由 bridge 合并到 ``ScheduledRun``，

@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from web.workflow.models import RunStatus, StageStatus
-from web.workflow.service import WorkflowService
-from web.workflow.store import WorkflowStore
+from hosts.web.workflow.models import RunStatus, StageStatus
+from hosts.web.workflow.service import WorkflowService
+from hosts.web.workflow.store import WorkflowStore
 
 # ── helpers ──────────────────────────────────────────────────
 

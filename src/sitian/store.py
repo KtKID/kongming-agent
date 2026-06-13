@@ -68,10 +68,12 @@ _OBSERVATIONS_HASH_FILENAME = "last_observations_hash"
 
 def resolve_sitian_root(root_dir: str | Path | None = None) -> Path:
     if root_dir is None:
-        from config_loader.paths import get_kongming_home
+        from infrastructure.config.paths import get_kongming_home
 
         return get_kongming_home() / "sitian"
-    return Path(root_dir).expanduser().resolve()
+    from infrastructure.config.paths import resolve_kongming_path
+
+    return resolve_kongming_path(root_dir)
 
 
 class SiTianRecordsStore:

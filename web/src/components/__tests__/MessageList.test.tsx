@@ -117,6 +117,38 @@ describe("MessageList", () => {
     expect(footer).toHaveTextContent("150");
   });
 
+  it("鼠标进入气泡时显示复制和配置时区时间", () => {
+    const writeText = vi.fn();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(
+      <MessageList
+        threadId="t1"
+        timezone="Asia/Shanghai"
+        items={[
+          {
+            id: "u-hover",
+            kind: "user",
+            threadId: "t1",
+            content: "hover-copy",
+            timestampMs: Date.parse("2026-06-04T08:11:00.000Z"),
+          },
+        ]}
+      />,
+    );
+
+    const meta = screen.getByTestId("message-hover-meta");
+    expect(meta).toHaveClass("opacity-0");
+    expect(meta).toHaveClass("group-hover:opacity-100");
+    expect(meta).toHaveTextContent("16:11");
+
+    fireEvent.click(screen.getByRole("button", { name: "复制消息" }));
+    expect(writeText).toHaveBeenCalledWith("hover-copy");
+  });
+
   it("系统提示卡片使用独立样式并显示失败原因", () => {
     useChatStore.setState({
       itemsByThread: {

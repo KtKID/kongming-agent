@@ -16,9 +16,7 @@ import time
 import pytest
 
 from core.contracts import ApprovalRequest
-from safety.grant_store import GrantStore
-from safety.guards.trust import TrustResolver
-from safety.types import (
+from safety.approval.types import (
     ApprovalMetadataKeys,
     BoundaryDecision,
     BoundaryKind,
@@ -28,6 +26,8 @@ from safety.types import (
     GrantKey,
     RuntimeBoundaryContext,
 )
+from safety.grants.store import GrantStore
+from safety.guards.trust import TrustResolver
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -154,7 +154,7 @@ def test_session_grant_yields_silent_allow_with_session_source() -> None:
 
 
 def test_config_grant_yields_silent_allow_with_config_source() -> None:
-    from config_loader.models import (
+    from infrastructure.config.models import (
         Config,
         ModelConfig,
         SafetyConfig,
@@ -187,7 +187,7 @@ def test_config_grant_yields_silent_allow_with_config_source() -> None:
 
 def test_config_allow_tools_silent_uses_tool_capability_wildcard() -> None:
     """allow_tools_silent 走 ``tool:<name>`` capability + ``*`` 通配。"""
-    from config_loader.models import Config, ModelConfig, SafetyConfig
+    from infrastructure.config.models import Config, ModelConfig, SafetyConfig
 
     cfg = Config(
         model=ModelConfig(
@@ -246,7 +246,7 @@ def test_intrinsic_short_circuits_grant_lookup() -> None:
 
 def test_session_overrides_config_when_both_match() -> None:
     """session > config 优先级（GrantStore.find_matching 已实现，TrustResolver 复用）。"""
-    from config_loader.models import Config, ModelConfig, SafetyConfig
+    from infrastructure.config.models import Config, ModelConfig, SafetyConfig
 
     cfg = Config(
         model=ModelConfig(

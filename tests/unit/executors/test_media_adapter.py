@@ -1,4 +1,4 @@
-"""unit：``executors.llm.media_adapter`` 模块行为契约。
+"""unit：``infrastructure.llm_providers.media_adapter`` 模块行为契约。
 
 对应 ``dev-pipeline/tasks/claude-image-paste-e2e/`` §4 multimodal-assembly
 的测试矩阵 A / B / C / E（pytest #21）。
@@ -19,15 +19,15 @@ from pathlib import Path
 
 import pytest
 
-from context.session_store import _message_from_dict, _message_to_dict
 from core.message import Message
-from executors.llm.media_adapter import (
+from hosts.web.uploads.registry import EXT_BY_MIME
+from hosts.web.uploads.storage import AssetStorage
+from infrastructure.llm_providers.media_adapter import (
     ImageMediaPart,
     build_media_part_from_metadata,
     collect_media_parts_from_messages,
 )
-from web.uploads.registry import EXT_BY_MIME
-from web.uploads.storage import AssetStorage
+from sessions.session_store import _message_from_dict, _message_to_dict
 
 # ---------------------------------------------------------------------------
 # 工具：构造 attachment ref dict + 落盘 fixture
@@ -388,7 +388,7 @@ def test_collect_media_parts_malformed_ref_not_dict_warns_and_skips(
         metadata={"attachments": ["not-a-dict", _make_ref(asset_id="good")]},
     )
 
-    with caplog.at_level(logging.WARNING, logger="executors.llm.media_adapter"):
+    with caplog.at_level(logging.WARNING, logger="infrastructure.llm_providers.media_adapter"):
         parts = collect_media_parts_from_messages([msg], storage=storage, thread_id="t")
 
     assert [p.asset_id for p in parts] == ["good"]
@@ -412,7 +412,7 @@ def test_collect_media_parts_unknown_kind_warns_and_skips(
         },
     )
 
-    with caplog.at_level(logging.WARNING, logger="executors.llm.media_adapter"):
+    with caplog.at_level(logging.WARNING, logger="infrastructure.llm_providers.media_adapter"):
         parts = collect_media_parts_from_messages([msg], storage=storage, thread_id="t")
 
     assert [p.asset_id for p in parts] == ["ok"]

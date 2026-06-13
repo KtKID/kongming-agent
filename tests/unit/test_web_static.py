@@ -17,8 +17,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from config_loader.models import Config
-from web.static import DEFAULT_DIST_DIR, install_static
+from hosts.web.static import DEFAULT_DIST_DIR, install_static
+from infrastructure.config.models import Config
 
 
 def _cfg(*, dev_mode: bool) -> Config:
@@ -74,6 +74,28 @@ def test_no_dist_prod_mode_raises(tmp_path: Path, monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="frontend dist not found"):
         install_static(app, cfg)
+
+
+def test_env_dist_dir_overrides_default(tmp_path: Path, monkeypatch) -> None:
+    """KONGMING_WEB_DIST 指向包内 dist 时，static 直接服务该目录。"""
+    monkeypatch.chdir(tmp_path)
+    dist = tmp_path / "bundled" / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("BUNDLED", encoding="utf-8")
+    (dist / "assets" / "app.js").write_text("console.log('bundled');", encoding="utf-8")
+    monkeypatch.setenv("KONGMING_WEB_DIST", str(dist))
+
+    cfg = _cfg(dev_mode=False)
+    app = _build_app_with_dist()
+    install_static(app, cfg)
+
+    with TestClient(app) as client:
+        resp = client.get("/some-page")
+        assert resp.status_code == 200
+        assert resp.text == "BUNDLED"
+        resp = client.get("/assets/app.js")
+        assert resp.status_code == 200
+        assert "bundled" in resp.text
 
 
 def test_with_dist_serves_index_and_assets(tmp_path: Path, monkeypatch) -> None:

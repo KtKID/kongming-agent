@@ -70,22 +70,67 @@ describe("stores/chat", () => {
   it("setHistory → 历史消息映射成 ChatItem", () => {
     useChatStore.getState().setHistory("t1", [
       {
+        id: "h-user-1",
+        frame_type: "text",
         role: "user",
         content: "u",
-        turn: 1,
-        timestamp_ms: 100,
+        provider: "generic_chat",
+        timestamp: "2026-06-04T00:00:00.100Z",
       },
       {
+        id: "h-assistant-1",
+        frame_type: "text",
         role: "assistant",
         content: "a",
-        turn: 1,
-        timestamp_ms: 110,
+        provider: "generic_chat",
+        timestamp: "2026-06-04T00:00:00.110Z",
       },
     ]);
     const items = useChatStore.getState().itemsByThread["t1"]!;
     expect(items).toHaveLength(2);
     expect(items[0]!.kind).toBe("user");
     expect(items[1]!.kind).toBe("assistant");
+  });
+
+  it("setHistory → tool_result 历史映射成 tool ChatItem", () => {
+    useChatStore.getState().setHistory("t1", [
+      {
+        id: "h-tool-1",
+        frame_type: "tool_result",
+        toolId: "call-1",
+        toolName: "read_file",
+        content: "file body",
+        isError: false,
+        provider: "generic_chat",
+        timestamp: "2026-06-04T00:00:00.250Z",
+      },
+      {
+        id: "h-tool-2",
+        frame_type: "tool_result",
+        toolId: "call-2",
+        toolName: "shell",
+        content: "exit 1",
+        isError: true,
+        provider: "generic_chat",
+        timestamp: "2026-06-04T00:00:00.300Z",
+      },
+    ]);
+
+    const items = useChatStore.getState().itemsByThread["t1"]!;
+    expect(items).toHaveLength(2);
+    const okTool = items[0]!;
+    const failedTool = items[1]!;
+    if (okTool.kind !== "tool" || failedTool.kind !== "tool") {
+      throw new Error("expected tool items");
+    }
+    expect(okTool.id).toBe("h-tool-1");
+    expect(okTool.callId).toBe("call-1");
+    expect(okTool.toolName).toBe("read_file");
+    expect(okTool.ok).toBe(true);
+    expect(okTool.result).toBe("file body");
+    expect(okTool.timestampMs).toBe(Date.parse("2026-06-04T00:00:00.250Z"));
+    expect(failedTool.ok).toBe(false);
+    expect(failedTool.errorMessage).toBe("exit 1");
   });
 
   it("clearBuffers(threadId) 只清该 thread", () => {

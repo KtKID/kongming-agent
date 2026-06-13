@@ -1,4 +1,4 @@
-"""unit：observability.trace_sink 覆盖。
+"""unit：infrastructure.tracing.trace_sink 覆盖。
 
 B1 / CR 报告 cr-report-20260424-202744.md。覆盖：
 
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from observability.trace_sink import (
+from infrastructure.tracing.trace_sink import (
     JsonlTraceSink,
     _event_to_dict,
     _json_default,
@@ -73,10 +73,6 @@ async def test_multiple_emits_append_in_order(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    reason="并发顺序断言在 CI 上 flaky；先 xfail 让 PR #2 过，单独修",
-    strict=False,
-)
 async def test_concurrent_emits_do_not_interleave(tmp_path):
     """并发 emit 必须被 asyncio.Lock 串行，不得出现半行 JSON。"""
     from core.contracts import Event
@@ -236,7 +232,7 @@ async def test_close_is_noop_and_idempotent(tmp_path):
 
 @pytest.mark.asyncio
 async def test_build_jsonl_trace_sink_reads_only_output_path(tmp_path):
-    from config_loader.models import Config, ModelConfig, TraceConfig
+    from infrastructure.config.models import Config, ModelConfig, TraceConfig
 
     cfg = Config(
         model=ModelConfig(name="m", base_url="http://localhost:1234"),
@@ -356,8 +352,8 @@ async def test_invalid_periodic_batch_size_raises(tmp_path):
 @pytest.mark.asyncio
 async def test_build_jsonl_trace_sink_passes_stream_config(tmp_path):
     """D#5：build_jsonl_trace_sink 把 cfg.stream.delta_sampling / periodic_batch_size 传入 sink。"""
-    from config_loader.models import Config, ModelConfig, StreamConfig, TraceConfig
     from core.contracts import Event
+    from infrastructure.config.models import Config, ModelConfig, StreamConfig, TraceConfig
 
     cfg = Config(
         model=ModelConfig(name="m", base_url="http://localhost:1234"),

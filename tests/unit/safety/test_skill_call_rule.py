@@ -2,9 +2,9 @@
 
 覆盖：
 
-1. ``safety.types.SkillCallRule`` frozen dataclass 性
-2. ``safety.default_rules.DEFAULT_SKILL_CALL_RULES`` 默认空 tuple（deny-by-default 锚点）
-3. ``config_loader.models.SafetySkillCallConfig`` pydantic schema：
+1. ``safety.approval.types.SkillCallRule`` frozen dataclass 性
+2. ``safety.approval.default_rules.DEFAULT_SKILL_CALL_RULES`` 默认空 tuple（deny-by-default 锚点）
+3. ``infrastructure.config.models.SafetySkillCallConfig`` pydantic schema：
    - 有效配置加载
    - ``extra="forbid"`` 拒绝未知字段
    - ``name`` / ``matcher`` 空字符串拒绝
@@ -22,14 +22,14 @@ from dataclasses import FrozenInstanceError
 import pytest
 from pydantic import ValidationError
 
-from config_loader.models import (
+from infrastructure.config.models import (
     Config,
     ModelConfig,
     SafetyConfig,
     SafetySkillCallConfig,
 )
-from safety.default_rules import DEFAULT_SKILL_CALL_RULES
-from safety.types import BoundaryScope, SkillCallRule
+from safety.approval.default_rules import DEFAULT_SKILL_CALL_RULES
+from safety.approval.types import BoundaryScope, SkillCallRule
 
 # ---------------------------------------------------------------------------
 # §1 SkillCallRule frozen dataclass

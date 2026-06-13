@@ -14,8 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from core.contracts import ApprovalDecision, ApprovalRequest
-from safety.guards.consent import ConsentResolver
-from safety.types import (
+from safety.approval.types import (
     ApprovalMetadataKeys,
     BoundaryDecision,
     BoundaryKind,
@@ -24,6 +23,7 @@ from safety.types import (
     RuntimeBoundaryContext,
     SkillCallRule,
 )
+from safety.guards.consent import ConsentResolver
 
 # ---------------------------------------------------------------------------
 # Fixtures / spies

@@ -23,15 +23,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from application.scheduled_runs.execution_bridge import ExecutionBridge
 from core.contracts import (
     ApprovalDecision,
     ApprovalRequest,
     ToolContext,
 )
 from scheduler.domain import ApprovalMode
-from scheduler.execution_bridge import ExecutionBridge
 from scheduler.store import Store
-from tools.schedule_tool import build_schedule_tool
+from tools.builtin.schedule_tool import build_schedule_tool
 
 
 @dataclass
@@ -96,7 +96,7 @@ def _build_real_bridge(
 
 def _config_with_global_mode(mode: str) -> object:
     """构造最小 Config，把 scheduler.approval.mode 设为 mode。供需要显式覆盖兜底的测试用。"""
-    from config_loader.models import (
+    from infrastructure.config.models import (
         Config,
         ModelConfig,
         SchedulerApprovalConfig,

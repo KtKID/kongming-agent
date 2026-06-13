@@ -15,4 +15,4 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-uv run python -m web.run "$@"
+uv run python -m hosts.web.run "$@"

@@ -8,7 +8,6 @@ import json as _json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from config_loader.models import SchedulerApprovalConfig
 from core.contracts import (
     ApprovalDecision,
     ApprovalProvider,
@@ -16,6 +15,7 @@ from core.contracts import (
     Event,
     EventSink,
 )
+from infrastructure.config.models import SchedulerApprovalConfig
 from scheduler.domain import ApprovalMode
 
 _CONSENT_CLASS = "explicit_consent"

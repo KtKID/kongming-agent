@@ -34,7 +34,7 @@ interface AutoApprovalStore {
 
 /** 极简的"能发送指定帧"的 socket 接口（避免引入完整 ClaudeCodeSocket 类型） */
 export interface AutoApprovalSocket {
-  send: (frame: AutoApprovalToggleFrame | AutoApprovalQueryFrame) => void;
+  send: (frame: AutoApprovalToggleFrame | AutoApprovalQueryFrame) => boolean | void;
 }
 
 export const useAutoApprovalStore = create<AutoApprovalStore>((set) => ({
@@ -87,7 +87,8 @@ export function toggleAutoApproval(
 ): void {
   if (!cwd) return;
   try {
-    socket.send({ frame_type: "auto-approval-toggle", cwd, enabled });
+    const sent = socket.send({ frame_type: "auto-approval-toggle", cwd, enabled });
+    if (sent === false) return;
   } catch {
     // socket 不可用：交给上层 UI 反馈；不 optimistic
     return;

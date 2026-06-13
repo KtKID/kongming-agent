@@ -5,6 +5,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Layout } from "@/components/Layout";
 import { useApprovalInboxStore } from "@/features/approval-inbox";
 import { resetSender } from "@/features/approval-inbox/senderRef";
+import { apiGetThreadTaskProgress } from "@/lib/api";
+import type { ThreadTaskProgressSnapshot } from "@/protocol";
 import { useAuthStore } from "@/stores/auth";
 import { useConnectionStatusStore } from "@/stores/connectionStatus";
 import { useThreadsStore } from "@/stores/threads";
@@ -24,6 +26,7 @@ vi.mock("@/hooks/useThreadStatusWS", () => ({
 vi.mock("@/lib/api", () => ({
   apiPost: vi.fn().mockResolvedValue(undefined),
   apiGet: vi.fn().mockResolvedValue([]),
+  apiGetThreadTaskProgress: vi.fn(),
   apiPatch: vi.fn().mockResolvedValue(undefined),
   apiDelete: vi.fn().mockResolvedValue(undefined),
   ApiError: class ApiError extends Error {
@@ -36,14 +39,59 @@ vi.mock("@/lib/api", () => ({
     }
   },
   RateLimitedError: class RateLimitedError extends Error {
-    constructor(public retryAfterSeconds: number, msg: string) {
+    constructor(
+      public retryAfterSeconds: number,
+      msg: string,
+    ) {
       super(msg);
     }
   },
 }));
 
+const mockApiGetThreadTaskProgress = vi.mocked(apiGetThreadTaskProgress);
+
+const emptyTaskProgressSnapshot: ThreadTaskProgressSnapshot = {
+  schema_version: 1,
+  session_id: "thread-empty",
+  updated_at_ms: 1781190000000,
+  source: "api",
+  tasks: [],
+  counts: {
+    pending: 0,
+    in_progress: 0,
+    completed: 0,
+    total: 0,
+  },
+};
+
+const mobileTaskProgressSnapshot: ThreadTaskProgressSnapshot = {
+  schema_version: 1,
+  session_id: "thread-mobile123456",
+  updated_at_ms: 1781190000000,
+  source: "workflow",
+  tasks: [
+    {
+      id: "wf:task-1",
+      orchestration_task_id: "wf:task-1",
+      task_id: "task-1",
+      task_run_id: "task-1",
+      desc: "移动端进度任务",
+      status: "in_progress",
+      display_order: 0,
+    },
+  ],
+  counts: {
+    pending: 0,
+    in_progress: 1,
+    completed: 0,
+    total: 1,
+  },
+};
+
 describe("Layout", () => {
   beforeEach(() => {
+    mockApiGetThreadTaskProgress.mockReset();
+    mockApiGetThreadTaskProgress.mockResolvedValue(emptyTaskProgressSnapshot);
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
       writable: true,
@@ -133,13 +181,20 @@ describe("Layout", () => {
       <MemoryRouter initialEntries={["/chat/thread-abcdef123456"]}>
         <Routes>
           <Route element={<Layout />}>
-            <Route path="/chat/:thread_id" element={<div data-testid="chat" />} />
+            <Route
+              path="/chat/:thread_id"
+              element={<div data-testid="chat" />}
+            />
           </Route>
         </Routes>
       </MemoryRouter>,
     );
 
     expect(screen.getByText("Claude Thread")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Workflow" })).toHaveAttribute(
+      "href",
+      "/chat/thread-abcdef123456/agent-workflows",
+    );
     expect(screen.getAllByTestId("connection-indicator")).toHaveLength(2);
     expect(screen.getByText("4ms")).toBeInTheDocument();
   });
@@ -176,7 +231,10 @@ describe("Layout", () => {
       <MemoryRouter initialEntries={["/chat/thread-generic123456"]}>
         <Routes>
           <Route element={<Layout />}>
-            <Route path="/chat/:thread_id" element={<div data-testid="chat" />} />
+            <Route
+              path="/chat/:thread_id"
+              element={<div data-testid="chat" />}
+            />
           </Route>
         </Routes>
       </MemoryRouter>,
@@ -185,6 +243,30 @@ describe("Layout", () => {
     expect(screen.getByText("Generic Thread")).toBeInTheDocument();
     expect(screen.getAllByTestId("connection-indicator")).toHaveLength(1);
     expect(screen.getByText("4ms")).toBeInTheDocument();
+  });
+
+  it("shows workflow entry from route thread id before thread metadata loads", () => {
+    render(
+      <MemoryRouter
+        initialEntries={["/chat/thread-route-only/agent-workflows"]}
+      >
+        <Routes>
+          <Route element={<Layout />}>
+            <Route
+              path="/chat/:thread_id/agent-workflows"
+              element={<div data-testid="workflow-page" />}
+            />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("Current thread")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Workflow" })).toHaveAttribute(
+      "href",
+      "/chat/thread-route-only/agent-workflows",
+    );
+    expect(screen.getByTestId("workflow-page")).toBeInTheDocument();
   });
 
   it("hides Claude indicator when Claude socket is inactive", () => {
@@ -219,7 +301,10 @@ describe("Layout", () => {
       <MemoryRouter initialEntries={["/chat/thread-claude-inactive"]}>
         <Routes>
           <Route element={<Layout />}>
-            <Route path="/chat/:thread_id" element={<div data-testid="chat" />} />
+            <Route
+              path="/chat/:thread_id"
+              element={<div data-testid="chat" />}
+            />
           </Route>
         </Routes>
       </MemoryRouter>,
@@ -231,6 +316,7 @@ describe("Layout", () => {
   });
 
   it("uses the tools menu on compact widths", async () => {
+    mockApiGetThreadTaskProgress.mockResolvedValue(mobileTaskProgressSnapshot);
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
       writable: true,
@@ -261,22 +347,36 @@ describe("Layout", () => {
       <MemoryRouter initialEntries={["/chat/thread-mobile123456"]}>
         <Routes>
           <Route element={<Layout />}>
-            <Route path="/chat/:thread_id" element={<div data-testid="chat" />} />
+            <Route
+              path="/chat/:thread_id"
+              element={<div data-testid="chat" />}
+            />
           </Route>
         </Routes>
       </MemoryRouter>,
     );
 
     expect(screen.queryByTestId("connection-indicator")).toBeNull();
-    expect(screen.getByRole("button", { name: "Open tools menu" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open tools menu" }),
+    ).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "Open tools menu" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Open tools menu" }),
+    );
 
     expect(screen.getByText("Files")).toBeInTheDocument();
     expect(screen.getByText("Git")).toBeInTheDocument();
     expect(screen.getByText("Shell")).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "进度" })).toBeInTheDocument();
+    expect(screen.getByText("Workflow")).toBeInTheDocument();
     expect(screen.getByText("定时任务")).toBeInTheDocument();
     expect(screen.getByText("司天报告")).toBeInTheDocument();
     expect(screen.getByText("复制线程 ID")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("menuitem", { name: "进度" }));
+
+    expect(await screen.findByText("移动端进度任务")).toBeInTheDocument();
+    expect(screen.queryByText("Files")).toBeNull();
   });
 });

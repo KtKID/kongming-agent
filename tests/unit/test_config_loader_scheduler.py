@@ -15,8 +15,13 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from config_loader import load_config
-from config_loader.models import Config, ModelConfig, SchedulerApprovalConfig, SchedulerConfig
+from infrastructure.config import load_config
+from infrastructure.config.models import (
+    Config,
+    ModelConfig,
+    SchedulerApprovalConfig,
+    SchedulerConfig,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SETTING_YAML = REPO_ROOT / "config" / "setting.yaml"
@@ -311,7 +316,7 @@ def test_scheduler_approval_mode_invalid_yaml_raises(
         encoding="utf-8",
     )
     # load_config 把 pydantic ValidationError 包成 ConfigValidationError
-    from config_loader.errors import ConfigValidationError
+    from infrastructure.config.errors import ConfigValidationError
 
     with pytest.raises((ValidationError, ConfigValidationError)):
         load_config(yaml_path, load_env_file=False)
@@ -438,7 +443,7 @@ def test_scheduler_default_max_turns_yaml_zero_raises(
         "  default_max_turns: 0\n",
         encoding="utf-8",
     )
-    from config_loader.errors import ConfigValidationError
+    from infrastructure.config.errors import ConfigValidationError
 
     with pytest.raises((ValidationError, ConfigValidationError)):
         load_config(yaml_path, load_env_file=False)

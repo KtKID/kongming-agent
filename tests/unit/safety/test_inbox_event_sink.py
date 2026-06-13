@@ -13,8 +13,8 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
-from safety.approval_manager import ApprovalManager, _PendingApproval
-from safety.inbox_event_sink import InboxEventSink
+from safety.approval.manager import ApprovalManager, _PendingApproval
+from safety.inbox.event_sink import InboxEventSink
 
 
 def _make_pending(

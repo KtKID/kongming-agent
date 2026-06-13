@@ -4,8 +4,9 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-import cli.main as cli_main
-from config_loader.models import (
+import hosts.cli.main as cli_main
+from core.contracts import ApprovalDecision, ToolResult
+from infrastructure.config.models import (
     ApprovalConfig,
     Config,
     ModelConfig,
@@ -25,6 +26,55 @@ class _DummyRuntime:
 
     async def aclose(self) -> None:
         return None
+
+
+class _WorkflowSmokeApproval:
+    """记录 workflow smoke 审批请求，输入为请求，输出为批准结果。"""
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def decide(self, request):
+        self.requests.append(request)
+        return ApprovalDecision(outcome="approved", reason="test")
+
+
+class _WorkflowSmokeTool:
+    """记录 workflow smoke 工具调用，输入为参数和上下文，输出为 planner 失败结果。"""
+
+    name = "run_agent_workflow"
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def execute(self, args, ctx):
+        self.calls.append((args, ctx))
+        return ToolResult(
+            ok=False,
+            content="工具执行失败：run_agent_workflow",
+            error_message="map_reduce planner found no input files",
+        )
+
+
+class _WorkflowSmokeTools:
+    """提供 workflow smoke 所需工具查找，输入为工具名，输出为工具实例。"""
+
+    def __init__(self, tool: _WorkflowSmokeTool) -> None:
+        self.tool = tool
+
+    def __getitem__(self, name: str):
+        if name != "run_agent_workflow":
+            raise KeyError(name)
+        return self.tool
+
+
+class _WorkflowSmokeRuntime(_DummyRuntime):
+    """提供 workflow smoke 所需 runtime 属性，输入为空，输出为测试 runtime。"""
+
+    def __init__(self) -> None:
+        self.approval = _WorkflowSmokeApproval()
+        self.workflow_tool = _WorkflowSmokeTool()
+        self.tools = _WorkflowSmokeTools(self.workflow_tool)
 
 
 def test_generate_cli_session_id_uses_12_hex_chars(monkeypatch) -> None:
@@ -50,6 +100,97 @@ def test_cli_help_shows_session_listing_flags() -> None:
     assert result.exit_code == 0
     assert "--list-sessions" in result.output
     assert "--resume-last" in result.output
+
+
+def test_cli_help_shows_workflow_smoke_option() -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli_main.main, ["--help"])
+    assert result.exit_code == 0
+    assert "--workflow-smoke" in result.output
+
+
+async def test_run_workflow_smoke_approves_and_executes_run_agent_workflow(capsys) -> None:
+    runtime = _WorkflowSmokeRuntime()
+
+    await cli_main._run_workflow_smoke(runtime, "workflow-smoke-test")
+
+    assert len(runtime.approval.requests) == 1
+    request = runtime.approval.requests[0]
+    assert request.tool_name == "run_agent_workflow"
+    assert request.arguments["mode"] == "map_reduce"
+    assert len(runtime.workflow_tool.calls) == 1
+    args, ctx = runtime.workflow_tool.calls[0]
+    assert args["mode"] == "map_reduce"
+    assert ctx.session_id == "workflow-smoke-test"
+    assert "[workflow-smoke] ok" in capsys.readouterr().out
+
+
+async def test_run_exposes_workflow_and_role_tools_to_cli_llm(monkeypatch) -> None:
+    """CLI 正常装配时应把 workflow 工具和角色工具一起暴露给 LLM。"""
+    captured: dict = {}
+
+    class _DummyBridge:
+        def __init__(
+            self,
+            *,
+            runtime,
+            adapter,
+            session_id: str,
+            echo_final_content: bool = True,
+        ) -> None:
+            del runtime, adapter, echo_final_content
+            self.session_id = session_id
+
+        async def run_loop(self) -> None:
+            return None
+
+    async def _fake_assemble_instructions(_cfg, _files, *, skill_listing=""):
+        del skill_listing
+        return "system", ["agent_spec"], None
+
+    async def _no_skills(*_args, **_kwargs):
+        return []
+
+    def _capture_build(_cfg, **kwargs):
+        captured.update(kwargs)
+        return _DummyRuntime()
+
+    monkeypatch.setattr(cli_main, "_load_config_or_exit", lambda _: _build_cfg())
+    monkeypatch.setattr(cli_main, "_assemble_instructions", _fake_assemble_instructions)
+    monkeypatch.setattr(cli_main, "load_skill_specs", _no_skills)
+    monkeypatch.setattr(cli_main, "format_skill_listing", lambda _specs: "")
+    monkeypatch.setattr(cli_main, "build_default_approval", lambda *_, **__: object())
+    monkeypatch.setattr(cli_main.NativeRuntime, "build", staticmethod(_capture_build))
+    monkeypatch.setattr(cli_main, "SessionBridge", _DummyBridge)
+    monkeypatch.setattr(cli_main, "_generate_cli_session_id", lambda: "cli-workflow-tools")
+    monkeypatch.setattr(cli_main, "_print_banner", lambda *_, **__: None)
+    monkeypatch.setattr(cli_main, "_discover_persistent_sessions", lambda _cfg: ([], None))
+
+    await cli_main._run(
+        config_path=None,
+        session_id=None,
+        list_sessions=False,
+        resume_last=False,
+        verbose=False,
+        smoke=False,
+        instructions_files=[],
+        trace_enabled=False,
+        reasoning_effort=None,
+    )
+
+    enabled_tool_names = captured["enabled_tool_names"]
+    registry = captured["tools"]
+    assert "run_agent_workflow" in enabled_tool_names
+    assert "run_parallel_subagents" in enabled_tool_names
+    assert "list_agent_roles" in enabled_tool_names
+    assert "create_agent_role" in enabled_tool_names
+    assert "run_agent_workflow" in registry
+    assert "run_parallel_subagents" in registry
+    assert "list_agent_roles" in registry
+    assert "create_agent_role" in registry
+    workflow_tool = registry["run_agent_workflow"]
+    role_tool = registry["create_agent_role"]
+    assert workflow_tool._handle.manager.role_manager is role_tool._manager  # type: ignore[attr-defined]
 
 
 def _build_cfg() -> Config:
@@ -236,8 +377,8 @@ def test_bind_discovered_session_path_updates_persistent_backend() -> None:
     file_bound = cli_main._bind_discovered_session_path(file_cfg, Path("/tmp/file-sessions"))
     sqlite_bound = cli_main._bind_discovered_session_path(sqlite_cfg, Path("/tmp/sessions.db"))
 
-    assert file_bound.session.file_store_path == "/tmp/file-sessions"
-    assert sqlite_bound.session.store_path == "/tmp/sessions.db"
+    assert file_bound.session.file_store_path == str(Path("/tmp/file-sessions"))
+    assert sqlite_bound.session.store_path == str(Path("/tmp/sessions.db"))
 
 
 async def test_run_list_sessions_prints_and_skips_runtime_build(monkeypatch, capsys) -> None:

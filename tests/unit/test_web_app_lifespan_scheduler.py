@@ -19,8 +19,8 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from config_loader.models import Config
-from web.app import create_app
+from hosts.web.app import create_app
+from infrastructure.config.models import Config
 
 
 def _make_cfg(*, scheduler_enabled: bool) -> Config:
@@ -119,7 +119,7 @@ class FakeThreadManager:
 
 
 def _seed_password(home: Path, password: str = "test-password") -> None:
-    from web.auth_secrets import hash_password
+    from hosts.web.auth.secrets import hash_password
 
     web_dir = home / "web"
     web_dir.mkdir(parents=True, exist_ok=True)

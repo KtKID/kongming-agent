@@ -16,7 +16,7 @@ from evolution.models import TranscriptWindow
 from tools import AutoAllowApproval
 
 if TYPE_CHECKING:
-    from executors.agent_runtime.native_runtime import NativeRuntime
+    from runtime_assembly.native_runtime import NativeRuntime
 
 REVIEWER_TOOL_NAME = "evolution_write"
 _REVIEWER_CAPTURED_EVENT_KINDS = frozenset(
@@ -120,7 +120,7 @@ async def run_child_review(
     max_nutrients: int,
     min_confidence: float,
 ) -> ChildReviewOutcome:
-    from executors.agent_runtime.native_runtime import NativeRuntime
+    from runtime_assembly.native_runtime import NativeRuntime
 
     learning = parent_runtime.config.evolution.learning
     review_session_id = f"evo-review-{window.session_id}-{window.run_id}"

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from web.rate_limit import LoginRateLimiter, RateLimitedError
+from hosts.web.rate_limit import LoginRateLimiter, RateLimitedError
 
 
 class FakeClock:

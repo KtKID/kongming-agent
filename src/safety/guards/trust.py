@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from core.contracts import ApprovalDecision, ApprovalRequest
-from safety.types import (
+from safety.approval.types import (
     ApprovalMetadataKeys,
     BoundaryKind,
     BoundaryZone,
@@ -29,8 +29,8 @@ from safety.types import (
 )
 
 if TYPE_CHECKING:
-    from safety.boundary_resolver import BoundaryResolver
-    from safety.grant_store import GrantStore
+    from safety.boundaries.resolver import BoundaryResolver
+    from safety.grants.store import GrantStore
 
 # 工具名 → capability 映射（与 GrantStore.from_config 写入一致）
 _FILE_READ_TOOLS: frozenset[str] = frozenset({"read_file", "list_dir"})
@@ -98,20 +98,19 @@ class TrustResolver:
         - ``shell``：command 类（path_or_action 为命令首段）
         """
         capability, path_or_action = _derive_capability_and_target(request)
-        if capability is None or path_or_action is None:
-            return None
+        if capability is not None and path_or_action is not None:
+            # 1. 精确 capability 查询（session_id 严格隔离：仅查本 session 桶 + config）
+            result = self._grants.find_matching(
+                capability=capability,
+                path_or_action=path_or_action,
+                boundary_kind=BoundaryKind.HOST,
+                session_id=request.session_id,
+            )
+            if result is not None:
+                return result
 
-        # 1. 精确 capability 查询（session_id 严格隔离：仅查本 session 桶 + config）
-        result = self._grants.find_matching(
-            capability=capability,
-            path_or_action=path_or_action,
-            boundary_kind=BoundaryKind.HOST,
-            session_id=request.session_id,
-        )
-        if result is not None:
-            return result
-
-        # 2. tool: 精确命令前缀匹配（session grant 细化后不再通配）
+        # 2. tool: 精确命令前缀匹配 + 通配工具授权。
+        #    无 path/action 参数的普通工具仍可通过 allow_tools_silent 命中通配 grant。
         tool_name = request.tool_name
         if tool_name:
             tool_capability = f"tool:{tool_name}"
@@ -120,7 +119,7 @@ class TrustResolver:
             if tool_name in _SHELL_TOOLS:
                 cmd = (request.arguments or {}).get("command")
                 if isinstance(cmd, str) and cmd.strip():
-                    from safety.chain import extract_command_base
+                    from safety.approval.chain import extract_command_base
 
                     cmd_base = extract_command_base(cmd)
                     if cmd_base:

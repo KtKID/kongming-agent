@@ -188,7 +188,7 @@ def materialize_user_rules_yaml(home: Path) -> Path:
     """把内置 default_rules.yaml 物化到用户可编辑位置（首次启动时复制）。
 
     Args:
-        home: kongming home，一般是 ``<project>/.kongming``
+        home: kongming home，一般由 ``get_kongming_home()`` 产出。
 
     Returns:
         物化后的 yaml 绝对路径。用户应编辑这份。

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 
-from cli.approval_manager_sink import CLIApprovalEventSink
 from core.contracts import ApprovalAction, ApprovalRequest
-from safety.approval_manager import ApprovalManager, _PendingApproval
-from safety.approval_rules import ApprovalRules
+from hosts.cli.approval_manager_sink import CLIApprovalEventSink
+from safety.approval.manager import ApprovalManager, _PendingApproval
+from safety.approval.rules import ApprovalRules
 
 
 def _pending(
@@ -43,14 +43,14 @@ def _pending(
     )
 
 
-# 验证终端返回本次会话同意时，CLI 接收器只按单次允许回写审批管理器。
-async def test_cli_sink_accept_for_session_resolves_as_once_payload() -> None:
+# 验证终端返回单次允许时，CLI 接收器回写审批管理器。
+async def test_cli_sink_accept_once_resolves_allow_payload() -> None:
     manager = ApprovalManager(rules=ApprovalRules())
     captured: list[ApprovalRequest] = []
 
     async def prompt(request: ApprovalRequest) -> ApprovalAction:
         captured.append(request)
-        return ApprovalAction.ACCEPT_FOR_SESSION
+        return ApprovalAction.ACCEPT_ONCE
 
     pending = _pending(asyncio.get_running_loop())
     manager._pending[pending.request_id] = pending

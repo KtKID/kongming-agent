@@ -1,4 +1,4 @@
-"""unit：safety.permission_policy v0.1.4 占位形态 + from_config 迁移产物。
+"""unit：safety.policies.permission v0.1.4 占位形态 + from_config 迁移产物。
 
 v0.1.4 起 ``PermissionPolicy.check`` / ``.evaluate`` 方法体已被
 ``raise NotImplementedError`` 替换；本文件仅验证 ``from_config`` 不抛异常 +
@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import pytest
 
-from config_loader.models import ApprovalConfig, Config, ModelConfig
-from safety.permission_policy import PermissionPolicy, PermissionRule
-from safety.types import ApprovalRequiredCommand, SensitivePathRule
+from infrastructure.config.models import ApprovalConfig, Config, ModelConfig
+from safety.approval.types import ApprovalRequiredCommand, SensitivePathRule
+from safety.policies.permission import PermissionPolicy, PermissionRule
 
 
 def _cfg(mode: str) -> Config:

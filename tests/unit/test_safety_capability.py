@@ -1,4 +1,4 @@
-"""unit：safety.capability_policy v0.1.4 占位形态 + from_config 迁移产物。
+"""unit：safety.policies.capability v0.1.4 占位形态 + from_config 迁移产物。
 
 v0.1.4 起 ``CapabilityPolicy.check`` 方法体已被 ``raise NotImplementedError``
 替换；本文件仅验证 ``from_config`` 不抛异常 + 迁移产物形态正确。
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from config_loader.models import (
+from infrastructure.config.models import (
     Config,
     EvolutionConfig,
     EvolutionMemoryConfig,
@@ -20,8 +20,8 @@ from config_loader.models import (
     ShellToolConfig,
     ToolConfig,
 )
-from safety.capability_policy import CapabilityPolicy, CapabilitySet
-from safety.types import HardDenyCommand
+from safety.approval.types import HardDenyCommand
+from safety.policies.capability import CapabilityPolicy, CapabilitySet
 
 
 def _local_config(

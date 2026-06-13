@@ -27,17 +27,17 @@ import pytest
 # Defensive guard: 严禁本测试文件触发任何能真删文件的模块。
 # 这是"测试只做决策评估，不执行文件操作"的硬保险——即便后续维护误加 import
 # 也会立刻在 collection 阶段失败。
-_FORBIDDEN_MODULES = ("tools.shell_tool",)
+_FORBIDDEN_MODULES = ("tools.builtin.shell_tool",)
 for _mod in _FORBIDDEN_MODULES:
     assert _mod not in sys.modules, (
         f"FATAL: {_mod} loaded in test_setting_yaml_runtime_safety; "
         "this test must only call chain.decide, never execute shell."
     )
 
-from config_loader import load_config  # noqa: E402
 from core.contracts import ApprovalDecision, ApprovalRequest  # noqa: E402
-from safety.chain import build_safety_chain  # noqa: E402
-from safety.types import ApprovalMetadataKeys  # noqa: E402
+from infrastructure.config import load_config  # noqa: E402
+from safety.approval.chain import build_safety_chain  # noqa: E402
+from safety.approval.types import ApprovalMetadataKeys  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SETTING_YAML = _REPO_ROOT / "config" / "setting.yaml"

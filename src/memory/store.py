@@ -8,9 +8,9 @@ v0.1.3 Memory Snapshot：多文件读取（MEMORY / USER / ERRORS）、
 - ``load_from_disk()`` 是唯一冻结态刷新入口。
 - ``format_for_system_prompt()`` 只读冻结态，保证普通 turn 的 prompt 稳定。
 - memory tool 只读写活态 entries 和磁盘，保证工具结果准确。
-- context compact 后重新 ``load_from_disk()``，刷新冻结态。
+- history compact 后重新 ``load_from_disk()``，刷新冻结态。
 
-外部访问入口：``src/tools/memory_tool.py::MemoryTool``。Agent 只能通过 MemoryTool
+外部访问入口：``src/tools/builtin/memory_tool.py::MemoryTool``。Agent 只能通过 MemoryTool
 的 target 参数（memory/user/errors）访问记忆，不能直接操作文件路径——这是为了
 防止 Agent 绕过 memory 管理用 write_file 建 MEMORY.md 这类"野文件"。
 """
@@ -23,6 +23,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+from infrastructure.config.paths import get_kongming_home, resolve_kongming_path
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -89,7 +91,7 @@ class MemorySnapshot:
     """冻结态记忆快照，用于 system prompt 注入。
 
     snapshot 在 ``load_from_disk()`` 时捕获，之后保持不变。
-    只有 context compact 后重新 ``load_from_disk()`` 才会刷新。
+    只有 history compact 后重新 ``load_from_disk()`` 才会刷新。
 
     Attributes:
         memory_text: MEMORY.md 的完整文本。
@@ -226,11 +228,12 @@ class MemoryStore:
     - ``load()`` / ``ensure()`` 保持向后兼容。
 
     Args:
-        base_path: 项目根目录。默认为当前工作目录；实际 memory 目录会拼为
+        base_path: 显式项目根目录；实际 memory 目录会拼为
             ``base_path / .kongming/memory``。仅在 ``memory_dir`` 为 ``None`` 时生效。
         memory_dir: 直接指定 memory 目录的绝对路径。若提供，则忽略 ``base_path``
             且不再追加 ``.kongming/memory``，让调用方（例如 cli 按 config
             ``evolution.memory.root_path`` 配置绝对路径）自由选择任意目录。
+        默认路径: ``get_kongming_home() / "memory"``。
         read_max_chars: 单文件读取最大字符数。超出部分按字符截断，防止异常巨大的
             memory 文件吃掉 prompt 预算。
     """
@@ -243,10 +246,13 @@ class MemoryStore:
         read_max_chars: int = 65536,
     ) -> None:
         if memory_dir is not None:
-            self._memory_dir = Path(memory_dir).resolve()
+            self._memory_dir = resolve_kongming_path(memory_dir)
             self._base = self._memory_dir  # 保留属性以便老代码访问，语义不再重要
+        elif base_path is None:
+            self._base = get_kongming_home()
+            self._memory_dir = self._base / "memory"
         else:
-            self._base = (base_path or Path.cwd()).resolve()
+            self._base = Path(base_path).expanduser().resolve()
             self._memory_dir = self._base / _DEFAULT_MEMORY_DIR
 
         self._read_max_chars = int(read_max_chars)
@@ -291,7 +297,7 @@ class MemoryStore:
     async def load_from_disk(self) -> MemorySnapshot:
         """从磁盘读取所有 memory 文件，刷新活态条目和冻结快照。
 
-        这是唯一冻结态刷新入口。context compact 后应调用此方法重新加载。
+        这是唯一冻结态刷新入口。history compact 后应调用此方法重新加载。
 
         行为：
             1. 创建目录（``mkdir(exist_ok=True)``），不创建文件。

@@ -1,0 +1,202 @@
+# XSpace 打包用 Kongming Web runtime 默认配置。
+#
+# 用途：
+#   这份配置是 x-space resources 中 `kongming/config/setting.yaml` 的源文件。
+#   它描述桌面产品默认行为，和仓库根 `config/setting.yaml` 的本地开发默认值分离。
+#
+# 维护规则：
+#   1. 本文件覆盖 `infrastructure.config.models.Config` 的全部 leaf 字段。
+#   2. 新增 Config 字段后，必须在本文件补默认值，配置契约测试会强制提醒。
+#   3. 密钥、token、密码、个人路径不写入安装包；使用空值、环境变量名或 app data 注入。
+#   4. x-space 启动 sidecar 时用 `--config <resource>/kongming/config/setting.yaml` 显式传入本文件的复制件。
+
+model:
+  # provider 留空时按 base_url 自动推断协议；x-space 设置页可覆盖。
+  provider:
+  name: local-model
+  base_url: http://127.0.0.1:1234/v1
+  provider_routing:
+    openai_compatible:
+      - api.openai.com
+      - open.bigmodel.cn
+      - api.deepseek.com
+      - api.moonshot.cn
+      - api.minimaxi.com
+      - localhost
+      - 127.0.0.1
+    anthropic:
+      - api.anthropic.com
+  # 安装包不内置远端 key；远端模型通过用户设置或 KONGMING_MODEL_API_KEY 注入。
+  api_key: ""
+  timeout: 60.0
+  max_tokens: 4096
+  temperature: 0.7
+  reasoning_effort:
+  reasoning_profiles: {}
+
+runner:
+  max_turns: 90
+
+session:
+  # 桌面端默认落盘，便于重启后恢复会话。
+  backend: file
+  # .kongming/* 运行数据路径统一派生到 kongming_home（x-space 运行时由 --home 指定）。
+  store_path: .kongming/sessions.db
+  file_store_path: .kongming/sessions
+
+trace:
+  # .kongming/* 运行数据路径统一派生到 kongming_home。
+  output_path: .kongming/trace.jsonl
+  auto_flush: true
+  raw_llm: false
+
+logging:
+  level: INFO
+
+host:
+  # 当前 HostConfig schema 只允许 cli；Web 入口由 hosts.web.run 和 web.enabled 决定。
+  kind: cli
+
+approval:
+  mode: interactive
+
+tool:
+  shell:
+    enabled: true
+    timeout_seconds: 30.0
+    max_stream_bytes: 8000
+    terminate_grace_seconds: 2.0
+  file:
+    enabled: true
+    read_max_bytes: 65536
+
+compactor:
+  enabled: false
+  max_messages: 50
+  keep_recent: 20
+  keep_system: true
+  tool_result_max_chars: 2000
+
+retry:
+  max_retries: 3
+  retry_backoff: 1.0
+
+cli:
+  show_reasoning: false
+
+evolution:
+  memory:
+    enabled: true
+    # .kongming/* 运行数据路径统一派生到 kongming_home。
+    root_path: .kongming/memory
+    inject_prompt: true
+    read_max_chars: 65536
+    view_max_chars: 8000
+  learning:
+    enabled: false
+    mode: child_agent
+    background: true
+    model_name:
+    base_url:
+    api_key_env: EVOLUTION_REVIEWER_API_KEY
+    provider:
+    reasoning_effort:
+    every_n_runs: 5
+    min_user_turns: 3
+    max_history_messages: 20
+    max_nutrients: 2
+    nutrient_confidence_threshold: 0.75
+    review_timeout_seconds: 30.0
+    drain_on_close_seconds: 10.0
+    # .kongming/* 运行数据路径统一派生到 kongming_home。
+    root_path: .kongming/evolution
+
+stream:
+  enabled: true
+  read_timeout: 120.0
+  suppress_content_after_tool_call: true
+  delta_sampling: none
+  periodic_batch_size: 20
+
+safety:
+  # 产品包内不内置用户私有路径策略；内置安全基线仍由 safety 默认规则提供。
+  hard_deny_commands: []
+  approval_required_commands: []
+  sensitive_paths: []
+  skill_call_rules: []
+  trusted_workdirs: []
+  allow_writes: []
+  allow_tools_silent: []
+  log_silent_reads: false
+
+scheduler:
+  enabled: true
+  # 留空时使用 <kongming_home>/cron；显式 .kongming/* 会继续派生到 kongming_home。
+  home:
+  interval: 1.0
+  max_inflight: 8
+  max_task_age_seconds:
+  default_timezone: Asia/Shanghai
+  default_delivery_channel: web
+  default_max_turns: 90
+  approval:
+    mode: trust
+    allow_write_file_create_in_cwd: true
+
+web:
+  enabled: true
+  host: 127.0.0.1
+  # x-space 可传 --port 0 动态分配；固定默认值保留给资源配置和显式端口模式。
+  port: 60000
+  dev_mode: false
+  initial_password:
+  cors_origins: []
+  idle_timeout_seconds: 1800
+  idle_check_interval_seconds: 60
+  dashboard_poll_interval_seconds: 5
+  pending_approval_timeout_seconds: 60
+  ws_heartbeat_interval_ms: 30000
+  ws_heartbeat_background_interval_ms: 60000
+  ws_heartbeat_timeout_ms: 10000
+  ws_heartbeat_max_missed: 3
+  llm_presets: []
+  full_log:
+    enabled: false
+    # .kongming/* 运行数据路径统一派生到 kongming_home。
+    path: .kongming/logs/full_log.jsonl
+    rotate_daily: true
+    include_http_body: false
+    queue_size: 10000
+
+workflow:
+  enabled: true
+  # 留空时使用 <kongming_home>/workflows；显式 .kongming/* 会继续派生到 kongming_home。
+  home:
+  scan_interval: 30.0
+
+sitian:
+  version: v1
+  default_scan_interval_sec: 300
+  idle_sleep_sec: 30
+  # 留空时使用 <kongming_home>/sitian；设置后作为该根目录下的相对子目录名。
+  output_subdir:
+  scanner:
+    recent_session_window_days: 3
+    session_recent_user_messages: 1
+    session_recent_assistant_messages: 1
+    session_message_max_chars: 500
+  analyzer:
+    enabled: false
+    model_name: ""
+    base_url: ""
+    api_key_env: SITIAN_ANALYZER_API_KEY
+    max_tokens: 2048
+    temperature: 0.3
+    timeout: 30
+    max_context_chars: 50000
+    skip_if_unchanged: true
+    full_log_enabled: false
+  interests:
+    projects: []
+    focus: ""
+  sources: []

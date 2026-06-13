@@ -20,10 +20,13 @@ import type { WhiteboardCardKind } from "@/lib/whiteboard-card-templates";
 
 export type { WhiteboardCardItem } from "@/components/WhiteboardCard";
 
+// 白板面板同时服务独立右栏和 Dock 内嵌页，Dock 模式只复用内容与卡片交互。
 interface WhiteboardPanelProps {
   title?: string;
   cards: WhiteboardCardItem[];
   isOpen?: boolean;
+  embedded?: boolean;
+  variant?: "panel" | "dock";
   compactMode?: boolean;
   mobileMode?: boolean;
   canCreate?: boolean;
@@ -50,6 +53,8 @@ export function WhiteboardPanel({
   title = "Whiteboard",
   cards,
   isOpen = true,
+  embedded = false,
+  variant = "panel",
   compactMode = false,
   mobileMode = false,
   canCreate = true,
@@ -64,6 +69,8 @@ export function WhiteboardPanel({
   onUpdateCardLayout,
   onBringToFront,
 }: WhiteboardPanelProps) {
+  const isDockEmbedded = embedded || variant === "dock";
+  const isContentVisible = isDockEmbedded || isOpen;
   const hasCreateHandler = canCreate && Boolean(onCreateCard);
   const primaryCreateScope: CardScope = projectTitle === null ? "global" : "project";
   const projectButtonDisabled = !hasCreateHandler;
@@ -73,7 +80,7 @@ export function WhiteboardPanel({
   const [diagramDialogOpen, setDiagramDialogOpen] = useState(false);
   const [workflowDashboardOpen, setWorkflowDashboardOpen] = useState(false);
 
-  const resizeEnabled = isOpen && !compactMode && !mobileMode;
+  const resizeEnabled = isContentVisible && !isDockEmbedded && !compactMode && !mobileMode;
   const panelResize = useWhiteboardResize({ enabled: resizeEnabled });
   const boardRef = useRef<HTMLDivElement | null>(null);
   const interactionRef = useRef<{
@@ -154,6 +161,7 @@ export function WhiteboardPanel({
     };
   }, [canvasHeight, cardsWithDefaults, onUpdateCardLayout]);
 
+  // 卡片拖拽只更新白板卡片布局，不参与外层 Dock 或独立右栏尺寸计算。
   const startDrag = (cardId: string, event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
@@ -172,6 +180,7 @@ export function WhiteboardPanel({
     onBringToFront?.(cardId);
   };
 
+  // 卡片 resize 保持原有白板语义，Dock 内嵌模式下仍可调整单张卡片高度。
   const startResize = (cardId: string, event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     event.stopPropagation();
@@ -192,7 +201,7 @@ export function WhiteboardPanel({
 
   return (
     <>
-      {mobileMode && isOpen ? (
+      {mobileMode && isContentVisible && !isDockEmbedded ? (
         <button
           type="button"
           aria-label="关闭白板遮罩"
@@ -203,28 +212,32 @@ export function WhiteboardPanel({
       <aside
         data-testid="whiteboard-panel"
         className={cn(
-          "obsidian-panel obsidian-hairline relative z-20 flex h-full shrink-0 flex-col rounded-[1.85rem]",
-          panelResize.isResizing
-            ? "transition-[min-width,transform] duration-300 ease-out"
-            : "transition-[width,min-width,transform] duration-300 ease-out",
-          compactMode ? "absolute inset-y-0 right-0 shadow-xl" : "shadow-none",
-          isOpen
-            ? mobileMode
-              ? "w-[90vw] min-w-0 overflow-hidden"
-              : compactMode
-                ? "w-[min(50rem,calc(100vw-5.5rem))] min-w-0"
-                : "min-w-[24rem]"
-            : mobileMode
-              ? "w-0 min-w-0 overflow-visible border-l-0"
-              : "w-[4.5rem] min-w-[4.5rem] overflow-hidden",
+          isDockEmbedded
+            ? "relative flex h-full min-w-0 flex-1 flex-col overflow-hidden"
+            : [
+                "obsidian-panel obsidian-hairline relative z-20 flex h-full shrink-0 flex-col rounded-xl",
+                panelResize.isResizing
+                  ? "transition-[min-width,transform] duration-300 ease-out"
+                  : "transition-[width,min-width,transform] duration-300 ease-out",
+                compactMode ? "absolute inset-y-0 right-0 shadow-xl" : "shadow-none",
+                isOpen
+                  ? mobileMode
+                    ? "w-[90vw] min-w-0 overflow-hidden"
+                    : compactMode
+                      ? "w-[min(50rem,calc(100vw-5.5rem))] min-w-0"
+                      : "min-w-[24rem]"
+                  : mobileMode
+                    ? "w-0 min-w-0 overflow-visible border-l-0"
+                    : "w-[4.5rem] min-w-[4.5rem] overflow-hidden",
+              ],
         )}
         style={resizeEnabled ? { width: `${panelResize.width}px` } : undefined}
       >
-        {isOpen && !mobileMode ? (
+        {isContentVisible && !mobileMode && !isDockEmbedded ? (
           <button
             type="button"
             onClick={onToggleOpen}
-            className="absolute left-0 top-6 z-20 inline-flex h-11 w-11 -translate-x-1/2 items-center justify-center rounded-[1.3rem] border border-border/80 bg-card/90 text-foreground shadow-glass backdrop-blur-xl transition-colors hover:bg-card"
+            className="absolute left-0 top-4 z-20 inline-flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-lg border border-border/80 bg-card/90 text-foreground shadow-glass backdrop-blur-xl transition-colors hover:bg-card"
             aria-label="隐藏白板"
           >
             <PanelRightClose className="h-4.5 w-4.5" />
@@ -248,13 +261,13 @@ export function WhiteboardPanel({
         <div
           className={cn(
             "flex h-full flex-col origin-right transition-[opacity,transform] duration-300 ease-out",
-            isOpen
+            isContentVisible
               ? "translate-x-0 scale-x-100 opacity-100"
               : "pointer-events-none translate-x-8 scale-x-95 opacity-0",
           )}
         >
-          <div className="border-b border-border/70 px-4 py-3.5 pl-8">
-            <div className="flex items-start justify-between gap-3">
+          <div className={cn("border-b border-border/70 px-3 py-2.5", !isDockEmbedded && "pl-7")}>
+            <div className="flex items-start justify-between gap-2">
               <div className="space-y-1">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-semibold tracking-tight text-foreground text-glow">
@@ -340,17 +353,17 @@ export function WhiteboardPanel({
               </div>
             </div>
           </div>
-          <div className="min-h-0 flex-1 overflow-hidden pb-1.5">
+          <div className="min-h-0 flex-1 overflow-hidden pb-1">
             <div
               ref={boardRef}
-              className="relative h-full overflow-hidden rounded-[1.4rem] border border-border/70 bg-card/95 shadow-glass"
+              className="relative h-full overflow-hidden rounded-lg border border-border/70 bg-card/95 shadow-glass"
             >
               <div className="obsidian-grid pointer-events-none absolute inset-0 opacity-[0.18]" />
               <div className="relative h-full overflow-y-auto scrollbar-overlay">
                 {cards.length === 0 ? (
                   <div className="flex h-full items-center justify-center p-4">
-                    <div className="w-full max-w-sm rounded-[1.35rem] border border-dashed border-border/80 bg-card/72 px-5 py-7 text-center shadow-glass backdrop-blur-sm">
-                      <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-2xl border border-border/80 bg-muted/70 text-muted-foreground">
+                    <div className="w-full max-w-sm rounded-lg border border-dashed border-border/80 bg-card/72 px-4 py-5 text-center shadow-glass backdrop-blur-sm">
+                      <div className="mx-auto mb-2.5 flex h-8 w-8 items-center justify-center rounded-lg border border-border/80 bg-muted/70 text-muted-foreground">
                         <LayoutGrid className="h-4.5 w-4.5" />
                       </div>
                       <div className="text-sm font-semibold tracking-tight text-foreground">
@@ -420,27 +433,31 @@ export function WhiteboardPanel({
             </div>
           </div>
         </div>
-        <div
-          className={cn(
-            "absolute inset-0 transition-[opacity,transform] duration-300 ease-out",
-            isOpen ? "pointer-events-none translate-x-6 opacity-0" : "translate-x-0 opacity-100",
-          )}
-        >
-          <button
-            type="button"
-            onClick={onToggleOpen}
-            aria-label="展开白板"
-            data-testid="whiteboard-edge-handle"
+        {!isDockEmbedded ? (
+          <div
             className={cn(
-              "inline-flex items-center justify-center border border-border/80 bg-card/90 text-foreground shadow-glass backdrop-blur-xl transition-colors hover:bg-card",
-              mobileMode
-                ? "absolute right-0 top-5 h-20 w-6 rounded-l-2xl border-r-0"
-                : "mt-5 mr-2 h-12 w-12 rounded-[1.4rem]",
+              "absolute inset-0 transition-[opacity,transform] duration-300 ease-out",
+              isContentVisible
+                ? "pointer-events-none translate-x-6 opacity-0"
+                : "translate-x-0 opacity-100",
             )}
           >
-            <ChevronLeft className={cn(mobileMode ? "h-4 w-4" : "h-4.5 w-4.5")} />
-          </button>
-        </div>
+            <button
+              type="button"
+              onClick={onToggleOpen}
+              aria-label="展开白板"
+              data-testid="whiteboard-edge-handle"
+              className={cn(
+                "inline-flex items-center justify-center border border-border/80 bg-card/90 text-foreground shadow-glass backdrop-blur-xl transition-colors hover:bg-card",
+                mobileMode
+                  ? "absolute right-0 top-4 h-16 w-5 rounded-l-lg border-r-0"
+                  : "mt-4 mr-2 h-8 w-8 rounded-lg",
+              )}
+            >
+              <ChevronLeft className={cn(mobileMode ? "h-4 w-4" : "h-4.5 w-4.5")} />
+            </button>
+          </div>
+        ) : null}
       </aside>
       <ArchitectureDiagramDialog
         open={diagramDialogOpen}

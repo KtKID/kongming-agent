@@ -1,0 +1,60 @@
+# Kongming Web 后端 sidecar 构建配置。
+#
+# 用途：
+#   为 PyInstaller / wheel 打包提供构建期输入，描述入口、产物名、隐藏导入、
+#   数据文件和平台字段。
+#
+# 关键执行流程：
+#   1. 构建脚本读取本文件。
+#   2. 校验入口脚本、数据文件和目标平台。
+#   3. 调用 PyInstaller spec。
+#   4. 产出 Windows `kongming-web-backend.exe`。
+#
+# 运行时边界：
+#   本文件只服务构建期。`kongming-web-backend.exe` 启动时不会读取本文件。
+#   运行时 host / port / home / config / dist-dir / ready-json 全部来自 CLI 参数、
+#   环境变量、运行时配置和默认值。
+
+artifact:
+  name: kongming-web-backend
+  platform: windows
+
+entrypoint:
+  script: packaging/kongming_web_backend_entry.py
+  module: hosts.web.run
+  function: main
+
+pyinstaller:
+  onefile: true
+  console: true
+  spec: packaging/kongming-web-backend.spec
+  dist_path: dist/kongming-web-backend
+  work_path: build/pyinstaller/kongming-web-backend
+  hidden_imports:
+    - scheduler
+    - evolution
+    - network
+    - commands
+    - devtools
+    - prompts
+    - prompts.templates
+  data_files:
+    - source: src/prompts/templates
+      target: prompts/templates
+    - source: src/safety/auto_approval/default_rules.yaml
+      target: safety/auto_approval
+    - source: config/xspace/setting.yaml
+      target: config
+    - source: web/dist
+      target: web/dist
+
+platforms:
+  windows:
+    enabled: true
+    output_name: kongming-web-backend.exe
+  macos:
+    enabled: false
+    output_name: kongming-web-backend
+  linux:
+    enabled: false
+    output_name: kongming-web-backend

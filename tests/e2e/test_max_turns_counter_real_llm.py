@@ -26,17 +26,17 @@ from typing import Any
 
 import pytest
 
-from config_loader import load_config
-from config_loader.paths import get_kongming_home
 from core.agent_spec import AgentSpec
 from core.contracts import Session, ToolContext
 from core.errors import MaxTurnsExceededError
 from core.session import InMemorySession
-from executors.agent_runtime.native_runtime import NativeRuntime
-from safety.capability_policy import CapabilityPolicy, CapabilitySet
-from tools.approval import AutoAllowApproval
-from tools.base import BaseBuiltinTool
-from tools.registry import ToolRegistry
+from infrastructure.config import load_config
+from infrastructure.config.paths import get_kongming_home
+from runtime_assembly.native_runtime import NativeRuntime
+from safety.policies.capability import CapabilityPolicy, CapabilitySet
+from tools.runtime.approval import AutoAllowApproval
+from tools.runtime.base import BaseBuiltinTool
+from tools.runtime.registry import ToolRegistry
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 LOCAL_MODEL_YAML = REPO_ROOT / "config" / "setting.yaml"

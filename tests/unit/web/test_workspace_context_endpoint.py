@@ -5,11 +5,11 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from config_loader.models import Config
+from hosts.web.app import create_app
+from hosts.web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
+from hosts.web.threads.metadata import ThreadMetadata
+from infrastructure.config.models import Config
 from tests.unit.test_web_app_lifespan import _seed_password
-from web.app import create_app
-from web.auth import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
-from web.thread_metadata import ThreadMetadata
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 
@@ -186,7 +186,7 @@ def test_workspace_context_empty_cwd_falls_back_to_server_cwd(tmp_path: Path) ->
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body["workspace_root"] == str(tmp_path)
+        assert body["workspace_root"] == tmp_path.as_posix()
         assert body["files_available"] is True
         assert body["shell_available"] is True
         # generic_chat thread 走 system_shell（非 claude_code）

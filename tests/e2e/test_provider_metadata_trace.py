@@ -14,7 +14,7 @@ import pytest
 from core import AgentSpec, InMemorySession, Runner
 from core.contracts import LLMRequest, LLMResponse
 from core.message import Message
-from observability import JsonlTraceSink
+from infrastructure.tracing import JsonlTraceSink
 from tests.e2e.conftest import RecordingApproval
 
 # ---------------------------------------------------------------------------

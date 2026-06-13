@@ -14,7 +14,7 @@ jobs:
   lint-test:
     name: fmt + lint + typecheck + targeted unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -46,9 +46,7 @@ jobs:
 
       - name: Targeted unit tests (pull request)
         if: github.event_name == 'pull_request'
-        env:
-          KONGMING_PRE_PUSH_BASE: origin/${{ github.base_ref }}
-        run: make prepush-test
+        run: echo "targeted unit tests run on the push event for the same branch head"
 
       - name: Targeted unit tests (push)
         if: github.event_name == 'push'

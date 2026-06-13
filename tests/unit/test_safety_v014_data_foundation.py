@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from config_loader.models import (
+from infrastructure.config.models import (
     Config,
     ModelConfig,
     SafetyApprovalRequiredConfig,
@@ -24,7 +24,7 @@ from config_loader.models import (
     SafetyHardDenyConfig,
     SafetySensitivePathConfig,
 )
-from safety.default_rules import (
+from safety.approval.default_rules import (
     DEFAULT_ALLOW_TOOLS_SILENT,
     DEFAULT_ALLOW_WRITES,
     DEFAULT_APPROVAL_REQUIRED_COMMANDS,
@@ -32,7 +32,7 @@ from safety.default_rules import (
     DEFAULT_SENSITIVE_PATHS,
     DEFAULT_TRUSTED_WORKDIRS,
 )
-from safety.types import (
+from safety.approval.types import (
     ApprovalMetadataKeys,
     ApprovalRequiredCommand,
     BoundaryDecision,
@@ -179,7 +179,6 @@ def test_default_approval_required_commands_typed() -> None:
 def test_default_sensitive_paths_block_credentials() -> None:
     blocked_matchers = {rule.matcher for rule in DEFAULT_SENSITIVE_PATHS if rule.effect == "block"}
     assert "~/.ssh/" in blocked_matchers
-    assert "~/.kongming/" in blocked_matchers
     assert "~/.aws/credentials" in blocked_matchers
 
 
@@ -190,6 +189,7 @@ def test_default_sensitive_paths_elevated_includes_env_and_agents_md() -> None:
     assert ".env*" in elevated_matchers
     assert "AGENTS.md" in elevated_matchers
     assert "CLAUDE.md" in elevated_matchers
+    assert ".kongming/skills/" in elevated_matchers
 
 
 def test_default_sensitive_paths_allow_kongming_workdir() -> None:
@@ -408,7 +408,7 @@ def _find_forbidden(file_path: Path) -> list[str]:
 
 def test_module_1_boundary_no_runtime_logic() -> None:
     """M1 严格边界：types.py / default_rules.py 不允许混入运行时判定逻辑。"""
-    src_root = Path(__file__).resolve().parents[2] / "src" / "safety"
+    src_root = Path(__file__).resolve().parents[2] / "src" / "safety" / "approval"
     targets = [src_root / "types.py", src_root / "default_rules.py"]
     leaks: list[str] = []
     for target in targets:

@@ -33,6 +33,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from infrastructure.config.paths import resolve_kongming_path
+
 # CLAUDE.md 明确规则：UTC+8 固定偏移，不用系统 TZ / astimezone()。
 CN_TZ = timezone(timedelta(hours=8))
 
@@ -42,7 +44,7 @@ LogDir = Literal["c2s", "s2c", "http_req", "http_resp"]
 class _FullLogConfigLike(Protocol):
     """鸭子类型协议 —— ``WebFullLogConfig`` 实例或任意有相同字段的对象都行。
 
-    阶段 1 ``WebFullLogConfig`` 还没并到 ``config_loader``（并行任务在做），
+    阶段 1 ``WebFullLogConfig`` 还没并到 ``infrastructure.config``（并行任务在做），
     用 Protocol 避免硬依赖。
     """
 
@@ -116,8 +118,8 @@ class FullLogger:
         rotate_daily: bool = True,
     ) -> None:
         self._enabled = bool(enabled)
-        # 相对 cwd 解析，启动时 mkdir 父目录。
-        self._path: Path = Path(path).resolve()
+        # .kongming/* 配置路径统一派生到 kongming_home，其他路径保持显式配置语义。
+        self._path: Path = resolve_kongming_path(path)
         self._queue_size = max(1, int(queue_size))
         # TODO 阶段 2 #23：实现按 UTC+8 日历切日 ``full_log.<YYYY-MM-DD>.jsonl``。
         self._rotate_daily = bool(rotate_daily)

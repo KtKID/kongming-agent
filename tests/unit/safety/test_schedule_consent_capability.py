@@ -1,6 +1,6 @@
 """unit：v0.2 agent-cron-module 模块 6 —— ``schedule`` capability 默认规则。
 
-覆盖 :mod:`safety.default_rules` 新增的 :data:`DEFAULT_CONSENT_THEN_TRUST_TOOLS`
+覆盖 :mod:`safety.approval.default_rules` 新增的 :data:`DEFAULT_CONSENT_THEN_TRUST_TOOLS`
 锚点常量与 ``schedule`` tool 走 ConsentResolver 的 standard ask 路径：
 
 1. ``DEFAULT_CONSENT_THEN_TRUST_TOOLS`` 含 ``"memory"`` 与 ``"schedule"``（锚点）
@@ -25,9 +25,9 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import ApprovalConfig, Config, ModelConfig
 from core.contracts import ApprovalDecision, ApprovalRequest
-from safety.default_rules import (
+from infrastructure.config.models import ApprovalConfig, Config, ModelConfig
+from safety.approval.default_rules import (
     DEFAULT_ALLOW_TOOLS_SILENT,
     DEFAULT_APPROVAL_REQUIRED_COMMANDS,
     DEFAULT_CONSENT_THEN_TRUST_TOOLS,
@@ -35,14 +35,14 @@ from safety.default_rules import (
     DEFAULT_SENSITIVE_PATHS,
     DEFAULT_SKILL_CALL_RULES,
 )
-from safety.guards.consent import ConsentResolver
-from safety.types import (
+from safety.approval.types import (
     ApprovalMetadataKeys,
     BoundaryDecision,
     BoundaryKind,
     BoundaryZone,
     RuntimeBoundaryContext,
 )
+from safety.guards.consent import ConsentResolver
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers（参考 test_safety_consent_resolver.py 风格）
@@ -228,13 +228,13 @@ async def test_schedule_tool_consent_writes_session_grant(tmp_path: Any) -> None
     查询；该缺口与 memory tool 共有，由 trust.py 修复（不在本任务范围）。
     本测试只锁定 grant **写入**正确，不假设 trust 第二轮 silent_allow。
     """
-    from safety.boundary_resolver import BoundaryResolver
-    from safety.chain import SafetyGatedApproval
-    from safety.decision_engine import SafetyDecisionEngine
-    from safety.grant_store import GrantStore
+    from safety.approval.chain import SafetyGatedApproval
+    from safety.approval.decision_engine import SafetyDecisionEngine
+    from safety.approval.types import BoundaryKind, GrantKey
+    from safety.boundaries.resolver import BoundaryResolver
+    from safety.grants.store import GrantStore
     from safety.guards.hard_block import HardBlockGuard
     from safety.guards.trust import TrustResolver
-    from safety.types import BoundaryKind, GrantKey
 
     cfg = _cfg()
     # FakeApproval 模拟用户首次点"本 session 同意"：返回 grant_scope=session
@@ -297,7 +297,7 @@ def test_existing_default_tables_unaffected_by_consent_then_trust_tools() -> Non
     - approval_required_commands 仍含 ``git-push`` profile
     - sensitive_paths 仍含 ``ssh-material`` block + ``project-env`` elevated
     - skill_call_rules 仍是空 tuple（deny-by-default）
-    - allow_tools_silent 仍只含 ``read_file`` / ``list_dir``，没有把
+    - allow_tools_silent 含低风险只读工具和 agent role 工具，没有把
       ``schedule`` / ``memory`` 误塞进去
     """
     hard_deny_names = {r.name for r in DEFAULT_HARD_DENY_COMMANDS}
@@ -315,7 +315,13 @@ def test_existing_default_tables_unaffected_by_consent_then_trust_tools() -> Non
 
     assert DEFAULT_SKILL_CALL_RULES == ()
 
-    assert set(DEFAULT_ALLOW_TOOLS_SILENT) == {"read_file", "list_dir"}
+    assert set(DEFAULT_ALLOW_TOOLS_SILENT) == {
+        "read_file",
+        "list_dir",
+        "list_agent_roles",
+        "create_agent_role",
+        "update_task_progress",
+    }
     # 关键回归：schedule / memory 不应被错误地放进 allow_tools_silent
     # （否则用户首次也不会被询问，破坏 consent-then-trust 语义）
     assert "schedule" not in DEFAULT_ALLOW_TOOLS_SILENT

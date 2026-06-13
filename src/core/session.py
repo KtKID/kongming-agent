@@ -1,7 +1,7 @@
 """默认 in-memory session 实现。
 
 只解决"最小闭环能跑、多轮不丢历史"。持久化、恢复、压缩都由
-``context/session_store.py`` 在后续批次升级时承担，遵守同一份
+``sessions/session_store.py`` 在后续批次升级时承担，遵守同一份
 :class:`core.contracts.Session` 协议。
 
 v1-mini 单协程执行，不加锁；后续如果出现多任务共享 session 的场景，

@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from web.startup_progress import STARTUP_STEPS, StartupProgress
+from hosts.web.app_support.startup_progress import STARTUP_STEPS, StartupProgress
 
 
 def _read_json(path: Path) -> dict:

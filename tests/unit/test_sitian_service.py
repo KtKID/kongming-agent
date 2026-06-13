@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from config_loader.models import Config, ModelConfig
+from infrastructure.config.models import Config, ModelConfig
 from sitian.config import SiTianConfig, SiTianSourceConfig
 from sitian.scanners import SiTianScanSource
 from sitian.service import SiTianReadState, SiTianRunOnce

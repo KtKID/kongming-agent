@@ -16,6 +16,7 @@ import { ProjectSessionBrowser } from "@/components/ProjectSessionBrowser";
 import { SidebarSessionRow, type HoverAction } from "@/components/SidebarSessionRow";
 import { ThreadSourceIcon } from "@/components/ThreadSourceIcon";
 import { useInlineEdit } from "@/hooks/useInlineEdit";
+import { loadCachedPayload, saveCachedPayload } from "@/lib/sidebar-cache";
 import type {
   ClaudeProjectSummaryDTO,
   ClaudeProjectsRefreshProgressDTO,
@@ -23,6 +24,9 @@ import type {
   ImportClaudeSessionRequest,
   ImportClaudeSessionResponse,
 } from "@/protocol";
+
+const CLAUDE_PROJECTS_CACHE_KEY = "kongming.sidebar.claude-projects";
+const CLAUDE_PROJECTS_CACHE_TTL_MS = 15_000;
 
 // ---------------------------------------------------------------------------
 // Props
@@ -44,7 +48,10 @@ export function ClaudeProjectsTree({
   onSessionClick,
   onNewSession,
 }: ClaudeProjectsTreeProps): JSX.Element {
-  const [projects, setProjects] = useState<ClaudeProjectSummaryDTO[] | null>(null);
+  const cached = loadCachedPayload<ClaudeProjectSummaryDTO[]>(CLAUDE_PROJECTS_CACHE_KEY);
+  const [projects, setProjects] = useState<ClaudeProjectSummaryDTO[] | null>(
+    cached?.value ?? null,
+  );
   const [error, setError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshProgress, setRefreshProgress] =
@@ -65,6 +72,7 @@ export function ClaudeProjectsTree({
         setRefreshProgress(progress);
       });
       setProjects(result.projects);
+      saveCachedPayload(CLAUDE_PROJECTS_CACHE_KEY, result.projects);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -149,7 +157,13 @@ export function ClaudeProjectsTree({
           emptyText="还没添加任何项目，点上方按钮添加"
           noMatchText="没有匹配的 Claude 历史会话"
           refreshLabel="重新加载"
-          externalRefreshKey={claudeProjectsRefreshKey}
+          externalRefreshKey={
+            claudeProjectsRefreshKey > 0 ||
+            !cached ||
+            Date.now() - cached.savedAt > CLAUDE_PROJECTS_CACHE_TTL_MS
+              ? claudeProjectsRefreshKey || 1
+              : 0
+          }
         />
       </div>
     </div>

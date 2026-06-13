@@ -1,4 +1,4 @@
-"""unit：``executors.llm.raw_dump`` 的开关、落盘、脱敏、静默失败行为。"""
+"""unit：``infrastructure.llm_providers.raw_dump`` 的开关、落盘、脱敏、静默失败行为。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from executors.llm.raw_dump import dump_raw_llm_interaction, is_enabled
+from infrastructure.llm_providers.raw_dump import dump_raw_llm_interaction, is_enabled
 
 
 @pytest.mark.unit

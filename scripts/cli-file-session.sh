@@ -8,4 +8,4 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # 临时覆盖 backend=file，不修改原配置文件
-uv run python -m cli.main --config config/setting.yaml "$@"
+uv run python -m hosts.cli.main --config config/setting.yaml "$@"

@@ -1,7 +1,7 @@
 """scheduler v0.1 — cron 装配工厂。
 
 把 :meth:`NativeRuntime.build` 的装配能力复用过来构造一个
-:class:`scheduler.execution_bridge.ExecutionBridge`：cron run 走 fresh
+:class:`application.scheduled_runs.execution_bridge.ExecutionBridge`：cron run 走 fresh
 session + 工具裁剪 + watchdog，但 LLM / safety / tool registry / session 工厂
 等装配仍然走主流程，避免 cron 自己复制一份装配。
 
@@ -19,7 +19,7 @@ session + 工具裁剪 + watchdog，但 LLM / safety / tool registry / session �
 
 - 不装配 :class:`Store`，由调用方传入（CLI / web app lifespan 自己持有）。
 - 不持有 ``stop_event`` / ``ticker``：本工厂只负责"造 bridge"，循环编排留给调用方。
-- 仅依赖 :mod:`executors.agent_runtime.native_runtime` 暴露出来的 properties，
+- 仅依赖 :mod:`runtime_assembly.native_runtime` 暴露出来的 properties，
   不直接读私有字段。
 """
 
@@ -30,18 +30,18 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from config_loader.models import Config
-from executors.agent_runtime.native_runtime import NativeRuntime
-from scheduler.execution_bridge import ExecutionBridge
+from application.scheduled_runs.execution_bridge import ExecutionBridge
+from infrastructure.config.models import Config
+from runtime_assembly.native_runtime import NativeRuntime
 from scheduler.store import Store
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from config_loader.models import LLMPresetConfig
-    from context.session_bootstrap import SessionBootstrap
     from core.contracts import EventSink, Session, Tool, ToolLookup
+    from infrastructure.config.models import LLMPresetConfig
     from scheduler.delivery import DeliveryDispatcher
+    from sessions.session_bootstrap import SessionBootstrap
 
 
 def _default_cron_session_factory(
@@ -59,13 +59,13 @@ def _default_cron_session_factory(
     本函数生成默认 factory：
 
     - ``backend='memory'`` → 仍走 ``InMemorySession``（与 v0.2 行为一致）
-    - ``backend='sqlite' | 'file'`` → 走 ``context.build_session``，**让 cron
+    - ``backend='sqlite' | 'file'`` → 走 ``sessions.build_session``，**让 cron
       fresh session 跟主 session 用同一种 backend**
 
     file backend 需要 ``SessionBootstrap``：调用方未传时构造一个最小 placeholder
     （cron 是独立 fresh run，bootstrap 元数据不必跟主 session 一致）。
     """
-    from context import SessionBootstrap, build_session
+    from sessions import SessionBootstrap, build_session
 
     resolved_bootstrap = bootstrap or SessionBootstrap(
         agent_name="kongming-agent-cron",

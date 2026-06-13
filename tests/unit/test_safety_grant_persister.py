@@ -1,4 +1,4 @@
-"""unit：safety v0.1.4 M5.5 — :mod:`safety._grant_persister` atomic yaml 写回。
+"""unit：safety v0.1.4 M5.5 — :mod:`safety.grants.persister` atomic yaml 写回。
 
 覆盖：
 
@@ -17,18 +17,18 @@ from pathlib import Path
 
 import pytest
 
-from safety._grant_persister import (
-    is_ruamel_available,
-    persist_grant,
-    persist_grants,
-)
-from safety.grant_store import grant_with_now
-from safety.types import (
+from safety.approval.types import (
     BoundaryKind,
     DecisionSource,
     Grant,
     GrantKey,
 )
+from safety.grants.persister import (
+    is_ruamel_available,
+    persist_grant,
+    persist_grants,
+)
+from safety.grants.store import grant_with_now
 
 # 测试用初始 yaml（含注释 + 顺序）
 _INITIAL_YAML = """\
@@ -237,7 +237,7 @@ class TestAtomicAndErrors:
         config_path = _write_initial_config(tmp_path)
         observed: list[tuple[str, str]] = []
 
-        import safety._grant_persister as persister_mod
+        import safety.grants.persister as persister_mod
 
         original_replace = persister_mod.os.replace
 

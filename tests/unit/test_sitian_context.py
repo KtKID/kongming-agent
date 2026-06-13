@@ -1,4 +1,4 @@
-"""unit：context.sitian_context.build_sitian_context_text 全面测试。
+"""unit：prompting sitian context build_sitian_context_text 全面测试。
 
 覆盖场景：
 - 正常 3 项 work_items → 表格 + freshness
@@ -24,7 +24,11 @@ from unittest.mock import patch
 
 import pytest
 
-from context.sitian_context import MAX_ITEMS_PER_CHANNEL, build_sitian_context_text
+import prompting.context_sources.sitian_context as sitian_context_mod
+from prompting.context_sources.sitian_context import (
+    MAX_ITEMS_PER_CHANNEL,
+    build_sitian_context_text,
+)
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -93,7 +97,7 @@ def _patch_now():
         def fromisoformat(cls, s: str) -> datetime:
             return original_datetime.fromisoformat(s)
 
-    return patch("context.sitian_context.datetime", _FakeDatetime)
+    return patch.object(sitian_context_mod, "datetime", _FakeDatetime)
 
 
 # ---------------------------------------------------------------------------

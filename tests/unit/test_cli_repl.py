@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import io
 
-from cli.repl import confirm_yn
+from hosts.cli.repl import confirm_yn
 
 
 def test_confirm_yn_yes(monkeypatch, capsys):

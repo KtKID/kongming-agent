@@ -16,10 +16,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from config_loader.models import Config, ModelConfig, ReasoningProfile
 from core.contracts import LLMRequest
 from core.message import Message, ToolCall
-from executors.llm.anthropic_messages import AnthropicMessagesProvider
+from infrastructure.config.models import Config, ModelConfig, ReasoningProfile
+from infrastructure.llm_providers.anthropic_messages import AnthropicMessagesProvider
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -355,7 +355,7 @@ def test_native_runtime_dispatches_anthropic_provider() -> None:
         )
     )
 
-    from executors.agent_runtime.native_runtime import NativeRuntime
+    from runtime_assembly.native_runtime import NativeRuntime
 
     runtime = NativeRuntime.build(cfg)
     assert runtime is not None
@@ -366,9 +366,9 @@ def test_native_runtime_dispatches_anthropic_provider() -> None:
 @pytest.mark.unit
 def test_native_runtime_dispatches_openai_provider_by_default() -> None:
     """provider=openai_compatible 时应使用 OpenAIResponsesProvider。"""
-    from config_loader.models import Config, ModelConfig
-    from executors.agent_runtime.native_runtime import NativeRuntime
-    from executors.llm.openai_responses import OpenAIResponsesProvider
+    from infrastructure.config.models import Config, ModelConfig
+    from infrastructure.llm_providers.openai_responses import OpenAIResponsesProvider
+    from runtime_assembly.native_runtime import NativeRuntime
 
     cfg = Config(
         model=ModelConfig(

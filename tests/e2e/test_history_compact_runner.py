@@ -5,7 +5,7 @@
 1. runner 构造时不传 ``message_compactor`` 的语义（原样透传 history）没被改变
 2. runner 构造时传入符合 ``core.contracts.MessageCompactor`` Protocol 的对象
    后，每 turn 发给 LLM 的 messages 真的是 compactor 加工后的结果
-3. NativeRuntime.build 默认注入 context.HistoryCompactor，用户什么都不传也能
+3. NativeRuntime.build 默认注入 prompting.HistoryCompactor，用户什么都不传也能
    防止长对话撞 context 上限
 
 辅助组件用结构化鸭子类型满足 Protocol，避免触碰真实 OpenAI provider。
@@ -15,7 +15,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from config_loader.models import (
+from core import Runner
+from core.agent_spec import AgentSpec
+from core.message import Message
+from core.session import InMemorySession
+from infrastructure.config.models import (
     ApprovalConfig,
     Config,
     ModelConfig,
@@ -23,12 +27,8 @@ from config_loader.models import (
     SessionConfig,
     TraceConfig,
 )
-from context import HistoryCompactor
-from core import Runner
-from core.agent_spec import AgentSpec
-from core.message import Message
-from core.session import InMemorySession
-from executors.agent_runtime.native_runtime import NativeRuntime
+from prompting import HistoryCompactor
+from runtime_assembly.native_runtime import NativeRuntime
 
 
 class _CountingCompactor:
@@ -236,7 +236,7 @@ async def test_native_runtime_build_disables_compactor_by_default(
     这是 memory-module5-completion task 定下的新默认行为：现有 FIFO 压缩语义
     与 LLM summarize 式压缩差距大，默认关闭、留给后续 task compactor-v2-llm-summarize。
     """
-    from executors.agent_runtime.native_runtime import _NoopCompactor
+    from runtime_assembly.native_runtime import _NoopCompactor
 
     cfg = _build_stub_cfg(tmp_path)
     runtime = NativeRuntime.build(

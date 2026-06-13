@@ -169,6 +169,8 @@ export function toViewModel(state: ChatTimelineState): ChatViewModel {
       case "system": {
         const notice = record.notice;
         if (!notice) break;
+        // usage 留 store 供 StatusLine 消费，不渲染为系统通知卡片。
+        if (notice.source === "usage") break;
         const { runId } = decodeTurn(record.turnId, state.threadId);
         items.push({
           kind: "notice",

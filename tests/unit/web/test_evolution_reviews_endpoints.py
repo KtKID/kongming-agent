@@ -6,7 +6,6 @@ from pathlib import Path
 import httpx
 import pytest
 
-from config_loader.models import Config
 from evolution.models import (
     DecisionItem,
     DecisionRecord,
@@ -17,10 +16,11 @@ from evolution.models import (
 )
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore
+from hosts.web.app import create_app
+from hosts.web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
+from hosts.web.threads.metadata import ThreadMetadata
+from infrastructure.config.models import Config
 from tests.unit.test_web_app_lifespan import _seed_password
-from web.app import create_app
-from web.auth import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
-from web.thread_metadata import ThreadMetadata
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 
@@ -241,7 +241,7 @@ async def test_post_evolution_decision_accept_memory_materializes_workspace_memo
         assert item["target"] == "memory"
         assert item["applied_status"] == "written"
         assert item["applied_mode"] == "append"
-        memory_path = workspace / ".kongming" / "memory" / "MEMORY.md"
+        memory_path = tmp_path / "memory" / "MEMORY.md"
         assert item["applied_path"] == str(memory_path)
         assert memory_path.exists()
         content = memory_path.read_text(encoding="utf-8")
@@ -348,7 +348,7 @@ async def test_post_evolution_reapply_materializes_pending_memory_and_skill(tmp_
         memory_item = items["nutrient-2"]
         assert memory_item["applied_status"] == "written"
         assert memory_item["applied_mode"] == "append"
-        memory_path = workspace / ".kongming" / "memory" / "MEMORY.md"
+        memory_path = tmp_path / "memory" / "MEMORY.md"
         assert memory_item["applied_path"] == str(memory_path)
         assert memory_path.exists()
 

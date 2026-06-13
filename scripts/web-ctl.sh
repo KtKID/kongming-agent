@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# scripts/web-ctl.sh — 薄壳，把 web 进程管理委托给 src/web/ctl.py。
+# scripts/web-ctl.sh — 薄壳，把 web 进程管理委托给 src/hosts/web/ctl.py。
 #
 # 历史：v0.1.6 之前是 152 行 bash，因不读 .env / 跨平台靠 || 堆 hack
-# 等问题，重构为 Python 实现（src/web/ctl.py）。bash 仅作 entry shim
+# 等问题，重构为 Python 实现（src/hosts/web/ctl.py）。bash 仅作 entry shim
 # 保持 ./start.sh web ... 用户接口不变。
 #
 # 用法：
@@ -20,4 +20,4 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-exec uv run python -m web.ctl "$@"
+exec uv run python -m hosts.web.ctl "$@"

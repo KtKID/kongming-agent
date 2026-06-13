@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from core.message import Message, ToolCall
-from observability import PromptDebugDumpSink
+from infrastructure.tracing import PromptDebugDumpSink
 
 
 def test_prompt_debug_dump_writes_prompt_snapshot_json(tmp_path) -> None:
@@ -41,3 +41,28 @@ def test_prompt_debug_dump_writes_prompt_snapshot_json(tmp_path) -> None:
     assert payload["assembled_messages"][2]["tool_calls"] == [
         {"call_id": "call-1", "tool_name": "read_file", "arguments": {"path": "a"}}
     ]
+
+
+def test_default_debug_dir_uses_kongming_home(monkeypatch, tmp_path) -> None:
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("KONGMING_HOME", str(home))
+    monkeypatch.chdir(workspace)
+    sink = PromptDebugDumpSink()
+
+    path = Path(
+        sink.dump(
+            session_id="sid",
+            run_id="run-1",
+            turn=1,
+            model="stub-model",
+            instruction_origins=[],
+            history_before_assemble=[],
+            assembled_messages=[Message.system("SYS")],
+            metadata={},
+            added_system_prompt="SYS",
+        )
+    )
+
+    assert path.parent == (home / "debug").resolve()

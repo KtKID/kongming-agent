@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from config_loader.models import (
+from infrastructure.config.models import (
     ApprovalConfig,
     Config,
     EvolutionConfig,
@@ -25,8 +25,8 @@ from config_loader.models import (
     ShellToolConfig,
     ToolConfig,
 )
-from safety.capability_policy import CapabilityPolicy, CapabilitySet
-from safety.permission_policy import PermissionPolicy, PermissionRule
+from safety.policies.capability import CapabilityPolicy, CapabilitySet
+from safety.policies.permission import PermissionPolicy, PermissionRule
 
 
 def _config(

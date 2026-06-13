@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
-from config_loader.models import Config, ModelConfig
+from infrastructure.config.models import Config, ModelConfig
 from scheduler.runtime_factory import build_cron_execution_bridge
 from scheduler.store import Store
 
@@ -197,7 +197,7 @@ def test_cron_runtime_forwards_tools_and_enabled_names(tmp_path: Path) -> None:
     tools = {"read_file": object()}
 
     with patch(
-        "executors.agent_runtime.native_runtime.NativeRuntime.build",
+        "runtime_assembly.native_runtime.NativeRuntime.build",
         return_value=fake_runtime,
     ) as mock_build:
         _runtime, _bridge = build_cron_execution_bridge(

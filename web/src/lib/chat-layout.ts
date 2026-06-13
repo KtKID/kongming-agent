@@ -15,6 +15,7 @@
 
 export const MOBILE_BREAKPOINT = 768;
 export const COMPACT_BREAKPOINT = 1080;
+export const WHITEBOARD_AUTO_EXPAND_BREAKPOINT = 1500;
 
 export interface ChatLayoutState {
   /** 移动端布局（< 768px）：侧边栏与白板互斥展开 */
@@ -31,6 +32,6 @@ export function getChatLayoutState(width: number): ChatLayoutState {
   return {
     isMobileLayout,
     isCompactLayout,
-    shouldOpenWhiteboard: !isCompactLayout,
+    shouldOpenWhiteboard: width >= WHITEBOARD_AUTO_EXPAND_BREAKPOINT,
   };
 }

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from web.workflow.models import (
+from hosts.web.workflow.models import (
     EdgeTrigger,
     EventSource,
     RunStatus,
@@ -17,7 +17,7 @@ from web.workflow.models import (
     WorkflowRun,
     new_id,
 )
-from web.workflow.store import (
+from hosts.web.workflow.store import (
     _DEFINITIONS_FILENAME,
     _EVENTS_FILENAME,
     _RUNS_FILENAME,

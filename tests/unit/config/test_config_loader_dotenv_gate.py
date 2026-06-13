@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from config_loader import load_config
+from infrastructure.config import load_config
 
 
 @pytest.mark.unit

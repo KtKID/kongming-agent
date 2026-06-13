@@ -62,10 +62,13 @@ dev = [
     "mypy>=1.10",
     "import-linter>=2.0",
     "pre-commit>=3.7",
+    "pyinstaller>=6.0",
 ]
 
 [project.scripts]
-kongming = "cli.main:main"
+kongming = "hosts.cli.main:main"
+kongming-web = "hosts.web.run:main"
+kongming-web-ctl = "hosts.web.ctl:main"
 kongming-sitian = "sitian.cli:main"
 
 [project.urls]
@@ -80,35 +83,49 @@ Repository = "https://github.com/kongming-agent/kongming-agent"
 packages = [
     "src/core",
     "src/tools",
-    "src/context",
-    "src/executors",
-    "src/host",
-    "src/cli",
+    "src/sessions",
+    "src/prompting",
+    "src/infrastructure",
+    "src/application",
+    "src/runtime_assembly",
+    "src/hosts",
     "src/safety",
-    "src/observability",
-    "src/config_loader",
     "src/memory",
     "src/prompts",
-    "src/web",
     "src/sitian",
+    "src/scheduler",
+    "src/evolution",
+    "src/network",
+    "src/commands",
+    "src/devtools",
 ]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/prompts/templates" = "prompts/templates"
+"src/safety/auto_approval/default_rules.yaml" = "safety/auto_approval/default_rules.yaml"
+"config/xspace/setting.yaml" = "config/setting.yaml"
 
 [tool.hatch.build.targets.sdist]
 include = [
     "src/core",
     "src/tools",
-    "src/context",
-    "src/executors",
-    "src/host",
-    "src/cli",
+    "src/sessions",
+    "src/prompting",
+    "src/infrastructure",
+    "src/application",
+    "src/runtime_assembly",
+    "src/hosts",
     "src/safety",
-    "src/observability",
-    "src/config_loader",
     "src/memory",
     "src/prompts",
-    "src/web",
     "src/sitian",
+    "src/scheduler",
+    "src/evolution",
+    "src/network",
+    "src/commands",
+    "src/devtools",
     "config",
+    "packaging",
     "README.md",
     "pyproject.toml",
 ]
@@ -151,32 +168,31 @@ ignore = [
 "tests/**" = ["B", "SIM", "RUF012"]
 "__init__.py" = ["F401", "RUF022"]
 # tool input_schema 是数据定义，RUF012 建议不适用
-"src/tools/base.py" = ["RUF012"]
-"src/tools/file_tools.py" = ["RUF012"]
-"src/tools/shell_tool.py" = ["RUF012", "SIM105"]
-"src/tools/memory_tool.py" = ["RUF012"]
-"src/tools/schedule_tool.py" = ["RUF012"]
+"src/tools/runtime/base.py" = ["RUF012"]
+"src/tools/builtin/file_tool.py" = ["RUF012"]
+"src/tools/builtin/shell_tool.py" = ["RUF012", "SIM105"]
+"src/tools/builtin/memory_tool.py" = ["RUF012"]
+"src/tools/builtin/schedule_tool.py" = ["RUF012"]
 # 其他风格级提示不是硬错误
 "src/core/runner.py" = ["SIM108"]
-"src/safety/chain.py" = ["SIM103"]
-"src/config_loader/models.py" = ["SIM103"]
-"src/context/session_store.py" = ["SIM108"]
-"src/executors/agent_runtime/native_runtime.py" = ["SIM108"]
+"src/safety/approval/chain.py" = ["SIM103"]
+"src/infrastructure/config/models.py" = ["SIM103"]
+"src/sessions/session_store.py" = ["SIM108"]
+"src/runtime_assembly/native_runtime.py" = ["SIM108"]
 
 [tool.ruff.lint.isort]
 known-first-party = [
     "core",
     "tools",
-    "context",
-    "executors",
-    "host",
-    "cli",
+    "sessions",
+    "prompting",
+    "infrastructure",
+    "application",
+    "runtime_assembly",
+    "hosts",
     "safety",
-    "observability",
-    "config_loader",
     "memory",
     "prompts",
-    "web",
     "sitian",
 ]
 
@@ -192,6 +208,7 @@ skip-magic-trailing-comma = false
 
 [tool.mypy]
 python_version = "3.11"
+platform = "linux"
 mypy_path = "src"
 strict = false
 warn_unused_ignores = true
@@ -255,15 +272,12 @@ markers = [
     "contract: 契约一致性测试（同协议多实现）",
     "smoke: 最小启动烟囱测试",
     "slow: 需要较长时间或依赖外部服务",
+    "live: 需要真实外部 provider 或真实模型服务",
 ]
 filterwarnings = [
     "error",
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
-    # 测试 teardown 时 gc 触发的 unclosed socket / event loop 警告：
-    # 测试进程短命，资源被进程退出兜底回收；生产代码（src/）使用 asyncio.run /
-    # asyncio.get_running_loop() 正确 API，不存在此类泄漏。一律忽略避免 CI 误挂。
-    "ignore::pytest.PytestUnraisableExceptionWarning",
 ]
 
 # ---------------------------------------------------------------------------
@@ -275,14 +289,14 @@ branch = true
 source = [
     "core",
     "tools",
-    "context",
-    "executors",
-    "host",
-    "cli",
+    "sessions",
+    "prompting",
+    "infrastructure",
+    "application",
+    "runtime_assembly",
+    "hosts",
     "safety",
-    "observability",
     "memory",
-    "config_loader",
     "sitian",
 ]
 omit = [

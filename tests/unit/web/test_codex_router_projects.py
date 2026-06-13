@@ -18,7 +18,7 @@ worktree 隔离硬约束：用 ``tmp_path`` 当 ``kongming_home`` + ``codex_home
 
 与 ``test_claude_router_projects.py`` 的差异：
 
-1. registry 模块换 ``web.codex.projects_registry`` + 路径字段 ``codex_projects.json``
+1. registry 模块换 ``web.integrations.codex.projects_registry`` + 路径字段 ``codex_projects.json``
 2. POST/DELETE 路径前缀 ``/api/codex/projects``
 3. **codex jsonl 结构不同**：codex 不按 cwd 编码目录名，而是
    ``sessions/<Y>/<M>/<D>/rollout-<ISO>-<UUID>.jsonl``，cwd 真值在 jsonl 第一行
@@ -38,17 +38,17 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from hosts.web.app import create_app
+from hosts.web.integrations.codex.projects_registry import (
+    add_project,
+    codex_projects_path,
+    load_registry,
+)
 from tests.unit.test_web_app_lifespan import _seed_password
 from tests.unit.test_web_routers_threads import (
     CSRF_HEADERS,
     FakeTM,
     _make_cfg,
-)
-from web.app import create_app
-from web.codex.projects_registry import (
-    add_project,
-    codex_projects_path,
-    load_registry,
 )
 
 # ---------------------------------------------------------------------------
@@ -67,7 +67,7 @@ def _disable_bootstrap_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     必须把这步置空，否则每条用例都会被预登记一条 ``/Volumes/.../kongming-agent``。
     """
     monkeypatch.setattr(
-        "web.app._bootstrap_projects_registry",
+        "hosts.web.app._bootstrap_projects_registry",
         lambda home, repo_root: None,
     )
 

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from web.whiteboard_store import (
+from hosts.web.whiteboard.store import (
     DEFAULT_WHITEBOARD_TITLE,
     WhiteboardContentConflictError,
     WhiteboardLayoutUpdate,

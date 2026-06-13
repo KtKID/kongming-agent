@@ -24,11 +24,11 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from config_loader.models import Config
+from hosts.web.app import create_app
+from hosts.web.routers.sitian import router as sitian_router
+from infrastructure.config.models import Config
 from sitian.store import SiTianRecordsStore
 from tests.unit.test_web_app_lifespan import _seed_password
-from web.app import create_app
-from web.routers.sitian import router as sitian_router
 
 # ---------------------------------------------------------------------------
 # Fake ThreadManager（与 cron router 测试同款最小桩）
@@ -137,7 +137,7 @@ def _login_client(
 
     # CSRF：GET 不需要 CSRF header，且 login POST 在其它 router 测试里证实
     # 不需要单独发 csrf header。直接登录即可。
-    from web.auth import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
+    from hosts.web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
 
     resp = client.post(
         "/api/auth/login",

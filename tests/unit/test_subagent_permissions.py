@@ -6,17 +6,17 @@ from typing import Any
 
 import pytest
 
-from core.contracts import ApprovalDecision, ApprovalRequest, ToolContext
-from core.message import Message, ToolCall
-from core.run_state import RunState
-from executors.agent_runtime.subagent_permissions import (
+from application.subagents.permissions import (
     SCOPED_WORKDIR_MODE,
     ScopedFileTool,
     SubAgentApprovalProvider,
     SubAgentGrant,
     SubAgentToolAuditHook,
 )
-from tools.file_tools import build_file_tools
+from core.contracts import ApprovalDecision, ApprovalRequest, ToolContext
+from core.message import Message, ToolCall
+from core.run_state import RunState
+from tools.builtin.file_tool import build_file_tools
 
 
 class _Writer:
@@ -104,7 +104,12 @@ async def test_scoped_file_tool_rejects_parent_and_symlink_escape(tmp_path: Path
 
     outside_dir = tmp_path / "outside"
     outside_dir.mkdir()
-    (grant.working_dir / "link").symlink_to(outside_dir, target_is_directory=True)
+    try:
+        (grant.working_dir / "link").symlink_to(outside_dir, target_is_directory=True)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is required for symlink escape coverage")
+        raise
     symlink_escape = await tools["write_file"].execute(
         {"path": "link/escape.txt", "content": "bad"},
         ctx,

@@ -47,7 +47,7 @@ interface ComposerProps {
     text: string,
     reasoningEffort: ReasoningEffort | null,
     attachments?: UserInputAttachment[],
-  ) => void;
+  ) => void | boolean | Promise<void | boolean>;
   /** 软上限；超出仍可发，但显示提醒 */
   softLimit?: number;
   /**
@@ -65,6 +65,8 @@ interface ComposerProps {
    * 本 Composer 不感知具体业务，仅提供位置。generic_chat 通道不传则不显示。
    */
   leftActions?: ReactNode;
+  /** 深度思考右侧的模型切换控件。 */
+  modelSwitcher?: ReactNode;
   /**
    * interrupt-run-v0.1：当前是否有 active run 可中断。
    *
@@ -94,6 +96,7 @@ export function Composer({
   softLimit = 8000,
   threadId,
   leftActions,
+  modelSwitcher,
   isRunning = false,
   onInterrupt,
 }: ComposerProps) {
@@ -169,14 +172,19 @@ export function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId]);
 
-  const submit = () => {
+  const submit = async () => {
     const text = value.trim();
     const ready = uploader.readyAttachments;
     // 允许"只有图片没文字"或"只有文字没图片"或"图片+文字"
     if (disabled) return;
     if (text.length === 0 && ready.length === 0) return;
     if (uploader.hasUploading) return;
-    onSubmit(text, reasoningEffort, ready.length > 0 ? ready : undefined);
+    const shouldClear = await onSubmit(
+      text,
+      reasoningEffort,
+      ready.length > 0 ? ready : undefined,
+    );
+    if (shouldClear === false) return;
     setValue("");
     uploader.clear();
     setShowMenu(false);
@@ -218,7 +226,7 @@ export function Composer({
     }
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      submit();
+      void submit();
     }
   };
 
@@ -250,7 +258,7 @@ export function Composer({
             placeholder={
               disabled ? "推理中，请稍候..." : "输入消息（⌘⏎ 发送），/ 打开命令菜单"
             }
-            className="min-h-0 resize-none overflow-y-hidden border-border/70 bg-background/88 py-0 shadow-none leading-5"
+            className="min-h-0 resize-none overflow-y-hidden border-input/85 bg-card/82 py-0.5 text-card-foreground shadow-none leading-5 placeholder:text-muted-foreground/80 focus-visible:border-primary/45 focus-visible:ring-primary/35 dark:border-border/90 dark:bg-background/72 dark:text-foreground dark:placeholder:text-muted-foreground/72 dark:focus-visible:border-primary/55 dark:focus-visible:ring-primary/45"
             aria-label="消息输入"
           />
           <ThumbnailStrip
@@ -259,8 +267,14 @@ export function Composer({
             className="mt-2"
           />
         </div>
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-1">
+        <div
+          className="flex items-center justify-between gap-3"
+          data-testid="composer-action-row"
+        >
+          <div
+            className="flex min-w-0 flex-1 flex-wrap items-center gap-1"
+            data-testid="composer-primary-actions"
+          >
             <DropdownMenu
               open={attachmentMenuOpen}
               onOpenChange={setAttachmentMenuOpen}
@@ -329,6 +343,7 @@ export function Composer({
                 </DropdownMenuRadioGroup>
               </DropdownMenuContent>
             </DropdownMenu>
+            {modelSwitcher}
           </div>
           <input
             ref={fileInputRef}
@@ -339,7 +354,10 @@ export function Composer({
             onChange={onFilesChosen}
             data-testid="composer-file-input"
           />
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <div
+            className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground"
+            data-testid="composer-secondary-actions"
+          >
             <span className={overflow ? "text-destructive" : ""}>
               {value.length}
               {overflow ? ` / 软上限 ${softLimit}` : ""}
@@ -361,7 +379,7 @@ export function Composer({
               <Button
                 type="button"
                 size="sm"
-                onClick={submit}
+                onClick={() => void submit()}
                 disabled={
                   disabled ||
                   uploader.hasUploading ||

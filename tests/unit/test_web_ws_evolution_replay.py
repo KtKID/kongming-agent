@@ -8,11 +8,11 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import Config
 from evolution.models import EvolutionNutrient, ReviewResult, ReviewWritePayload
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore
-from web.ws import _send_evolution_replay_frames
+from hosts.web.websocket.routes import _send_evolution_replay_frames
+from infrastructure.config.models import Config
 
 
 class _FakeWS:

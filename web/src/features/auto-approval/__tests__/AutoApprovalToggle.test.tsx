@@ -63,6 +63,31 @@ describe("AutoApprovalToggle", () => {
     });
   });
 
+  it("toggle send 返回 false 时不做 optimistic 更新", () => {
+    const send = vi.fn((frame: unknown) => {
+      if (
+        typeof frame === "object" &&
+        frame !== null &&
+        "frame_type" in frame &&
+        frame.frame_type === "auto-approval-toggle"
+      ) {
+        return false;
+      }
+      return true;
+    });
+    render(<AutoApprovalToggle cwd="/p" socket={{ send }} />);
+    send.mockClear();
+
+    fireEvent.click(screen.getByTestId("auto-approval-switch"));
+
+    expect(send).toHaveBeenCalledWith({
+      frame_type: "auto-approval-toggle",
+      cwd: "/p",
+      enabled: true,
+    });
+    expect(useAutoApprovalStore.getState().byCwd["/p"]).toBeUndefined();
+  });
+
   it("cwd 变化时重新 query", () => {
     const send = vi.fn();
     const { rerender } = render(

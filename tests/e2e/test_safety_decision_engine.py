@@ -38,7 +38,8 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import (
+from core.contracts import ApprovalDecision, ApprovalRequest
+from infrastructure.config.models import (
     ApprovalConfig,
     Config,
     EvolutionConfig,
@@ -48,22 +49,21 @@ from config_loader.models import (
     ShellToolConfig,
     ToolConfig,
 )
-from core.contracts import ApprovalDecision, ApprovalRequest
-from safety.boundary_resolver import BoundaryResolver
-from safety.capability_policy import CapabilityPolicy, CapabilitySet
-from safety.chain import build_safety_chain
-from safety.decision_engine import SafetyDecisionEngine
-from safety.grant_store import GrantStore, grant_with_now
-from safety.guards.consent import ConsentResolver
-from safety.guards.hard_block import HardBlockGuard
-from safety.guards.trust import TrustResolver
-from safety.permission_policy import PermissionPolicy, PermissionRule
-from safety.types import (
+from safety.approval.chain import build_safety_chain
+from safety.approval.decision_engine import SafetyDecisionEngine
+from safety.approval.types import (
     ApprovalMetadataKeys,
     BoundaryKind,
     DecisionSource,
     RuntimeBoundaryContext,
 )
+from safety.boundaries.resolver import BoundaryResolver
+from safety.grants.store import GrantStore, grant_with_now
+from safety.guards.consent import ConsentResolver
+from safety.guards.hard_block import HardBlockGuard
+from safety.guards.trust import TrustResolver
+from safety.policies.capability import CapabilityPolicy, CapabilitySet
+from safety.policies.permission import PermissionPolicy, PermissionRule
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -161,7 +161,7 @@ async def test_case01_tracked_write_silent_allow_intrinsic(tmp_path: Path) -> No
     cfg = _config()
     engine, _, _, _ = _build_engine(cfg)
     # 选一个项目里实际 tracked 的文件
-    tracked_path = str(Path.cwd() / "src" / "core" / "contracts.py")
+    tracked_path = str(Path.cwd() / "src" / "core" / "contracts" / "__init__.py")
     decision = await engine.decide(
         _req(tool_name="write_file", arguments={"path": tracked_path, "content": "x"}),
         _runtime(),

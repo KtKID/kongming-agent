@@ -25,7 +25,7 @@ help:
 	@echo "  make nightly-local 本地真实 e2e nightly（默认端口 60999）"
 	@echo "  make test          test-unit + test-e2e"
 	@echo "  make smoke         最小启动 smoke test"
-	@echo "  make cli           启动 CLI（本地模型基线配置）"
+	@echo "  make cli           启动 CLI（MiniMax M3 默认）"
 	@echo "  make clean         清理缓存产物"
 
 install:

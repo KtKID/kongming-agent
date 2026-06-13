@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from web._app_lock import (
+from hosts.web.app_support.app_lock import (
     _read_holder_pid,
     _try_lock_path,
     acquire_app_instance_lock,

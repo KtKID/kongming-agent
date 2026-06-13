@@ -49,8 +49,8 @@ from pathlib import Path
 
 import pytest
 
-from config_loader import load_config
-from executors.agent_runtime.native_runtime import NativeRuntime
+from infrastructure.config import load_config
+from runtime_assembly.native_runtime import NativeRuntime
 from tools import AutoAllowApproval, ReadFileTool
 
 _DUMP_ENV = "KONGMING_E2E_DEBUG_DUMP_RAW"

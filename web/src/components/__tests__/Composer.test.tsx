@@ -71,6 +71,19 @@ describe("Composer", () => {
     expect(onSubmit).toHaveBeenCalledWith("hello", null, undefined);
   });
 
+  it("onSubmit 返回 false 时保留输入内容", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(false);
+    render(<Composer onSubmit={onSubmit} />);
+    const user = userEvent.setup();
+    const input = screen.getByLabelText("消息输入");
+
+    await user.type(input, "keep me");
+    await user.click(screen.getByRole("button", { name: /发送/ }));
+
+    expect(onSubmit).toHaveBeenCalledWith("keep me", null, undefined);
+    expect(input).toHaveValue("keep me");
+  });
+
   it("disabled=true → 禁用 textarea + 发送按钮", () => {
     const onSubmit = vi.fn();
     render(<Composer onSubmit={onSubmit} disabled={true} />);
@@ -101,6 +114,25 @@ describe("Composer", () => {
     expect(screen.getByRole("button", { name: /深度思考/ })).toBeDisabled();
   });
 
+  it("applies Composer textarea spacing and theme classes", () => {
+    render(<Composer onSubmit={vi.fn()} />);
+    const textarea = screen.getByRole("textbox");
+
+    expect(textarea).toHaveClass("py-0.5");
+    expect(textarea).toHaveClass("border-input/85");
+    expect(textarea).toHaveClass("bg-card/82");
+    expect(textarea).toHaveClass("text-card-foreground");
+    expect(textarea).toHaveClass("placeholder:text-muted-foreground/80");
+    expect(textarea).toHaveClass("focus-visible:border-primary/45");
+    expect(textarea).toHaveClass("focus-visible:ring-primary/35");
+    expect(textarea).toHaveClass("dark:border-border/90");
+    expect(textarea).toHaveClass("dark:bg-background/72");
+    expect(textarea).toHaveClass("dark:text-foreground");
+    expect(textarea).toHaveClass("dark:placeholder:text-muted-foreground/72");
+    expect(textarea).toHaveClass("dark:focus-visible:border-primary/55");
+    expect(textarea).toHaveClass("dark:focus-visible:ring-primary/45");
+  });
+
   it("点击加号后显示图片菜单项", async () => {
     render(<Composer onSubmit={vi.fn()} threadId="thread-1" />);
     const user = userEvent.setup();
@@ -110,6 +142,24 @@ describe("Composer", () => {
 
     expect(screen.getByTestId("composer-attach-button")).toBeInTheDocument();
     expect(screen.getByText("图片")).toBeInTheDocument();
+  });
+
+  it("底部主操作区保留加号和模型选择并允许换行", () => {
+    render(
+      <Composer
+        onSubmit={vi.fn()}
+        threadId="thread-1"
+        modelSwitcher={<button type="button">选择模型</button>}
+        leftActions={<button type="button">项目</button>}
+      />,
+    );
+
+    const primaryActions = screen.getByTestId("composer-primary-actions");
+    expect(primaryActions).toHaveClass("flex-wrap");
+    expect(primaryActions).toHaveClass("flex-1");
+    expect(primaryActions).toContainElement(screen.getByTestId("composer-plus-trigger"));
+    expect(primaryActions).toHaveTextContent("选择模型");
+    expect(screen.getByTestId("composer-secondary-actions")).toHaveClass("shrink-0");
   });
 
   // interrupt-run-v0.1

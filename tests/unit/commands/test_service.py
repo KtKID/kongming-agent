@@ -72,7 +72,7 @@ class TestCommandServiceRouting:
             runtime_delegate=runtime_delegate,
             host_kind="cli",
         )
-        result = await svc.handle_input("hello world", context=_context())
+        result = await svc.handle_input("hello world", execution_context=_context())
         assert isinstance(result, Result)
         assert calls == ["hello world"]
 
@@ -96,7 +96,7 @@ class TestCommandServiceRouting:
             runtime_delegate=runtime_delegate,
             host_kind="cli",
         )
-        result = await svc.handle_input("/review auth module", context=_context())
+        result = await svc.handle_input("/review auth module", execution_context=_context())
         assert isinstance(result, Result)
         assert calls == ["auth module"]
 
@@ -120,7 +120,7 @@ class TestCommandServiceRouting:
             runtime_delegate=runtime_delegate,
             host_kind="cli",
         )
-        result = await svc.handle_input("/review", context=_context())
+        result = await svc.handle_input("/review", execution_context=_context())
         assert isinstance(result, Result)
         assert calls == ["Review current workspace changes."]
 
@@ -140,7 +140,7 @@ class TestCommandServiceRouting:
             runtime_delegate=runtime_delegate,
             host_kind="cli",
         )
-        result = await svc.handle_input("/deploy", context=_context())
+        result = await svc.handle_input("/deploy", execution_context=_context())
         assert isinstance(result, CommandResult)
         assert result.status == "failed"
         assert "/deploy" in result.output_text
@@ -164,7 +164,7 @@ class TestCommandServiceRouting:
             runtime_delegate=runtime_delegate,
             host_kind="cli",
         )
-        result = await svc.handle_input("/tmp/project/foo.py", context=_context())
+        result = await svc.handle_input("/tmp/project/foo.py", execution_context=_context())
         assert isinstance(result, Result)
         assert calls == ["/tmp/project/foo.py"]
 
@@ -193,7 +193,7 @@ class TestCommandServiceRouting:
             runtime_delegate=runtime_delegate,
             host_kind="cli",
         )
-        await svc.handle_input("/review check auth", context=ctx)
+        await svc.handle_input("/review check auth", execution_context=ctx)
         assert received_effort == ["high"]
 
     @pytest.mark.asyncio
@@ -223,7 +223,7 @@ class TestCommandServiceRouting:
             runtime_delegate=runtime_delegate,
             host_kind="web",
         )
-        result = await svc.handle_input("/clionly", context=_context())
+        result = await svc.handle_input("/clionly", execution_context=_context())
         assert isinstance(result, CommandResult)
         assert result.status == "failed"
         assert "Unknown command" in result.output_text
