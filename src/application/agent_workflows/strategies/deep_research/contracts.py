@@ -148,8 +148,8 @@ class DeepResearchSourcePolicy:
     blocked_domains: tuple[str, ...] = ()
     # 是否优先一手来源。
     prefer_primary_sources: bool = True
-    # 当前支持 fake/internal，真实 provider 后续通过该字段扩展。
-    provider: str = "fake"
+    # 当前支持 fake/internal，默认使用 runtime 注入 provider。
+    provider: str = "internal"
 
 
 @dataclass(frozen=True)
@@ -484,7 +484,7 @@ def _parse_limits(raw: Mapping[str, object]) -> DeepResearchLimits:
 
 def _parse_source_policy(raw: Mapping[str, object]) -> DeepResearchSourcePolicy:
     """解析来源策略，输入为原始映射，输出为来源策略对象。"""
-    provider = _text(raw.get("provider")) or "fake"
+    provider = _text(raw.get("provider")) or "internal"
     if provider not in {"fake", "internal"}:
         raise DeepResearchContractError("source_policy.provider must be fake or internal")
     return DeepResearchSourcePolicy(

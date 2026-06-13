@@ -159,6 +159,30 @@ tool:
     enabled: true
     read_max_bytes: 65536
 
+mcp:
+  enabled: true
+  servers:
+  - server_id: minimax
+    command: uvx
+    args:
+    - minimax-coding-plan-mcp
+    - "-y"
+    env:
+      MINIMAX_API_HOST: https://api.minimax.io
+    secret_env_keys:
+    - MINIMAX_API_KEY
+    initialize_timeout_ms: 30000
+    call_timeout_ms: 60000
+
+web_search:
+  enabled: true
+  provider_name: minimax_web_search
+  search_tool_name: mcp__minimax__web_search
+  search_tool_names:
+  - mcp__minimax__web_search
+  - web_search
+  max_results: 5
+
 compactor:
   # 默认关闭：现有压缩仅做消息数 FIFO，和 LLM summarize 式压缩差距大。
   # 正式 LLM summarize 压缩待后续独立 task compactor-v2-llm-summarize 实施，

@@ -196,6 +196,7 @@ class AgentWorkflowManager:
         workspace_root: Path,
         role_manager: AgentRoleManager,
         deep_research_source_provider: Any | None = None,
+        deep_research_source_diagnostics: Any | None = None,
     ) -> None:
         """初始化管理器，输入为子 agent 管理器、配置和工作区，输出为带默认策略注册的 workflow facade。"""
         self._subagents = subagents
@@ -203,6 +204,7 @@ class AgentWorkflowManager:
         self._workspace_root = workspace_root.resolve()
         self._role_manager = role_manager
         self._deep_research_source_provider = deep_research_source_provider
+        self._deep_research_source_diagnostics = deep_research_source_diagnostics
         self._strategy_manager = AgentWorkflowStrategyManager(
             context_factory=self._build_workflow_context
         )
@@ -228,13 +230,27 @@ class AgentWorkflowManager:
         """返回 deep_research 来源 provider，输入为 manager 状态，输出为可选 provider。"""
         return self._deep_research_source_provider
 
-    def bind_deep_research_source_provider(self, provider: Any | None) -> None:
-        """绑定 deep_research 来源 provider，输入为 provider 或 None，输出为 manager 状态更新。"""
-        self._deep_research_source_provider = provider
+    @property
+    def deep_research_source_diagnostics(self) -> Any | None:
+        """返回 Web 来源 provider 诊断，输入为 manager 状态，输出为可选诊断载荷。"""
+        return self._deep_research_source_diagnostics
 
-    def set_deep_research_source_provider(self, provider: Any | None) -> None:
-        """设置 deep_research 来源 provider，输入为 provider 或 None，输出为兼容测试入口。"""
-        self.bind_deep_research_source_provider(provider)
+    def bind_deep_research_source_provider(
+        self,
+        provider: Any | None,
+        diagnostics: Any | None = None,
+    ) -> None:
+        """绑定 deep_research 来源 provider 和诊断，输入为 provider/diagnostics，输出为状态更新。"""
+        self._deep_research_source_provider = provider
+        self._deep_research_source_diagnostics = diagnostics
+
+    def set_deep_research_source_provider(
+        self,
+        provider: Any | None,
+        diagnostics: Any | None = None,
+    ) -> None:
+        """设置 deep_research 来源 provider 和诊断，输入为 provider/diagnostics，输出为兼容测试入口。"""
+        self.bind_deep_research_source_provider(provider, diagnostics=diagnostics)
 
     def list_workflow_strategies(self) -> tuple[WorkflowStrategyCatalogEntry, ...]:
         """列出已注册策略，输入为当前策略注册表，输出为父 agent 可查看的策略目录。"""

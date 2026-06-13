@@ -211,6 +211,96 @@ def _build_cfg() -> Config:
     )
 
 
+async def test_run_registers_mcp_runtime_tools_and_closes_manager(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    managers: list[object] = []
+
+    class _FakeMcpWebSearchTool:
+        name = "web_search"
+        description = "fake mcp web search"
+        input_schema = {"type": "object", "properties": {}}
+
+        async def execute(self, _args, _ctx):
+            return ToolResult(ok=True, content="ok")
+
+    class _FakeMcpRuntimeRegistrationManager:
+        def __init__(self, cfg, *, event_sinks=()):
+            self.cfg = cfg
+            self.event_sinks = tuple(event_sinks)
+            self.register_calls = []
+            self.closed = False
+            managers.append(self)
+
+        async def register(self, registry, *, excluded_tool_names=()):
+            self.register_calls.append(tuple(excluded_tool_names))
+            registry.register(_FakeMcpWebSearchTool())
+            return object()
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    class _DummyBridge:
+        def __init__(
+            self,
+            *,
+            runtime,
+            adapter,
+            session_id: str,
+            echo_final_content: bool = True,
+        ) -> None:
+            del runtime, adapter, echo_final_content
+            self.session_id = session_id
+
+        async def run_loop(self) -> None:
+            return None
+
+    async def _fake_assemble_instructions(_cfg, _files, *, skill_listing=""):
+        del skill_listing
+        return "system", ["agent_spec"], None
+
+    async def _no_skills(*_args, **_kwargs):
+        return []
+
+    def _capture_build(_cfg, **kwargs):
+        captured.update(kwargs)
+        return _DummyRuntime()
+
+    monkeypatch.setattr(cli_main, "_load_config_or_exit", lambda _: _build_cfg())
+    monkeypatch.setattr(cli_main, "_assemble_instructions", _fake_assemble_instructions)
+    monkeypatch.setattr(cli_main, "load_skill_specs", _no_skills)
+    monkeypatch.setattr(cli_main, "format_skill_listing", lambda _specs: "")
+    monkeypatch.setattr(cli_main, "build_default_approval", lambda *_, **__: object())
+    monkeypatch.setattr(
+        cli_main,
+        "McpRuntimeRegistrationManager",
+        _FakeMcpRuntimeRegistrationManager,
+    )
+    monkeypatch.setattr(cli_main.NativeRuntime, "build", staticmethod(_capture_build))
+    monkeypatch.setattr(cli_main, "SessionBridge", _DummyBridge)
+    monkeypatch.setattr(cli_main, "_generate_cli_session_id", lambda: "cli-mcp-tools")
+    monkeypatch.setattr(cli_main, "_print_banner", lambda *_, **__: None)
+    monkeypatch.setattr(cli_main, "_discover_persistent_sessions", lambda _cfg: ([], None))
+
+    await cli_main._run(
+        config_path=None,
+        session_id=None,
+        list_sessions=False,
+        resume_last=False,
+        verbose=False,
+        smoke=False,
+        instructions_files=[],
+        trace_enabled=False,
+        reasoning_effort=None,
+    )
+
+    assert len(managers) == 1
+    manager = managers[0]
+    assert manager.register_calls == [("evolution_write",)]  # type: ignore[attr-defined]
+    assert manager.closed is True  # type: ignore[attr-defined]
+    assert "web_search" in captured["enabled_tool_names"]  # type: ignore[operator]
+    assert "web_search" in captured["tools"]  # type: ignore[operator]
+
+
 async def test_run_prefers_explicit_session_id(monkeypatch) -> None:
     captured: dict[str, str] = {}
 

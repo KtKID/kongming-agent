@@ -246,6 +246,7 @@ async def test_map_reduce_workflow_runs_fake_mappers_and_writes_artifacts(tmp_pa
 
     catalog = manager.list_workflow_strategies()
     assert [entry.mode for entry in catalog] == [
+        "deep_research",
         "map_reduce",
         "parallel",
         "roundtable_review",

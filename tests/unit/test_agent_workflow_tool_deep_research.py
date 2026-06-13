@@ -62,7 +62,7 @@ def test_normalize_deep_research_payload_fills_defaults() -> None:
         "workflow_timeout_seconds": 2400,
     }
     assert normalized["source_policy"] == {
-        "provider": "fake",
+        "provider": "internal",
         "language": "zh-CN",
         "freshness_days": None,
         "allowed_domains": [],

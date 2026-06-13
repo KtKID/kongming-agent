@@ -219,20 +219,25 @@ def test_agent_workflow_manager_registers_parallel_strategy_catalog(tmp_path: Pa
 
     catalog = manager.list_workflow_strategies()
     assert [entry.mode for entry in catalog] == [
+        "deep_research",
         "map_reduce",
         "parallel",
         "roundtable_review",
     ]
-    map_reduce = catalog[0]
-    assert map_reduce.title == "Map-Reduce 代码分析"
-    assert map_reduce.status == "available"
-    assert map_reduce.runnable is True
+    deep_research_description = manager.describe_workflow_strategy("deep_research")
+    assert deep_research_description.status == "available"
+    assert deep_research_description.runnable is True
+    deep_research_entry = catalog[0]
+    assert deep_research_entry.title == "Deep Research 研究工作流"
+    assert deep_research_entry.status == "available"
+    assert deep_research_entry.runnable is True
 
     description = manager.describe_workflow_strategy("parallel")
     assert description.inputs[0].name == "task_specs"
     assert "互不依赖" in description.summary
 
     map_reduce_description = manager.describe_workflow_strategy("map_reduce")
+    assert map_reduce_description.title == "Map-Reduce 代码分析"
     assert map_reduce_description.status == "available"
     assert map_reduce_description.runnable is True
     roundtable_description = manager.describe_workflow_strategy("roundtable_review")

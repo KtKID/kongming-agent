@@ -60,7 +60,7 @@ class ResearchSourceManager:
         if fetch_budget < 0:
             raise ValueError("fetch_budget must be >= 0")
 
-        candidates = await self._search_all(queries)
+        candidates, search_failed_records = await self._search_all(queries)
         deduped = self._deduper.select(candidates, source_budget=source_budget)
         for selected in deduped.selected:
             self._write_audit(
@@ -88,7 +88,7 @@ class ResearchSourceManager:
                 },
             )
 
-        records: list[ResearchSourceRecord] = []
+        records: list[ResearchSourceRecord] = list(search_failed_records)
         for index, candidate in enumerate(deduped.selected):
             if index >= fetch_budget:
                 records.append(_candidate_record(candidate, error_code="fetch_budget_exhausted"))
@@ -101,13 +101,15 @@ class ResearchSourceManager:
 
     async def _search_all(
         self, queries: Sequence[ResearchSourceQuery]
-    ) -> list[ResearchSourceCandidate]:
-        """执行全部 search，输入为搜索线列表，输出为规范化候选列表。"""
+    ) -> tuple[list[ResearchSourceCandidate], list[ResearchSourceRecord]]:
+        """执行全部 search，输入为搜索线列表，输出为规范化候选和搜索失败记录。"""
         candidates: list[ResearchSourceCandidate] = []
+        failed_records: list[ResearchSourceRecord] = []
         for query in queries:
             try:
                 raw_items = await self._provider.search(query)
             except Exception as exc:
+                failed_records.append(_search_failed_record(query, self._provider.name, exc))
                 self._write_audit(
                     "deep_research.search_failed",
                     {
@@ -120,7 +122,7 @@ class ResearchSourceManager:
                 continue
             limited_items = list(raw_items)[: max(query.max_results, 0)]
             candidates.extend(normalize_candidate(item) for item in limited_items)
-        return candidates
+        return candidates, failed_records
 
     async def _fetch_one(self, candidate: ResearchSourceCandidate) -> ResearchSourceRecord:
         """读取单个候选，输入为候选，输出为成功或失败来源记录。"""
@@ -346,6 +348,29 @@ def _failed_record(candidate: ResearchSourceCandidate, exc: Exception) -> Resear
         error_message=_error_digest(exc),
         provider_name=candidate.provider_name,
         rank=candidate.rank,
+    )
+
+
+def _search_failed_record(
+    query: ResearchSourceQuery,
+    provider_name: str,
+    exc: Exception,
+) -> ResearchSourceRecord:
+    """构造搜索失败记录，输入为搜索线和异常，输出为 query-level failed source record。"""
+    source_key = f"{provider_name}:{query.query_id}:search_failed"
+    return ResearchSourceRecord(
+        source_id=stable_source_id(source_key),
+        query_id=query.query_id,
+        url="",
+        canonical_url="",
+        title=query.line,
+        status="failed",
+        tier="weak",
+        content_text=None,
+        error_code=exc.__class__.__name__.lower(),
+        error_message=_error_digest(exc),
+        provider_name=provider_name,
+        rank=0,
     )
 
 

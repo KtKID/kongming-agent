@@ -42,6 +42,7 @@ from application.subagents.manager import SubAgentManager, SubAgentTask
 from application.subagents.permissions import SubAgentPermissionSpec
 from core.contracts import ApprovalRequest, EventSink, SupportsLLMStream, ToolContext
 from hosts.cli.adapter import CLIAdapter, CLIEventSink
+from hosts.shared.mcp_runtime_registration import McpRuntimeRegistrationManager
 from hosts.shared.session_bridge import SessionBridge
 from infrastructure.config import (
     Config,
@@ -591,6 +592,12 @@ async def _run(
             )
             event_sinks = [*event_sinks, memory_refresh_sink]
 
+    mcp_runtime_registration = McpRuntimeRegistrationManager(cfg, event_sinks=event_sinks)
+    await mcp_runtime_registration.register(
+        registry,
+        excluded_tool_names=("evolution_write",),
+    )
+
     enabled_tool_names = [
         name for name in registry.names() if name != "evolution_write"
     ]  # child reviewer 专用工具不暴露给主 agent
@@ -726,7 +733,10 @@ async def _run(
                 aclose_fn = getattr(ticker_runtime, "aclose", None)
                 if aclose_fn is not None:
                     await aclose_fn()
-        await runtime.aclose()
+        try:
+            await runtime.aclose()
+        finally:
+            await mcp_runtime_registration.aclose()
 
 
 def _resolve_sitian_prompt_root(cfg: Config) -> Path | None:

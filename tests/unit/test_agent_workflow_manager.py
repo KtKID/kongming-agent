@@ -959,11 +959,13 @@ async def test_run_workflow_specs_unknown_mode_uses_strategy_registry(
         await runtime.aclose()
 
     assert exc_info.value.available_modes == (
+        "deep_research",
         "map_reduce",
         "parallel",
         "roundtable_review",
     )
     assert exc_info.value.runnable_modes == (
+        "deep_research",
         "map_reduce",
         "parallel",
         "roundtable_review",
