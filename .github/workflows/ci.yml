@@ -46,10 +46,7 @@ jobs:
 
       - name: Targeted unit tests (pull request)
         if: github.event_name == 'pull_request'
-        env:
-          KONGMING_PRE_PUSH_BASE: origin/${{ github.base_ref }}
-          KONGMING_PRE_PUSH_TIMEOUT_SECONDS: "1800"
-        run: make prepush-test
+        run: echo "targeted unit tests run on the push event for the same branch head"
 
       - name: Targeted unit tests (push)
         if: github.event_name == 'push'
