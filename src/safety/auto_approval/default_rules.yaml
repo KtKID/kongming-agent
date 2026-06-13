@@ -1,0 +1,222 @@
+# =============================================================================
+# 智能审批 v1 · 内置规则集（24 条）
+# =============================================================================
+#
+# 【这是内置默认规则，启动时会**物化**到 <project>/.kongming/web/auto_approval/rules.yaml；
+#  用户应编辑物化后的那份，不要直接改本文件——升级会被覆盖】
+#
+# 启用方式（在 Web UI 发送按钮左侧的开关）：
+#   - 总开关 ON  → 命中规则的命令 = 必须人审；未命中的命令 = 倒计时 10s 自动通过
+#   - 总开关 OFF → 一切回到原行为（所有审批都人审，不倒计时）
+#
+# 单条规则的语义：
+#   - enabled: true  → 启用该规则（命中后拦截，不自动通过）
+#   - enabled: false → 停用该规则（命中后走自动通过倒计时，即"该类操作不再拦"）
+#
+# per-cwd 覆盖：
+#   <project>/.kongming/web/auto_approval/<cwd-hash>.json 里的 rule_overrides
+#   字段可以按规则 id 覆盖：{"bash_sudo": false} 表示当前 project 不拦 sudo。
+#
+# 加自定义规则：
+#   编辑物化后的 rules.yaml（不是本文件），按下面的 schema 加新条目，重启 web。
+#
+# rule.id 必须与本文件中 id 字段对齐——前后端 banner / audit 都按此 id 显示。
+#
+# -----------------------------------------------------------------------------
+# match.kind 取值（matchers.py 实现）：
+# -----------------------------------------------------------------------------
+# - bash_cmd_first         : Bash 主命令完全等于（自动剥 rtk/env/PATH=/nice 等 wrapper）
+# - bash_cmd_first_prefix  : Bash 主命令以 prefix 开头
+# - bash_cmd_first_in      : Bash 主命令属于 list 之一
+# - bash_cmd_pattern       : 整条命令做正则匹配（不预拆 wrapper，适合"管道串联"类规则）
+# - edit_path_glob         : Edit/Write/NotebookEdit 的 file_path glob 命中
+# - edit_path_pattern      : Edit/Write/NotebookEdit 的 file_path 正则命中
+# - mcp_not_in_allowlist   : tool_name 以 mcp__ 开头且不在 allowlist
+#
+# 转义 hack 防御：bash_cmd_first* 系列内部走 shlex.split 解析命令，
+# 自动识别 `r\m` / `r""m` / `'r''m'` 等 shell 转义，hack 命令最终被还原成
+# 真实 token（如 ["rm", "/tmp/x"]）再匹配。
+#
+# 参考真源：.claude/settings.local.json permissions.deny（rtk wrapper / 递归 chmod / force-with-lease）。
+
+version: 1
+default_timeout_ms: 10000
+
+rules:
+  # === Bash 文件破坏 ===
+  #
+  # 设计：bash_rm_any 覆盖"任何 rm 命令"（含 rtk/env wrapper + shlex 自动
+  # unescape `r\m` / `r""m` / `\rm` 等转义 hack）。bash_rm_recursive 保留作为
+  # 单独 description（即使关掉 bash_rm_any，递归删除仍单独被拦）。
+  - id: bash_rm_any
+    enabled: true
+    description: "任何 rm 命令（含 wrapper + 转义 hack；shlex 自动 unescape）"
+    match:
+      kind: bash_cmd_first
+      command: "rm"
+
+  - id: bash_rm_recursive
+    enabled: true
+    description: "递归删除（rm -rf/-fr/-r，含 rtk/sudo 等 wrapper；与 bash_rm_any 重叠但单独保留便于审计）"
+    match:
+      kind: bash_cmd_pattern
+      pattern: '\brm\s+(-[a-zA-Z]*[rR][a-zA-Z]*\b|-[rR]\b)'
+
+  - id: bash_dd
+    enabled: true
+    description: "dd 命令（块设备复制）"
+    match:
+      kind: bash_cmd_first
+      command: "dd"
+
+  - id: bash_mkfs
+    enabled: true
+    description: "格式化文件系统（mkfs.*）"
+    match:
+      kind: bash_cmd_first_prefix
+      prefix: "mkfs"
+
+  # === Bash 权限提升 ===
+  - id: bash_sudo
+    enabled: true
+    description: "sudo 提权"
+    match:
+      kind: bash_cmd_first
+      command: "sudo"
+
+  - id: bash_chmod_recursive
+    enabled: true
+    description: "chmod -R 递归改权限"
+    match:
+      kind: bash_cmd_pattern
+      pattern: '\bchmod\s+(-[a-zA-Z]*R[a-zA-Z]*\b|-R\b)'
+
+  - id: bash_chown_recursive
+    enabled: true
+    description: "chown -R 递归改 owner"
+    match:
+      kind: bash_cmd_pattern
+      pattern: '\bchown\s+(-[a-zA-Z]*R[a-zA-Z]*\b|-R\b)'
+
+  - id: bash_chmod_world_writable
+    enabled: true
+    description: "chmod 设为 world-writable（777/0777/666/a+w 等）"
+    match:
+      kind: bash_cmd_pattern
+      pattern: '\bchmod\s+([0-7]{0,2}[67]{2}|a\+w)\b'
+
+  # === Bash git 破坏 ===
+  - id: bash_git_push_force
+    enabled: true
+    description: "git push --force / -f / --force-with-lease"
+    match:
+      kind: bash_cmd_pattern
+      pattern: '\bgit\s+push\b.*?(--force(-with-lease)?\b|\s-f\b)'
+
+  - id: bash_git_reset_hard
+    enabled: true
+    description: "git reset --hard"
+    match:
+      kind: bash_cmd_pattern
+      pattern: '\bgit\s+reset\b.*?--hard\b'
+
+  - id: bash_git_checkout_dot
+    enabled: true
+    description: "git checkout . / git restore . 丢弃改动"
+    match:
+      kind: bash_cmd_pattern
+      pattern: '\bgit\s+(checkout|restore)\b.*?(\.|\s--\s+\.)\s*$'
+
+  - id: bash_git_clean_force
+    enabled: true
+    description: "git clean -f / -fd"
+    match:
+      kind: bash_cmd_pattern
+      pattern: '\bgit\s+clean\b.*?-[a-zA-Z]*f[a-zA-Z]*\b'
+
+  - id: bash_git_branch_delete
+    enabled: true
+    description: "git branch -D 强删分支"
+    match:
+      kind: bash_cmd_pattern
+      pattern: '\bgit\s+branch\b.*?-D\b'
+
+  # === Bash 系统级 ===
+  - id: bash_shutdown_reboot
+    enabled: true
+    description: "shutdown / reboot / halt / poweroff"
+    match:
+      kind: bash_cmd_first_in
+      commands: ["shutdown", "reboot", "halt", "poweroff"]
+
+  - id: bash_kill_dash9
+    enabled: true
+    description: "kill -9 强杀进程"
+    match:
+      kind: bash_cmd_pattern
+      pattern: '\bkill\s+-9\b'
+
+  - id: bash_curl_pipe_shell
+    enabled: true
+    description: "curl/wget | shell 远程执行"
+    match:
+      kind: bash_cmd_pattern
+      pattern: '\b(curl|wget)\b.*?\|\s*(sh|bash|zsh|ksh)\b'
+
+  - id: bash_nested_shell
+    enabled: true
+    description: "bash/sh/zsh/ksh/dash/fish -c 嵌套（保守降级为必须人审，避免漏判）"
+    match:
+      kind: bash_cmd_pattern
+      pattern: '\b(bash|sh|zsh|ksh|dash|fish|csh|tcsh|ash)\s+-c\b'
+
+  - id: bash_eval_source
+    enabled: true
+    description: "eval / source / . 命令（动态执行字符串或读脚本，潜在 RCE 入口）"
+    match:
+      kind: bash_cmd_first_in
+      commands: ["eval", "source", "."]
+
+  # === Edit/Write 敏感路径 ===
+  - id: edit_dotenv
+    enabled: true
+    description: "写 .env 文件"
+    match:
+      kind: edit_path_glob
+      globs: ["**/.env", "**/.env.*", "**/.env"]
+
+  - id: edit_ssh_dir
+    enabled: true
+    description: "写 ~/.ssh/ 下任意文件"
+    match:
+      kind: edit_path_pattern
+      pattern: '(^|/)\.ssh(/|$)'
+
+  - id: edit_aws_credentials
+    enabled: true
+    description: "写 ~/.aws/ 下任意文件"
+    match:
+      kind: edit_path_pattern
+      pattern: '(^|/)\.aws(/|$)'
+
+  - id: edit_etc
+    enabled: true
+    description: "写 /etc/ 下任意文件"
+    match:
+      kind: edit_path_pattern
+      pattern: '^/etc(/|$)'
+
+  - id: edit_credentials_token
+    enabled: true
+    description: "写含 credentials/token/secret 的文件"
+    match:
+      kind: edit_path_pattern
+      pattern: '(credentials|token|secret)'
+
+  # === MCP 未知 ===
+  - id: mcp_unknown
+    enabled: true
+    description: "未在 allowlist 的 mcp__* 工具（v1 默认全部不在白名单 = 全部拦截）"
+    match:
+      kind: mcp_not_in_allowlist
+      allowlist: []

@@ -245,6 +245,12 @@ ignore_imports =
     web.app -> web.uploads.storage
     web.app -> web.uploads.registry
     web.app -> web.uploads.validation
+; cli-approval-manager-v0.1：web.auto_approval 仅保留 Web WS/audit 边界和
+; compatibility exports，policy/config/rules 真源迁到 safety.auto_approval。
+; 放行这三条精确 re-export 边，app/routers 继续只通过 web.auto_approval 入口触达。
+    web.auto_approval -> safety.auto_approval.config_store
+    web.auto_approval -> safety.auto_approval.policy
+    web.auto_approval -> safety.auto_approval.rules
 ; manage-config-tab #6：web.app + dashboard/config/router 都需要触达 manager / writer
 ; / restart / schema 子模块。其中 writer 走 config_loader.{loader,errors} 做
 ; pydantic 校验闭环——``config_loader.errors -> core.errors`` 的传递链触发

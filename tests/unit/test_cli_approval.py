@@ -18,7 +18,11 @@ from typing import Any
 
 import pytest
 
-from cli.approval import build_cli_action_prompt
+from cli.approval import (
+    _resolve_cli_manager_deadline_ms,
+    _resolve_cli_manager_timeout,
+    build_cli_action_prompt,
+)
 from core.contracts import ApprovalAction, ApprovalRequest
 
 
@@ -54,6 +58,27 @@ def patch_input(monkeypatch: pytest.MonkeyPatch):
 
         monkeypatch.setattr("cli.approval._blocking_readline", fake_blocking_readline)
         monkeypatch.setattr("cli.approval._stdin_is_tty", lambda: is_tty)
+
+    return _setup
+
+
+@pytest.fixture
+def patch_cli_manager_input(monkeypatch: pytest.MonkeyPatch):
+    """提供 CLI manager 两选项输入替身，并记录 deadline。"""
+
+    def _setup(answer: str | None, *, is_tty: bool = True) -> list[int]:
+        deadlines: list[int] = []
+
+        def fake_readline(timeout: Any) -> str | None:
+            deadlines.append(timeout.deadline_ms)
+            return answer
+
+        monkeypatch.setattr(
+            "cli.approval._blocking_cli_manager_readline_with_countdown",
+            fake_readline,
+        )
+        monkeypatch.setattr("cli.approval._stdin_is_tty", lambda: is_tty)
+        return deadlines
 
     return _setup
 
@@ -196,6 +221,126 @@ async def test_non_tty_empty_returns_reject(patch_input: Any) -> None:
     prompt = build_cli_action_prompt()
     action = await prompt(_req())
     assert action is ApprovalAction.REJECT
+
+
+# ---------------------------------------------------------------------------
+# §3.5 CLI manager 两选项路径
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cli_manager_y_returns_accept_once_without_token_flow(
+    patch_cli_manager_input: Any,
+) -> None:
+    """CLI manager 模式遇到 elevated metadata 时仍只接受 y/n 两选项。"""
+    patch_cli_manager_input("y", is_tty=True)
+    prompt = build_cli_action_prompt()
+    action = await prompt(
+        _req(
+            metadata={
+                "approval_channel": "cli",
+                "policy_hint": "elevated",
+                "confirm_token": "abc12345",
+                "timeout_ms": 10_000,
+            },
+        ),
+    )
+    assert action is ApprovalAction.ACCEPT_ONCE
+
+
+@pytest.mark.asyncio
+async def test_cli_manager_session_key_rejects(
+    patch_cli_manager_input: Any,
+) -> None:
+    """CLI manager 模式只接受 y，输入 s 直接按拒绝处理。"""
+    patch_cli_manager_input("s", is_tty=True)
+    prompt = build_cli_action_prompt()
+    action = await prompt(_req(metadata={"approval_channel": "cli", "timeout_ms": 10_000}))
+    assert action is ApprovalAction.REJECT
+
+
+@pytest.mark.asyncio
+async def test_cli_manager_empty_input_rejects(
+    patch_cli_manager_input: Any,
+) -> None:
+    """CLI manager 模式回车默认拒绝。"""
+    patch_cli_manager_input("", is_tty=True)
+    prompt = build_cli_action_prompt()
+    action = await prompt(_req(metadata={"approval_channel": "cli", "timeout_ms": 10_000}))
+    assert action is ApprovalAction.REJECT
+
+
+@pytest.mark.asyncio
+async def test_cli_manager_auto_approve_timeout_accepts(
+    patch_cli_manager_input: Any,
+) -> None:
+    """CLI manager 安全路径倒计时到点后自动同意。"""
+    patch_cli_manager_input(None, is_tty=True)
+    prompt = build_cli_action_prompt()
+    action = await prompt(
+        _req(metadata={"approval_channel": "cli", "auto_approve_at_ms": 110_000}),
+    )
+    assert action is ApprovalAction.ACCEPT_ONCE
+
+
+@pytest.mark.asyncio
+async def test_cli_manager_auto_reject_timeout_rejects(
+    patch_cli_manager_input: Any,
+) -> None:
+    """CLI manager 危险路径倒计时到点后自动拒绝。"""
+    patch_cli_manager_input(None, is_tty=True)
+    prompt = build_cli_action_prompt()
+    action = await prompt(
+        _req(metadata={"approval_channel": "cli", "auto_reject_at_ms": 110_000}),
+    )
+    assert action is ApprovalAction.REJECT
+
+
+@pytest.mark.asyncio
+async def test_cli_manager_non_tty_defaults_to_reject(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI manager 非 TTY 直接拒绝，避免后台等待 stdin。"""
+
+    def fail_if_called(_timeout: Any) -> str:
+        raise AssertionError("非 TTY 不应读取 CLI manager 输入")
+
+    monkeypatch.setattr(
+        "cli.approval._blocking_cli_manager_readline_with_countdown",
+        fail_if_called,
+    )
+    monkeypatch.setattr("cli.approval._stdin_is_tty", lambda: False)
+
+    prompt = build_cli_action_prompt()
+    action = await prompt(_req(metadata={"approval_channel": "cli", "timeout_ms": 10_000}))
+    assert action is ApprovalAction.REJECT
+
+
+def test_cli_manager_deadline_caps_terminal_wait_to_ten_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI manager 终端等待最多 10 秒；更早的 auto deadline 优先。"""
+    monkeypatch.setattr("cli.approval.time.time", lambda: 100.0)
+
+    assert _resolve_cli_manager_deadline_ms({"timeout_ms": 60_000}) == 110_000
+    auto_approve = _resolve_cli_manager_timeout(
+        {"timeout_ms": 60_000, "auto_approve_at_ms": 105_000},
+    )
+    assert auto_approve.deadline_ms == 105_000
+    assert auto_approve.default_action is ApprovalAction.ACCEPT_ONCE
+
+    capped_auto_approve = _resolve_cli_manager_timeout(
+        {"timeout_ms": 60_000, "auto_approve_at_ms": 130_000},
+    )
+    assert capped_auto_approve.deadline_ms == 110_000
+    assert capped_auto_approve.default_action is ApprovalAction.ACCEPT_ONCE
+
+    assert (
+        _resolve_cli_manager_deadline_ms(
+            {"timeout_ms": 60_000, "auto_reject_at_ms": 105_000},
+        )
+        == 105_000
+    )
 
 
 # ---------------------------------------------------------------------------

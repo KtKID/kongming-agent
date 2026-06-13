@@ -23,14 +23,14 @@
 
 from __future__ import annotations
 
-from web.auto_approval.audit import AuditLogger
-from web.auto_approval.config_store import ConfigStore, ProjectConfig
-from web.auto_approval.policy import AutoApprovalPolicy, Decision
-from web.auto_approval.rules import (
+from safety.auto_approval.config_store import ConfigStore, ProjectConfig
+from safety.auto_approval.policy import AutoApprovalPolicy, Decision
+from safety.auto_approval.rules import (
     RuleDefinition,
     load_default_rules,
     materialize_user_rules_yaml,
 )
+from web.auto_approval.audit import AuditLogger
 
 __all__ = [
     "AuditLogger",
