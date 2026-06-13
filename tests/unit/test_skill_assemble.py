@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-import cli.main as cli_main
-from config_loader.models import (
+import hosts.cli.main as cli_main
+from infrastructure.config.models import (
     ApprovalConfig,
     Config,
     EvolutionConfig,
@@ -25,7 +25,7 @@ from config_loader.models import (
     SessionConfig,
     TraceConfig,
 )
-from context.skill_loader import format_skill_listing, load_skill_specs
+from prompting.skills.skill_loader import format_skill_listing, load_skill_specs
 
 
 def _build_cfg() -> Config:

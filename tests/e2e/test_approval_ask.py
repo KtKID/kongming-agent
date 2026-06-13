@@ -4,7 +4,7 @@
 
 > 某次工具调用命中 ``ask``，CLI 完成人工确认，批准后继续执行。
 
-用 :class:`tools.approval.InteractiveApproval` 注入一个异步 prompt 回调模拟
+用 :class:`tools.runtime.approval.InteractiveApproval` 注入一个异步 prompt 回调模拟
 "CLI 用户输入 y/n"，验证：
 
 - user 说 yes → tool 正常执行、最终 completed

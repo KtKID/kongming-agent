@@ -18,7 +18,6 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from config_loader.models import Config
 from evolution.apply_executor import build_apply_job
 from evolution.models import (
     DecisionItem,
@@ -30,7 +29,8 @@ from evolution.models import (
 )
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore
-from web.app import create_app
+from hosts.web.app import create_app
+from infrastructure.config.models import Config
 
 
 def _make_cfg(*, dev_mode: bool = True) -> Config:
@@ -137,7 +137,7 @@ class FakeThreadManager:
 
 def _seed_password(home: Path, password: str = "test-password") -> None:
     """提前在 home/web/password.hash 落 hash，避免装配时抛 WebAuthNotConfiguredError。"""
-    from web.auth_secrets import hash_password
+    from hosts.web.auth.secrets import hash_password
 
     web_dir = home / "web"
     web_dir.mkdir(parents=True, exist_ok=True)
@@ -210,7 +210,7 @@ def test_password_not_configured_raises(tmp_path: Path, monkeypatch: pytest.Monk
     tm = FakeThreadManager()
     # 不调 _seed_password
 
-    from web.errors import WebAuthNotConfiguredError
+    from hosts.web.errors import WebAuthNotConfiguredError
 
     with pytest.raises(WebAuthNotConfiguredError):
         create_app(cfg, tm, home_dir=tmp_path)
@@ -335,7 +335,7 @@ def test_lifespan_startup_recovers_pending_evolution_apply_jobs(tmp_path: Path) 
     with TestClient(app):
         pass
 
-    memory_path = workspace / ".kongming" / "memory" / "MEMORY.md"
+    memory_path = tmp_path / "memory" / "MEMORY.md"
     assert memory_path.exists()
     content = memory_path.read_text(encoding="utf-8")
     assert "workspace keeps a stable note layout" in content

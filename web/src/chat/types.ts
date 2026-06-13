@@ -65,6 +65,10 @@ export interface GenericSendOptions {
   provider: "generic";
   /** 所属线程 id。 */
   threadId: string;
+  /** 当前发送采用的 preset；缺省时沿用 thread metadata。 */
+  presetId?: string | null;
+  /** UI 层模型家族标识，便于审计日志和测试断言。 */
+  modelFamilyId?: string | null;
 }
 
 /** Claude 频道发送选项。 */

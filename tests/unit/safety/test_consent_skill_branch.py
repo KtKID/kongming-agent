@@ -7,7 +7,7 @@
   block > elevated > allow > standard fallback 优先级链
 - ``boundary_scope=SANDBOX`` 规则被构造时过滤
 - :func:`safety.guards.consent._normalize_user_skill_call_rules`（test of internal helper）
-- :data:`safety.default_rules.DEFAULT_SKILL_CALL_RULES` 默认空 tuple
+- :data:`safety.approval.default_rules.DEFAULT_SKILL_CALL_RULES` 默认空 tuple
 
 不覆盖 evaluate 主流程 silent_allow 分流（见 ``test_consent_skill_silent_allow.py``）。
 """
@@ -18,15 +18,15 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import ApprovalConfig, Config, ModelConfig, SafetySkillCallConfig
 from core.contracts import ApprovalDecision, ApprovalRequest
-from safety.default_rules import DEFAULT_SKILL_CALL_RULES
+from infrastructure.config.models import ApprovalConfig, Config, ModelConfig, SafetySkillCallConfig
+from safety.approval.default_rules import DEFAULT_SKILL_CALL_RULES
+from safety.approval.types import BoundaryScope, SkillCallRule
 from safety.guards.consent import (
     ConsentResolver,
     _normalize_user_skill_call_rules,  # test of internal helper
     _skill_name_matches,  # test of internal helper
 )
-from safety.types import BoundaryScope, SkillCallRule
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers

@@ -1,6 +1,6 @@
 """WSEventSink 单测（Phase 1 #7）。
 
-覆盖 :class:`web.ws_event_sink.WSEventSink._translate` 的全部 dispatch
+覆盖 :class:`web.websocket.event_sink.WSEventSink._translate` 的全部 dispatch
 分支 + emit 容错 + attach_ws：
 
 - content.delta / reasoning.delta（含 seq / turn 默认值）
@@ -21,7 +21,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 from core.contracts import Event
-from web.ws_event_sink import WSEventSink
+from hosts.web.websocket.event_sink import WSEventSink
 
 
 def _make_ws() -> AsyncMock:

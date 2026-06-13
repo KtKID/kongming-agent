@@ -20,9 +20,9 @@ from pathlib import Path
 
 import pytest
 
-from config_loader import load_config
-from config_loader.errors import ConfigValidationError
-from config_loader.models import WebFullLogConfig
+from infrastructure.config import load_config
+from infrastructure.config.errors import ConfigValidationError
+from infrastructure.config.models import WebFullLogConfig
 
 # 已有 e2e 用 setting.yaml 作为基准；这里隔离用最小 yaml + tmp_path，避免本地
 # setting.yaml 漂移污染断言。

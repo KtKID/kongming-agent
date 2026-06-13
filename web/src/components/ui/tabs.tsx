@@ -11,7 +11,7 @@ const TabsList = React.forwardRef<
   <TabsPrimitive.List
     ref={ref}
     className={cn(
-      "obsidian-hairline inline-flex h-11 items-center justify-center rounded-2xl border border-border/70 bg-card/78 p-1 text-muted-foreground shadow-sm backdrop-blur-xl",
+      "obsidian-hairline inline-flex h-8 items-center justify-center rounded-lg border border-border/70 bg-card/78 p-0.5 text-muted-foreground shadow-sm backdrop-blur-xl",
       className,
     )}
     {...props}
@@ -26,7 +26,7 @@ const TabsTrigger = React.forwardRef<
   <TabsPrimitive.Trigger
     ref={ref}
     className={cn(
-      "inline-flex items-center justify-center whitespace-nowrap rounded-xl px-3.5 py-2 text-sm font-medium ring-offset-background transition-[color,background-color,box-shadow] duration-200 ease-standard focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-primary/12 data-[state=active]:text-foreground data-[state=active]:shadow-sm data-[state=active]:border data-[state=active]:border-primary/20",
+      "inline-flex items-center justify-center whitespace-nowrap rounded-md px-2.5 py-1.5 text-sm font-medium ring-offset-background transition-[color,background-color,box-shadow] duration-200 ease-standard focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-primary/12 data-[state=active]:text-foreground data-[state=active]:shadow-sm data-[state=active]:border data-[state=active]:border-primary/20",
       className,
     )}
     {...props}

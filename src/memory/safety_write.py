@@ -159,7 +159,7 @@ def _atomic_write_sync(path: Path, content: str) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
         os.replace(tmp_path, str(path))
-    except BaseException:
+    except Exception:
         # 清理临时文件
         import contextlib
 

@@ -1,6 +1,6 @@
 """generic_chat per-cwd 自动通过倒计时端到端集成测（approval-rules-unified 重构）。
 
-覆盖 :class:`safety.approval_manager.ApprovalManager._handle_auto_approve` 的
+覆盖 :class:`safety.approval.manager.ApprovalManager._handle_auto_approve` 的
 完整生命周期 + 三退出路径 cancel 防护 + race fail-safe + rm 危险规则保护：
 
 1. ``test_auto_approve_resolves_when_cwd_enabled`` ——
@@ -55,12 +55,12 @@ from typing import Any
 import pytest
 
 from core.contracts import ApprovalDecision
-from safety.approval_manager import (
+from hosts.web.approvals.auto.config_store import ConfigStore, ProjectConfig
+from safety.approval.manager import (
     ApprovalManager,
     reset_for_testing,
 )
-from safety.approval_rules import ApprovalRules
-from web.auto_approval.config_store import ConfigStore, ProjectConfig
+from safety.approval.rules import ApprovalRules
 
 pytestmark = pytest.mark.asyncio
 
@@ -80,7 +80,7 @@ def _reset_singletons() -> Iterator[None]:
 
 @dataclass
 class _FakeDecision:
-    """duck typing 匹配 :class:`safety.approval_rules._PolicyDecisionLike`。"""
+    """duck typing 匹配 :class:`safety.approval.rules._PolicyDecisionLike`。"""
 
     auto_eligible: bool
     blocked_by_rule: str | None
@@ -89,7 +89,7 @@ class _FakeDecision:
 
 @dataclass
 class _FakePolicy:
-    """duck typing 匹配 :class:`safety.approval_rules._AutoApprovalPolicyProto`。
+    """duck typing 匹配 :class:`safety.approval.rules._AutoApprovalPolicyProto`。
 
     构造时注入静态 decision + cwd 启用集合；满足集成测用例 1-6 + race fail-safe
     场景需求（不依赖完整 RuleSet 加载）。
@@ -381,8 +381,8 @@ async def test_policy_shared_across_channels() -> None:
     2. ``policy.set_enabled(cwd, True)`` 写盘 → ``ApprovalRules.classify(...)``
        立即读到新值（ConfigStore 不缓存，每次 ``get`` 读盘；保证多通道一致性）。
     """
-    from web.auto_approval.policy import AutoApprovalPolicy
-    from web.auto_approval.rules import RuleSet
+    from hosts.web.approvals.auto.policy import AutoApprovalPolicy
+    from hosts.web.approvals.auto.rules import RuleSet
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         store = ConfigStore(Path(tmp_dir))
@@ -446,8 +446,8 @@ async def test_real_policy_drives_manager_auto_approve() -> None:
     与用例 1 的差异：用真实 AutoApprovalPolicy 而非 _FakePolicy，验证
     duck typing 在生产对象上确实匹配 _AutoApprovalPolicyProto（避免 Protocol 漂移）。
     """
-    from web.auto_approval.policy import AutoApprovalPolicy
-    from web.auto_approval.rules import RuleSet
+    from hosts.web.approvals.auto.policy import AutoApprovalPolicy
+    from hosts.web.approvals.auto.rules import RuleSet
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         store = ConfigStore(Path(tmp_dir))
@@ -610,8 +610,8 @@ async def test_bash_rm_blocked_forces_human_approval_even_when_zap_on() -> None:
     - 不创建 auto-approve task（``auto_approve_task_count == 0`` during pending）
     - timeout 触发后 outcome=rejected, source=manager_timeout（不是 rule_auto_allow）
     """
-    from web.auto_approval.policy import AutoApprovalPolicy
-    from web.auto_approval.rules import load_default_rules
+    from hosts.web.approvals.auto.policy import AutoApprovalPolicy
+    from hosts.web.approvals.auto.rules import load_default_rules
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         store = ConfigStore(Path(tmp_dir))

@@ -15,6 +15,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Copy,
   FileText,
   LoaderCircle,
   Sigma,
@@ -170,6 +171,7 @@ export function MessageViewport<T>({
 export function MessageList({
   threadId,
   items: injectedItems,
+  timezone,
 }: {
   threadId: string | undefined;
   /**
@@ -181,6 +183,7 @@ export function MessageList({
    * 在注入侧的 itemsByThread 不再写入），不会引入额外重渲染。
    */
   items?: ChatItem[];
+  timezone?: string;
 }) {
   const storeItems = useChatStore((s) =>
     threadId ? (s.itemsByThread[threadId] ?? EMPTY_ITEMS) : EMPTY_ITEMS,
@@ -224,7 +227,7 @@ export function MessageList({
               threadId={item.threadId}
             />
           ) : (
-            <ChatMessageItem key={item.id} item={item} />
+            <ChatMessageItem key={item.id} item={item} timezone={timezone} />
           )
         }
       />
@@ -244,11 +247,17 @@ export function MessageList({
  * 用途：肉眼验证 (threadId, runId, turn) 复合 key 是否正确生成；修非流式
  * 多轮覆盖 bug 后的快速回归手段。
  */
-export function ChatMessageItem({ item }: { item: ChatItem }) {
+export function ChatMessageItem({
+  item,
+  timezone,
+}: {
+  item: ChatItem;
+  timezone?: string;
+}) {
   // 同步读一次 debug 开关；不响应式，避免不必要的 re-render
   const debug = useMemo(() => isDebugMode(), []);
   if (!debug) {
-    return <MessageContent item={item} />;
+    return <MessageContent item={item} timezone={timezone} />;
   }
 
   const turn =
@@ -259,7 +268,7 @@ export function ChatMessageItem({ item }: { item: ChatItem }) {
 
   return (
     <div className="relative" data-testid="debug-badge-wrap">
-      <MessageContent item={item} />
+      <MessageContent item={item} timezone={timezone} />
       <div
         data-testid="debug-badge"
         className="pointer-events-none absolute right-0 top-0 z-10 rounded-bl-md rounded-tr-md border border-border bg-background/90 px-1.5 py-0.5 font-mono text-[10px] leading-tight text-muted-foreground shadow-sm backdrop-blur-sm"
@@ -270,19 +279,31 @@ export function ChatMessageItem({ item }: { item: ChatItem }) {
   );
 }
 
-function MessageContent({ item }: { item: ChatItem }) {
+function MessageContent({
+  item,
+  timezone,
+}: {
+  item: ChatItem;
+  timezone?: string;
+}) {
   switch (item.kind) {
     case "user":
       return (
         <div className="flex items-end justify-end gap-2">
-          <div className="max-w-[80%] rounded-[1.4rem] rounded-br-md border border-primary/20 bg-primary px-4 py-3 text-sm text-primary-foreground shadow-sm">
+          <MessageBubbleFrame
+            content={item.content}
+            timestampMs={item.timestampMs}
+            timezone={timezone}
+            align="right"
+            bubbleClassName="max-w-[80%] rounded-[1.4rem] rounded-br-md border border-primary/20 bg-primary px-4 py-3 text-sm text-primary-foreground shadow-sm"
+          >
             {item.attachments && item.attachments.length > 0 ? (
               <UserAttachmentThumbnails attachments={item.attachments} />
             ) : null}
             {item.content ? (
               <Markdown text={item.content} className="leading-relaxed" />
             ) : null}
-          </div>
+          </MessageBubbleFrame>
           <ChatAvatar role="user" />
         </div>
       );
@@ -293,7 +314,7 @@ function MessageContent({ item }: { item: ChatItem }) {
         <div className="flex items-start gap-2">
           <ChatAvatar role="assistant" />
           <div className="min-w-0 flex-1">
-            <AssistantMessage item={item} />
+            <AssistantMessage item={item} timezone={timezone} />
           </div>
         </div>
       );
@@ -327,6 +348,82 @@ function MessageContent({ item }: { item: ChatItem }) {
       return null;
     }
   }
+}
+
+function MessageBubbleFrame({
+  children,
+  content,
+  timestampMs,
+  timezone,
+  align,
+  bubbleClassName,
+}: {
+  children: ReactNode;
+  content: string;
+  timestampMs: number;
+  timezone?: string;
+  align: "left" | "right";
+  bubbleClassName: string;
+}) {
+  const formattedTime = useMemo(
+    () => formatMessageTime(timestampMs, timezone),
+    [timestampMs, timezone],
+  );
+  const copyMessage = useCallback(() => {
+    if (!content) return;
+    void navigator.clipboard?.writeText(content);
+  }, [content]);
+  const isRight = align === "right";
+
+  return (
+    <div
+      className={cn(
+        "group flex min-w-0 flex-col gap-1",
+        isRight ? "items-end" : "items-start",
+      )}
+    >
+      <div className={bubbleClassName}>{children}</div>
+      <div
+        data-testid="message-hover-meta"
+        className={cn(
+          "flex h-5 items-center gap-2 text-[11px] text-muted-foreground opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100",
+          isRight ? "justify-end pr-2" : "justify-start pl-2",
+        )}
+      >
+        {content ? (
+          <button
+            type="button"
+            onClick={copyMessage}
+            className="inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            aria-label="复制消息"
+            title="复制"
+          >
+            <Copy className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
+        <span>{formattedTime}</span>
+      </div>
+    </div>
+  );
+}
+
+function normalizeMessageTimezone(timezone: string | undefined): string {
+  if (!timezone) return "UTC";
+  try {
+    new Intl.DateTimeFormat("zh-CN", { timeZone: timezone }).format(0);
+    return timezone;
+  } catch {
+    return "UTC";
+  }
+}
+
+function formatMessageTime(timestampMs: number, timezone: string | undefined): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: normalizeMessageTimezone(timezone),
+  }).format(new Date(timestampMs));
 }
 
 /**
@@ -382,8 +479,10 @@ function UserAttachmentThumbnails({
 
 function AssistantMessage({
   item,
+  timezone,
 }: {
   item: Extract<ChatItem, { kind: "assistant" }>;
+  timezone?: string;
 }) {
   const [reasoningOpen, setReasoningOpen] = useState(false);
   // v0.1.6：assistant 只发 tool_calls 时 content 为空字符串（语义"无文本输出"）。
@@ -393,14 +492,6 @@ function AssistantMessage({
   const hasContent = Boolean(item.content);
   const hasReasoning = Boolean(item.reasoning);
   const hasUsage = Boolean(item.usage);
-  const formattedTime = useMemo(
-    () =>
-      new Date(item.timestampMs).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
-    [item.timestampMs],
-  );
   if (!hasContent && !item.streaming && !hasReasoning) return null;
   return (
     <div className="flex flex-col gap-2">
@@ -425,7 +516,13 @@ function AssistantMessage({
       ) : null}
       {hasContent || item.streaming ? (
         <div className="w-full">
-          <div className="obsidian-panel-soft rounded-[1.45rem] rounded-bl-md px-4 py-3 text-sm">
+          <MessageBubbleFrame
+            content={item.content}
+            timestampMs={item.timestampMs}
+            timezone={timezone}
+            align="left"
+            bubbleClassName="obsidian-panel-soft rounded-[1.45rem] rounded-bl-md px-4 py-3 text-sm"
+          >
             <Markdown text={item.content} />
             {item.streaming ? (
               <span
@@ -433,13 +530,12 @@ function AssistantMessage({
                 className="ml-1 inline-block h-4 w-1 animate-pulse bg-accent align-middle"
               />
             ) : null}
-          </div>
+          </MessageBubbleFrame>
           {hasUsage ? (
             <div
               className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 pl-2 text-[11px] text-muted-foreground"
               data-testid="assistant-usage-footer"
             >
-              <span>{formattedTime}</span>
               <span className="inline-flex items-center gap-1">
                 <ArrowUp className="h-3 w-3" />
                 {fmtCompact(item.usage!.prompt)}

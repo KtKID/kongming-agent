@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from config_loader.models import ModelConfig
+from infrastructure.config.models import ModelConfig
 
 # ---------------------------------------------------------------------------
 # host 启发式：api.anthropic.com 自动切到 anthropic

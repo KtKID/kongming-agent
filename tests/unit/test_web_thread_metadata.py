@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from web.thread_metadata import (
+from hosts.web.threads.metadata import (
     THREAD_METADATA_SCHEMA_VERSION,
     ThreadMetadata,
     delete_thread_metadata_dir,
@@ -241,6 +241,20 @@ def test_list_sorted_by_updated_at_desc(tmp_path: Path) -> None:
         "thread-bbbbbbbbbbbb",  # updated_at=300
         "thread-cccccccccccc",  # 200
         "thread-aaaaaaaaaaaa",  # 100
+    ]
+
+
+def test_list_uses_thread_id_as_stable_tiebreaker(tmp_path: Path) -> None:
+    a = _make_meta("thread-aaaaaaaaaaaa", updated_at=100.0)
+    c = _make_meta("thread-cccccccccccc", updated_at=100.0)
+    b = _make_meta("thread-bbbbbbbbbbbb", updated_at=100.0)
+    for m in (a, c, b):
+        write_thread_metadata(tmp_path, m)
+    out = list_thread_metadata(tmp_path)
+    assert [m.id for m in out] == [
+        "thread-cccccccccccc",
+        "thread-bbbbbbbbbbbb",
+        "thread-aaaaaaaaaaaa",
     ]
 
 

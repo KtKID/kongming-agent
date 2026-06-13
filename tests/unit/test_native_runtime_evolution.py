@@ -9,7 +9,11 @@ from typing import Any
 import pytest
 
 import evolution
-from config_loader.models import (
+from core.contracts import Event, LLMRequest, LLMResponse, ToolContext, ToolResult
+from core.errors import MaxTurnsExceededError
+from core.message import Message
+from core.result import Result
+from infrastructure.config.models import (
     ApprovalConfig,
     Config,
     EvolutionConfig,
@@ -21,11 +25,7 @@ from config_loader.models import (
     ShellToolConfig,
     ToolConfig,
 )
-from core.contracts import Event, LLMRequest, LLMResponse, ToolContext, ToolResult
-from core.errors import MaxTurnsExceededError
-from core.message import Message
-from core.result import Result
-from executors.agent_runtime.native_runtime import NativeRuntime
+from runtime_assembly.native_runtime import NativeRuntime
 from tools import ToolRegistry
 
 

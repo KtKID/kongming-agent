@@ -23,7 +23,7 @@ import pytest
 
 from core.contracts import Event
 from devtools.full_logger import _reset_for_tests, init_full_logger
-from web.ws_event_sink import WSEventSink
+from hosts.web.websocket.event_sink import WSEventSink
 
 # 项目 .kongming/logs/ 下的固定输出位置——跟生产 full_log.jsonl 同 home，
 # dev 可直接 cat 这个文件审视格式。

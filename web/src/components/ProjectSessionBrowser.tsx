@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { JSX, ReactNode } from "react";
 import {
   ChevronDown,
@@ -114,6 +114,7 @@ export function ProjectSessionBrowser<TProject, TSession>({
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
   const [showAllSessions, setShowAllSessions] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
+  const didAutoRefreshRef = useRef(false);
 
   // 项目列表变化时，保留已展开 + 自动展开最近活跃
   useEffect(() => {
@@ -153,8 +154,10 @@ export function ProjectSessionBrowser<TProject, TSession>({
 
   // mount 时初始加载
   useEffect(() => {
+    if (projects !== null || didAutoRefreshRef.current) return;
+    didAutoRefreshRef.current = true;
     void onRefresh();
-  }, []);
+  }, [onRefresh, projects]);
 
   const toggleExpand = (key: string) => {
     setExpandedProjects((s) => {

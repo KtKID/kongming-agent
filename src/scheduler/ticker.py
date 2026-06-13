@@ -6,7 +6,7 @@ try/except 吞所有异常，不让单次失败弄崩整个循环（参考 ``oth
 v0.2 升级：
 
 - 默认 ``interval`` 从 60s 降到 1s（支持秒级 SECONDS 触发器；跟
-  :class:`config_loader.SchedulerConfig.interval` 联动）
+  :class:`infrastructure.config.SchedulerConfig.interval` 联动）
 - 单 tick 内不再 ``await bridge.execute(...)`` 串行，而是
   ``asyncio.create_task(...)`` 让多个 due 任务并行 fire；防止单个长任务把后续
   due 拖到下一个 interval
@@ -52,8 +52,8 @@ from typing import TYPE_CHECKING
 from scheduler.timing import to_iso, utc_now
 
 if TYPE_CHECKING:
+    from application.scheduled_runs.execution_bridge import ExecutionBridge
     from scheduler.domain import DueTaskReservation
-    from scheduler.execution_bridge import ExecutionBridge
     from scheduler.store import Store
 
 logger = logging.getLogger(__name__)

@@ -1,6 +1,6 @@
 """WebHostAdapter 单测（Phase 1 #6）。
 
-覆盖 :class:`web.host_adapter.WebHostAdapter` 的全部公开行为：
+覆盖 :class:`web.app_support.host_adapter.WebHostAdapter` 的全部公开行为：
 
 - ``write_output`` / ``notify_event`` 行为
 - ``prompt_approval`` 三路径：成功 ack / 超时 / cell evict cancel
@@ -12,7 +12,7 @@
 - 重复 ``call_id`` 抛 RuntimeError（保护安全链路）
 
 stub WS：用 ``unittest.mock.AsyncMock`` 的 ``send_json`` / ``close``，
-满足 :class:`web.host_adapter._WSSendable` Protocol。
+满足 :class:`web.app_support.host_adapter._WSSendable` Protocol。
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.contracts import ApprovalAction, ApprovalRequest, Event
-from web.host_adapter import WebHostAdapter
+from hosts.web.app_support.host_adapter import WebHostAdapter
 
 
 def _make_ws() -> AsyncMock:
@@ -300,8 +300,8 @@ async def test_close_with_thread_id_calls_manager_cancel_by_thread(
     manager_spy = MagicMock()
     manager_spy.cancel_by_thread = MagicMock(return_value=2)  # 假装清掉 2 条 pending
 
-    # 注：源码内是 `from safety.approval_manager import get_approval_manager`（局部 import）
-    import safety.approval_manager as approval_manager_mod
+    # 注：源码内是 `from safety.approval.manager import get_approval_manager`（局部 import）
+    import safety.approval.manager as approval_manager_mod
 
     monkeypatch.setattr(approval_manager_mod, "get_approval_manager", lambda: manager_spy)
 
@@ -323,7 +323,7 @@ async def test_close_without_thread_id_skips_manager_call(
     manager_spy = MagicMock()
     manager_spy.cancel_by_thread = MagicMock()
 
-    import safety.approval_manager as approval_manager_mod
+    import safety.approval.manager as approval_manager_mod
 
     monkeypatch.setattr(approval_manager_mod, "get_approval_manager", lambda: manager_spy)
 

@@ -11,7 +11,7 @@
 
 不负责：
 
-- 装配 provider / tools / session（那是 ``executors/agent_runtime/native_runtime.py`` 的事）
+- 装配 provider / tools / session（那是 ``runtime_assembly/native_runtime.py`` 的事）
 - safety 判定（capability / permission 由装配层预先串好，runner 只消费 ApprovalProvider）
 - 具体 provider 调用或工具执行（通过协议委托）
 """
@@ -21,7 +21,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from core.agent_spec import AgentSpec
@@ -55,6 +56,14 @@ from core.lifecycle import LifecycleHook
 from core.message import Message, ToolCall
 from core.result import Result
 from core.run_state import RunState
+
+
+@dataclass(frozen=True)
+class _RunInstructionSource:
+    """单次 run 的指令来源，输入为 origin/content，输出满足 PromptSource。"""
+
+    origin: str
+    content: str
 
 
 class Runner:
@@ -166,16 +175,90 @@ class Runner:
             *(lifecycle_hooks or ()),
         ]
 
+        async def seed_messages(state: RunState) -> None:
+            await self._seed_messages(
+                session, agent_spec, user_input, state, attachments=attachments
+            )
+
+        return await self._run_with_seed(
+            session=session,
+            agent_spec=agent_spec,
+            llm=llm,
+            tools=tools,
+            approval=approval,
+            run_id=run_id,
+            effective_max_turns=effective_max_turns,
+            enabled_tools=enabled_tools,
+            effective_lifecycle_hooks=effective_lifecycle_hooks,
+            seed_messages=seed_messages,
+        )
+
+    async def continue_from_last_user_message(
+        self,
+        *,
+        session: Session,
+        agent_spec: AgentSpec,
+        llm: LLMProvider,
+        tools: ToolLookup,
+        approval: ApprovalProvider,
+        max_turns: int | None = None,
+        run_id: str | None = None,
+        enabled_tools: Sequence[Tool] | None = None,
+        lifecycle_hooks: Sequence[LifecycleHook] | None = None,
+    ) -> Result:
+        """Drive a run from the existing trailing user message.
+
+        This entrypoint is for hosts that have already persisted the user
+        message as the run boundary. It validates that the latest session
+        message is a user message, claims a fresh run id, then reuses the same
+        turn loop as :meth:`run` without appending another user message.
+        """
+
+        run_id = run_id or ""
+        effective_max_turns = max_turns if max_turns is not None else agent_spec.max_turns
+        effective_lifecycle_hooks = [
+            *self._lifecycle_hooks,
+            *(lifecycle_hooks or ()),
+        ]
+
+        async def seed_messages(state: RunState) -> None:
+            await self._claim_last_user_message(session, state)
+
+        return await self._run_with_seed(
+            session=session,
+            agent_spec=agent_spec,
+            llm=llm,
+            tools=tools,
+            approval=approval,
+            run_id=run_id,
+            effective_max_turns=effective_max_turns,
+            enabled_tools=enabled_tools,
+            effective_lifecycle_hooks=effective_lifecycle_hooks,
+            seed_messages=seed_messages,
+        )
+
+    async def _run_with_seed(
+        self,
+        *,
+        session: Session,
+        agent_spec: AgentSpec,
+        llm: LLMProvider,
+        tools: ToolLookup,
+        approval: ApprovalProvider,
+        run_id: str,
+        effective_max_turns: int,
+        enabled_tools: Sequence[Tool] | None,
+        effective_lifecycle_hooks: Sequence[LifecycleHook],
+        seed_messages: Callable[[RunState], Awaitable[None]],
+    ) -> Result:
+        """Run the shared turn loop after a caller-specific seed step."""
+
         state = RunState(run_id=run_id, session_id=session.session_id)
         state.mark_running()
 
         try:
             resolved_tools = self._resolve_tools(agent_spec, tools, enabled_tools)
-            # _seed_messages 内部完成 user message append + advance_run_index +
-            # 写 state.run_id；之后所有 emit / Result 都读 state.run_id（已落定）。
-            await self._seed_messages(
-                session, agent_spec, user_input, state, attachments=attachments
-            )
+            await seed_messages(state)
             await self._emit(
                 Event(
                     kind="run.start",
@@ -371,6 +454,28 @@ class Runner:
             state.run_id = f"run-{session.session_id}-{run_index}"
         state.record(user_msg)
 
+    async def _claim_last_user_message(self, session: Session, state: RunState) -> None:
+        """Claim an already persisted trailing user message as this run's input."""
+        history = await session.history()
+        if not history:
+            raise AgentError(
+                "cannot continue run without an existing user message",
+                details={"session_id": session.session_id},
+            )
+        user_msg = history[-1]
+        if user_msg.role != "user":
+            raise AgentError(
+                "cannot continue run because the latest message is not a user message",
+                details={
+                    "session_id": session.session_id,
+                    "latest_role": user_msg.role,
+                },
+            )
+        if not state.run_id:
+            run_index = await session.advance_run_index()
+            state.run_id = f"run-{session.session_id}-{run_index}"
+        state.record(user_msg)
+
     async def _drive_turns(
         self,
         *,
@@ -403,9 +508,10 @@ class Runner:
 
             if self._input_assembler is not None:
                 # 新路径：InputAssembler 接管 compact + system 注入。
+                instruction_sources = self._instruction_sources_for(agent_spec)
                 assembled = await self._input_assembler.assemble(
                     history,
-                    self._instruction_sources,
+                    instruction_sources,
                 )
                 prepared_messages = assembled.messages
                 if self._prompt_debug_sink is not None:
@@ -448,8 +554,8 @@ class Runner:
                     )
                 )
             # claude-image-paste-e2e §5：把 ``session_id``(Web 路径 == ``thread_id``,
-            # 见 src/web/thread_metadata.py:112)透传到 provider,供
-            # :class:`executors.llm.anthropic_messages.AnthropicMessagesProvider`
+            # 见 src/hosts/web/threads/metadata.py:112)透传到 provider,供
+            # :class:`infrastructure.llm_providers.anthropic_messages.AnthropicMessagesProvider`
             # 还原附件物理路径(``.kongming/web/uploads/images/<thread_id>/<asset_id>.<ext>``)。
             # CLI 路径无 attachments,thread_id 取值不命中 storage,无副作用。
             llm_request = LLMRequest(
@@ -591,6 +697,21 @@ class Runner:
             "dropped_count": original - compacted_count,
         }
         return compacted, meta
+
+    def _instruction_sources_for(self, agent_spec: AgentSpec) -> Sequence[PromptSource]:
+        """解析单次 run 指令，输入为 agent spec，输出 assembler 使用的来源列表。"""
+        instructions = agent_spec.instructions.strip()
+        if not instructions:
+            return self._instruction_sources
+        if not self._instruction_sources:
+            return [_RunInstructionSource(origin="", content=agent_spec.instructions)]
+        if (
+            len(self._instruction_sources) == 1
+            and self._instruction_sources[0].origin == ""
+            and self._instruction_sources[0].content != agent_spec.instructions
+        ):
+            return [_RunInstructionSource(origin="", content=agent_spec.instructions)]
+        return self._instruction_sources
 
     async def _safe_llm_complete(self, llm: LLMProvider, request: LLMRequest) -> LLMResponse:
         """包装 provider 调用异常为 :class:`ProviderError`。"""
@@ -1084,8 +1205,20 @@ class Runner:
         meta = {"ok": False, "error_message": error_text}
         if metadata:
             meta.update(metadata)
-        # 用 JSON 字符串承载错误文本，给下游 provider / 模型一个明确的结构化信号。
-        content = json.dumps({"error": error_text}, ensure_ascii=False)
+        # 用中文 JSON 字符串承载错误文本，给下游 provider / 模型明确的失败处理约束。
+        content = json.dumps(
+            {
+                "工具执行失败": True,
+                "失败原因": error_text,
+                "后续处理要求": [
+                    "必须先向用户说明工具执行失败和失败原因。",
+                    "禁止声称工具已经成功执行、任务已经完成或产物已经生成。",
+                    "禁止编造工具输出、文件路径、报告、子 agent 结果或审计日志。",
+                    "需要继续时，先修正参数或请求用户补充信息，再重新调用工具。",
+                ],
+            },
+            ensure_ascii=False,
+        )
         return Message.tool_result(
             tool_call_id=call.call_id,
             content=content,

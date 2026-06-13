@@ -13,7 +13,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from config_loader.models import (
+from application.scheduled_runs.execution_bridge import (
+    _FALLBACK_MAX_TURNS_NO_CONFIG,
+    ExecutionBridge,
+)
+from infrastructure.config.models import (
     Config,
     ModelConfig,
     SchedulerConfig,
@@ -30,7 +34,6 @@ from scheduler.domain import (
     TaskTarget,
     TriggerType,
 )
-from scheduler.execution_bridge import _FALLBACK_MAX_TURNS_NO_CONFIG, ExecutionBridge
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -132,7 +135,7 @@ def test_m3_no_base_config_falls_back_to_90() -> None:
 @pytest.mark.unit
 def test_m4_no_hardcoded_default_max_turns_constant() -> None:
     """M4: execution_bridge 模块不再有 _DEFAULT_MAX_TURNS=20 残留（防回退）。"""
-    import scheduler.execution_bridge as eb
+    import application.scheduled_runs.execution_bridge as eb
 
     assert not hasattr(eb, "_DEFAULT_MAX_TURNS"), (
         "v0.5.1 应删除 _DEFAULT_MAX_TURNS 硬编码；改走 cfg.scheduler.default_max_turns"

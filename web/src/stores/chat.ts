@@ -5,7 +5,7 @@ import type {
   AssistantFinalFrame,
   ErrorFrame,
   EvolutionReviewDTO,
-  HistoryMessageDTO,
+  NormalizedMessage,
   SystemNoticeFrame,
   ThreadUsage,
   ToolCallEndFrame,
@@ -138,7 +138,7 @@ interface ChatState {
   itemsByThread: Record<string, ChatItem[]>;
   /** thread_id → 最新 token usage DTO（v2 派生结果，自带 provider discriminator） */
   usageByThread: Record<string, ThreadUsage>;
-  setHistory: (threadId: string, history: HistoryMessageDTO[]) => void;
+  setHistory: (threadId: string, history: NormalizedMessage[]) => void;
   appendUser: (
     threadId: string,
     content: string,
@@ -538,48 +538,50 @@ export const useChatStore = create<ChatState>((set) => ({
 
   setHistory: (threadId, history) => {
     const items: ChatItem[] = history.map((m, i) => {
-      if (m.role === "user") {
+      const parsedAt = m.timestamp ? Date.parse(m.timestamp) : Date.now();
+      const timestampMs = Number.isNaN(parsedAt) ? Date.now() : parsedAt;
+      if (m.frame_type === "text" && m.role === "user") {
         return {
-          id: `hist-${threadId}-${i}`,
+          id: m.id ?? `hist-${threadId}-${i}`,
           kind: "user",
           threadId,
-          content: m.content,
-          timestampMs: m.timestamp_ms,
-          attachments: m.attachments,
+          content: String(m.content ?? ""),
+          timestampMs,
         };
       }
-      if (m.role === "assistant") {
+      if (m.frame_type === "text") {
         return {
-          id: `hist-${threadId}-${i}`,
+          id: m.id ?? `hist-${threadId}-${i}`,
           kind: "assistant",
           threadId,
-          turn: m.turn,
-          // 历史消息没有 run_id；用空串占位（不参与 buffer 匹配）
+          turn: i,
           runId: "",
-          content: m.content,
+          content: String(m.content ?? ""),
           reasoning: "",
-          timestampMs: m.timestamp_ms,
+          timestampMs,
           streaming: false,
         };
       }
-      // tool
-      // v0.1.6: 历史重放路径补齐 toolName / result(content) / resultData /
-      // errorMessage / ok。arguments 在 Message 上没存（在前面 assistant 的
-      // tool_calls 里），暂留 {} 直至跨消息重建实现。
       return {
-        id: `hist-${threadId}-${i}`,
+        id: m.id ?? `hist-${threadId}-${i}`,
         kind: "tool",
         threadId,
-        turn: m.turn,
+        turn: i,
         runId: "",
-        toolName: m.tool_name ?? "",
-        callId: m.tool_call_id ?? `hist-${i}`,
-        arguments: {},
-        ok: m.ok ?? true,
-        errorMessage: m.error_message ?? undefined,
-        result: m.content,
-        resultData: m.data ?? null,
-        timestampMs: m.timestamp_ms,
+        toolName: m.toolName ?? "",
+        callId: m.toolId ?? `hist-${i}`,
+        arguments:
+          m.toolInput && typeof m.toolInput === "object"
+            ? (m.toolInput as Record<string, unknown>)
+            : {},
+        ok: m.frame_type === "tool_use" ? null : m.isError === true ? false : true,
+        errorMessage:
+          m.frame_type === "tool_result" && m.isError === true
+            ? String(m.content ?? "")
+            : undefined,
+        result: m.frame_type === "tool_result" ? String(m.content ?? "") : undefined,
+        resultData: null,
+        timestampMs,
       };
     });
     set((s) => ({

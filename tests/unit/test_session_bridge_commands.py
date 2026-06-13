@@ -15,8 +15,8 @@ import pytest
 from commands.models import CommandExecutionContext, CommandResult
 from core.message import Message
 from core.result import Result
-from host.base import HostAdapter
-from host.session_bridge import SessionBridge
+from hosts.shared.base import HostAdapter
+from hosts.shared.session_bridge import SessionBridge
 
 
 class _StubAdapter(HostAdapter):
@@ -67,10 +67,10 @@ class _CapturingCommandService:
         self,
         raw_input: str,
         *,
-        context: Any,
+        execution_context: Any,
         attachments: list[dict[str, Any]] | None = None,
     ) -> Result | CommandResult:
-        self.calls.append((raw_input, context))
+        self.calls.append((raw_input, execution_context))
         return self._result
 
 

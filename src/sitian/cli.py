@@ -34,8 +34,8 @@ from typing import TYPE_CHECKING
 
 import click
 
-from config_loader import load_config
-from config_loader.models import Config
+from infrastructure.config import load_config
+from infrastructure.config.models import Config
 
 if TYPE_CHECKING:
     from core.contracts import LLMProvider
@@ -105,7 +105,7 @@ def state_command(config_path: Path | None, root_dir: Path | None) -> None:
 def _resolve_records_root(root_dir: Path | None, cfg: Config | None) -> Path:
     """根据 cfg.sitian.output_subdir 拼最终 store 路径。
 
-    - root_dir 是 ``--root-dir`` 传的值（或 None → 走默认 ``~/.kongming/SiTian``）
+    - root_dir 是 ``--root-dir`` 传的值（或 None → 走默认 ``<kongming_home>/sitian``）
     - 若 cfg.sitian.output_subdir 已设置，进一步拼到子目录
     - 其余产物文件名/结构都由 SiTianRecordsStore 内部决定，本函数只负责 root
     """
@@ -165,7 +165,7 @@ def _build_analyzer_provider(cfg: Config) -> LLMProvider | None:
 
     import os
 
-    from config_loader.models import ModelConfig
+    from infrastructure.config.models import ModelConfig
 
     api_key = ""
     if analyzer_cfg.api_key_env:
@@ -181,7 +181,7 @@ def _build_analyzer_provider(cfg: Config) -> LLMProvider | None:
     )
     provider_cfg = cfg.model_copy(update={"model": sitian_model})
 
-    from executors.llm.provider_factory import build_provider
+    from infrastructure.llm_providers.provider_factory import build_provider
 
     return build_provider(provider_cfg)
 

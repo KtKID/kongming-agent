@@ -16,10 +16,10 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from config_loader.models import Config
 from core.contracts import ApprovalAction, ApprovalRequest
-from web.thread_manager import ThreadManager
-from web.thread_metadata import ThreadMetadata, write_thread_metadata
+from hosts.web.threads.manager import ThreadManager
+from hosts.web.threads.metadata import ThreadMetadata, write_thread_metadata
+from infrastructure.config.models import Config
 
 
 def _make_cfg(idle_timeout: int = 60, idle_check: int = 10) -> Config:

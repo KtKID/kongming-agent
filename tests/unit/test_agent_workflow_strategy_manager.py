@@ -12,21 +12,22 @@ from pathlib import Path
 
 import pytest
 
-from config_loader.models import Config, ModelConfig
-from executors.agent_runtime.strategies.base import (
+from application.agent_roles import AgentRoleManager
+from application.agent_workflows.context import WorkflowExecutionContext
+from application.agent_workflows.manager import AgentWorkflowManager
+from application.agent_workflows.strategies.base import (
     WorkflowRunRequest,
     WorkflowStrategyNotFound,
     WorkflowStrategyNotRunnable,
 )
-from executors.agent_runtime.strategies.description import (
+from application.agent_workflows.strategies.description import (
     WorkflowStrategyDescription,
     WorkflowStrategyInputField,
 )
-from executors.agent_runtime.strategies.manager import (
+from application.agent_workflows.strategies.manager import (
     AgentWorkflowStrategyManager,
 )
-from executors.agent_runtime.workflow.context import WorkflowExecutionContext
-from executors.agent_runtime.workflow.manager import AgentWorkflowManager
+from infrastructure.config.models import Config, ModelConfig
 
 
 class _AuditWriter:
@@ -93,6 +94,7 @@ def _context_factory(request: WorkflowRunRequest) -> WorkflowExecutionContext:
         mode=request.mode,
         workflow_dir=Path("/tmp/wf-test"),
         started_at="2026-06-07T00:00:00+00:00",
+        desc=request.desc,
         audit_writer=_AuditWriter(),
     )
 
@@ -212,14 +214,27 @@ def test_agent_workflow_manager_registers_parallel_strategy_catalog(tmp_path: Pa
         subagents=object(),  # type: ignore[arg-type]
         config=cfg,
         workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
     )
 
     catalog = manager.list_workflow_strategies()
-    assert [entry.mode for entry in catalog] == ["parallel"]
-    assert catalog[0].title == "并行子任务"
-    assert catalog[0].status == "available"
-    assert catalog[0].runnable is True
+    assert [entry.mode for entry in catalog] == [
+        "map_reduce",
+        "parallel",
+        "roundtable_review",
+    ]
+    map_reduce = catalog[0]
+    assert map_reduce.title == "Map-Reduce 代码分析"
+    assert map_reduce.status == "available"
+    assert map_reduce.runnable is True
 
     description = manager.describe_workflow_strategy("parallel")
     assert description.inputs[0].name == "task_specs"
     assert "互不依赖" in description.summary
+
+    map_reduce_description = manager.describe_workflow_strategy("map_reduce")
+    assert map_reduce_description.status == "available"
+    assert map_reduce_description.runnable is True
+    roundtable_description = manager.describe_workflow_strategy("roundtable_review")
+    assert roundtable_description.status == "available"
+    assert roundtable_description.runnable is True

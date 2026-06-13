@@ -1,6 +1,6 @@
 """Claude keepalive 本地日志。
 
-写入位置固定为工作区 ``.kongming/logs/claude-keepalive.jsonl``，一行一个 JSON
+写入位置固定为 ``<kongming_home>/logs/claude-keepalive.jsonl``，一行一个 JSON
 事件，便于用 ``tail -f`` 直接观察 Claude WS 保活链路。
 """
 

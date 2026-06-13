@@ -22,11 +22,8 @@
  *
  * ## 幂等去重（P0）
  *
- * history 展开的 record id 与实时 `messageKey` 同源：history 用
- * `${threadId}-turn-${turn}` 作 turnId（= generic 无 run_id 时实时 turnId），
- * messageKey = `event.messageId ?? `${turnId}:${role}``，从而同 messageId / 同
- * (turnId, role) 的历史帧 + 实时帧合并后不重复。已有 streaming/completed 的
- * assistant 时跳过历史 assistant（不覆盖实时累积内容）。
+ * history 展开的 record id 使用 `NormalizedMessage.id`，从而同 messageId 的
+ * 历史帧 + 实时帧合并后不重复。
  */
 import type {
   ChatTimelineStoreApi,
@@ -44,7 +41,7 @@ import type {
   ChatProviderKind,
   UserInputAttachment,
 } from "@/chat/types";
-import type { HistoryMessageDTO } from "@/protocol";
+import type { NormalizedMessage } from "@/protocol";
 
 export class ChatTimelineStore implements ChatTimelineStoreApi {
   private state: ChatTimelineState;
@@ -427,6 +424,18 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
             [id]: { ...tool, partialInput: (tool.partialInput ?? "") + partialDelta },
           },
         };
+      } else {
+        const pending: ChatPendingTool = {
+          id,
+          threadId: event.threadId,
+          turnId: event.turnId,
+          partialInput: partialDelta,
+          startedAt: event.createdAt,
+        };
+        this.state = {
+          ...this.state,
+          pendingTools: { ...this.state.pendingTools, [id]: pending },
+        };
       }
       return;
     }
@@ -548,32 +557,40 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
   // ---- history 真实展开（P0）----
 
   /**
-   * history_batch_loaded 展开：把 HistoryMessageDTO[] 展开成 records。
-   * 参考 stores/chat.ts `setHistory`。id 与实时 messageKey 同源以幂等去重。
+   * history_batch_loaded 展开：把 NormalizedMessage[] 展开成 records。
+   * id 使用 NormalizedMessage.id，与实时 messageId 同源以幂等去重。
    */
   private expandHistory(event: ChatEvent): void {
     const messages = event.payload.messages;
     if (!Array.isArray(messages)) return;
-    for (const m of messages as HistoryMessageDTO[]) {
-      this.expandHistoryMessage(event.provider as ChatProviderKind, event.threadId, m);
+    const sorted = [...(messages as NormalizedMessage[])].sort(
+      (a, b) => normalizedMessageMs(a, event.createdAt) - normalizedMessageMs(b, event.createdAt),
+    );
+    let turnIndex = 0;
+    let lastRole: string | undefined;
+    for (const m of sorted) {
+      const roleKey = normalizedHistoryRole(m);
+      if (roleKey === "user" && lastRole && lastRole !== "user") turnIndex += 1;
+      const turnId = `${event.threadId}-history-${turnIndex}`;
+      this.expandHistoryMessage(event.provider as ChatProviderKind, event.threadId, turnId, m, event.createdAt);
+      lastRole = roleKey;
     }
   }
 
   private expandHistoryMessage(
     provider: ChatProviderKind,
     threadId: string,
-    m: HistoryMessageDTO,
+    turnId: string,
+    m: NormalizedMessage,
+    fallbackAt: number,
   ): void {
-    // history 无 run_id：turnId 走 `${threadId}-turn-${turn}`（= generic 无 run_id
-    // 实时 turnId 同源），messageKey = `${turnId}:${role}`。
-    const turnId = `${threadId}-turn-${m.turn}`;
-    const at = m.timestamp_ms;
+    const at = normalizedMessageMs(m, fallbackAt);
+    const id = m.id ?? `${turnId}:${m.frame_type}:${at}`;
 
-    if (m.role === "user") {
-      const id = `${turnId}:user`;
+    if (m.frame_type === "text" && m.role === "user") {
       if (this.state.messagesById[id]) return; // 已有同源 → 幂等跳过
       this.ensureHistoryTurn(provider, threadId, turnId);
-      const parts: ChatMessagePart[] = [{ type: "text", text: m.content }];
+      const parts: ChatMessagePart[] = [{ type: "text", text: String(m.content ?? "") }];
       this.writeMessage(
         id,
         {
@@ -593,10 +610,8 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
       return;
     }
 
-    if (m.role === "assistant") {
-      const id = `${turnId}:assistant`;
+    if (m.frame_type === "text") {
       const prev = this.state.messagesById[id];
-      // 已有 streaming/completed assistant（实时已建）→ 跳过历史，不覆盖实时内容。
       if (prev) return;
       this.ensureHistoryTurn(provider, threadId, turnId);
       this.writeMessage(
@@ -607,7 +622,7 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
           turnId,
           role: "assistant",
           provider,
-          parts: [{ type: "text", text: m.content }],
+          parts: [{ type: "text", text: String(m.content ?? "") }],
           status: "completed",
           createdAt: at,
           updatedAt: at,
@@ -618,24 +633,72 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
       return;
     }
 
-    // tool
-    const callId = m.tool_call_id ?? `${turnId}:tool`;
-    if (this.state.messagesById[callId]) return; // 幂等
+    if (m.frame_type === "tool_use") {
+      const callId = m.toolId ?? id;
+      if (this.state.messagesById[callId]) return;
+      this.ensureHistoryTurn(provider, threadId, turnId);
+      const args =
+        m.toolInput && typeof m.toolInput === "object"
+          ? (m.toolInput as Record<string, unknown>)
+          : {};
+      const tool: ChatToolRecord = {
+        id: callId,
+        threadId,
+        turnId,
+        toolName: m.toolName ?? "unknown",
+        status: "running",
+        inputText: typeof m.toolInput === "string" ? m.toolInput : JSON.stringify(m.toolInput ?? {}),
+        outputText: "",
+        arguments: args,
+        pending: false,
+        startedAt: at,
+      };
+      this.state = {
+        ...this.state,
+        toolsById: { ...this.state.toolsById, [callId]: tool },
+      };
+      const turn = this.state.turnsById[turnId];
+      if (turn && !turn.toolCallIds.includes(callId)) {
+        this.patchTurn(turnId, { toolCallIds: [...turn.toolCallIds, callId] });
+      }
+      this.writeMessage(
+        callId,
+        {
+          id: callId,
+          threadId,
+          turnId,
+          role: "tool",
+          provider,
+          parts: [],
+          status: "streaming",
+          createdAt: at,
+          updatedAt: at,
+        },
+        true,
+      );
+      return;
+    }
+
+    if (m.frame_type !== "tool_result") return;
+    const callId = m.toolId ?? id;
     this.ensureHistoryTurn(provider, threadId, turnId);
-    const ok = m.ok ?? true;
+    const ok = m.isError !== true;
+    const prevTool = this.state.toolsById[callId];
+    const outputText = typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "");
     const tool: ChatToolRecord = {
       id: callId,
       threadId,
       turnId,
-      toolName: m.tool_name ?? "",
+      toolName: m.toolName ?? prevTool?.toolName ?? "unknown",
       status: ok ? "completed" : "failed",
-      inputText: "",
-      outputText: m.content,
-      arguments: {},
-      errorMessage: m.error_message ?? undefined,
-      resultData: m.data ?? null,
+      inputText: prevTool?.inputText ?? "",
+      outputText,
+      arguments: prevTool?.arguments ?? {},
+      errorMessage: ok ? undefined : String(m.content ?? ""),
+      resultData: null,
       pending: false,
-      startedAt: at,
+      partialInput: prevTool?.partialInput,
+      startedAt: prevTool?.startedAt ?? at,
       finishedAt: at,
     };
     this.state = {
@@ -645,6 +708,14 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
     const turn = this.state.turnsById[turnId];
     if (turn && !turn.toolCallIds.includes(callId)) {
       this.patchTurn(turnId, { toolCallIds: [...turn.toolCallIds, callId] });
+    }
+    const prevMessage = this.state.messagesById[callId];
+    if (prevMessage) {
+      this.patchMessage(callId, {
+        status: ok ? "completed" : "failed",
+        updatedAt: at,
+      });
+      return;
     }
     // tool 也占一个 orderedMessageIds 槽位（role="tool" 的轻 record，承载顺序 + 关联）。
     this.writeMessage(
@@ -692,4 +763,15 @@ function mergeText(parts: ChatMessagePart[], delta: string): ChatMessagePart[] {
   const cur = next[idx];
   if (cur.type === "text") next[idx] = { type: "text", text: cur.text + delta };
   return next;
+}
+
+function normalizedMessageMs(msg: NormalizedMessage, fallback: number): number {
+  if (!msg.timestamp) return fallback;
+  const parsed = Date.parse(msg.timestamp);
+  return Number.isNaN(parsed) ? fallback : parsed;
+}
+
+function normalizedHistoryRole(msg: NormalizedMessage): string {
+  if (msg.frame_type === "tool_use" || msg.frame_type === "tool_result") return "tool";
+  return msg.role ?? "assistant";
 }

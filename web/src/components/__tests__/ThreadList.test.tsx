@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ThreadList } from "@/components/ThreadList";
@@ -14,6 +15,15 @@ beforeEach(() => {
     createThread: vi.fn(),
     renameThread: vi.fn(),
     deleteThread: vi.fn(),
+    startPendingGenericThread: vi.fn(() => {
+      useThreadsStore.setState({
+        pendingNewSession: {
+          backendKind: "generic_chat",
+          cwd: "",
+          projectName: "",
+        },
+      });
+    }),
   });
 });
 
@@ -167,5 +177,23 @@ describe("ThreadList", () => {
 
     const claudeBadge = screen.getByLabelText("Claude 会话");
     expect(claudeBadge.querySelector("img")).toHaveAttribute("src", "/brand/claude-app-icon.png");
+  });
+
+  it("点击新建对话进入 generic pending 空白页状态", async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/chat/thread-aaaaaaaaaaaa"]}>
+        <Routes>
+          <Route path="/chat" element={<div data-testid="chat-root" />} />
+          <Route path="/chat/:thread_id" element={<ThreadList />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "新建对话" }));
+
+    expect(useThreadsStore.getState().startPendingGenericThread).toHaveBeenCalledTimes(1);
+    expect(useThreadsStore.getState().pendingNewSession?.backendKind).toBe("generic_chat");
+    expect(screen.getByTestId("chat-root")).toBeInTheDocument();
   });
 });

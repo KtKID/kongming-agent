@@ -11,7 +11,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { ChatTimelineStore } from "../ChatTimelineStore";
 import type { ChatEvent, ChatHistoryBatch } from "../types";
-import type { HistoryMessageDTO } from "@/protocol";
+import type { NormalizedMessage } from "@/protocol";
 
 const T = "t1";
 
@@ -183,6 +183,32 @@ describe("ChatTimelineStore · claude pending tool 全生命周期", () => {
     expect(tool.arguments).toEqual({ path: "/x" });
     expect(state.turnsById["r1"].toolCallIds).toContain("c1");
   });
+
+  it("input_json delta 早于 pending 占位时仍保留 partialInput", () => {
+    const store = new ChatTimelineStore(T);
+    store.applyEvent(
+      ev({ kind: "tool_call_delta", toolCallId: "c-early", payload: { partialInputDelta: '{"path"' } }),
+    );
+    let pending = store.getSnapshot().pendingTools["c-early"];
+    expect(pending.partialInput).toBe('{"path"');
+
+    store.applyEvent(
+      ev({ kind: "tool_call_delta", toolCallId: "c-early", payload: { partialInputDelta: ':"/x"}' } }),
+    );
+    pending = store.getSnapshot().pendingTools["c-early"];
+    expect(pending.partialInput).toBe('{"path":"/x"}');
+
+    store.applyEvent(
+      ev({
+        kind: "tool_call_started",
+        toolCallId: "c-early",
+        payload: { pending: false, toolName: "read_file", arguments: { path: "/x" } },
+      }),
+    );
+    const state = store.getSnapshot();
+    expect(state.pendingTools["c-early"]).toBeUndefined();
+    expect(state.toolsById["c-early"].partialInput).toBe('{"path":"/x"}');
+  });
 });
 
 describe("ChatTimelineStore · system.notice / error 落 record", () => {
@@ -244,7 +270,7 @@ describe("ChatTimelineStore · system.notice / error 落 record", () => {
 });
 
 describe("ChatTimelineStore · history 真实展开", () => {
-  function histBatch(messages: HistoryMessageDTO[]): ChatHistoryBatch {
+  function histBatch(messages: NormalizedMessage[]): ChatHistoryBatch {
     return {
       threadId: T,
       provider: "generic",
@@ -259,22 +285,28 @@ describe("ChatTimelineStore · history 真实展开", () => {
     };
   }
 
+  function msg(partial: NormalizedMessage): NormalizedMessage {
+    return {
+      provider: "generic_chat",
+      timestamp: "2026-06-04T00:00:00.000Z",
+      ...partial,
+    };
+  }
+
   it("history 展开 user / assistant / tool 三类 record", () => {
     const store = new ChatTimelineStore(T);
     store.applyHistory(
       histBatch([
-        { role: "user", content: "问题", turn: 1, timestamp_ms: 10 },
-        { role: "assistant", content: "回答", turn: 1, timestamp_ms: 11 },
-        {
-          role: "tool",
+        msg({ id: "h-user-1", frame_type: "text", role: "user", content: "问题" }),
+        msg({ id: "h-assistant-1", frame_type: "text", role: "assistant", content: "回答" }),
+        msg({
+          id: "h-tool-1",
+          frame_type: "tool_result",
           content: "文件内容",
-          turn: 1,
-          timestamp_ms: 12,
-          tool_name: "read_file",
-          tool_call_id: "tc1",
-          ok: true,
-          data: { size: 100 },
-        },
+          toolName: "read_file",
+          toolId: "tc1",
+          isError: false,
+        }),
       ]),
     );
     const state = store.getSnapshot();
@@ -296,82 +328,131 @@ describe("ChatTimelineStore · history 真实展开", () => {
     const tool = state.toolsById["tc1"];
     expect(tool.toolName).toBe("read_file");
     expect(tool.outputText).toBe("文件内容");
-    expect(tool.resultData).toEqual({ size: 100 });
+    expect(tool.resultData).toBeNull();
     expect(tool.status).toBe("completed");
   });
 
-  it("history tool ok=false 时 status=failed，error_message 落字段", () => {
+  it("history tool_result isError=true 时 status=failed，content 落 errorMessage", () => {
     const store = new ChatTimelineStore(T);
     store.applyHistory(
       histBatch([
-        {
-          role: "tool",
-          content: "",
-          turn: 1,
-          timestamp_ms: 12,
-          tool_name: "shell",
-          tool_call_id: "tc2",
-          ok: false,
-          error_message: "exit 1",
-        },
+        msg({
+          id: "h-tool-2",
+          frame_type: "tool_result",
+          content: "exit 1",
+          toolName: "shell",
+          toolId: "tc2",
+          isError: true,
+        }),
       ]),
     );
     const tool = store.getSnapshot().toolsById["tc2"];
     expect(tool.status).toBe("failed");
     expect(tool.errorMessage).toBe("exit 1");
   });
+
+  it("history tool_use 后同 toolId 的 tool_result 更新完成态并保留参数", () => {
+    const store = new ChatTimelineStore(T);
+    store.applyHistory(
+      histBatch([
+        msg({
+          id: "h-tool-use-3",
+          frame_type: "tool_use",
+          toolId: "tc3",
+          toolName: "read_file",
+          toolInput: { path: "/tmp/a" },
+          timestamp: "2026-06-04T00:00:00.000Z",
+        }),
+        msg({
+          id: "h-tool-result-3",
+          frame_type: "tool_result",
+          toolId: "tc3",
+          toolName: "read_file",
+          content: "文件内容",
+          isError: false,
+          timestamp: "2026-06-04T00:00:01.000Z",
+        }),
+      ]),
+    );
+    const state = store.getSnapshot();
+    expect(state.orderedMessageIds).toHaveLength(1);
+    const rec = state.messagesById["tc3"];
+    expect(rec.status).toBe("completed");
+    const tool = state.toolsById["tc3"];
+    expect(tool.status).toBe("completed");
+    expect(tool.arguments).toEqual({ path: "/tmp/a" });
+    expect(tool.outputText).toBe("文件内容");
+  });
 });
 
 describe("ChatTimelineStore · history / realtime 幂等去重", () => {
-  // 同源约束：history 展开的 turnId = `${threadId}-turn-${turn}`，与 generic
-  // provider 无 run_id 时的实时 turnId 同源；messageKey = `${turnId}:${role}`。
-  it("history user 与同 turn 实时 user 合并后只一条（messageKey 同源）", () => {
-    const store = new ChatTimelineStore(T);
-    // 先实时 user：turnId 用与 history turn=1 同源的键
-    store.applyEvent(ev({ kind: "user_message", turnId: `${T}-turn-1`, payload: { text: "问题" } }));
-    expect(store.getSnapshot().orderedMessageIds).toHaveLength(1);
-    // 再 history 含同一 turn 的 user（同源 id → 合并）
-    store.applyHistory({
+  function historyBatch(messages: NormalizedMessage[]): ChatHistoryBatch {
+    return {
       threadId: T,
       provider: "generic",
       events: [
         ev({
           kind: "history_batch_loaded",
           turnId: `${T}-history`,
-          payload: {
-            messages: [{ role: "user", content: "问题", turn: 1, timestamp_ms: 10 }],
-          },
+          payload: { messages },
         }),
       ],
       hasMore: false,
-    });
+    };
+  }
+
+  it("history user 与同 messageId 实时 user 合并后只一条", () => {
+    const store = new ChatTimelineStore(T);
+    store.applyHistory(
+      historyBatch([
+        {
+          id: "same-user",
+          provider: "generic_chat",
+          timestamp: "2026-06-04T00:00:00.000Z",
+          frame_type: "text",
+          role: "user",
+          content: "问题",
+        },
+      ]),
+    );
+    store.applyEvent(
+      ev({
+        kind: "user_message",
+        messageId: "same-user",
+        turnId: "live-turn",
+        payload: { text: "问题" },
+      }),
+    );
     const state = store.getSnapshot();
     expect(state.orderedMessageIds).toHaveLength(1);
     expect(state.messagesById[state.orderedMessageIds[0]].role).toBe("user");
   });
 
-  it("已有 streaming assistant 时，history 同 turnId 的 assistant 被跳过保留实时版本", () => {
+  it("已有 streaming assistant 时，history 同 messageId 的 assistant 被跳过保留实时版本", () => {
     const store = new ChatTimelineStore(T);
-    // 实时：assistant 在 turnId=`${T}-turn-3` streaming（已收到 delta）
-    const turnId = `${T}-turn-3`;
-    store.applyEvent(ev({ kind: "assistant_message_started", turnId }));
-    store.applyEvent(ev({ kind: "assistant_message_delta", turnId, payload: { delta: "实时版本" } }));
+    const turnId = "live-turn";
+    store.applyEvent(ev({ kind: "assistant_message_started", messageId: "same-assistant", turnId }));
+    store.applyEvent(
+      ev({
+        kind: "assistant_message_delta",
+        messageId: "same-assistant",
+        turnId,
+        payload: { delta: "实时版本" },
+      }),
+    );
     expect(store.getSnapshot().orderedMessageIds).toHaveLength(1);
-    // history 灌入同 turn=3 的 assistant：应跳过，不覆盖实时累积的内容
-    store.applyHistory({
-      threadId: T,
-      provider: "generic",
-      events: [
-        ev({
-          kind: "history_batch_loaded",
-          turnId: `${T}-history`,
-          payload: {
-            messages: [{ role: "assistant", content: "历史版本", turn: 3, timestamp_ms: 5 }],
-          },
-        }),
-      ],
-      hasMore: false,
-    });
+    store.applyHistory(
+      historyBatch([
+        {
+          id: "same-assistant",
+          provider: "generic_chat",
+          timestamp: "2026-06-04T00:00:00.000Z",
+          frame_type: "text",
+          role: "assistant",
+          content: "历史版本",
+        },
+      ]),
+    );
     const state = store.getSnapshot();
     expect(state.orderedMessageIds).toHaveLength(1);
     const msg = state.messagesById[state.orderedMessageIds[0]];
@@ -381,50 +462,52 @@ describe("ChatTimelineStore · history / realtime 幂等去重", () => {
 
   it("history 重复灌入两次同一批不产生重复 record（幂等）", () => {
     const store = new ChatTimelineStore(T);
-    const batch: ChatHistoryBatch = {
-      threadId: T,
-      provider: "generic",
-      events: [
-        ev({
-          kind: "history_batch_loaded",
-          turnId: `${T}-history`,
-          payload: {
-            messages: [
-              { role: "user", content: "问题", turn: 1, timestamp_ms: 10 },
-              { role: "assistant", content: "回答", turn: 1, timestamp_ms: 11 },
-            ],
-          },
-        }),
-      ],
-      hasMore: false,
-    };
+    const batch = historyBatch([
+      {
+        id: "h-user-repeat",
+        provider: "generic_chat",
+        timestamp: "2026-06-04T00:00:00.000Z",
+        frame_type: "text",
+        role: "user",
+        content: "问题",
+      },
+      {
+        id: "h-assistant-repeat",
+        provider: "generic_chat",
+        timestamp: "2026-06-04T00:00:01.000Z",
+        frame_type: "text",
+        role: "assistant",
+        content: "回答",
+      },
+    ]);
     store.applyHistory(batch);
     store.applyHistory(batch);
     expect(store.getSnapshot().orderedMessageIds).toHaveLength(2);
   });
 
-  it("history 展开后实时同 turn 的 assistant delta 合并进同一条（不重复）", () => {
+  it("history 展开后实时同 messageId 的 assistant delta 合并进同一条", () => {
     const store = new ChatTimelineStore(T);
-    // history 含 turn=2 的 assistant
-    store.applyHistory({
-      threadId: T,
-      provider: "generic",
-      events: [
-        ev({
-          kind: "history_batch_loaded",
-          turnId: `${T}-history`,
-          payload: {
-            messages: [{ role: "assistant", content: "历史回答", turn: 2, timestamp_ms: 20 }],
-          },
-        }),
-      ],
-      hasMore: false,
-    });
+    store.applyHistory(
+      historyBatch([
+        {
+          id: "same-delta",
+          provider: "generic_chat",
+          timestamp: "2026-06-04T00:00:00.000Z",
+          frame_type: "text",
+          role: "assistant",
+          content: "历史回答",
+        },
+      ]),
+    );
     const afterHistory = store.getSnapshot().orderedMessageIds.length;
     expect(afterHistory).toBe(1);
-    // 实时 delta 落在同 turnId（history assistant 用 `${T}-turn-2` 同源键）
     store.applyEvent(
-      ev({ kind: "assistant_message_delta", turnId: `${T}-turn-2`, payload: { delta: "追加" } }),
+      ev({
+        kind: "assistant_message_delta",
+        messageId: "same-delta",
+        turnId: "live-turn",
+        payload: { delta: "追加" },
+      }),
     );
     const state = store.getSnapshot();
     expect(state.orderedMessageIds).toHaveLength(1);

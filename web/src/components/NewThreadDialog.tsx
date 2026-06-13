@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Folder } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
@@ -13,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useThreadsStore } from "@/stores/threads";
 import type { BackendKind } from "@/protocol";
+import { isTauriEnv, pickDirectory } from "@/lib/dirPicker";
 import { isAbsoluteProjectPath } from "@/lib/path";
 
 interface Props {
@@ -35,6 +37,7 @@ export function NewThreadDialog({ open, onOpenChange }: Props) {
   const [presetId, setPresetId] = useState("");
   const [cwd, setCwd] = useState("");
   const [busy, setBusy] = useState(false);
+  const [directoryPickerBusy, setDirectoryPickerBusy] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -42,6 +45,7 @@ export function NewThreadDialog({ open, onOpenChange }: Props) {
       setBackendKind("generic_chat");
       setPresetId(presets[0]?.id ?? "");
       setCwd("");
+      setDirectoryPickerBusy(false);
     }
   }, [open, presets]);
 
@@ -52,6 +56,29 @@ export function NewThreadDialog({ open, onOpenChange }: Props) {
   const cwdValid = !normalizedCwd || isAbsoluteProjectPath(normalizedCwd);
   const canSubmit =
     !busy && cwdValid && (noPresetNeeded || !!presetId);
+
+  const onPickDirectory = async () => {
+    if (directoryPickerBusy) return;
+    setDirectoryPickerBusy(true);
+    try {
+      const picked = await pickDirectory({
+        title: "选择工作目录",
+        defaultPath: normalizedCwd || undefined,
+      });
+      if (picked) {
+        setCwd(picked);
+        return;
+      }
+      if (!isTauriEnv()) {
+        toast.error("系统文件管理器入口需要 Tauri 环境");
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`打开目录选择器失败：${msg}`);
+    } finally {
+      setDirectoryPickerBusy(false);
+    }
+  };
 
   const onSubmit = async () => {
     const trimmed = name.trim();
@@ -91,12 +118,27 @@ export function NewThreadDialog({ open, onOpenChange }: Props) {
             autoFocus
             maxLength={200}
           />
-          <Input
-            placeholder="工作目录（可选，绝对路径）"
-            value={cwd}
-            onChange={(e) => setCwd(e.target.value)}
-            aria-label="cwd"
-          />
+          <div className="relative">
+            <Input
+              placeholder="工作目录（可选，绝对路径）"
+              value={cwd}
+              onChange={(e) => setCwd(e.target.value)}
+              aria-label="cwd"
+              className="pr-11"
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="absolute right-1 top-1/2 h-7 w-7 -translate-y-1/2 rounded-md border border-border/75 bg-transparent text-muted-foreground shadow-none hover:border-primary/45 hover:bg-transparent hover:text-foreground active:translate-y-[calc(-50%+1px)]"
+              onClick={() => void onPickDirectory()}
+              disabled={directoryPickerBusy}
+              aria-label="打开工作目录选择器"
+              title="打开工作目录选择器"
+            >
+              <Folder className="h-4 w-4 fill-none" strokeWidth={1.8} />
+            </Button>
+          </div>
           {cwdValid ? (
             <p className="text-xs text-muted-foreground">
               填写后 Files / Shell 会直接绑定这个 workspace；留空保持纯聊天。

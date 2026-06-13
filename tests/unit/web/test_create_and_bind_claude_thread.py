@@ -22,11 +22,11 @@ from pathlib import Path
 
 import pytest
 
-from web.thread_manager import (
+from hosts.web.threads.manager import (
     ClaudeThreadConflictError,
     ThreadManager,
 )
-from web.thread_metadata import list_thread_metadata
+from hosts.web.threads.metadata import list_thread_metadata
 
 
 def _make_runtime_factory() -> Callable:
@@ -40,7 +40,7 @@ def _make_runtime_factory() -> Callable:
 
 def _make_cfg() -> object:
     """最小可用 Config 实例。"""
-    from config_loader import load_config
+    from infrastructure.config import load_config
 
     # 测试用默认 config，本测试不依赖具体字段
     return load_config(Path("config/setting.yaml"))

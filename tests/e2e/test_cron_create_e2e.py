@@ -17,12 +17,12 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from config_loader.models import Config
+from hosts.web.app import create_app
+from hosts.web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
+from hosts.web.threads.metadata import ThreadMetadata
+from infrastructure.config.models import Config
 from scheduler.timing import to_iso
 from tests.unit.test_web_app_lifespan import _seed_password
-from web.app import create_app
-from web.auth import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
-from web.thread_metadata import ThreadMetadata
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 

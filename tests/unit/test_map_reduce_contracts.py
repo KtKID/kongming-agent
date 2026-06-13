@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import pytest
 
-from executors.agent_runtime.strategies.map_reduce_contracts import (
+from application.agent_workflows.strategies.map_reduce.contracts import (
     MapperOutputValidator,
     MapReduceContractError,
     parse_map_reduce_workflow_spec,

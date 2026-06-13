@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useWorkspaceStore } from "@/stores/workspace";
+import { WORKSPACE_TABS, useWorkspaceStore } from "@/stores/workspace";
 
 const apiMocks = vi.hoisted(() => ({
   apiGet: vi.fn(),
@@ -17,7 +17,12 @@ describe("stores/workspace", () => {
       loadingByThread: {},
       activeTabByThread: {},
       fileOpenRequestByThread: {},
+      drawerFile: null,
     });
+  });
+
+  it("WORKSPACE_TABS 包含 Dock 支持的全部页签", () => {
+    expect(WORKSPACE_TABS).toEqual(["chat", "files", "git", "shell", "whiteboard"]);
   });
 
   it("fetchContext 拉取 thread 的 workspace context", async () => {
@@ -48,6 +53,14 @@ describe("stores/workspace", () => {
 
     expect(useWorkspaceStore.getState().activeTabByThread["thread-1"]).toBe("shell");
     expect(useWorkspaceStore.getState().activeTabByThread["thread-2"]).toBe("git");
+  });
+
+  it("setActiveTab 支持 whiteboard 页签", () => {
+    useWorkspaceStore.getState().setActiveTab("thread-1", "whiteboard");
+
+    expect(useWorkspaceStore.getState().activeTabByThread["thread-1"]).toBe(
+      "whiteboard",
+    );
   });
 
   it("requestOpenFile 按 thread 记录打开请求", () => {
@@ -89,7 +102,7 @@ describe("stores/workspace", () => {
         "thread-2": false,
       },
       activeTabByThread: {
-        "thread-1": "shell",
+        "thread-1": "whiteboard",
         "thread-2": "git",
       },
       fileOpenRequestByThread: {

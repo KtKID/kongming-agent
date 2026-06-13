@@ -7,6 +7,7 @@ import type {
   EvolutionDecisionRequest,
   EvolutionDecisionResponse,
   EvolutionReviewDTO,
+  ThreadTaskProgressSnapshot,
 } from "@/protocol";
 
 /**
@@ -134,6 +135,11 @@ export const apiPut = <T>(path: string, body?: unknown) =>
 export const apiPatch = <T>(path: string, body?: unknown) =>
   request<T>("PATCH", path, body);
 export const apiDelete = (path: string) => request<void>("DELETE", path);
+
+export const apiGetThreadTaskProgress = (threadId: string) =>
+  apiGet<ThreadTaskProgressSnapshot>(
+    `/api/threads/${encodeURIComponent(threadId)}/task-progress`,
+  );
 
 function normalizeEvolutionDecision(
   decision: EvolutionDecisionItemDTO,

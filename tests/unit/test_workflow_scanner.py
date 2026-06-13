@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from web.workflow.models import StageStatus
-from web.workflow.scanner import WorkflowScanner
-from web.workflow.templates import get_node_templates
+from hosts.web.workflow.models import StageStatus
+from hosts.web.workflow.scanner import WorkflowScanner
+from hosts.web.workflow.templates import get_node_templates
 
 
 def _make_scanner(root: Path) -> WorkflowScanner:

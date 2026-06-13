@@ -43,7 +43,7 @@ uv run kongming-sitian state
 
 ### 记录目录
 
-司天记录默认写到 `~/.kongming/SiTian/`，核心产物全部是 JSON / JSONL / Markdown：
+司天记录默认写到 `<kongming_home>/sitian/`，`kongming_home` 默认是 `Path.home() / ".kongming"`，也可由 `KONGMING_HOME` 显式覆盖。`--root-dir` 或脚本层 `SITIAN_ROOT` 会覆盖司天产物根目录。核心产物全部是 JSON / JSONL / Markdown：
 
 - `observations.jsonl`
 - `runtime_state.json`

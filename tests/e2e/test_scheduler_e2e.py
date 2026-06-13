@@ -46,7 +46,7 @@ from scheduler.policy import apply_concurrency_policy
 from scheduler.store import Store, TaskNotFoundError
 from scheduler.ticker import run_ticker_loop, tick
 from scheduler.timing import to_iso, utc_now
-from tools.schedule_tool import build_schedule_tool
+from tools.builtin.schedule_tool import build_schedule_tool
 
 
 def _suppress_task_not_found() -> contextlib.AbstractContextManager[None]:

@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from config_loader.paths import get_kongming_home
-from context.instruction_loader import assemble_instructions
-from context.skill_loader import format_skill_listing, load_skill_specs
+from infrastructure.config.paths import get_kongming_home
+from prompting.instructions.instruction_loader import assemble_instructions
+from prompting.skills.skill_loader import format_skill_listing, load_skill_specs
 
 
 @pytest.mark.asyncio
@@ -34,10 +34,9 @@ async def test_dump_cron_instructions_real(capsys) -> None:
         event_sinks=[],
     )
     listing = format_skill_listing(skill_specs_list)
-    if not listing:
-        pytest.skip("no skills installed under .kongming/skills/ — 装配链跳过")
-    rendered = rendered + f"\n\n# skills\n{listing}"
-    origins = [*origins, "skills"]
+    if listing:
+        rendered = rendered + f"\n\n# skills\n{listing}"
+        origins = [*origins, "skills"]
 
     with capsys.disabled():
         print("\n" + "=" * 80)
@@ -49,6 +48,8 @@ async def test_dump_cron_instructions_real(capsys) -> None:
         print(f"origins: {origins}")
         print(f"skill count: {len(skill_specs_list)}")
 
+    if not listing:
+        pytest.skip("当前环境没有发现 skills，跳过真实 skills listing 断言")
     assert "# skills" in rendered, "rendered prompt missing '# skills' section"
     skill_names = [s.name for s in skill_specs_list]
     if "sitian-scan" in skill_names:

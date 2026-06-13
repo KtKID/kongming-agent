@@ -22,14 +22,14 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-from safety.default_rules import DEFAULT_DESTRUCTIVE_ALWAYS_ASK
-from safety.types import BoundaryScope, DestructivePattern
+from safety.approval.default_rules import DEFAULT_DESTRUCTIVE_ALWAYS_ASK
+from safety.approval.types import BoundaryScope, DestructivePattern
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from config_loader.models import Config
     from core.contracts import ApprovalRequest
+    from infrastructure.config.models import Config
 
 # 复用 hard_block 的 shell 分隔符正则
 _SHELL_SEGMENT_SPLITTER = re.compile(r"(?:&&|\|\||;|\|)")

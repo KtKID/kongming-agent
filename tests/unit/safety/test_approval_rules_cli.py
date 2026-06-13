@@ -1,4 +1,4 @@
-"""``safety.approval_rules`` 的 CLI 通道覆盖测试。"""
+"""``safety.approval.rules`` 的 CLI 通道覆盖测试。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from safety.approval_rules import ApprovalRules
+from safety.approval.rules import ApprovalRules
 from safety.auto_approval import AutoApprovalPolicy, ConfigStore, ProjectConfig
 from safety.auto_approval.rules import load_default_rules
 
@@ -53,6 +53,37 @@ def test_cli_safe_command_with_real_policy_starts_auto_approve(tmp_path: Path) -
     assert before_ms + 10_000 <= dec.auto_approve_at_ms <= after_ms + 10_000 + 1
     assert dec.auto_reject_at_ms is None
     assert dec.timeout_ms == 10_000
+
+
+def test_cli_user_kongming_home_read_starts_auto_approve(tmp_path: Path) -> None:
+    policy = _real_policy(tmp_path)
+    rules = ApprovalRules(policy=policy)
+
+    before_ms = int(time.time() * 1000)
+    dec = rules.classify(
+        channel="cli",
+        thread_id="cli-session",
+        cwd="/proj",
+        tool_name="read_file",
+        tool_input={
+            "path": str(
+                tmp_path
+                / ".kongming"
+                / "sessions"
+                / "thread-1"
+                / "agent-workflows"
+                / "wf-1"
+                / "audit.jsonl"
+            )
+        },
+    )
+    after_ms = int(time.time() * 1000)
+
+    assert dec.severity == "standard"
+    assert dec.matched_rule is None
+    assert dec.auto_reject_at_ms is None
+    assert dec.auto_approve_at_ms is not None
+    assert before_ms + 10_000 <= dec.auto_approve_at_ms <= after_ms + 10_000 + 1
 
 
 # 验证真实规则集下，CLI 危险命令命中 ``bash_rm_any`` 后进入自动拒绝倒计时。

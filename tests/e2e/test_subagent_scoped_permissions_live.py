@@ -14,13 +14,14 @@ from typing import Any
 
 import pytest
 
-from cli.main import _apply_model_preset_or_exit
-from config_loader import load_config
+from application.agent_roles import AgentRoleManager
+from application.agent_workflows.manager import AgentWorkflowManager
+from application.subagents.manager import SubAgentManager, SubAgentTask
+from application.subagents.permissions import SubAgentPermissionSpec
 from core.agent_spec import AgentSpec
-from executors.agent_runtime.native_runtime import NativeRuntime
-from executors.agent_runtime.subagent_manager import SubAgentManager, SubAgentTask
-from executors.agent_runtime.subagent_permissions import SubAgentPermissionSpec
-from executors.agent_runtime.workflow.manager import AgentWorkflowManager
+from hosts.cli.main import _apply_model_preset_or_exit
+from infrastructure.config import load_config
+from runtime_assembly.native_runtime import NativeRuntime
 from tools import AutoAllowApproval, ToolRegistry, build_file_tools
 
 pytestmark = pytest.mark.skipif(
@@ -83,6 +84,7 @@ async def test_minimax_m3_scoped_subagent_allows_workdir_read_write_and_rejects_
         subagents=SubAgentManager(runtime),
         config=cfg,
         workspace_root=workspace_root,
+        role_manager=AgentRoleManager(role_dir=workspace_root / ".kongming" / "agent_roles"),
     )
 
     try:

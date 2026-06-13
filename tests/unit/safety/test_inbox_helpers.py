@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from safety.inbox_helpers import emit_remove_safe, to_inbox_payload
+from safety.inbox.helpers import emit_remove_safe, to_inbox_payload
 
 
 class TestToInboxPayload:

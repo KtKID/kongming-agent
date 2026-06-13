@@ -28,9 +28,9 @@ from pathlib import Path
 
 import pytest
 
-from context.session_store import SQLiteSession
 from core import AgentSpec, InMemorySession, Runner
 from core.message import Message, ToolCall
+from sessions.session_store import SQLiteSession
 from tests.e2e.conftest import RecordingApproval, StubLLMProvider
 
 # ---------------------------------------------------------------------------

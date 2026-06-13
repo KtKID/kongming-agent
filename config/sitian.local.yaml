@@ -4,9 +4,10 @@
 # 入口：./sitian.sh                                  # 推荐：封装好的脚本
 #   或：uv run kongming-sitian run-once \
 #         --config config/sitian.local.yaml \
-#         --root-dir /tmp/sitian-records
+#         --root-dir ~/sitian-records
 #
-# 默认产物根：~/.kongming/SiTian/（可用 --root-dir 或 SITIAN_ROOT env 覆盖）
+# 默认产物根：<kongming_home>/sitian/，kongming_home 默认是 Path.home() / ".kongming"
+# 可用 --root-dir 或 sitian.sh 的 SITIAN_ROOT 显式覆盖司天产物根目录。
 #
 # 本文件只承担"司天 CLI 的配置"。其他模块（web / 主 agent CLI / scheduler）走
 # 各自的 config，不复用此文件。
@@ -53,7 +54,7 @@ sitian:
     timeout: 90                             # LLM 调用超时秒数；超时会被分析器拦下并写 errors
     max_context_chars: 50000                # 输入 observations 裁剪上限（字符数），超出按最新 session 优先裁剪
     skip_if_unchanged: true                 # observations 没变化时跳过 LLM 调用（用 last_observations_hash 比对，省 token）
-    full_log_enabled: true                  # 写完整 LLM 提示词+回复到 $SITIAN_ROOT/full-log/（审计 + 调试用）
+    full_log_enabled: true                  # 写完整 LLM 提示词+回复到产物根 full-log/（审计 + 调试用）
 
   # ---- 用户兴趣（注入到 LLM system prompt） ----------------------------
   interests:

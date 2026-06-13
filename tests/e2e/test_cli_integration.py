@@ -7,19 +7,22 @@ import json
 import time
 from pathlib import Path
 
-import cli.main as cli_main
-from config_loader.models import (
+import hosts.cli.main as cli_main
+from core.message import Message
+from infrastructure.config.models import (
     ApprovalConfig,
     Config,
     ModelConfig,
     RunnerConfig,
+    SchedulerConfig,
     SessionConfig,
     TraceConfig,
 )
-from context import InstructionLoader, build_session
-from core.message import Message
-from executors.agent_runtime.native_runtime import NativeRuntime
-from observability import JsonlTraceSink, PromptDebugDumpSink
+from infrastructure.tracing import JsonlTraceSink, PromptDebugDumpSink
+from prompting import InstructionLoader
+from runtime_assembly.native_runtime import NativeRuntime
+from sessions import build_session
+from sessions.session_bootstrap import SessionBootstrap
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 # 测试 dump 与 CLI ``--debug`` 生产落盘 (.kongming/debug/prompt-debug-*.json)
@@ -50,6 +53,19 @@ def _build_cfg(
         ),
         trace=TraceConfig(output_path=str(tmp_path / trace_file)),
         approval=ApprovalConfig(mode="auto_allow"),
+        scheduler=SchedulerConfig(enabled=False),
+    )
+
+
+def _bootstrap(tmp_path: Path) -> SessionBootstrap:
+    return SessionBootstrap(
+        agent_name="test-agent",
+        model_name="stub-model",
+        instruction_sources=["test"],
+        instruction_text_hash="sha256:test",
+        created_at=1000.0,
+        cwd=str(tmp_path),
+        app_version=None,
     )
 
 
@@ -76,11 +92,12 @@ def _dump_prompt_flow_result(test_name: str, payload: dict) -> None:
     print(f"\n📄 Prompt flow dump: {path.resolve()}")
 
 
-async def test_cli_assembly_with_sqlite_persists_across_runtime_instances(
+async def test_cli_assembly_with_file_backend_persists_across_runtime_instances(
     stub_llm, recording_approval, tmp_path
 ):
-    """CLI-style session_factory should preserve sqlite history across runtime instances."""
-    cfg = _build_cfg(tmp_path, backend="sqlite")
+    """CLI-style session_factory should preserve file history across runtime instances."""
+    cfg = _build_cfg(tmp_path, backend="file", file_store_path=str(tmp_path / "file-sessions"))
+    bootstrap = _bootstrap(tmp_path)
 
     stub_llm.script(content="ok-first")
     runtime1 = NativeRuntime.build(
@@ -88,16 +105,16 @@ async def test_cli_assembly_with_sqlite_persists_across_runtime_instances(
         approval=recording_approval,
         tools={},
         enabled_tool_names=[],
-        session_factory=lambda sid: build_session(cfg, sid),
+        session_factory=lambda sid: build_session(cfg, sid, bootstrap=bootstrap),
     )
     runtime1._llm = stub_llm  # type: ignore[attr-defined]
 
     result1 = await runtime1.run("remember banana", session_id="persist-1")
     assert result1.status == "completed"
 
-    db_path = tmp_path / "sessions.db"
-    assert db_path.exists(), "SQLiteSession 应创建 db 文件"
-    assert db_path.stat().st_size > 0
+    session_path = tmp_path / "file-sessions" / "persist-1" / "persist-1.jsonl"
+    assert session_path.exists(), "FileSession 应创建 jsonl 文件"
+    assert session_path.stat().st_size > 0
 
     stub_llm.script(content="ok-second")
     runtime2 = NativeRuntime.build(
@@ -105,7 +122,7 @@ async def test_cli_assembly_with_sqlite_persists_across_runtime_instances(
         approval=recording_approval,
         tools={},
         enabled_tool_names=[],
-        session_factory=lambda sid: build_session(cfg, sid),
+        session_factory=lambda sid: build_session(cfg, sid, bootstrap=bootstrap),
     )
     runtime2._llm = stub_llm  # type: ignore[attr-defined]
 
@@ -380,7 +397,7 @@ async def test_prompt_debug_mode_dumps_runtime_prompt_snapshot(
 
 def test_instruction_render_hash_is_reproducible() -> None:
     """The same rendered instruction text should produce a stable sha256."""
-    from context.instruction_loader import InstructionSource
+    from prompting.instructions.instruction_loader import InstructionSource
 
     sources = [
         InstructionSource(origin="agent_spec", content="Be helpful"),
@@ -458,6 +475,11 @@ async def test_cli_run_persists_instruction_metadata_to_file_manifest(
     monkeypatch.setattr(cli_main, "_load_config_or_exit", lambda _: cfg)
     monkeypatch.setattr(cli_main, "build_default_registry", lambda **_: _DummyRegistry())
     monkeypatch.setattr(cli_main, "build_default_approval", lambda *_, **__: object())
+
+    async def _no_skill_specs(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(cli_main, "load_skill_specs", _no_skill_specs)
     monkeypatch.setattr(cli_main.NativeRuntime, "build", staticmethod(_fake_build))
     monkeypatch.setattr(cli_main, "SessionBridge", _DummyBridge)
     monkeypatch.setattr(cli_main, "_generate_cli_session_id", lambda: "cli-meta")
@@ -590,7 +612,7 @@ async def test_cli_run_resume_last_selects_latest_file_session(tmp_path, monkeyp
 
     monkeypatch.setattr(cli_main, "_load_config_or_exit", lambda _: cfg)
 
-    async def _fake_assemble_instructions(_cfg, _files):
+    async def _fake_assemble_instructions(_cfg, _files, **_kwargs):
         return "system", [], None
 
     monkeypatch.setattr(cli_main, "_assemble_instructions", _fake_assemble_instructions)

@@ -24,9 +24,9 @@ from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore, resolve_evolution_root
 
 if TYPE_CHECKING:
-    from config_loader.models import Config
     from core.contracts import EventSink
     from evolution.transcript_provider import TranscriptProvider
+    from infrastructure.config.models import Config
 
 __all__ = ["EvolutionManager"]
 
@@ -56,7 +56,10 @@ class EvolutionManager:
         self._bg_tasks: set[asyncio.Task[Any]] = set()
 
         # 内部装配 state_store / evolution_store / mini_registry
-        root_dir = resolve_evolution_root(self._learning.root_path)
+        root_dir = resolve_evolution_root(
+            self._learning.root_path,
+            kongming_home=kongming_home,
+        )
         self._state_store = EvolutionStateStore(root_dir)
         self._evolution_store = EvolutionStore(
             root_dir=root_dir,
@@ -70,7 +73,7 @@ class EvolutionManager:
         self._mini_registry = ToolRegistry()
 
         if self._learning.enabled:
-            from tools.evolution_write_tool import build_evolution_write_tool
+            from tools.builtin.evolution_write_tool import build_evolution_write_tool
 
             tool = build_evolution_write_tool(
                 self._evolution_store,
@@ -392,7 +395,7 @@ class EvolutionManager:
         from core.agent_spec import AgentSpec
         from core.session import InMemorySession
         from evolution.reviewer_runtime import REVIEWER_TOOL_NAME
-        from executors.agent_runtime.native_runtime import NativeRuntime
+        from runtime_assembly.native_runtime import NativeRuntime
         from tools import AutoAllowApproval
 
         learning = self._learning

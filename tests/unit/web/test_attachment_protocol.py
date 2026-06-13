@@ -3,7 +3,6 @@
 覆盖范围：
 - ``UserInputAttachment`` pydantic round-trip（model_dump_json ↔ model_validate_json）
 - ``UserInputFrame.attachments`` 含 / 不含两种情况
-- ``HistoryMessageDTO.attachments`` 含 / 不含两种情况
 - ``kind`` / ``status`` Literal 字段的合法值与拒绝行为
 - ``AttachmentAsset`` dataclass 字段完整性
 - ``Message.metadata["attachments"]`` 字段名约定（核心约束：字段名锁定 ``attachments``）
@@ -23,10 +22,9 @@ import pytest
 from pydantic import ValidationError
 
 from core.message import Message
-from web.protocol import UserInputAttachment
-from web.protocol.rest_models import HistoryMessageDTO
-from web.protocol.ws_frames import UserInputFrame
-from web.uploads.storage import AttachmentAsset, AttachmentKind, AttachmentStatus
+from hosts.web.protocol import UserInputAttachment
+from hosts.web.protocol.ws_frames import UserInputFrame
+from hosts.web.uploads.storage import AttachmentAsset, AttachmentKind, AttachmentStatus
 
 # ---------------------------------------------------------------------------
 # TS 真源（与 web/src/protocol.ts::UserInputAttachment interface 字段一致）
@@ -227,40 +225,6 @@ class TestUserInputFrameAttachments:
             "asset-001",
             "asset-002",
         ]
-
-
-# ---------------------------------------------------------------------------
-# §1.5 HistoryMessageDTO.attachments 升级（向后兼容）
-# ---------------------------------------------------------------------------
-
-
-class TestHistoryMessageDTOAttachments:
-    def test_history_without_attachments_round_trip(self) -> None:
-        """旧 JSONL 历史无 attachments 字段，反序列化时 attachments=None。"""
-        dto = HistoryMessageDTO(
-            role="user",
-            content="hello",
-            turn=0,
-            timestamp_ms=1_700_000_000_000,
-        )
-        assert dto.attachments is None
-
-        restored = HistoryMessageDTO.model_validate_json(dto.model_dump_json())
-        assert restored == dto
-
-    def test_history_with_attachments_round_trip(self) -> None:
-        att = _make_attachment()
-        dto = HistoryMessageDTO(
-            role="user",
-            content="with image",
-            turn=1,
-            timestamp_ms=1_700_000_000_001,
-            attachments=[att],
-        )
-        restored = HistoryMessageDTO.model_validate_json(dto.model_dump_json())
-        assert restored == dto
-        assert restored.attachments is not None
-        assert restored.attachments[0].mime_type == "image/png"
 
 
 # ---------------------------------------------------------------------------

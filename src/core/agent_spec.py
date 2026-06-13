@@ -20,7 +20,7 @@ class AgentSpec:
         default_model: 默认模型名。最终调用时 provider 可能会被配置层覆写。
         tool_names: 从工具查找面启用的工具名白名单。空列表表示不启用任何工具。
         max_turns: 默认最大轮数。调用方可以在 runner.run() 时覆盖。
-        metadata: 预留给装配层或 observability 的自由字段，core 不解释。
+        metadata: 预留给装配层或 infrastructure.tracing 的自由字段，core 不解释。
     """
 
     name: str

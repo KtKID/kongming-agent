@@ -127,6 +127,51 @@ def test_select_unit_tests_includes_web_module_fallback(tmp_path: Path) -> None:
     assert "tests/unit/web/test_unrelated.py" in selected
 
 
+def test_select_unit_tests_keeps_auto_approval_changes_narrow(tmp_path: Path) -> None:
+    _touch(tmp_path / "tests/unit/test_arch_contracts.py")
+    _touch(tmp_path / "tests/unit/test_config_loader.py")
+    _touch(tmp_path / "tests/unit/test_web_app_lifespan.py")
+    _touch(tmp_path / "tests/unit/test_web_run_factory.py")
+    _touch(tmp_path / "tests/unit/safety/test_approval_rules.py")
+    _touch(tmp_path / "tests/unit/safety/test_auto_approval_manager.py")
+    _touch(tmp_path / "tests/unit/safety/test_unrelated.py")
+    _touch(tmp_path / "tests/unit/web/app_support/test_auto_approval_manager.py")
+    _touch(tmp_path / "tests/unit/web/dashboard/config/test_manager.py")
+    _touch(tmp_path / "tests/unit/web/integrations/claude_code/test_approval.py")
+    _touch(tmp_path / "tests/unit/web/integrations/claude_code/test_approval_smart_v1.py")
+    _touch(tmp_path / "tests/unit/web/integrations/claude_code/test_route_smart_approval.py")
+    _touch(tmp_path / "tests/unit/web/integrations/claude_code/test_service.py")
+    _touch(tmp_path / "tests/unit/web/test_app_lock.py")
+    _touch(tmp_path / "tests/unit/web/test_web_lifespan_bootstrap.py")
+    _touch(tmp_path / "tests/unit/web/usage/usage_token_v2/test_manager.py")
+
+    selected = pre_push.select_unit_tests(
+        tmp_path,
+        [
+            "src/hosts/web/app.py",
+            "src/hosts/web/app_support/auto_approval_manager.py",
+            "src/hosts/web/integrations/claude_code/approval.py",
+            "src/safety/auto_approval/__init__.py",
+            "src/safety/auto_approval/manager.py",
+        ],
+    )
+
+    assert selected == [
+        "tests/unit/safety/test_approval_rules.py",
+        "tests/unit/safety/test_auto_approval_manager.py",
+        "tests/unit/test_arch_contracts.py",
+        "tests/unit/test_config_loader.py",
+        "tests/unit/test_web_app_lifespan.py",
+        "tests/unit/test_web_run_factory.py",
+        "tests/unit/web/app_support/test_auto_approval_manager.py",
+        "tests/unit/web/integrations/claude_code/test_approval.py",
+        "tests/unit/web/integrations/claude_code/test_approval_smart_v1.py",
+        "tests/unit/web/integrations/claude_code/test_route_smart_approval.py",
+        "tests/unit/web/test_app_lock.py",
+        "tests/unit/web/test_web_lifespan_bootstrap.py",
+    ]
+
+
 def test_web_stem_matching_stays_narrow(tmp_path: Path) -> None:
     _touch(tmp_path / "tests/unit/test_web_routers_threads.py")
     _touch(tmp_path / "tests/unit/web/test_webhooks_dispatcher.py")

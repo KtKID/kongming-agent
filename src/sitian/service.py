@@ -43,8 +43,8 @@ from sitian.config import SiTianConfig, SiTianSourceConfig
 from sitian.models import JsonValue, SiTianObservation, SiTianSourceRuntimeState
 
 if TYPE_CHECKING:
-    from config_loader.models import Config
     from core.contracts import LLMProvider
+    from infrastructure.config.models import Config
 from sitian.scanners import SiTianScanBatch, SiTianScanSource
 from sitian.store import SiTianRecordsStore
 from sitian.suggestions import SiTianMaterializeState

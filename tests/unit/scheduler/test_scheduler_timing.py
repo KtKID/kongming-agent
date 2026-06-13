@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
@@ -32,6 +32,14 @@ from scheduler.timing import (
     to_iso,
     utc_now,
 )
+
+
+def _require_zoneinfo(key: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(key)
+    except ZoneInfoNotFoundError:
+        pytest.skip(f"timezone data is unavailable for {key}")
+
 
 # ---------------------------------------------------------------------------
 # grace_seconds_for_period
@@ -253,7 +261,7 @@ class TestComputeFirstRunAt:
         result = compute_first_run_at(trigger, now=now)
         result_dt = parse_iso(result)
         # 转回北京时间应该是 9 点
-        assert result_dt.astimezone(ZoneInfo("Asia/Shanghai")).hour == 9
+        assert result_dt.astimezone(_require_zoneinfo("Asia/Shanghai")).hour == 9
         # 等价于 UTC 1:00（次日，因为北京 14:00 已过当天的 9 点窗口）
         assert result_dt.astimezone(UTC) == datetime(2026, 5, 4, 1, 0, 0, tzinfo=UTC)
 
@@ -375,7 +383,6 @@ def test_cron_with_timezone_uses_timezone_not_utc() -> None:
     都按 trigger.timezone 解释 cron 表达式）。
     """
     from datetime import datetime
-    from zoneinfo import ZoneInfo
 
     from scheduler.domain import ScheduleTrigger, TriggerType
     from scheduler.timing import compute_first_run_at, parse_iso
@@ -391,7 +398,7 @@ def test_cron_with_timezone_uses_timezone_not_utc() -> None:
     result_dt = parse_iso(result_iso)
 
     # 北京下次 9:00 = 次日（2026-05-04）北京 9:00
-    bj = result_dt.astimezone(ZoneInfo("Asia/Shanghai"))
+    bj = result_dt.astimezone(_require_zoneinfo("Asia/Shanghai"))
     assert bj.hour == 9, f"应触发在北京 9:00，实际是北京 {bj.hour}:{bj.minute}"
     assert bj.year == 2026 and bj.month == 5 and bj.day == 4, f"应是 5/4 北京 9:00，实际 {bj}"
 

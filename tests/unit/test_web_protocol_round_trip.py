@@ -17,17 +17,18 @@ from __future__ import annotations
 
 import pytest
 
-from web.protocol.rest_models import (
+from hosts.web.protocol.rest_models import (
     CellSummaryDTO,
+    CreateGenericThreadFromFirstMessageRequest,
+    CreateGenericThreadFromFirstMessageResponse,
     CreateThreadRequest,
     ErrorResponseDTO,
-    HistoryMessageDTO,
     LLMPresetDTO,
     LoginRequest,
     RenameThreadRequest,
     ThreadMetadataDTO,
 )
-from web.protocol.ws_frames import (
+from hosts.web.protocol.ws_frames import (
     ApprovalAckFrame,
     ApprovalDecisionFrame,
     ApprovalRequestFrame,
@@ -83,12 +84,15 @@ def _make_run_interrupted() -> RunInterruptedFrame:
 
 
 def _make_thread_history() -> ThreadHistoryFrame:
-    msg = HistoryMessageDTO(
-        role="user",
-        content="hi",
-        turn=0,
-        timestamp_ms=1_700_000_000_000,
-    )
+    msg = {
+        "id": "msg-1",
+        "sessionId": None,
+        "timestamp": "2026-06-04T00:00:00Z",
+        "provider": "generic_chat",
+        "frame_type": "text",
+        "role": "user",
+        "content": "hi",
+    }
     return ThreadHistoryFrame(timestamp_ms=1_700_000_000_001, messages=[msg])
 
 
@@ -226,16 +230,6 @@ def _make_cell_evicted() -> CellEvictedFrame:
 # REST DTO factories --------------------------------------------------------
 
 
-def _make_history_message() -> HistoryMessageDTO:
-    return HistoryMessageDTO(
-        role="tool",
-        content="ok",
-        turn=1,
-        timestamp_ms=1_700_000_000_100,
-        tool_call_id="call-x",
-    )
-
-
 def _make_thread_metadata() -> ThreadMetadataDTO:
     return ThreadMetadataDTO(
         id="thread-abcdef012345",
@@ -255,6 +249,23 @@ def _make_thread_metadata() -> ThreadMetadataDTO:
 
 def _make_create_thread_request() -> CreateThreadRequest:
     return CreateThreadRequest(name="new chat", preset_id="preset-default")
+
+
+def _make_create_generic_thread_from_first_message_request() -> (
+    CreateGenericThreadFromFirstMessageRequest
+):
+    return CreateGenericThreadFromFirstMessageRequest(
+        text="hello",
+        preset_id="preset-default",
+        cwd="/tmp/project-a",
+        reasoning_effort="medium",
+    )
+
+
+def _make_create_generic_thread_from_first_message_response() -> (
+    CreateGenericThreadFromFirstMessageResponse
+):
+    return CreateGenericThreadFromFirstMessageResponse(thread=_make_thread_metadata())
 
 
 def _make_rename_thread_request() -> RenameThreadRequest:
@@ -340,9 +351,16 @@ def test_round_trip_ws_frame(factory):
 
 
 REST_DTO_FACTORIES = [
-    pytest.param(_make_history_message, id="history_message_dto"),
     pytest.param(_make_thread_metadata, id="thread_metadata_dto"),
     pytest.param(_make_create_thread_request, id="create_thread_request"),
+    pytest.param(
+        _make_create_generic_thread_from_first_message_request,
+        id="create_generic_thread_from_first_message_request",
+    ),
+    pytest.param(
+        _make_create_generic_thread_from_first_message_response,
+        id="create_generic_thread_from_first_message_response",
+    ),
     pytest.param(_make_rename_thread_request, id="rename_thread_request"),
     pytest.param(_make_llm_preset, id="llm_preset_dto"),
     pytest.param(_make_login_request, id="login_request"),

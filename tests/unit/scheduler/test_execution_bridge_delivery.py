@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from application.scheduled_runs.execution_bridge import ExecutionBridge
 from core.agent_spec import AgentSpec
 from core.contracts import EventSink
 from core.message import Message
@@ -48,7 +49,6 @@ from scheduler.domain import (
     TaskTarget,
     TriggerType,
 )
-from scheduler.execution_bridge import ExecutionBridge
 from scheduler.store import Store
 from scheduler.timing import to_iso, utc_now
 

@@ -4,7 +4,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from context.session_discovery import (
+from sessions.session_discovery import (
     discover_file_sessions,
     discover_sqlite_sessions,
     find_session_by_id,

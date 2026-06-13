@@ -10,9 +10,9 @@
 from __future__ import annotations
 
 from core.contracts import ApprovalDecision, ApprovalRequest
-from safety.chain import _build_event_payload
-from safety.default_rules import DEFAULT_SENSITIVE_PATHS
-from safety.types import ApprovalMetadataKeys
+from safety.approval.chain import _build_event_payload
+from safety.approval.default_rules import DEFAULT_SENSITIVE_PATHS
+from safety.approval.types import ApprovalMetadataKeys
 
 # ---------------------------------------------------------------------------
 # _build_event_payload 测试

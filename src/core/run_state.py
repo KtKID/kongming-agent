@@ -35,7 +35,7 @@ class RunState:
         status: 当前生命周期状态。runner 会在合法状态之间迁移。
         turn: 已经进入第几个 turn，从 0 开始；首次 LLM 调用前为 0，之后自增。
         messages: 本次 run 观察到的消息序列（通常是 session.history 的快照副本），
-            供 observability / recovery 使用，不代替 session 自身历史。
+            供 infrastructure.tracing / recovery 使用，不代替 session 自身历史。
         last_error: 最近一次抛出的错误；status=failed 时必然非空。
         metadata: 自由字段，装配层可以写入 trace_id 之类的附加信息。
     """

@@ -8,7 +8,7 @@ from pathlib import Path
 
 def test_route_does_not_import_evolution_internals() -> None:
     """D8: route.py 不 import evolution.state_store / reviewer_runtime / event_bus / store。"""
-    route_src = Path("src/web/claude_code/route.py").read_text()
+    route_src = Path("src/hosts/web/integrations/claude_code/route.py").read_text(encoding="utf-8")
     tree = ast.parse(route_src)
 
     forbidden = {
@@ -31,7 +31,7 @@ def test_route_does_not_import_evolution_internals() -> None:
 
 def test_route_only_imports_allowed_evolution_modules() -> None:
     """route.py 只应 import evolution.evolution_manager 和 evolution.claude_transcript_provider。"""
-    route_src = Path("src/web/claude_code/route.py").read_text()
+    route_src = Path("src/hosts/web/integrations/claude_code/route.py").read_text(encoding="utf-8")
     tree = ast.parse(route_src)
 
     allowed = {
@@ -54,7 +54,7 @@ def test_route_only_imports_allowed_evolution_modules() -> None:
 
 def test_dispatch_has_evolution_params() -> None:
     """_dispatch 函数签名包含 evolution_manager / bound_cwd / bound_claude_tid 参数。"""
-    route_src = Path("src/web/claude_code/route.py").read_text()
+    route_src = Path("src/hosts/web/integrations/claude_code/route.py").read_text(encoding="utf-8")
     tree = ast.parse(route_src)
 
     for node in ast.walk(tree):

@@ -1,4 +1,4 @@
-"""unit：context.prompts_loader 装配器覆盖。
+"""unit：prompting.instructions.prompts_loader 装配器覆盖。
 
 模块 3 / task prompt-modules-v0.1.3。覆盖启动物化、HTML 注释剔除、
 空白段跳过、用户编辑保留、异常冒泡等全部分支。
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from context.prompts_loader import (
+from prompting.instructions.prompts_loader import (
     TEMPLATE_FILENAMES,
     _strip_html_comments,
     materialize_and_load_prompts,
@@ -134,6 +134,23 @@ async def test_returns_combined_three_sections_by_default(tmp_path: Path) -> Non
     assert user_text and user_text in result
     # 至少存在两个 "\n\n" 分节符（三段之间两个空行）
     assert result.count("\n\n") >= 2
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_tools_template_mentions_workflow_tools(tmp_path: Path) -> None:
+    """TOOLS 模板应明确提示 workflow、角色工具和 map_reduce 入口。"""
+    await materialize_and_load_prompts(tmp_path)
+
+    tools_text = read_section_text(tmp_path / "prompts", "TOOLS.md")
+
+    assert "run_agent_workflow" in tools_text
+    assert "run_parallel_subagents" in tools_text
+    assert "list_agent_roles" in tools_text
+    assert "create_agent_role" in tools_text
+    assert "participants.select" in tools_text
+    assert 'mode="map_reduce"' in tools_text
+    assert "tools schema" in tools_text
 
 
 @pytest.mark.unit

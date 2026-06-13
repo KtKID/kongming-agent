@@ -1,4 +1,4 @@
-"""unit: scheduler.execution_bridge._build_provider 错配抛错 → FAILED run 路径（v0.5.3）。
+"""unit: application.scheduled_runs.execution_bridge._build_provider 错配抛错 → FAILED run 路径（v0.5.3）。
 
 覆盖矩阵：
 
@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import Config, LLMPresetConfig, ModelConfig
+from application.scheduled_runs.execution_bridge import ExecutionBridge
 from core import AgentSpec, InMemorySession
 from core.contracts import (
     ApprovalDecision,
@@ -38,6 +38,7 @@ from core.contracts import (
 from core.message import Message
 from core.result import Result
 from core.runner import Runner
+from infrastructure.config.models import Config, LLMPresetConfig, ModelConfig
 from scheduler.domain import (
     ConcurrencyPolicy,
     DueTaskReservation,
@@ -53,7 +54,6 @@ from scheduler.domain import (
     TaskTarget,
     TriggerType,
 )
-from scheduler.execution_bridge import ExecutionBridge
 from scheduler.store import Store
 from scheduler.timing import to_iso, utc_now
 

@@ -15,11 +15,11 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from config_loader.models import ModelConfig, ReasoningProfile
 from core.contracts import LLMRequest
 from core.message import Message
-from executors.llm.openai_responses import OpenAIResponsesProvider
-from executors.llm.reasoning import (
+from infrastructure.config.models import ModelConfig, ReasoningProfile
+from infrastructure.llm_providers.openai_responses import OpenAIResponsesProvider
+from infrastructure.llm_providers.reasoning import (
     ReasoningConfig,
     match_profile,
     normalize_effort,

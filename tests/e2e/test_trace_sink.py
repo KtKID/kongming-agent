@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from core import AgentSpec, InMemorySession, Runner, ToolCall
-from observability import JsonlTraceSink
+from infrastructure.tracing import JsonlTraceSink
 from tests.e2e.conftest import MemoryEventSink, RecordingApproval, StubLLMProvider
 from tools import ReadFileTool
 

@@ -16,7 +16,7 @@ import asyncio
 
 import pytest
 
-from cli.cron_delivery import CliDeliverySink
+from hosts.cli.cron_delivery import CliDeliverySink
 from scheduler.delivery import DeliveryResult, DeliveryStatus
 from scheduler.domain import (
     ConcurrencyPolicy,

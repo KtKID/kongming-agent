@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from web.thread_metadata import (
+from hosts.web.threads.metadata import (
     ThreadMetadata,
     read_thread_metadata,
     write_thread_metadata,

@@ -22,13 +22,11 @@ from evolution.models import (
     ReviewWritePayload,
 )
 from evolution.state_store import EvolutionStateStore
+from infrastructure.config.paths import resolve_kongming_path
 
 
-def resolve_evolution_root(raw: str) -> Path:
-    expanded = Path(raw).expanduser()
-    if expanded.is_absolute():
-        return expanded.resolve()
-    return (Path.cwd() / expanded).resolve()
+def resolve_evolution_root(raw: str, *, kongming_home: Path | None = None) -> Path:
+    return resolve_kongming_path(raw, kongming_home=kongming_home)
 
 
 @dataclass(frozen=True)
@@ -41,7 +39,7 @@ class EvolutionWriteOutcome:
 
 
 class EvolutionStore:
-    """统一管理 ``.kongming/evolution`` 目录。"""
+    """统一管理 ``<kongming_home>/evolution`` 目录。"""
 
     def __init__(
         self,

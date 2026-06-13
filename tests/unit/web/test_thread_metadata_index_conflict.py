@@ -11,8 +11,8 @@ scanner 拿到的 title / archived 全错。
 
 from __future__ import annotations
 
-from web.routers.claude import _build_thread_metadata_index
-from web.thread_metadata import ThreadMetadata
+from hosts.web.routers.claude import _build_thread_metadata_index
+from hosts.web.threads.metadata import ThreadMetadata
 
 
 def _make_meta(

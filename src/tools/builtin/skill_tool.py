@@ -7,7 +7,7 @@
 
 设计要点：
 
-- **不继承** :class:`tools.base.BaseBuiltinTool`：基类的统一异常包装会把读盘
+- **不继承** :class:`tools.runtime.base.BaseBuiltinTool`：基类的统一异常包装会把读盘
   失败 / ``!command`` 拒绝吞成 ``ok=False``，runner 之上再无法区分失败原因。
   本类在 :meth:`execute` 内自管 try/except，同时配套 emit ``skill.failed``。
 - **三事件 emit**：``skill.invoked`` 在参数校验通过后立即 emit；
@@ -19,8 +19,8 @@
 - **``!command`` 永久禁用**：v0.1.6 不实现 shell 命令替换（与 Claude Code
   设计差异），仅做字面 token 检测，命中即 :class:`SkillSecurityError`。
 - **导入边界**：CLAUDE.md 约束 5/6 + import-linter Contract 3 / 4 —— 本模块
-  不允许 import ``safety`` / ``executors`` / ``host`` / ``cli`` / ``context``。
-  ``context.skill_loader.SkillSpec`` 与 ``tools`` 同层，不能直接消费；
+  不允许 import ``safety`` / ``executors`` / ``host`` / ``cli`` / ``prompting``。
+  ``prompting.skills.skill_loader.SkillSpec`` 与 ``tools`` 同层，不能直接消费；
   用本模块内的 :class:`_SkillSpecLike` Protocol 做结构子类型，由装配层（
   ``skill-assemble-v0.1.6`` 模块）传真 SkillSpec 进来即满足 duck typing。
 """
@@ -73,16 +73,16 @@ SKILL_TOOL_SCHEMA: Final[dict[str, Any]] = {
 
 
 # ---------------------------------------------------------------------------
-# SkillSpec 结构子类型（duck-type，避免 tools → context 跨层 import）
+# SkillSpec 结构子类型（duck-type，避免 tools → prompting 跨层 import）
 # ---------------------------------------------------------------------------
 
 
 @runtime_checkable
 class _SkillSpecLike(Protocol):
-    """:class:`context.skill_loader.SkillSpec` 的结构子类型。
+    """:class:`prompting.skills.skill_loader.SkillSpec` 的结构子类型。
 
     本类只读 ``name`` / ``source`` / ``body_path`` 三个字段；保持 Protocol 极简
-    使装配层传任意"长得像"的对象都能跑通。``context.skill_loader.SkillSpec``
+    使装配层传任意"长得像"的对象都能跑通。``prompting.skills.skill_loader.SkillSpec``
     天然满足此 Protocol——frozen dataclass + 上述三字段。
 
     放在本文件而非 ``core.contracts``：v0.1.6 阶段 SkillSpec 形态只在
@@ -173,13 +173,13 @@ class SkillTool:
 
     Args:
         specs: ``name -> SkillSpec`` 映射。装配层（``skill-assemble-v0.1.6``）
-            把 :func:`context.skill_loader.load_skill_specs` 结果转 dict 后传入。
+            把 :func:`prompting.skills.skill_loader.load_skill_specs` 结果转 dict 后传入。
             本类不持有 loader 引用，也不在运行时再次扫描磁盘——SkillSpec 一经
             装配即冻结，热重载留给 v0.2+。
         event_sinks: 运行时事件 sink 列表。空元组 = 不 emit。
             sink 抛异常不污染主链路（per-sink try/except）。
 
-    不继承 :class:`tools.base.BaseBuiltinTool` 的原因见模块 docstring。
+    不继承 :class:`tools.runtime.base.BaseBuiltinTool` 的原因见模块 docstring。
     """
 
     name: Final[str] = "skill"

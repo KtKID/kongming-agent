@@ -11,7 +11,7 @@ from typing import Any, cast
 import httpx
 import pytest
 
-from executors.llm.sse_reader import iter_sse_events
+from infrastructure.llm_providers.sse_reader import iter_sse_events
 
 from .streaming.fixtures import mock_response_with_bytes
 
@@ -87,7 +87,7 @@ async def test_malformed_json_warns_and_skips(
 ) -> None:
     """A.6：JSON 解析失败 —— log.warning 后跳过，不抛。"""
     raw = b'data: {this is not json}\n\ndata: {"id":"x"}\n\ndata: [DONE]\n\n'
-    with caplog.at_level(logging.WARNING, logger="executors.llm.sse_reader"):
+    with caplog.at_level(logging.WARNING, logger="infrastructure.llm_providers.sse_reader"):
         events = await _collect(raw)
     # 第二条合法行仍然 yield
     assert events == [(None, {"id": "x"})]

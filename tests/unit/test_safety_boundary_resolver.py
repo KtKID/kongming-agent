@@ -21,13 +21,13 @@ from typing import TYPE_CHECKING
 import pytest
 
 from core.contracts import ApprovalRequest
-from safety._path_trie import PathTrie
-from safety.boundary_resolver import BoundaryResolver
-from safety.types import (
+from safety.approval.types import (
     BoundaryKind,
     BoundaryZone,
     RuntimeBoundaryContext,
 )
+from safety.boundaries.path_trie import PathTrie
+from safety.boundaries.resolver import BoundaryResolver
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -427,10 +427,6 @@ def test_realpath_resolves_symlink(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    reason="性能阈值 200ms 在 CI 慢机上不稳；先 xfail 让 PR #2 过，单独修",
-    strict=False,
-)
 def test_resolve_3w_files_under_200ms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """3 万 tracked 文件首次构建 ResolvedBoundary < 200ms。
 

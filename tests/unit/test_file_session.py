@@ -9,9 +9,9 @@ from typing import ClassVar
 
 import pytest
 
-from context.file_session import FileSession, ValidationResult
-from context.session_bootstrap import SessionBootstrap
 from core.message import Message
+from sessions.file_session import FileSession, ValidationResult
+from sessions.session_bootstrap import SessionBootstrap
 
 
 def _bootstrap(**overrides) -> SessionBootstrap:

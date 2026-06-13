@@ -13,7 +13,7 @@ import pytest
 
 def _make_test_config(tmp_path: Path, *, enabled: bool = True) -> object:
     """构造最小 Config 用于 EvolutionManager 装配测试。"""
-    from config_loader import load_config
+    from infrastructure.config import load_config
 
     cfg = load_config(None)
     # 覆盖 evolution.learning 关键字段

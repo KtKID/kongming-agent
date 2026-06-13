@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 from core.contracts import LLMStreamChunk
-from executors.llm.openai_compat_stream_parser import OpenAICompatStreamParser
+from infrastructure.llm_providers.openai_compat_stream_parser import OpenAICompatStreamParser
 
 from .streaming.fixtures import (
     assert_message_done_equivalent,

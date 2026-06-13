@@ -13,7 +13,7 @@ class AgentError(Exception):
     """所有 agent 内部错误的基类。
 
     ``details`` 里可以携带结构化信息（例如 provider 原始错误、call_id 等），
-    以便 observability / host 层做进一步展示或落盘，而无需依赖 str(exc) 解析。
+    以便 infrastructure.tracing / host 层做进一步展示或落盘，而无需依赖 str(exc) 解析。
     """
 
     def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:

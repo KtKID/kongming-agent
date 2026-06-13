@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ApiError, RateLimitedError, apiGet, apiPost } from "@/lib/api";
+import {
+  ApiError,
+  RateLimitedError,
+  apiGet,
+  apiGetThreadTaskProgress,
+  apiPost,
+} from "@/lib/api";
 
 const originalFetch = globalThis.fetch;
 
@@ -37,6 +43,35 @@ describe("lib/api", () => {
     expect(headers["Content-Type"]).toBe("application/json");
     expect(init.credentials).toBe("include");
     expect(init.method).toBe("POST");
+  });
+
+  it("apiGetThreadTaskProgress encodes thread id in endpoint path", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            schema_version: 1,
+            session_id: "thread-a/b",
+            updated_at_ms: 1,
+            source: "api",
+            tasks: [],
+            counts: {
+              pending: 0,
+              in_progress: 0,
+              completed: 0,
+              total: 0,
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await apiGetThreadTaskProgress("thread-a/b");
+
+    const call = fetchMock.mock.calls[0];
+    expect(call[0]).toBe("/api/threads/thread-a%2Fb/task-progress");
   });
 
   it("401 → 抛 ApiError + redirect /login", async () => {

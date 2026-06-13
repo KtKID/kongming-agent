@@ -14,13 +14,18 @@ from collections.abc import Sequence
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from config_loader.models import (
+from application.scheduled_runs.execution_bridge import (
+    ExecutionBridge,
+    _AggregateEventSink,
+    _CronAuditWriterSink,
+)
+from core.contracts import EventSink
+from infrastructure.config.models import (
     Config,
     ModelConfig,
     SchedulerApprovalConfig,
     SchedulerConfig,
 )
-from core.contracts import EventSink
 from scheduler.domain import (
     ApprovalMode,
     ConcurrencyPolicy,
@@ -33,11 +38,6 @@ from scheduler.domain import (
     TaskState,
     TaskTarget,
     TriggerType,
-)
-from scheduler.execution_bridge import (
-    ExecutionBridge,
-    _AggregateEventSink,
-    _CronAuditWriterSink,
 )
 from scheduler.store import Store
 

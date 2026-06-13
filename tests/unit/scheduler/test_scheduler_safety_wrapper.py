@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import SchedulerApprovalConfig
 from core.contracts import ApprovalDecision, ApprovalRequest
+from infrastructure.config.models import SchedulerApprovalConfig
 from scheduler.safety_wrapper import ScheduleApprovalProvider
 
 

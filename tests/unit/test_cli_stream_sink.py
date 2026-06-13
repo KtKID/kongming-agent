@@ -16,7 +16,7 @@ import io
 import pytest
 
 from core.contracts import Event
-from host.cli_stream_sink import CLIStreamSink
+from hosts.cli.stream_sink import CLIStreamSink
 
 
 @pytest.mark.asyncio

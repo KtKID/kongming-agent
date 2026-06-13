@@ -2,11 +2,12 @@ import { NavLink, Outlet } from "react-router-dom";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 
-// 竖 tab 设计来自 manage-config-tab task：左侧两项「配置」/「网络」+ 右侧 Outlet。
+// 竖 tab 设计来自 manage-config-tab task：左侧「配置」/「模型服务商」/「网络」+ 右侧 Outlet。
 // 「网络」对应原 /manage/runtime-status 页面（破坏性更名为 /manage/network，无兼容 alias）；
 // 「配置」走 /manage/config → /manage/config/model 兜底。路由表见 lib/router.tsx。
 const TABS: ReadonlyArray<{ to: string; label: string }> = [
   { to: "/manage/config", label: "配置" },
+  { to: "/manage/model-providers", label: "模型服务商" },
   { to: "/manage/network", label: "网络" },
 ];
 

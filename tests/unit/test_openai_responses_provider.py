@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import ModelConfig
-from executors.llm.openai_responses import OpenAIResponsesProvider
+from infrastructure.config.models import ModelConfig
+from infrastructure.llm_providers.openai_responses import OpenAIResponsesProvider
 
 
 def _make_provider() -> OpenAIResponsesProvider:

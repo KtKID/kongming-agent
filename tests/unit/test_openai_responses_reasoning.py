@@ -12,10 +12,10 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import ModelConfig, ReasoningProfile
 from core.contracts import LLMRequest
 from core.message import Message
-from executors.llm.openai_responses import OpenAIResponsesProvider
+from infrastructure.config.models import ModelConfig, ReasoningProfile
+from infrastructure.llm_providers.openai_responses import OpenAIResponsesProvider
 
 
 def _make_provider(

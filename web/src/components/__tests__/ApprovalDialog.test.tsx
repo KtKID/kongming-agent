@@ -1,12 +1,19 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { ApprovalDialog } from "@/components/ApprovalDialog";
+import { toast } from "sonner";
+import { ApprovalDialog, type ApprovalAckSocket } from "@/components/ApprovalDialog";
 import { useApprovalDialogStore } from "@/hooks/useApprovalDialog";
-import type { ThreadSocket } from "@/lib/ws";
+
+vi.mock("sonner", () => ({
+  toast: {
+    error: vi.fn(),
+  },
+}));
 
 beforeEach(() => {
   useApprovalDialogStore.setState({ pending: [] });
+  vi.mocked(toast.error).mockClear();
 });
 
 function pushApproval() {
@@ -37,7 +44,7 @@ function pushElevatedApproval() {
 function makeStubSocket() {
   return {
     send: vi.fn(),
-  } as unknown as ThreadSocket;
+  } as ApprovalAckSocket & { send: ReturnType<typeof vi.fn> };
 }
 
 describe("ApprovalDialog — standard 模式", () => {
@@ -123,6 +130,54 @@ describe("ApprovalDialog — standard 模式", () => {
       call_id: "c1",
       action: "reject",
     });
+  });
+
+  it("socket 为空时保留 approval 队列并提示重试", async () => {
+    render(<ApprovalDialog socket={null} />);
+    pushApproval();
+    const user = userEvent.setup();
+    await waitFor(() =>
+      expect(screen.getByTestId("approval-approve")).toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByTestId("approval-approve"));
+
+    expect(useApprovalDialogStore.getState().pending.length).toBe(1);
+    expect(toast.error).toHaveBeenCalledWith("审批连接未就绪，请稍后重试");
+  });
+
+  it("send 返回 false 时保留 approval 队列并提示重试", async () => {
+    const sock = makeStubSocket();
+    sock.send.mockReturnValue(false);
+    render(<ApprovalDialog socket={sock} />);
+    pushApproval();
+    const user = userEvent.setup();
+    await waitFor(() =>
+      expect(screen.getByTestId("approval-approve")).toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByTestId("approval-approve"));
+
+    expect(useApprovalDialogStore.getState().pending.length).toBe(1);
+    expect(toast.error).toHaveBeenCalledWith("审批发送失败，请稍后重试");
+  });
+
+  it("send 抛错时保留 approval 队列并提示重试", async () => {
+    const sock = makeStubSocket();
+    sock.send.mockImplementation(() => {
+      throw new Error("closed");
+    });
+    render(<ApprovalDialog socket={sock} />);
+    pushApproval();
+    const user = userEvent.setup();
+    await waitFor(() =>
+      expect(screen.getByTestId("approval-approve")).toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByTestId("approval-approve"));
+
+    expect(useApprovalDialogStore.getState().pending.length).toBe(1);
+    expect(toast.error).toHaveBeenCalledWith("审批发送失败，请稍后重试");
   });
 
   it("standard 模式显示「本 session 同意」按钮", async () => {

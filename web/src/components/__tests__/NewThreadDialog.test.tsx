@@ -4,11 +4,27 @@ import { MemoryRouter } from "react-router-dom";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NewThreadDialog } from "@/components/NewThreadDialog";
 import { useThreadsStore } from "@/stores/threads";
+import * as dirPicker from "@/lib/dirPicker";
+import { toast } from "sonner";
 
 const createThread = vi.fn();
 
+vi.mock("@/lib/dirPicker", () => ({
+  isTauriEnv: vi.fn(),
+  pickDirectory: vi.fn(),
+}));
+
+vi.mock("sonner", () => ({
+  toast: {
+    error: vi.fn(),
+  },
+}));
+
 beforeEach(() => {
+  vi.clearAllMocks();
   createThread.mockReset();
+  vi.mocked(dirPicker.isTauriEnv).mockReturnValue(false);
+  vi.mocked(dirPicker.pickDirectory).mockResolvedValue(null);
   useThreadsStore.setState({
     threads: [],
     presets: [
@@ -30,6 +46,18 @@ beforeEach(() => {
 });
 
 describe("NewThreadDialog", () => {
+  it("工作目录输入框右侧显示文件夹选择按钮", () => {
+    render(
+      <MemoryRouter>
+        <NewThreadDialog open={true} onOpenChange={vi.fn()} />
+      </MemoryRouter>,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "打开工作目录选择器" }),
+    ).toBeInTheDocument();
+  });
+
   it("默认 backend=generic_chat 时提交带 preset", async () => {
     createThread.mockResolvedValue({
       id: "thread-xyz",
@@ -87,6 +115,65 @@ describe("NewThreadDialog", () => {
         "preset-a",
         "generic_chat",
         "/tmp/workspace",
+      ),
+    );
+  });
+
+  it("浏览器环境点击文件夹按钮会走可测试降级提示", async () => {
+    render(
+      <MemoryRouter>
+        <NewThreadDialog open={true} onOpenChange={vi.fn()} />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "打开工作目录选择器" }));
+
+    await waitFor(() =>
+      expect(dirPicker.pickDirectory).toHaveBeenCalledWith({
+        title: "选择工作目录",
+        defaultPath: undefined,
+      }),
+    );
+    expect(toast.error).toHaveBeenCalledWith("系统文件管理器入口需要 Tauri 环境");
+  });
+
+  it("Tauri 选择工作目录后回填 cwd 并随创建提交", async () => {
+    vi.mocked(dirPicker.isTauriEnv).mockReturnValue(true);
+    vi.mocked(dirPicker.pickDirectory).mockResolvedValue("E:\\xgt\\proj\\app");
+    createThread.mockResolvedValue({
+      id: "thread-picked",
+      name: "picked",
+      preset_id: "preset-a",
+      backend_kind: "generic_chat",
+      created_at: 1,
+      updated_at: 1,
+      message_count: 0,
+      usage_summary: null,
+      cwd: "E:\\xgt\\proj\\app",
+    });
+
+    render(
+      <MemoryRouter>
+        <NewThreadDialog open={true} onOpenChange={vi.fn()} />
+      </MemoryRouter>,
+    );
+
+    const user = userEvent.setup();
+    await user.type(screen.getByPlaceholderText(/不填则使用服务器ID/), "picked");
+    await user.click(screen.getByRole("button", { name: "打开工作目录选择器" }));
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("cwd")).toHaveValue("E:\\xgt\\proj\\app"),
+    );
+    await user.click(screen.getByRole("button", { name: /创建/ }));
+
+    await waitFor(() =>
+      expect(createThread).toHaveBeenCalledWith(
+        "picked",
+        "preset-a",
+        "generic_chat",
+        "E:\\xgt\\proj\\app",
       ),
     );
   });

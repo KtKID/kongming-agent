@@ -20,16 +20,16 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import ModelConfig
 from core.message import Message
-from executors.llm.anthropic_messages import AnthropicMessagesProvider
-from executors.llm.media_adapter import (
+from hosts.web.uploads.storage import AssetStorage
+from infrastructure.config.models import ModelConfig
+from infrastructure.llm_providers.anthropic_messages import AnthropicMessagesProvider
+from infrastructure.llm_providers.media_adapter import (
     AnthropicMediaAdapter,
     ImageMediaPart,
     MediaPart,
     OpenAIMediaAdapter,
 )
-from web.uploads.storage import AssetStorage
 
 # ---------------------------------------------------------------------------
 # 工具与 fixtures
@@ -734,7 +734,7 @@ def test_dropped_attachments_collected_when_to_blocks_fails(
     )
 
     dropped: list[str] = []
-    with caplog.at_level("WARNING", logger="executors.llm.anthropic_messages"):
+    with caplog.at_level("WARNING", logger="infrastructure.llm_providers.anthropic_messages"):
         result = provider._convert_user_message(msg, thread_id="t1", dropped=dropped)
 
     # 退化:str content
@@ -761,7 +761,7 @@ def test_dropped_attachments_collected_when_parts_empty(
     msg = Message.user("fallback please", metadata={"attachments": [bad_ref]})
 
     dropped: list[str] = []
-    with caplog.at_level("WARNING", logger="executors.llm.anthropic_messages"):
+    with caplog.at_level("WARNING", logger="infrastructure.llm_providers.anthropic_messages"):
         result = provider._convert_user_message(msg, thread_id="t1", dropped=dropped)
 
     # 退化路径:str content

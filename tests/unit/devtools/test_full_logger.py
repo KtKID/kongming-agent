@@ -80,6 +80,26 @@ async def test_enabled_false_no_write(tmp_path: Path) -> None:
     assert not log_path.exists()
 
 
+@pytest.mark.unit
+async def test_kongming_relative_path_uses_kongming_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("KONGMING_HOME", str(home))
+    monkeypatch.chdir(workspace)
+
+    logger = FullLogger(
+        enabled=True,
+        path=".kongming/logs/full_log.jsonl",
+        queue_size=100,
+    )
+
+    assert logger.path == (home / "logs" / "full_log.jsonl").resolve()
+
+
 # ---------------------------------------------------------------------------
 # 2. 时间戳 UTC+8 ISO8601 毫秒精度
 # ---------------------------------------------------------------------------

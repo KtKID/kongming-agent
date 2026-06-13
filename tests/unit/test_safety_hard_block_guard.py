@@ -3,7 +3,7 @@
 覆盖任务 #11 要求的 5+ 剧本：
 
 1. 写 ``~/.ssh/authorized_keys`` → hard_block + matched_rule="ssh-material"
-2. 写 ``~/.kongming/config.yaml`` 含 ``allow_writes: ["/"]`` → config-self-escalation
+2. 写项目级 ``.kongming/config.yaml`` 含 ``allow_writes: ["/"]`` → config-self-escalation
 3. ``pytest tests/ && rm -rf /`` → host-root-delete（验证 segment 切分）
 4. 写 ``~/safe/../.ssh/key``（``..`` 绕过） → hard_block（realpath 解析后命中）
 5. 写 ``/etc/hosts`` → 不命中 hard_block（应由 ConsentResolver 处理）
@@ -19,14 +19,14 @@ from typing import Any
 
 import pytest
 
-from config_loader.models import ApprovalConfig, Config, ModelConfig
 from core.contracts import ApprovalRequest
-from safety.guards.hard_block import HardBlockGuard
-from safety.types import (
+from infrastructure.config.models import ApprovalConfig, Config, ModelConfig
+from safety.approval.types import (
     ApprovalMetadataKeys,
     BoundaryKind,
     RuntimeBoundaryContext,
 )
+from safety.guards.hard_block import HardBlockGuard
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -102,7 +102,7 @@ def test_from_config_merges_default_rules(guard: HardBlockGuard) -> None:
 
     block_path_rules = {r.name for r in guard._block_path_rules}  # type: ignore[attr-defined]
     assert "ssh-material" in block_path_rules
-    assert "kongming-global-config" in block_path_rules
+    assert "kongming-global-config" not in block_path_rules
 
 
 # ---------------------------------------------------------------------------
@@ -156,21 +156,26 @@ def test_scenario_realpath_dotdot_bypass_blocked(
 
 
 @pytest.mark.unit
-def test_scenario_kongming_global_config_blocked(
+def test_scenario_kongming_global_home_access_not_hard_blocked(
     guard: HardBlockGuard, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """写 ~/.kongming/* → kongming-global-config 命中。"""
+    """读写 ~/.kongming/* → 交给后续用户审批，HardBlock 不拦截。"""
     monkeypatch.setenv("HOME", str(tmp_path))
     fresh_guard = HardBlockGuard.from_config(_cfg())
 
-    decision = fresh_guard.evaluate(
+    read_decision = fresh_guard.evaluate(
+        _req(tool_name="read_file", arguments={"path": "~/.kongming/sessions/thread/a.jsonl"}),
+        _runtime(),
+    )
+    write_decision = fresh_guard.evaluate(
         _req(
-            tool_name="write_file",
-            arguments={"path": "~/.kongming/somefile.txt", "content": "x"},
+            tool_name="write_file", arguments={"path": "~/.kongming/somefile.txt", "content": "x"}
         ),
         _runtime(),
     )
-    _assert_blocked(decision, matched_rule="kongming-global-config")
+
+    assert read_decision is None
+    assert write_decision is None
 
 
 @pytest.mark.unit
@@ -630,7 +635,7 @@ _USER_NOTDELTEST_RULES: list[dict[str, Any]] = [
 
 def _user_cfg_with_notdeltest() -> Config:
     """构造一份含 notdeltest 保护规则的 Config（模拟用户 yaml 配置）。"""
-    from config_loader.models import SafetyConfig, SafetyHardDenyConfig
+    from infrastructure.config.models import SafetyConfig, SafetyHardDenyConfig
 
     return Config(
         model=ModelConfig(

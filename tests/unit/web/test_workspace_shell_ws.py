@@ -5,10 +5,10 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
+from hosts.web.app import create_app
+from hosts.web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
+from hosts.web.threads.metadata import ThreadMetadata
 from tests.unit.test_web_app_lifespan import _seed_password
-from web.app import create_app
-from web.auth import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
-from web.thread_metadata import ThreadMetadata
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 
@@ -172,7 +172,7 @@ def _login_client(tmp_path: Path, tm: FakeTM) -> TestClient:
 def test_workspace_shell_ws_routes_input_resize_and_terminate(tmp_path: Path, monkeypatch) -> None:
     workspace = tmp_path / "proj"
     workspace.mkdir()
-    monkeypatch.setattr("web.routers.workspace_shell.WorkspaceShellProcess", FakeShellProcess)
+    monkeypatch.setattr("hosts.web.routers.workspace_shell.WorkspaceShellProcess", FakeShellProcess)
     client = _login_client(tmp_path, FakeTM(workspace))
     try:
         with client.websocket_connect("/ws/workspace-shell?thread_id=thread-000000000004") as ws:
@@ -208,7 +208,7 @@ def test_workspace_shell_ws_falls_back_to_plain_shell_on_resume_failure(
     workspace.mkdir()
     monkeypatch.setenv("SHELL", "/bin/zsh")
     monkeypatch.setattr(
-        "web.routers.workspace_shell.WorkspaceShellProcess",
+        "hosts.web.routers.workspace_shell.WorkspaceShellProcess",
         FakeResumeFailThenPlainShellProcess,
     )
     client = _login_client(tmp_path, FakeTM(workspace))
@@ -249,7 +249,7 @@ def test_workspace_shell_ws_uses_system_shell_for_generic_chat(
     workspace = tmp_path / "proj"
     workspace.mkdir()
     monkeypatch.setenv("SHELL", "/bin/zsh")
-    monkeypatch.setattr("web.routers.workspace_shell.WorkspaceShellProcess", FakeShellProcess)
+    monkeypatch.setattr("hosts.web.routers.workspace_shell.WorkspaceShellProcess", FakeShellProcess)
     client = _login_client(
         tmp_path,
         FakeTM(workspace, backend_kind="generic_chat", claude_thread_id=""),
@@ -270,14 +270,14 @@ def test_workspace_shell_ws_binds_new_claude_session_for_unbound_thread(
 ) -> None:
     workspace = tmp_path / "proj"
     workspace.mkdir()
-    monkeypatch.setattr("web.routers.workspace_shell.WorkspaceShellProcess", FakeShellProcess)
+    monkeypatch.setattr("hosts.web.routers.workspace_shell.WorkspaceShellProcess", FakeShellProcess)
 
     async def _fake_wait_for_new_claude_session(*args, **kwargs) -> str:
         del args, kwargs
         return "sid-new"
 
     monkeypatch.setattr(
-        "web.routers.workspace_shell.wait_for_new_claude_session",
+        "hosts.web.routers.workspace_shell.wait_for_new_claude_session",
         _fake_wait_for_new_claude_session,
     )
     tm = FakeTM(workspace, backend_kind="claude_code", claude_thread_id="")

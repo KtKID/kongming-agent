@@ -23,16 +23,16 @@ import pytest
 
 from core import AgentSpec, InMemorySession, Runner, ToolCall
 from safety import SafetyGatedApproval
-from safety.boundary_resolver import BoundaryResolver
-from safety.decision_engine import SafetyDecisionEngine
-from safety.grant_store import GrantStore
-from safety.guards.consent import ConsentResolver
-from safety.guards.hard_block import HardBlockGuard
-from safety.guards.trust import TrustResolver
-from safety.types import (
+from safety.approval.decision_engine import SafetyDecisionEngine
+from safety.approval.types import (
     BoundaryScope,
     SensitivePathRule,
 )
+from safety.boundaries.resolver import BoundaryResolver
+from safety.grants.store import GrantStore
+from safety.guards.consent import ConsentResolver
+from safety.guards.hard_block import HardBlockGuard
+from safety.guards.trust import TrustResolver
 from tests.e2e.conftest import MemoryEventSink, StubLLMProvider
 from tools import AutoAllowApproval, ReadFileTool
 
@@ -87,7 +87,7 @@ def _build_deny_chain(
     )
     boundary = BoundaryResolver.from_project_root()
 
-    from config_loader.models import (
+    from infrastructure.config.models import (
         ApprovalConfig,
         Config,
         ModelConfig,

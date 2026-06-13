@@ -18,8 +18,8 @@
 设计约束：
 
 - 协议真源只在 :mod:`core.contracts`，本包里**不**重定义 Protocol。
-- 本包不 import ``safety/`` / ``host/`` / ``cli/`` / ``executors/`` / ``context/`` /
-  ``observability/`` 下任何模块，硬约束由 import-linter 背书。
+- 本包不 import ``safety/`` / ``host/`` / ``cli/`` / ``executors/`` / ``sessions/`` / ``prompting/`` /
+  ``infrastructure.tracing/`` 下任何模块，硬约束由 import-linter 背书。
 """
 
 from __future__ import annotations
@@ -28,27 +28,32 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from core.contracts import EventSink, Tool
-from tools.agent_workflow_tool import AgentWorkflowHandle, build_agent_workflow_tool
-from tools.approval import (
+from tools.agent_role_tool import AgentRoleManagerLike, build_agent_role_tools
+from tools.agent_workflow_tool import (
+    AgentWorkflowHandle,
+    build_agent_workflow_tool,
+    build_run_agent_workflow_tool,
+)
+from tools.builtin.file_tool import (
+    ListDirTool,
+    ReadFileTool,
+    WriteFileTool,
+    build_file_tools,
+)
+from tools.builtin.shell_tool import ShellTool, build_shell_tool
+from tools.runtime.approval import (
     AutoAllowApproval,
     AutoDenyApproval,
     InteractiveApproval,
     PromptFn,
     build_default_approval,
 )
-from tools.base import BaseBuiltinTool
-from tools.file_tools import (
-    ListDirTool,
-    ReadFileTool,
-    WriteFileTool,
-    build_file_tools,
-)
-from tools.registry import ToolRegistry
-from tools.shell_tool import ShellTool, build_shell_tool
+from tools.runtime.base import BaseBuiltinTool
+from tools.runtime.registry import ToolRegistry
 
 if TYPE_CHECKING:
-    from config_loader.models import Config
     from evolution.store import EvolutionStore
+    from infrastructure.config.models import Config
     from scheduler.store import Store
 
 
@@ -65,7 +70,7 @@ def build_default_registry(
 ) -> ToolRegistry:
     """按 v1-mini 默认工具集组装一个 :class:`ToolRegistry`。
 
-    装配层（例如 ``executors/agent_runtime/native_runtime.py``）只需要读配置
+    装配层（例如 ``runtime_assembly/native_runtime.py``）只需要读配置
     里的 ``tool.file.enabled`` / ``tool.shell.enabled`` 以及运行参数，
     然后把它们喂进来即可，不用在别的地方再写第二份"默认工具清单"。
 
@@ -74,7 +79,7 @@ def build_default_registry(
 
     v0.2 起本函数**不再**直接装配 schedule_tool / memory_tool。两者改走外部
     register 模式：调用方在 ``build_default_registry`` 之后用
-    :func:`register_schedule_tool_if_enabled` / :func:`tools.memory_tool.build_memory_tool`
+    :func:`register_schedule_tool_if_enabled` / :func:`tools.builtin.memory_tool.build_memory_tool`
     把工具 register 到 registry 上。这样 cli/web 装配链路单一、调用方不需要为
     每个可选工具拖一串 kwargs。
 
@@ -124,13 +129,13 @@ def register_schedule_tool_if_enabled(
 ) -> Store | None:
     """按 ``cfg.scheduler.enabled`` 外部 register schedule_tool。
 
-    与 :func:`tools.memory_tool.build_memory_tool` 同款"外部 register"模式：
+    与 :func:`tools.builtin.memory_tool.build_memory_tool` 同款"外部 register"模式：
     调用方先用 :func:`build_default_registry` 拿到 registry，再调本 helper
     决定是否补一个 schedule_tool。这样 cli / web 装配代码可以共用同一行调用，
     避免每条入口都重复写 if-cfg.scheduler.enabled 分支。
 
     注意：本 helper **lazy import** ``scheduler.*`` 与
-    :func:`tools.schedule_tool.build_schedule_tool`；``cfg.scheduler.enabled=False``
+    :func:`tools.builtin.schedule_tool.build_schedule_tool`；``cfg.scheduler.enabled=False``
     时不会触碰 cron 模块，启动开销保持原样。
 
     Args:
@@ -147,11 +152,15 @@ def register_schedule_tool_if_enabled(
     if not cfg.scheduler.enabled:
         return None
 
-    from config_loader.paths import get_kongming_home
+    from infrastructure.config.paths import get_kongming_home, resolve_kongming_path
     from scheduler.store import Store
-    from tools.schedule_tool import build_schedule_tool
+    from tools.builtin.schedule_tool import build_schedule_tool
 
-    home = cfg.scheduler.home if cfg.scheduler.home is not None else (get_kongming_home() / "cron")
+    home = (
+        resolve_kongming_path(cfg.scheduler.home)
+        if cfg.scheduler.home is not None
+        else (get_kongming_home() / "cron")
+    )
     store = Store(home)
     # v0.3：把 cfg.scheduler 的默认 timezone / delivery channel 透传给 schedule_tool，
     # 让 LLM 创建任务时不必（也不应）猜时区，dispatcher 也不会因 delivery=None SKIPPED。
@@ -181,7 +190,7 @@ def register_evolution_write_tool_if_enabled(
 
     from evolution.state_store import EvolutionStateStore
     from evolution.store import EvolutionStore, resolve_evolution_root
-    from tools.evolution_write_tool import build_evolution_write_tool
+    from tools.builtin.evolution_write_tool import build_evolution_write_tool
 
     root_dir = resolve_evolution_root(cfg.evolution.learning.root_path)
     state_store = EvolutionStateStore(root_dir)
@@ -209,7 +218,27 @@ def register_agent_workflow_tool(
     handle: AgentWorkflowHandle,
 ) -> None:
     """Register the agent workflow tool with a late-bound manager handle."""
+    registry.register(cast(Tool, build_run_agent_workflow_tool(handle)))
     registry.register(cast(Tool, build_agent_workflow_tool(handle)))
+
+
+def register_agent_role_tool(
+    registry: ToolRegistry,
+    manager: AgentRoleManagerLike,
+) -> None:
+    """Register agent role list/create tools with a shared manager."""
+    for tool in build_agent_role_tools(manager):
+        registry.register(cast(Tool, tool))
+
+
+def register_task_progress_tool(
+    registry: ToolRegistry,
+    cfg: Config,
+) -> None:
+    """Register the current-session task progress tool."""
+    from tools.builtin.task_progress_tool import build_task_progress_tool_from_config
+
+    registry.register(cast(Tool, build_task_progress_tool_from_config(cfg)))
 
 
 __all__ = [
@@ -230,5 +259,7 @@ __all__ = [
     "build_shell_tool",
     "register_evolution_write_tool_if_enabled",
     "register_agent_workflow_tool",
+    "register_agent_role_tool",
     "register_schedule_tool_if_enabled",
+    "register_task_progress_tool",
 ]

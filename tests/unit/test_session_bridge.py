@@ -25,8 +25,8 @@ from commands.models import CommandResult
 from core.errors import ProviderError
 from core.message import Message
 from core.result import Result
-from host.base import HostAdapter
-from host.session_bridge import SessionBridge
+from hosts.shared.base import HostAdapter
+from hosts.shared.session_bridge import SessionBridge
 
 
 class _StubAdapter(HostAdapter):
@@ -71,6 +71,7 @@ class _StubRuntime:
         self._factory = result_factory or (lambda sid, user_input: _ok_result(sid))
         self._run_error = run_error
         self.calls: list[tuple[str, str]] = []
+        self.continue_calls: list[tuple[str, str | None]] = []
 
     async def run(
         self,
@@ -86,6 +87,15 @@ class _StubRuntime:
             self._run_error = None
             raise err
         return self._factory(session_id, user_input)
+
+    async def continue_from_last_user_message(
+        self,
+        *,
+        session_id: str,
+        reasoning_effort: str | None = None,
+    ) -> Result:
+        self.continue_calls.append((session_id, reasoning_effort))
+        return self._factory(session_id, "")
 
 
 def _ok_result(sid: str | None, content: str = "hi", **extra: Any) -> Result:
@@ -113,11 +123,12 @@ class _StubCommandService:
         self,
         raw_input: str,
         *,
-        context: Any,
+        execution_context: Any,
         attachments: list[dict[str, Any]] | None = None,
     ) -> CommandResult:
+        exec_ctx = execution_context
         self.calls.append(raw_input)
-        assert context.session_id == "sid-1"
+        assert exec_ctx.session_id == "sid-1"
         return self._result
 
 
@@ -185,6 +196,18 @@ async def test_run_once_writes_usage_line():
     b = _bridge(rt, ad)
     await b.run_once("hello")
     assert any("[tokens ↑10 ↓20 =30]" in out for out in ad.outputs)
+
+
+@pytest.mark.asyncio
+async def test_continue_from_last_user_message_delegates_and_writes_final_content():
+    rt, ad = _StubRuntime(), _StubAdapter()
+    b = _bridge(rt, ad)
+
+    result = await b.continue_from_last_user_message(reasoning_effort="high")
+
+    assert result.status == "completed"
+    assert rt.continue_calls == [("sid-1", "high")]
+    assert "hi" in ad.outputs
 
 
 @pytest.mark.asyncio

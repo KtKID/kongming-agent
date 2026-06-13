@@ -63,7 +63,7 @@ export function normalizedMessageToEvents(
           ...base,
           kind: "tool_call_started",
           toolCallId: msg.toolId,
-          payload: { toolName: msg.toolName, arguments: msg.toolInput },
+          payload: { pending: false, toolName: msg.toolName, arguments: msg.toolInput },
         },
       ];
     case "tool_result":
@@ -85,8 +85,28 @@ export function normalizedMessageToEvents(
       ];
     case "error":
       return [{ ...base, kind: "error", payload: { message: msg.error } }];
-    // session_created / stream_status / stream_delta / permission_request：
-    // 骨架暂不进时间线（session 绑定与审批链路本 task 不收编）。TODO #6。
+    case "stream_status":
+      if (msg.phase !== "tool_calling" || !msg.toolId) return [];
+      return [
+        {
+          ...base,
+          kind: "tool_call_started",
+          toolCallId: msg.toolId,
+          payload: { pending: true },
+        },
+      ];
+    case "stream_delta":
+      if (msg.deltaType !== "input_json" || !msg.toolId) return [];
+      return [
+        {
+          ...base,
+          kind: "tool_call_delta",
+          toolCallId: msg.toolId,
+          payload: { partialInputDelta: String(msg.content ?? "") },
+        },
+      ];
+    // session_created / permission_request：
+    // session 绑定与审批链路由 provider/manager 边界处理。
     default:
       return [];
   }

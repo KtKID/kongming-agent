@@ -1,4 +1,4 @@
-"""unit：safety.chain v0.1.4 薄壳形态 + build_safety_chain 装配。
+"""unit：safety.approval.chain v0.1.4 薄壳形态 + build_safety_chain 装配。
 
 验证：
 
@@ -13,21 +13,24 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from config_loader.models import ApprovalConfig, Config, ModelConfig
 from core.contracts import ApprovalDecision, ApprovalRequest
-from safety.capability_policy import CapabilityPolicy, CapabilitySet
-from safety.chain import (
+from infrastructure.config import load_config
+from infrastructure.config.models import ApprovalConfig, Config, ModelConfig
+from safety.approval.chain import (
     SafetyChainError,
     SafetyGatedApproval,
     _decorate_stage_compat,
     build_safety_chain,
 )
-from safety.decision_engine import SafetyDecisionEngine
-from safety.grant_store import GrantStore
-from safety.permission_policy import PermissionPolicy
-from safety.types import ApprovalMetadataKeys, BoundaryKind, DecisionSource
+from safety.approval.decision_engine import SafetyDecisionEngine
+from safety.approval.types import ApprovalMetadataKeys, BoundaryKind, DecisionSource
+from safety.grants.store import GrantStore
+from safety.policies.capability import CapabilityPolicy, CapabilitySet
+from safety.policies.permission import PermissionPolicy
 
 
 class _FixedApproval:
@@ -68,6 +71,10 @@ def _cfg() -> Config:
     )
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_SETTING_YAML = _REPO_ROOT / "config" / "setting.yaml"
+
+
 # ---------------------------------------------------------------------------
 # build_safety_chain：函数签名向上游零变更
 # ---------------------------------------------------------------------------
@@ -102,6 +109,22 @@ async def test_build_safety_chain_smoke_decide_does_not_raise() -> None:
     chain = build_safety_chain(_cfg(), interactive_approval=underlying)
     decision = await chain.decide(_req(tool_name="read_file", path="/tmp/test.txt"))
     assert decision.outcome in {"approved", "rejected"}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("tool_name", ["list_agent_roles", "create_agent_role"])
+async def test_agent_role_tools_are_silent_allowed(tool_name: str) -> None:
+    """验证角色工具在仓库默认配置中静默放行，输入为 tool 名，输出 silent_allow。"""
+    underlying = _FixedApproval("rejected")
+    cfg = load_config(_SETTING_YAML, load_env_file=False)
+    assert tool_name in cfg.safety.allow_tools_silent
+    chain = build_safety_chain(cfg, interactive_approval=underlying)
+
+    decision = await chain.decide(_req(tool_name=tool_name))
+
+    assert decision.outcome == "approved"
+    assert decision.metadata[ApprovalMetadataKeys.DECISION_CLASS] == "silent_allow"
+    assert underlying.requests == []
 
 
 # ---------------------------------------------------------------------------
@@ -239,8 +262,8 @@ async def test_build_safety_chain_with_explicit_trace_emitter() -> None:
 @pytest.mark.unit
 def test_safety_decision_engine_directly_wired() -> None:
     """SafetyDecisionEngine 类可被直接构造并注入 SafetyGatedApproval。"""
-    from safety.boundary_resolver import BoundaryResolver
-    from safety.grant_store import GrantStore
+    from safety.boundaries.resolver import BoundaryResolver
+    from safety.grants.store import GrantStore
     from safety.guards.consent import ConsentResolver
     from safety.guards.hard_block import HardBlockGuard
     from safety.guards.trust import TrustResolver

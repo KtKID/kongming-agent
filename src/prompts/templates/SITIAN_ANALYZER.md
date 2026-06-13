@@ -86,7 +86,7 @@
 
 - 这是给 Claude 的指令草稿，**第二人称**（"请...""帮我..."）
 - 必须包含**具体动作**：要读哪个文件、要跑哪个命令、要查哪个模块
-- 好的示例："请打开 src/web/whiteboard_manager.py，定位 WebSocket 心跳处理函数，检查 session 超时清理逻辑，并补一条 e2e 测试覆盖 5 分钟空闲断连场景"
+- 好的示例："请打开 src/hosts/web/whiteboard/manager.py，定位 WebSocket 心跳处理函数，检查 session 超时清理逻辑，并补一条 e2e 测试覆盖 5 分钟空闲断连场景"
 - 坏的示例："请处理白板问题"
 
 ### projects 规则

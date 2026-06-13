@@ -15,7 +15,7 @@ CWD = "test-cwd"
 
 
 def _setup_fixture(claude_home: Path, fixture_name: str) -> None:
-    from web.claude_code.jsonl_history import encode_cwd
+    from hosts.web.integrations.claude_code.jsonl_history import encode_cwd
 
     encoded = encode_cwd(CWD)
     target_dir = claude_home / "projects" / encoded

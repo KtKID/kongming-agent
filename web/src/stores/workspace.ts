@@ -2,7 +2,9 @@ import { create } from "zustand";
 import { apiGet } from "@/lib/api";
 import type { WorkspaceContextDTO } from "@/protocol";
 
-export type WorkspaceTab = "chat" | "files" | "git" | "shell";
+export const WORKSPACE_TABS = ["chat", "files", "git", "shell", "whiteboard"] as const;
+
+export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 
 export interface WorkspaceFileOpenRequest {
   path: string;

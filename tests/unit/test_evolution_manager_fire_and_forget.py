@@ -13,7 +13,7 @@ from tests._helpers.mock_transcript_provider import MockTranscriptProvider
 
 
 def _cfg(tmp_path: Path) -> object:
-    from config_loader import load_config
+    from infrastructure.config import load_config
 
     cfg = load_config(None)
     return cfg.model_copy(

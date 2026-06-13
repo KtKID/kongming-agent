@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from context.skill_loader import load_skill_specs
 from evolution.models import EvolutionNutrient
 from evolution.skill_materializer import materialize_skill
+from prompting.skills.skill_loader import load_skill_specs
 
 
 def _nutrient(

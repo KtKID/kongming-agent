@@ -5,6 +5,7 @@ set -euo pipefail
 : "${MINIMAX_API_KEY:?MINIMAX_API_KEY is required}"
 : "${MINIMAX_API_URL:=https://api.minimaxi.com/anthropic}"
 : "${MINIMAX_MODEL:=MiniMax-M3}"
+: "${MINIMAX_MAX_TOKENS:=8192}"
 
 MAX_DIFF_CHARS=80000
 
@@ -54,9 +55,10 @@ PAYLOAD=$(jq -n \
   --arg model "$MINIMAX_MODEL" \
   --arg system "$SYSTEM_PROMPT" \
   --arg user "$USER_PROMPT" \
+  --argjson max_tokens "$MINIMAX_MAX_TOKENS" \
   '{
     model: $model,
-    max_tokens: 4096,
+    max_tokens: $max_tokens,
     system: $system,
     messages: [
       {role: "user", content: $user}
@@ -83,10 +85,25 @@ fi
 
 # ── 4. 解析并发评论 ──
 
-REVIEW=$(echo "$BODY" | jq -r '(.content[] | select(.type == "text") | .text) // .content[0].text // empty')
+REVIEW=$(echo "$BODY" | jq -r '[.content[]? | select(.type == "text") | .text] | join("\n\n")')
 
 if [ -z "$REVIEW" ]; then
-  echo "::error::API response has no content"
+  STOP_REASON=$(echo "$BODY" | jq -r '.stop_reason // "unknown"')
+  CONTENT_TYPES=$(echo "$BODY" | jq -r '[.content[]?.type] | unique | join(", ")')
+  COMMENT="## 🤖 LLM Code Review
+
+自动审查没有生成可发布的文本内容。
+
+- stop_reason: ${STOP_REASON}
+- content_types: ${CONTENT_TYPES:-none}
+
+请检查 MiniMax 响应预算或 thinking/text 输出配置。
+
+---
+<sub>Reviewed by MiniMax (${MINIMAX_MODEL}) · PR #${PR_NUMBER}</sub>"
+
+  gh pr comment "$PR_NUMBER" --body "$COMMENT"
+  echo "::error::API response has no text content"
   echo "$BODY"
   exit 1
 fi

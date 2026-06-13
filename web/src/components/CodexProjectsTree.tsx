@@ -13,7 +13,11 @@ import { AddProjectDialog } from "@/components/AddProjectDialog";
 import { ProjectSessionBrowser } from "@/components/ProjectSessionBrowser";
 import { SidebarSessionRow, type HoverAction } from "@/components/SidebarSessionRow";
 import { ThreadSourceIcon } from "@/components/ThreadSourceIcon";
+import { loadCachedPayload, saveCachedPayload } from "@/lib/sidebar-cache";
 import type { ImportClaudeSessionResponse } from "@/protocol";
+
+const CODEX_PROJECTS_CACHE_KEY = "kongming.sidebar.codex-projects";
+const CODEX_PROJECTS_CACHE_TTL_MS = 15_000;
 
 // ---------------------------------------------------------------------------
 // Types (保持原导出，LeftSidebar 依赖)
@@ -58,7 +62,10 @@ export function CodexProjectsTree({
   onSessionClick,
   onNewSession,
 }: CodexProjectsTreeProps): JSX.Element {
-  const [projects, setProjects] = useState<CodexProjectSummary[] | null>(null);
+  const cached = loadCachedPayload<CodexProjectSummary[]>(CODEX_PROJECTS_CACHE_KEY);
+  const [projects, setProjects] = useState<CodexProjectSummary[] | null>(
+    cached?.value ?? null,
+  );
   const [error, setError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -74,6 +81,7 @@ export function CodexProjectsTree({
     try {
       const data = await apiGet<CodexProjectSummary[]>("/api/codex/projects");
       setProjects(data);
+      saveCachedPayload(CODEX_PROJECTS_CACHE_KEY, data);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -157,7 +165,13 @@ export function CodexProjectsTree({
           noMatchText="没有匹配的 Codex 历史会话"
           refreshLabel="重新加载"
           defaultVisible={10}
-          externalRefreshKey={codexProjectsRefreshKey}
+          externalRefreshKey={
+            codexProjectsRefreshKey > 0 ||
+            !cached ||
+            Date.now() - cached.savedAt > CODEX_PROJECTS_CACHE_TTL_MS
+              ? codexProjectsRefreshKey || 1
+              : 0
+          }
         />
       </div>
     </div>
