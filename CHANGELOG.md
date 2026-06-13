@@ -100,7 +100,8 @@ CLI 审批管理器、CI gate、MiniMax M3 等 PR。
 
 ### Notes
 
-- v0.5 的公开 release tag 指向 #21 合并后的 `main`：`770d079a`。
+- v0.5 的功能主体来自 #21 合并提交 `770d079a`；release tag 当前指向
+  changelog 补齐提交。
 - #16 / #17 / #18 / #19 已由 #21 覆盖并关闭。
 - LLM PR review 对 #21 因 GitHub diff 文件数超过 300 个返回 `PullRequest.diff too_large`，
   未执行实际代码审查；CI 结果为主要自动验证依据。
