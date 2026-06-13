@@ -47,6 +47,37 @@ class _FakeWriter:
         self.sent.append(msg)
 
 
+class _FakeDecision:
+    auto_eligible = True
+    blocked_by_rule: str | None = None
+    timeout_ms = 1
+    rule_evaluation: dict[str, Any] = {"matched": None, "all_rules": ["fake"]}
+
+
+class _FakePolicy:
+    def classify(
+        self,
+        *,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        cwd: str,
+        is_elevated: bool,
+    ) -> _FakeDecision:
+        return _FakeDecision()
+
+
+class _FakeAudit:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self.decisions: list[dict[str, Any]] = []
+
+    def log_request(self, **kwargs: Any) -> None:
+        self.requests.append(kwargs)
+
+    def log_decision(self, **kwargs: Any) -> None:
+        self.decisions.append(kwargs)
+
+
 def _make_ctx(tool_use_id: str = "toolu_test") -> ToolPermissionContext:
     return ToolPermissionContext(
         signal=None,
@@ -103,6 +134,22 @@ def _make_bridge(
 
 
 class TestPermissionRequestFields:
+    async def test_accepts_protocol_policy_and_audit(self) -> None:
+        """ApprovalBridge 只依赖 classify/log_* Protocol。"""
+        audit = _FakeAudit()
+        bridge, writer = _make_bridge(policy=_FakePolicy(), audit=audit)  # type: ignore[arg-type]
+
+        result = await bridge.can_use_tool(
+            "Bash",
+            {"command": "ls"},
+            _make_ctx("toolu_proto"),
+        )
+
+        assert isinstance(result, PermissionResultAllow)
+        assert writer.sent[0]["autoApproveAtMs"] is not None
+        assert audit.requests[0]["all_enabled_rules"] == ["fake"]
+        assert audit.decisions[0]["outcome"] == "allowed_auto_timeout"
+
     async def test_disabled_policy_no_auto_approve_at(
         self,
         policy: AutoApprovalPolicy,

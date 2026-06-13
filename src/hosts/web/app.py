@@ -481,11 +481,11 @@ def create_app(
     app.state.log_source_registry = LogSourceRegistry(cfg, home)
     app.state.log_read_service = LogReadService(app.state.log_source_registry)
 
-    # smart-approval-v1：进程级单例。具体 policy/config/audit 装配放在
-    # app_support helper，保持 app shell import 边界干净。
-    from hosts.web.app_support.auto_approval import configure_auto_approval
+    # smart-approval-v1：Web 只调用装配 Manager，真实 policy/config/rules 由
+    # safety.auto_approval.AutoApprovalManager 维护。
+    from hosts.web.app_support.auto_approval_manager import WebAutoApprovalManager
 
-    configure_auto_approval(app, home)
+    WebAutoApprovalManager.build(home).attach_to_app_state(app)
 
     # smart-approval-v2-inbox：全局审批 inbox broadcaster（per-process 单例）
     # 复用 /ws/thread-status 端点 fan-out approval.inbox.* 帧；

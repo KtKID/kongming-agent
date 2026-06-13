@@ -209,7 +209,6 @@ forbidden_modules =
 ; hosts.web.app_support.slash_candidates_loader 是装配期 loader（同 hosts.web.run），
 ; 仅在 lifespan startup 懒 import，允许触达 prompting / commands。
 ignore_imports =
-    hosts.web.app -> hosts.web.app_support.auto_approval
     hosts.web.app -> hosts.web.app_support.slash_candidates_loader
     hosts.web.app -> scheduler.runtime_factory
     hosts.web.app -> scheduler.store
@@ -217,9 +216,6 @@ ignore_imports =
     hosts.web.app -> scheduler.delivery
     hosts.web.app -> evolution.apply_executor
     hosts.web.app -> evolution.evolution_manager
-; hosts.web.approvals.auto 是 web approval 与 safety.auto_approval 的兼容门户，
-; 仅在 app shell contract 放行这条 re-export 边。
-    hosts.web.approvals.auto -> safety
     hosts.web.routers.threads -> evolution.apply_executor
     hosts.web.routers.threads -> evolution.models
     hosts.web.routers.threads -> evolution.state_store
@@ -261,6 +257,17 @@ ignore_imports =
     hosts.web.app -> hosts.web.uploads.storage
     hosts.web.app -> hosts.web.uploads.registry
     hosts.web.app -> hosts.web.uploads.validation
+; auto-approval-manager-boundary：app.py 只调用 Web 侧 Manager，真实
+; safety.auto_approval 装配由 app_support.auto_approval_manager 内部承担。
+; 这是唯一 Web app shell 自动审批装配边，禁止回退到
+; hosts.web.approvals.auto -> safety 包级放行。
+    hosts.web.app -> hosts.web.app_support.auto_approval_manager
+; cli-approval-manager-v0.1：hosts.web.approvals.auto 仅保留 Web WS/audit 边界和
+; compatibility exports，policy/config/rules 真源迁到 safety.auto_approval。
+; 放行这三条精确 re-export 边，app/routers 继续只通过 hosts.web.approvals.auto 入口触达。
+    hosts.web.approvals.auto -> safety.auto_approval.config_store
+    hosts.web.approvals.auto -> safety.auto_approval.policy
+    hosts.web.approvals.auto -> safety.auto_approval.rules
 ; manage-config-tab #6：hosts.web.app + dashboard/config/router 都需要触达 manager / writer
 ; / restart / schema 子模块。其中 writer 走 infrastructure.config.{loader,errors} 做
 ; pydantic 校验闭环——``infrastructure.config.errors -> core.errors`` 的传递链触发

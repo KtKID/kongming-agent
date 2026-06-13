@@ -52,10 +52,15 @@ def app_client(tmp_path: Path) -> Iterator[TestClient]:
 
 def test_app_state_has_auto_approval(app_client: TestClient) -> None:
     app = app_client.app
+    assert hasattr(app.state, "auto_approval_manager")
+    assert hasattr(app.state, "web_auto_approval_manager")
     assert hasattr(app.state, "auto_approval_policy")
     assert hasattr(app.state, "auto_approval_audit")
+    assert app.state.auto_approval_manager is not None
+    assert app.state.web_auto_approval_manager is not None
     assert app.state.auto_approval_policy is not None
     assert app.state.auto_approval_audit is not None
+    assert app.state.auto_approval_manager.policy is app.state.auto_approval_policy
 
 
 # ---------- toggle 路由 ----------

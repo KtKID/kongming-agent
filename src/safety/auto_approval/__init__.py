@@ -7,6 +7,7 @@ CLI 只能通过这里取得安全策略真源，避免 host 层之间互相 imp
 from __future__ import annotations
 
 from safety.auto_approval.config_store import ConfigStore, ProjectConfig
+from safety.auto_approval.manager import AutoApprovalManager
 from safety.auto_approval.policy import AutoApprovalPolicy, Decision
 from safety.auto_approval.rules import (
     RuleDefinition,
@@ -16,6 +17,7 @@ from safety.auto_approval.rules import (
 
 __all__ = [
     "AutoApprovalPolicy",
+    "AutoApprovalManager",
     "ConfigStore",
     "Decision",
     "ProjectConfig",

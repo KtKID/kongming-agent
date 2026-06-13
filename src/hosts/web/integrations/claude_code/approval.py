@@ -31,7 +31,7 @@ import asyncio
 import logging
 import re
 import time
-from typing import Any
+from typing import Any, Protocol
 
 from claude_agent_sdk.types import (
     PermissionResultAllow,
@@ -39,7 +39,6 @@ from claude_agent_sdk.types import (
     ToolPermissionContext,
 )
 
-from hosts.web.approvals.auto import AuditLogger, AutoApprovalPolicy
 from hosts.web.approvals.global_inbox import ApprovalInboxBroadcaster
 from hosts.web.integrations.claude_code.normalizer import ClaudeNormalizer
 from hosts.web.shared.session_manager import SessionManager
@@ -57,6 +56,60 @@ _BASH_PERMISSION_RE = re.compile(r"^Bash\((.+):\*\)$")
 _IS_ELEVATED_FOR_CLAUDE_CHANNEL: bool = False
 
 
+class _AutoApprovalDecision(Protocol):
+    """自动审批决策结果的最小结构。"""
+
+    auto_eligible: bool
+    blocked_by_rule: str | None
+    timeout_ms: int
+    rule_evaluation: dict[str, Any]
+
+
+class _AutoApprovalPolicy(Protocol):
+    """Claude approval bridge 依赖的 policy 最小接口。"""
+
+    def classify(
+        self,
+        *,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        cwd: str,
+        is_elevated: bool,
+    ) -> _AutoApprovalDecision: ...
+
+
+class _ApprovalAuditLogger(Protocol):
+    """Claude approval bridge 依赖的 audit logger 最小接口。"""
+
+    def log_request(
+        self,
+        *,
+        channel: str,
+        thread_id: str | None,
+        cwd: str,
+        tool_name: str,
+        arguments: Any,
+        matched_rule: str | None,
+        all_enabled_rules: list[str],
+        timeout_ms: int,
+    ) -> None: ...
+
+    def log_decision(
+        self,
+        *,
+        channel: str,
+        thread_id: str | None,
+        cwd: str,
+        tool_name: str,
+        arguments: Any,
+        matched_rule: str | None,
+        all_enabled_rules: list[str],
+        outcome: str,
+        decided_by: str | None,
+        timeout_ms: int,
+    ) -> None: ...
+
+
 class ApprovalBridge:
     """审批桥接器（per-connection）。
 
@@ -65,8 +118,8 @@ class ApprovalBridge:
 
     smart-approval-v1 新增依赖（**可选**，None 时走老行为）：
 
-    - ``policy``: ``AutoApprovalPolicy``——决策是否自动通过
-    - ``audit``: ``AuditLogger``——审计落盘
+    - ``policy``: 自动审批 policy Protocol——决策是否自动通过
+    - ``audit``: 审计 logger Protocol——审计落盘
     - ``cwd`` / ``thread_id``: 透传到 policy.classify + audit
     """
 
@@ -75,8 +128,8 @@ class ApprovalBridge:
         normalizer: ClaudeNormalizer,
         sessions: SessionManager,
         *,
-        policy: AutoApprovalPolicy | None = None,
-        audit: AuditLogger | None = None,
+        policy: _AutoApprovalPolicy | None = None,
+        audit: _ApprovalAuditLogger | None = None,
         cwd: str = "",
         thread_id: str | None = None,
         channel: str = "claude_code",
@@ -117,7 +170,7 @@ class ApprovalBridge:
         return list(self._allow_list)
 
     @property
-    def policy(self) -> AutoApprovalPolicy | None:
+    def policy(self) -> _AutoApprovalPolicy | None:
         """暴露 policy，单测 / 状态查询用。"""
         return self._policy
 
