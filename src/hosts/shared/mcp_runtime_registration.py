@@ -250,7 +250,7 @@ def _register_web_search_tool(
     """按配置注册通用 web_search，输入 registry/config，输出诊断。"""
     if not getattr(web_search_cfg, "enabled", False):
         return {"enabled": False, "reason": "disabled_by_config"}
-    if _WEB_SEARCH_TOOL_NAME in registry:
+    if _registry_has_tool(registry, _WEB_SEARCH_TOOL_NAME):
         return {
             "enabled": True,
             "reason": "already_registered",
@@ -292,7 +292,7 @@ def _resolve_search_tool(registry: ToolRegistry, web_search_cfg: Any) -> tuple[s
     for name in _candidate_search_tool_names(web_search_cfg):
         if name == _WEB_SEARCH_TOOL_NAME:
             continue
-        tool = registry.get(name)
+        tool = _registry_get_tool(registry, name)
         if tool is not None:
             return name, tool
     return None, None
@@ -340,6 +340,29 @@ def _server_is_ready(diagnostics: dict[str, Any], server_id: str) -> bool:
 def _mapping(value: object) -> dict[str, Any]:
     """把 mapping 转成 dict，输入任意值，输出 dict。"""
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _registry_has_tool(registry: object, name: str) -> bool:
+    """兼容不同 registry 形态检查工具名，输入 registry/name，输出是否存在。"""
+    try:
+        return name in registry  # type: ignore[operator]
+    except TypeError:
+        pass
+    names = getattr(registry, "names", None)
+    if callable(names):
+        return name in names()
+    return _registry_get_tool(registry, name) is not None
+
+
+def _registry_get_tool(registry: object, name: str) -> Any | None:
+    """兼容不同 registry 形态读取工具，输入 registry/name，输出 tool 或 None。"""
+    get = getattr(registry, "get", None)
+    if callable(get):
+        return get(name)
+    try:
+        return registry[name]  # type: ignore[index]
+    except (KeyError, TypeError, AttributeError):
+        return None
 
 
 __all__ = ["McpRuntimeRegistrationManager", "McpRuntimeRegistrationResult"]

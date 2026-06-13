@@ -70,6 +70,21 @@ tool:
     enabled: true
     read_max_bytes: 65536
 
+mcp:
+  # 桌面包默认不主动启动第三方 MCP server；用户或产品配置可按需开启。
+  enabled: false
+  servers: []
+
+web_search:
+  # 保持通用 web_search 能力开启；没有底层搜索工具时只产生可诊断的缺失状态。
+  enabled: true
+  provider_name: minimax_web_search
+  search_tool_name:
+  search_tool_names:
+    - web_search
+    - mcp__minimax__web_search
+  max_results: 5
+
 compactor:
   enabled: false
   max_messages: 50
@@ -167,6 +182,21 @@ web:
     rotate_daily: true
     include_http_body: false
     queue_size: 10000
+  deep_research_source_provider:
+    enabled: true
+    provider_name: web_user_tool_research_source
+    search_tool_name:
+    fetch_tool_name:
+    search_tool_names:
+      - deep_research_search
+      - web_search
+      - search_web
+      - browser_search
+    fetch_tool_names:
+      - deep_research_fetch
+      - web_fetch
+      - fetch_url
+      - browser_fetch
 
 workflow:
   enabled: true

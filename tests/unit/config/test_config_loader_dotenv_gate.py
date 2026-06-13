@@ -28,6 +28,7 @@ def test_kongming_skip_dotenv_ignores_project_env_file(
     (tmp_path / ".env").write_text("KONGMING_MODEL_NAME=from-dotenv\n", encoding="utf-8")
 
     monkeypatch.setenv("KONGMING_SKIP_DOTENV", "1")
+    monkeypatch.delenv("KONGMING_MODEL_NAME", raising=False)
     cfg = load_config(config_path)
 
     assert cfg.model.name == "from-yaml"
