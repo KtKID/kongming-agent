@@ -210,7 +210,7 @@ async def connect_provider(
 
     cfg: Config = request.app.state.config
     preset = _find_provider_preset(definition, cfg.web.llm_presets)
-    env_name = _connect_api_key_env(definition, preset)
+    env_name = definition.default_api_key_env
     config_manager = getattr(request.app.state, "config_manager", None)
     if config_manager is not None:
         config_manager.write_env_values({env_name: api_key})
@@ -219,6 +219,11 @@ async def connect_provider(
 
     if preset is None:
         preset = _default_preset_for_provider(definition, env_name)
+        if config_manager is not None:
+            config_manager.upsert_web_llm_preset(preset)
+        _attach_runtime_preset(cfg, preset)
+    elif preset.api_key_env != env_name:
+        preset = preset.model_copy(update={"api_key_env": env_name})
         if config_manager is not None:
             config_manager.upsert_web_llm_preset(preset)
         _attach_runtime_preset(cfg, preset)
@@ -302,11 +307,21 @@ async def list_connected_model_families(request: Request) -> list[ConnectedModel
             api_key = _resolve_api_key(definition, preset)
             if not api_key.value or api_key.env_name is None:
                 continue
-            preset = _default_preset_for_provider(definition, api_key.env_name)
+            _normalize_default_api_key_env(definition, api_key)
+            preset = _default_preset_for_provider(definition, definition.default_api_key_env)
             config_manager = getattr(request.app.state, "config_manager", None)
             if config_manager is not None:
                 config_manager.upsert_web_llm_preset(preset)
             _attach_runtime_preset(cfg, preset)
+        else:
+            api_key = _resolve_api_key(definition, preset)
+            _normalize_default_api_key_env(definition, api_key)
+            if preset.api_key_env == "KONGMING_MODEL_API_KEY":
+                preset = preset.model_copy(update={"api_key_env": definition.default_api_key_env})
+                config_manager = getattr(request.app.state, "config_manager", None)
+                if config_manager is not None:
+                    config_manager.upsert_web_llm_preset(preset)
+                _attach_runtime_preset(cfg, preset)
         connection = _provider_connection_from_env(definition, preset)
         if connection.status != "connected":
             continue
@@ -473,12 +488,23 @@ def _resolve_api_key(
 ) -> _ApiKeyResolution:
     """按服务商候选 env 顺序读取 API Key。"""
     for env_name in _api_key_env_candidates(definition, preset):
-        if not _generic_model_env_matches_provider(definition, env_name):
-            continue
         value = os.environ.get(env_name, "").strip()
         if value:
             return _ApiKeyResolution(env_name=env_name, value=value)
     return _ApiKeyResolution(env_name=None, value="")
+
+
+def _normalize_default_api_key_env(
+    definition: _ProviderDefinition,
+    api_key: _ApiKeyResolution,
+) -> None:
+    """把 fallback 命中的 key 映射到当前进程默认 env，供新 preset runtime 读取。"""
+    if (
+        api_key.env_name != definition.default_api_key_env
+        and api_key.value
+        and not os.environ.get(definition.default_api_key_env, "").strip()
+    ):
+        os.environ[definition.default_api_key_env] = api_key.value
 
 
 def _api_key_env_candidates(
@@ -490,7 +516,7 @@ def _api_key_env_candidates(
         definition.default_api_key_env,
         *definition.fallback_api_key_envs,
     ]
-    if preset is not None and preset.api_key_env:
+    if preset is not None and preset.api_key_env and preset.api_key_env != "KONGMING_MODEL_API_KEY":
         candidates.append(preset.api_key_env)
     result: list[str] = []
     for env_name in candidates:
@@ -499,65 +525,18 @@ def _api_key_env_candidates(
     return result
 
 
-def _connect_api_key_env(
-    definition: _ProviderDefinition,
-    preset: LLMPresetConfig | None,
-) -> str:
-    """返回保存连接时写入的 env 名。"""
-    if preset is not None and preset.api_key_env:
-        return preset.api_key_env
-    return definition.default_api_key_env
-
-
-def _generic_model_env_matches_provider(
-    definition: _ProviderDefinition,
-    env_name: str,
-) -> bool:
-    """避免通用主模型 key 被其他服务商误判为已连接。"""
-    if env_name != "KONGMING_MODEL_API_KEY":
-        return True
-
-    model_name = os.environ.get("KONGMING_MODEL_NAME", "").lower()
-    base_url = os.environ.get("KONGMING_MODEL_BASE_URL", "").lower()
-    if not model_name and not base_url:
-        return True
-
-    hints = (model_name, base_url)
-    provider_matches = any(
-        keyword in text
-        for text in hints
-        for keyword in (*definition.match_keywords, *definition.match_hosts)
-    )
-    if provider_matches:
-        return True
-
-    other_definitions = (
-        item for item in PROVIDER_DEFINITIONS if item.provider_id != definition.provider_id
-    )
-    return not any(
-        keyword in text
-        for item in other_definitions
-        for text in hints
-        for keyword in (*item.match_keywords, *item.match_hosts)
-    )
-
-
 def _missing_api_key_message(
     definition: _ProviderDefinition,
     preset: LLMPresetConfig | None,
 ) -> str:
-    """返回缺 key 或通用 key 被跳过时的提示。"""
-    if (
-        preset is not None
-        and preset.api_key_env == "KONGMING_MODEL_API_KEY"
-        and os.environ.get("KONGMING_MODEL_API_KEY", "").strip()
-        and not _generic_model_env_matches_provider(definition, "KONGMING_MODEL_API_KEY")
-    ):
-        return (
-            f"未找到 {definition.display_name} API Key；"
-            "当前 KONGMING_MODEL_API_KEY 指向其他默认模型。"
-        )
-    return f"未找到 {definition.display_name} API Key。"
+    """返回缺 key 提示。"""
+    env_names = [definition.default_api_key_env, *definition.fallback_api_key_envs]
+    if preset is not None and preset.api_key_env and preset.api_key_env != "KONGMING_MODEL_API_KEY":
+        env_names.append(preset.api_key_env)
+    unique_env_names = [
+        name for idx, name in enumerate(env_names) if name and name not in env_names[:idx]
+    ]
+    return f"未找到 {definition.display_name} API Key；请配置 {' / '.join(unique_env_names)}。"
 
 
 def _provider_definition(provider_id: str) -> _ProviderDefinition | None:
