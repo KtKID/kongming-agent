@@ -43,6 +43,38 @@ WEB_SOURCE_TEST_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("src/hosts/web/routers/threads.py", ("tests/unit/test_web_routers_threads.py",)),
 )
 
+# 这些源码路径已有精确入口测试，命中后跳过模块级兜底展开，保持 push gate 快速。
+NARROW_SOURCE_TEST_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "src/hosts/web/app.py",
+        (
+            "tests/unit/test_web_app_lifespan.py",
+            "tests/unit/test_web_run_factory.py",
+            "tests/unit/web/test_app_lock.py",
+            "tests/unit/web/test_web_lifespan_bootstrap.py",
+        ),
+    ),
+    (
+        "src/hosts/web/app_support/auto_approval_manager.py",
+        ("tests/unit/web/app_support/test_auto_approval_manager.py",),
+    ),
+    (
+        "src/hosts/web/integrations/claude_code/approval.py",
+        (
+            "tests/unit/web/integrations/claude_code/test_approval.py",
+            "tests/unit/web/integrations/claude_code/test_approval_smart_v1.py",
+            "tests/unit/web/integrations/claude_code/test_route_smart_approval.py",
+        ),
+    ),
+    (
+        "src/safety/auto_approval/",
+        (
+            "tests/unit/safety/test_approval_rules.py",
+            "tests/unit/safety/test_auto_approval_manager.py",
+        ),
+    ),
+)
+
 SENSITIVE_ENV_NAMES = {
     "ANTHROPIC_API_KEY",
     "AWS_ACCESS_KEY_ID",
@@ -321,6 +353,14 @@ def _source_related_tests(repo: Path, source_path: str) -> set[str]:
         if (repo / script_test).is_file():
             selected.add(script_test)
     if source_path.startswith("src/"):
+        matched_narrow_hint = False
+        for path, mapped_hints in NARROW_SOURCE_TEST_HINTS:
+            if source_path == path or source_path.startswith(path):
+                matched_narrow_hint = True
+                for hint in mapped_hints:
+                    selected.update(_select_from_hint(repo, hint))
+        if matched_narrow_hint:
+            return selected
         for path, mapped_hints in WEB_SOURCE_TEST_HINTS:
             if source_path == path:
                 for hint in mapped_hints:
