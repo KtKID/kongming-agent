@@ -9,17 +9,18 @@
 
 export const fontFamily = {
   sans: [
+    "Avenir Next",
+    "SF Pro Display",
     "-apple-system",
     "BlinkMacSystemFont",
-    "SF Pro Display",
-    "Segoe UI",
     "PingFang SC",
     "Helvetica Neue",
     "sans-serif",
   ],
   mono: [
-    "SF Mono",
     "JetBrains Mono",
+    "SF Mono",
+    "Berkeley Mono",
     "ui-monospace",
     "Menlo",
     "monospace",
@@ -52,10 +53,11 @@ export const duration = {
 
 /** 阴影层级（玻璃质感 + 微下沉） */
 export const shadow = {
-  sm: "0 1px 2px 0 hsl(0 0% 0% / 0.04)",
-  md: "0 4px 12px -2px hsl(0 0% 0% / 0.08)",
-  lg: "0 12px 32px -8px hsl(0 0% 0% / 0.12)",
-  glass: "0 8px 32px -4px hsl(0 0% 0% / 0.10), inset 0 1px 0 0 hsl(0 0% 100% / 0.06)",
+  sm: "0 8px 20px -16px hsl(236 35% 2% / 0.85)",
+  md: "0 18px 42px -24px hsl(236 35% 2% / 0.72)",
+  lg: "0 32px 80px -38px hsl(236 35% 2% / 0.82)",
+  glass:
+    "0 28px 72px -40px hsl(236 35% 2% / 0.9), inset 0 1px 0 0 hsl(0 0% 100% / 0.08), inset 0 0 0 1px hsl(257 92% 72% / 0.06)",
 } as const;
 
 /** 字体尺寸（与 line-height 配对） */
@@ -74,6 +76,6 @@ export const borderRadius = {
   sm: "0.25rem",
   DEFAULT: "0.5rem",
   md: "0.625rem", // shadcn new-york 默认
-  lg: "0.875rem",
-  xl: "1.125rem",
+  lg: "1rem",
+  xl: "1.25rem",
 } as const;

@@ -117,6 +117,7 @@ class Runner:
         run_id: str | None = None,
         enabled_tools: Sequence[Tool] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        lifecycle_hooks: Sequence[LifecycleHook] | None = None,
     ) -> Result:
         """执行一次完整 run。
 
@@ -162,6 +163,10 @@ class Runner:
 
         state = RunState(run_id=run_id, session_id=session.session_id)
         state.mark_running()
+
+        lifecycle_hook_count = len(self._lifecycle_hooks)
+        if lifecycle_hooks:
+            self._lifecycle_hooks.extend(lifecycle_hooks)
 
         try:
             resolved_tools = self._resolve_tools(agent_spec, tools, enabled_tools)
@@ -285,6 +290,8 @@ class Runner:
                 payload={"status": result.status, "turn_count": result.turn_count},
             )
         )
+        if lifecycle_hooks:
+            del self._lifecycle_hooks[lifecycle_hook_count:]
         return result
 
     # ------------------------------------------------------------------

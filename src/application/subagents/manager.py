@@ -8,6 +8,7 @@ selected by the caller.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ from application.subagents.permissions import (
 from core.agent_spec import AgentSpec
 from core.contracts import Tool
 from core.result import Result
+from infrastructure.config.paths import resolve_kongming_path
 
 if TYPE_CHECKING:
     from runtime_assembly.native_runtime import NativeRuntime
@@ -58,6 +60,7 @@ class SubAgentRun:
     content: str
     error_message: str | None
     turn_count: int
+    usage: dict[str, int] = field(default_factory=dict)
 
 
 class SubAgentManager:
@@ -128,6 +131,8 @@ class SubAgentManager:
                 "你是 kongming 子 agent。只处理分派给你的任务。"
                 "只使用本次派发的任务文本和必要上下文。"
                 "如果任务给出工作目录，文件写入必须位于该目录内。"
+                "任务要求输出结论或报告时，直接作为最终回复返回。"
+                "只有任务明确要求写文件且提供写入工具时才写文件。"
                 "输出包含：结论、关键依据、风险或未完成项。"
             ),
             default_model=self._runtime.agent_spec.default_model,
@@ -222,7 +227,7 @@ class SubAgentManager:
         )
 
     def _child_session_log_path(self, session_id: str) -> Path:
-        root = Path(self._runtime.config.session.file_store_path)
+        root = resolve_kongming_path(self._runtime.config.session.file_store_path)
         return root / session_id / f"{session_id}.jsonl"
 
     def _to_run(self, *, task: SubAgentTask, session_id: str, result: Result) -> SubAgentRun:
@@ -238,6 +243,7 @@ class SubAgentManager:
             content=content,
             error_message=error_message,
             turn_count=result.turn_count,
+            usage=_usage_from_result_metadata(result.metadata),
         )
 
     def _build_child_session_id(
@@ -280,6 +286,17 @@ def _task_max_turns(task: SubAgentTask) -> int:
     if isinstance(raw, int) and raw > 0:
         return raw
     return 3
+
+
+def _usage_from_result_metadata(metadata: dict[str, object]) -> dict[str, int]:
+    raw = metadata.get("usage")
+    if not isinstance(raw, Mapping):
+        return {}
+    return {
+        str(key): value
+        for key, value in raw.items()
+        if isinstance(key, str) and isinstance(value, int) and not isinstance(value, bool)
+    }
 
 
 def _now_iso() -> str:

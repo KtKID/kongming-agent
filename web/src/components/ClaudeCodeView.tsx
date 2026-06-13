@@ -1,23 +1,34 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { ChatMessageItem, MessageViewport } from "@/components/MessageList";
 import { Composer } from "@/components/Composer";
-import {
-  ClaudeApprovalDialog,
-  type ClaudeApprovalRequest,
-} from "@/components/ClaudeApprovalDialog";
 import { useClaudeCodeWS } from "@/hooks/useClaudeCodeWS";
+import { ChatManager } from "@/chat/ChatManager";
+import { makeNetworkHandle, getTimelineStore } from "@/chat/runtimeWiring";
+import { useThreadRunning } from "@/hooks/useThreadRunning";
 import { apiGet } from "@/lib/api";
-import type { NormalizedMessage, ThreadMetadataDTO } from "@/protocol";
+import type {
+  NormalizedMessage,
+  SystemNoticeFrame,
+  ThreadMetadataDTO,
+  ClaudeCodeC2SFrame,
+} from "@/protocol";
 import type { ChatItem as GenericChatItem } from "@/stores/chat";
+import { useEvolutionStore } from "@/stores/evolution";
+import {
+  AutoApprovalToggle,
+  type AutoApprovalStateFrame,
+  useAutoApprovalStore,
+} from "@/features/auto-approval";
+import { useItemsWithFileSummary } from "@/hooks/useItemsWithFileSummary";
+import { ModifiedFilesSummary } from "@/components/ModifiedFilesSummary";
 import { useThreadsStore } from "@/stores/threads";
 
 type ClaudeMetaItem =
   | { kind: "status"; content?: unknown; id: string }
   | {
       kind: "complete";
-      tokenBudget?: Record<string, unknown>;
       aborted?: boolean;
       id: string;
     };
@@ -98,7 +109,7 @@ function convertHistoryToChatItems(
   const nextTurn = () => n;
 
   for (const msg of messages) {
-    switch (msg.kind) {
+    switch (msg.frame_type) {
       case "text": {
         const text = stringifyContent(msg.content);
         if (!text.trim()) break;
@@ -198,11 +209,12 @@ interface Props {
 
 export function ClaudeCodeView({ threadId, thread }: Props) {
   const navigate = useNavigate();
+  const [resumeSessionId, setResumeSessionId] = useState<string | null>(
+    thread?.claude_thread_id?.trim() || null,
+  );
   const { socket, state } = useClaudeCodeWS(threadId);
   const [items, setItems] = useState<ClaudeRenderItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [pendingApproval, setPendingApproval] =
-    useState<ClaudeApprovalRequest | null>(null);
   const streamIdRef = useRef<string | null>(null);
   const hadStreamThisTurnRef = useRef(false);
   const turnSeqRef = useRef(0);
@@ -210,13 +222,94 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
   const [streamPhase, setStreamPhase] = useState<"idle" | "responding" | "thinking" | "tool_calling">("idle");
   const [streamToolName, setStreamToolName] = useState<string | undefined>();
 
+  // fix-claude-stop-button-stuck：判断"对话是否已结束"的唯一语义真源。
+  // 规则：从 items 末尾倒查，先遇 complete → 已结束（true）；
+  // 先遇 user → 新一轮已开始（false）；都没遇到 → 从未结束（false）。
+  // 服务于：
+  //   1) Composer Stop→Send 切换（isRunning 出态严判依据）
+  //   2) "对话结束" 气泡的判断同义化（避免不同 UI 用不同函数）
+  // complete 帧是后端唯一可信终止信号（参见 stream_end vs complete 不对称问题）。
+  const isConversationEnded = useMemo(() => {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (!isGenericChatItem(it) && it.kind === "complete") return true;
+      if (isGenericChatItem(it) && it.kind === "user") return false;
+    }
+    return false;
+  }, [items]);
+
+  // chat-running-state-unify #3：入态信号切到三频道共享 useThreadRunning
+  // （后端 thread-status phase 单一真源），不再依赖前端推导的 streamPhase / items.streaming。
+  // 保留 fix-claude-stop-button-stuck 的「出态严」兜底——isConversationEnded（complete
+  // 帧到达即结束）无条件压 false，避免后端 phase 万一漏发 complete 导致按钮卡住。
+  // streamPhase 状态本身保留（被 stream_status / stream_end 等 listener 维护，
+  // 服务于 UI phase 文案 + 工具名展示），仅 isRunning 推导改用 hook。
+  const threadRunning = useThreadRunning(threadId);
+  const isRunning = useMemo(
+    () => threadRunning && !isConversationEnded,
+    [threadRunning, isConversationEnded],
+  );
+
+  // interrupt-claude-channel-v0.1 #4：abort-session 帧需要的 sessionId。
+  // 优先用 thread.claude_thread_id（SDK session_created 后绑定的真值）；
+  // 首次发送前为空，退到 threadId 做兜底（即使后端拿到的是占位，至少能让前端
+  // gate 早 return 不发空帧）。
+  const sessionIdForAbort = useMemo(() => {
+    const liveSid = resumeSessionId?.trim();
+    if (liveSid) return liveSid;
+    const realSid = thread?.claude_thread_id?.trim();
+    if (realSid) return realSid;
+    return threadId ?? "";
+  }, [resumeSessionId, thread?.claude_thread_id, threadId]);
+
+  // message-runtime-v0.1 #5：claude 发送走统一 ChatManager。保留下方 pending 创建
+  // 时序（createThread + navigate + initialMessage buffer），仅把 claude-command 帧
+  // 的组装收口到 ClaudeChatProvider，视图不再手写 wire 帧。
+  // 提前到 onInterrupt 之前——#9 把 onInterrupt 改成走 chatManager.interrupt。
+  const chatManager = useMemo(() => {
+    if (!socket) return null;
+    return new ChatManager({
+      resolveHandle: (_kind, tid) =>
+        makeNetworkHandle(tid, (frame) =>
+          socket.send(frame as ClaudeCodeC2SFrame),
+        ),
+      ensureThread: async (req) => req.provider.threadId,
+      timelineFor: (tid) => getTimelineStore(tid),
+    });
+  }, [socket]);
+
+  // interrupt-claude-channel-v0.1 #5：onInterrupt 含两道幂等防御。
+  // 1) isRunning=false 早 return（gate）—— 没在 running 不发帧；
+  // 2) 300ms 节流 —— 误连点 / 双击只发一次 abort-session。
+  // 节流时间记 ref，避免 deps 变化导致 useCallback 重建。
+  // message-runtime #9：发帧改走 chatManager.interrupt 统一接口
+  // （三频道一致），不再视图层直接 socket.send。UX 决策（gate / 节流 / sessionId
+  // 计算）仍留视图层，发送路由下沉到 ChatManager → ClaudeChatProvider.interrupt。
+  const lastInterruptAtRef = useRef<number>(0);
+  const onInterrupt = useCallback(() => {
+    if (!isRunning) return;
+    const now = Date.now();
+    if (now - lastInterruptAtRef.current < 300) return;
+    lastInterruptAtRef.current = now;
+    if (!sessionIdForAbort) return;
+    if (!threadId || !chatManager) return;
+    void chatManager
+      .interrupt({ threadId, provider: "claude", sessionId: sessionIdForAbort })
+      .catch((err) => {
+        console.error("[ClaudeCodeView] interrupt failed", err);
+      });
+  }, [isRunning, sessionIdForAbort, threadId, chatManager]);
+
+  // --- evolution store register/unregister ---
+  useEffect(() => {
+    if (!threadId) return;
+    useEvolutionStore.getState().register(threadId);
+    return () => useEvolutionStore.getState().unregister(threadId);
+  }, [threadId]);
+
   // --- store selectors (#6 #7) ---
-  const pendingNewClaudeSession = useThreadsStore(
-    (s) => s.pendingNewClaudeSession,
-  );
-  const setPendingNewClaudeSession = useThreadsStore(
-    (s) => s.setPendingNewClaudeSession,
-  );
+  const pendingNewSession = useThreadsStore((s) => s.pendingNewSession);
+  const setPendingNewSession = useThreadsStore((s) => s.setPendingNewSession);
   const initialMessage = useThreadsStore((s) => s.initialMessage);
   const setInitialMessage = useThreadsStore((s) => s.setInitialMessage);
   const createThread = useThreadsStore((s) => s.createThread);
@@ -225,7 +318,12 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
     (s) => s.triggerClaudeProjectsRefresh,
   );
 
-  const isPending = !threadId;
+  const isPending =
+    !threadId && pendingNewSession?.backendKind === "claude_code";
+
+  useEffect(() => {
+    setResumeSessionId(thread?.claude_thread_id?.trim() || null);
+  }, [threadId, thread?.claude_thread_id]);
 
   const nextTurn = () => {
     turnSeqRef.current += 1;
@@ -234,7 +332,6 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
 
   useEffect(() => {
     setItems([]);
-    setPendingApproval(null);
     setHistoryLoading(false);
     streamIdRef.current = null;
     hadStreamThisTurnRef.current = false;
@@ -282,12 +379,53 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
   useEffect(() => {
     if (!socket || !threadId) return;
     const off = socket.on((frame) => {
-      if ("type" in frame && frame.type === "session-status") {
+      if ("frame_type" in frame && frame.frame_type === "session-status") {
+        if (!frame.isProcessing) {
+          setItems((prev) =>
+            prev.map((item) =>
+              isGenericChatItem(item) &&
+              item.id === streamIdRef.current &&
+              item.kind === "assistant"
+                ? { ...item, streaming: false }
+                : item,
+            ),
+          );
+          streamIdRef.current = null;
+          hadStreamThisTurnRef.current = false;
+          setStreamPhase("idle");
+          setStreamToolName(undefined);
+        }
+        return;
+      }
+
+      // smart-approval-v1: auto_approval_state 帧不是 NormalizedMessage，先拦
+      if (
+        "frame_type" in frame &&
+        (frame as { frame_type: string }).frame_type === "auto_approval_state"
+      ) {
+        useAutoApprovalStore
+          .getState()
+          .applyStateFrame(frame as unknown as AutoApprovalStateFrame);
+        return;
+      }
+
+      // system.notice 帧不是 NormalizedMessage，在 cast 前拦截
+      // 注意：不侵入 claude 频道的 items 对话流，不进入 claude SDK
+      if (
+        "frame_type" in frame &&
+        (frame as { frame_type: string }).frame_type === "system.notice"
+      ) {
+        const noticeFrame = frame as unknown as SystemNoticeFrame;
+        // evolution store 更新状态 + 触发 toast 通知（独立于对话流）
+        useEvolutionStore.getState().handleFrame(threadId, noticeFrame);
         return;
       }
 
       const msg = frame as NormalizedMessage;
-      switch (msg.kind) {
+      if (typeof msg.sessionId === "string" && msg.sessionId.trim()) {
+        setResumeSessionId(msg.sessionId.trim());
+      }
+      switch (msg.frame_type) {
         case "text": {
           if (pendingProjectsRefreshRef.current) {
             pendingProjectsRefreshRef.current = false;
@@ -347,6 +485,42 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
             triggerClaudeProjectsRefresh();
           }
           const delta = stringifyContent(msg.content);
+
+          // input_json delta: 累积到最近的 pending ToolItem，不污染 assistant.content
+          if (msg.deltaType === "input_json") {
+            const targetToolId =
+              typeof msg.toolId === "string" ? msg.toolId : null;
+            setItems((prev) => {
+              let matchedIdx = -1;
+              for (let i = prev.length - 1; i >= 0; i--) {
+                const item = prev[i];
+                if (
+                  isGenericChatItem(item) &&
+                  item.kind === "tool" &&
+                  item.pending === true
+                ) {
+                  if (targetToolId == null || item.callId === targetToolId) {
+                    matchedIdx = i;
+                    break;
+                  }
+                }
+              }
+              if (matchedIdx < 0) return prev;
+              return prev.map((item, idx) =>
+                idx === matchedIdx &&
+                isGenericChatItem(item) &&
+                item.kind === "tool"
+                  ? {
+                      ...item,
+                      partialInput: (item.partialInput ?? "") + delta,
+                    }
+                  : item,
+              );
+            });
+            return;
+          }
+
+          // text / thinking delta: 累积到 assistant ChatItem
           hadStreamThisTurnRef.current = true;
           setItems((prev) => {
             const sid = streamIdRef.current;
@@ -389,6 +563,11 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
             ),
           );
           streamIdRef.current = null;
+          // fix-claude-stop-button-stuck：对称清理 streamPhase / streamToolName。
+          // 跟 complete 分支保持一致，避免单条流结束后状态不一致（仅用于内部状态一致性，
+          // isRunning 的 stop→send 切换不依赖这里——见 isConversationEnded 注释）。
+          setStreamPhase("idle");
+          setStreamToolName(undefined);
           return;
         }
         case "stream_status": {
@@ -396,25 +575,81 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
           if (phase) {
             setStreamPhase(phase);
             setStreamToolName(phase === "tool_calling" ? (msg.toolName ?? undefined) : undefined);
+            // tool_calling block 起始：建一张 pending ToolCard 占位，
+            // 后续 input_json delta 累积 partialInput，tool_use 帧到达时原地 resolve
+            if (phase === "tool_calling") {
+              const toolId =
+                typeof msg.toolId === "string" ? msg.toolId : null;
+              const toolName =
+                typeof msg.toolName === "string" && msg.toolName
+                  ? msg.toolName
+                  : "(未知工具)";
+              setItems((prev) => [
+                ...prev,
+                {
+                  id: newId(),
+                  kind: "tool",
+                  threadId,
+                  turn: nextTurn(),
+                  runId: "claude-live",
+                  toolName,
+                  callId: toolId ?? newId(),
+                  arguments: {},
+                  ok: null,
+                  partialInput: "",
+                  pending: true,
+                  timestampMs: Date.now(),
+                },
+              ]);
+            }
           }
           return;
         }
         case "tool_use": {
-          setItems((prev) => [
-            ...prev,
-            {
-              id: newId(),
-              kind: "tool",
-              threadId,
-              turn: nextTurn(),
-              runId: "claude-live",
-              toolName: msg.toolName ?? "(未知工具)",
-              callId: msg.toolId ?? newId(),
-              arguments: asRecord(msg.toolInput ?? msg.input),
-              ok: null,
-              timestampMs: Date.now(),
-            },
-          ]);
+          const toolId = typeof msg.toolId === "string" ? msg.toolId : null;
+          const args = asRecord(msg.toolInput ?? msg.input);
+          setItems((prev) => {
+            // 优先按 callId===toolId 匹配 pending ToolItem 原地 resolve
+            if (toolId) {
+              const idx = prev.findIndex(
+                (item) =>
+                  isGenericChatItem(item) &&
+                  item.kind === "tool" &&
+                  item.pending === true &&
+                  item.callId === toolId,
+              );
+              if (idx >= 0) {
+                return prev.map((item, i) =>
+                  i === idx && isGenericChatItem(item) && item.kind === "tool"
+                    ? {
+                        ...item,
+                        toolName: msg.toolName ?? item.toolName,
+                        arguments: args,
+                        partialInput: undefined,
+                        pending: false,
+                      }
+                    : item,
+                );
+              }
+            }
+            // 兜底：没有匹配的 pending（如非流式分支或 toolId 缺失），
+            // 走原有创建新 ToolItem 逻辑
+            return [
+              ...prev,
+              {
+                id: newId(),
+                kind: "tool",
+                threadId,
+                turn: nextTurn(),
+                runId: "claude-live",
+                toolName: msg.toolName ?? "(未知工具)",
+                callId: toolId ?? newId(),
+                arguments: args,
+                ok: null,
+                timestampMs: Date.now(),
+              },
+            ];
+          });
           streamIdRef.current = null;
           return;
         }
@@ -477,7 +712,6 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
             ),
             {
               kind: "complete",
-              tokenBudget: msg.tokenBudget,
               aborted: msg.aborted,
               id: newId(),
             },
@@ -505,27 +739,10 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
           setStreamToolName(undefined);
           return;
         }
-        case "permission_request": {
-          if (typeof msg.requestId === "string" && typeof msg.toolName === "string") {
-            setPendingApproval({
-              requestId: msg.requestId,
-              toolName: msg.toolName,
-              toolInput: msg.toolInput ?? msg.input,
-            });
-          }
-          return;
-        }
-        case "permission_cancelled": {
-          if (
-            pendingApproval &&
-            typeof msg.requestId === "string" &&
-            pendingApproval.requestId === msg.requestId
-          ) {
-            setPendingApproval(null);
-          }
-          return;
-        }
         case "session_created": {
+          if (typeof msg.newSessionId === "string" && msg.newSessionId.trim()) {
+            setResumeSessionId(msg.newSessionId.trim());
+          }
           pendingProjectsRefreshRef.current = true;
           return;
         }
@@ -536,7 +753,7 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
       }
     });
     return off;
-  }, [pendingApproval, socket, threadId]);
+  }, [socket, threadId, triggerClaudeProjectsRefresh]);
 
   // --- #7: initialMessage buffer — auto-send after WS open ---
   useEffect(() => {
@@ -553,19 +770,28 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
         timestampMs: Date.now(),
       },
     ]);
-    socket.send({
-      type: "claude-command",
-      command: text,
-      options: {},
+    void chatManager?.sendMessage({
+      common: { text },
+      provider: { provider: "claude", threadId },
     });
     fetchThreads();
-  }, [threadId, socket, state, initialMessage, setInitialMessage, fetchThreads]);
+  }, [threadId, socket, state, initialMessage, setInitialMessage, fetchThreads, chatManager]);
 
   // --- #6: onSend with pending-mode create-thread flow ---
-  const onSend = async (text: string) => {
+  // claude-code-channel-image-paste: 加 attachments 参数 — 把 Composer
+  // 粘贴的图片 ref 透传给 WS claude-command 帧，后端 _attachment_prefix 拼
+  // ``@<abs_path>`` 进 prompt 头部走 SDK FileReadTool 自动读图。
+  // message-runtime #8: reasoningEffort 三频道贯通 — 不再丢 Composer 的 reasoning。
+  //   ClaudeChatProvider 把 reasoningEffort 透传到 wire 帧 options.reasoningEffort，
+  //   后端目前不消费（待后端 task），但前端契约层不再断链。
+  const onSend = async (
+    text: string,
+    attachments?: import("@/protocol").UserInputAttachment[],
+    reasoningEffort?: import("@/chat/types").ReasoningEffort | null,
+  ) => {
     // #5/#6: pending mode — create thread first
     if (isPending) {
-      const pending = pendingNewClaudeSession;
+      const pending = pendingNewSession;
       if (!pending) return;
       try {
         const created = await createThread(
@@ -574,7 +800,7 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
           "claude_code",
           pending.cwd,
         );
-        setPendingNewClaudeSession(null);
+        setPendingNewSession(null);
         setInitialMessage(text);
         navigate(`/chat/${created.id}`, { replace: true });
       } catch (err: unknown) {
@@ -587,6 +813,7 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
     }
 
     // normal mode — send via WS
+    if (!threadId) return;
     if (!socket || state !== "open") return;
     setItems((prev) => [
       ...prev,
@@ -596,32 +823,20 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
         threadId,
         content: text,
         timestampMs: Date.now(),
+        // 把刚发的图片附件塞进 user item，让 ChatMessageItem 渲染缩略图。
+        // 不传 attachments → ChatMessageItem 走纯文本路径（前置 task 已兼容）。
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
       },
     ]);
-    socket.send({
-      type: "claude-command",
-      command: text,
-      options: {},
+    void chatManager?.sendMessage({
+      common: { text, attachments, reasoningEffort },
+      provider: { provider: "claude", threadId },
     });
   };
 
-  const onApprovalResolve = (resp: {
-    requestId: string;
-    allow: boolean;
-    message?: string;
-    rememberEntry?: string;
-  }) => {
-    if (socket && state === "open") {
-      socket.send({
-        type: "claude-permission-response",
-        requestId: resp.requestId,
-        allow: resp.allow,
-        ...(resp.message ? { message: resp.message } : {}),
-        ...(resp.rememberEntry ? { rememberEntry: resp.rememberEntry } : {}),
-      });
-    }
-    setPendingApproval(null);
-  };
+  // 按 user 消息分界插入文件汇总（通用 hook，三频道共用）
+  const renderItems = useItemsWithFileSummary(items, threadId,
+    (it: ClaudeRenderItem) => isGenericChatItem(it) && it.kind === "user");
 
   return (
     <div
@@ -630,7 +845,7 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
     >
       <div className="min-h-0 flex-1 overflow-hidden" data-testid="claude-code-viewport">
         <MessageViewport
-          items={items}
+          items={renderItems}
           emptyText={
             isPending
               ? "输入消息开始新的 Claude Code 会话"
@@ -641,14 +856,16 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
           resetKey={threadId ?? "__pending__"}
           getUserMessageCount={(list) =>
             list.filter(
-              (item) => isGenericChatItem(item) && item.kind === "user",
+              (item) => "kind" in item && item.kind === "user",
             ).length
           }
           renderItem={(item) =>
-            isGenericChatItem(item) ? (
-              <ChatMessageItem key={item.id} item={item} />
+            "kind" in item && item.kind === "files-summary" ? (
+              <ModifiedFilesSummary key={item.id} files={item.files} threadId={item.threadId} />
+            ) : isGenericChatItem(item as ClaudeRenderItem) ? (
+              <ChatMessageItem key={item.id} item={item as GenericChatItem} />
             ) : (
-              <ClaudeMetaRow key={item.id} item={item} />
+              <ClaudeMetaRow key={item.id} item={item as ClaudeMetaItem} />
             )
           }
         />
@@ -664,14 +881,17 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
         </div>
       )}
       <Composer
-        disabled={isPending ? false : state !== "open"}
-        onSubmit={(text) => onSend(text)}
+        disabled={isPending ? false : state !== "open" || isRunning}
+        onSubmit={(text, reasoning, attachments) => onSend(text, attachments, reasoning)}
         threadId={threadId}
-      />
-      <ClaudeApprovalDialog
-        open={!!pendingApproval}
-        request={pendingApproval}
-        onResolve={onApprovalResolve}
+        isRunning={isRunning}
+        onInterrupt={onInterrupt}
+        leftActions={
+          /* smart-approval-v1: 只在已 bound cwd + socket 时挂；其他场景不渲染 */
+          thread?.cwd && socket ? (
+            <AutoApprovalToggle cwd={thread.cwd} socket={socket} />
+          ) : null
+        }
       />
     </div>
   );
@@ -686,15 +906,9 @@ function ClaudeMetaRow({ item }: { item: ClaudeMetaItem }) {
         </div>
       );
     case "complete": {
-      const summary = item.tokenBudget
-        ? Object.entries(item.tokenBudget)
-            .map(([key, value]) => `${key}=${stringifyContent(value)}`)
-            .join(" · ")
-        : "";
       return (
         <div className="self-center rounded border px-3 py-1 text-xs text-muted-foreground">
           {item.aborted ? "对话已中止" : "对话结束"}
-          {summary ? ` · ${summary}` : ""}
         </div>
       );
     }

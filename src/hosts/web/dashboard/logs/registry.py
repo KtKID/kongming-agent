@@ -10,8 +10,7 @@ Responsibilities
 ----------------
 1. Return a list of available log sources with ``exists / size / mtime``.
 2. Resolve paths from config values or ``kongming_home`` conventions.
-3. Enforce a whitelist: every resolved path must fall under an
-   *allowed root* (``kongming_home`` or ``cwd / ".kongming"``).
+3. Enforce a whitelist: every resolved path must fall under ``kongming_home``.
 4. Annotate each source with ``format`` and ``description``.
 5. Missing files are reported as ``exists=False`` -- **never raise**.
 6. Queries for unknown ``type`` values raise :class:`ValueError`.
@@ -32,6 +31,7 @@ from pathlib import Path
 from typing import Literal
 
 from infrastructure.config.models import Config
+from infrastructure.config.paths import resolve_kongming_path
 
 # ---------------------------------------------------------------------------
 # DTOs
@@ -70,18 +70,12 @@ class ResolvedLogSource:
 
 def _allowed_roots(kongming_home: Path) -> list[Path]:
     """Compute the list of allowed root directories (resolved, absolute)."""
-    return [
-        kongming_home,
-        (Path.cwd() / ".kongming").resolve(),
-    ]
+    return [kongming_home]
 
 
 def _resolve_relative(path_str: str, kongming_home: Path) -> Path:
-    """Resolve a potentially-relative path string against cwd, then validate."""
-    p = Path(path_str)
-    if not p.is_absolute():
-        p = Path.cwd() / p
-    return p.resolve()
+    """Resolve a potentially-relative path string against kongming home."""
+    return resolve_kongming_path(path_str, kongming_home=kongming_home)
 
 
 def _ensure_under_allowed_root(resolved: Path, allowed_roots: list[Path]) -> Path:
@@ -117,6 +111,10 @@ def _resolve_trace(cfg: Config, _home: Path) -> Path:
 
 def _resolve_heartbeat(_cfg: Config, home: Path) -> Path:
     return (home / "logs" / "heartbeat" / "heartbeat.log").resolve()
+
+
+def _resolve_generic_channel(_cfg: Config, home: Path) -> Path:
+    return (home / "logs" / "generic-channel" / "generic-channel.jsonl").resolve()
 
 
 def _resolve_evolution(_cfg: Config, home: Path) -> Path:
@@ -213,6 +211,13 @@ class LogSourceRegistry:
                 format="plain",
                 description="网络心跳诊断",
                 resolve_path=_resolve_heartbeat,
+            ),
+            LogSourceSpec(
+                type="generic_channel",
+                label="Generic Channel Log",
+                format="jsonl",
+                description="通用频道关键路径诊断",
+                resolve_path=_resolve_generic_channel,
             ),
             LogSourceSpec(
                 type="evolution",

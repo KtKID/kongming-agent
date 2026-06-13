@@ -185,17 +185,17 @@ export const apiPostEvolutionReapply = (threadId: string, reviewId: string) =>
 
 type ClaudeProjectsRefreshEvent =
   | {
-      kind: "progress";
+      frame_type: "progress";
       current: number;
       total: number;
       current_project: string;
     }
   | {
-      kind: "done";
+      frame_type: "done";
       projects: ClaudeProjectSummaryDTO[];
     }
   | {
-      kind: "error";
+      frame_type: "error";
       detail: string;
     };
 
@@ -247,11 +247,11 @@ export async function apiRefreshClaudeProjects(
       const trimmed = line.trim();
       if (!trimmed) continue;
       const event = JSON.parse(trimmed) as ClaudeProjectsRefreshEvent;
-      if (event.kind === "progress") {
+      if (event.frame_type === "progress") {
         onProgress(event);
         continue;
       }
-      if (event.kind === "error") {
+      if (event.frame_type === "error") {
         throw new ApiError(500, "internal", event.detail);
       }
       return { projects: event.projects };

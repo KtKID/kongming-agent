@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from safety.auto_approval import matchers
+import safety.auto_approval.matchers as matchers
 from safety.auto_approval.config_store import ConfigStore, ProjectConfig
 from safety.auto_approval.rules import RuleDefinition, RuleSet
 

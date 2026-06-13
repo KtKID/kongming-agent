@@ -298,4 +298,72 @@ describe("MessageList", () => {
       vi.restoreAllMocks();
     });
   });
+
+  // chat-receive-side-unify #5：items 注入（generic 走时间线投影，不读 store）
+  describe("items 注入 prop", () => {
+    it("传 items 时渲染注入的清单，忽略 store", () => {
+      // store 里放一条诱饵：若组件错读 store，会渲染 "store-only"。
+      useChatStore.setState({
+        itemsByThread: {
+          t1: [
+            {
+              id: "store-decoy",
+              kind: "user",
+              threadId: "t1",
+              content: "store-only",
+              timestampMs: 1,
+            },
+          ],
+        },
+      });
+      render(
+        <MessageList
+          threadId="t1"
+          items={[
+            {
+              id: "inj-1",
+              kind: "user",
+              threadId: "t1",
+              content: "injected-hi",
+              timestampMs: 1,
+            },
+            {
+              id: "inj-2",
+              kind: "assistant",
+              threadId: "t1",
+              turn: 0,
+              runId: "r1",
+              content: "injected-answer",
+              reasoning: "",
+              timestampMs: 2,
+              streaming: false,
+            },
+          ]}
+        />,
+      );
+      // 注入项渲染
+      expect(screen.getByText("injected-hi")).toBeInTheDocument();
+      expect(screen.getByText("injected-answer")).toBeInTheDocument();
+      // store 诱饵不渲染（证明确实没读 store）
+      expect(screen.queryByText("store-only")).toBeNull();
+    });
+
+    it("不传 items 时退回读 store（其它频道现状不破）", () => {
+      useChatStore.setState({
+        itemsByThread: {
+          t1: [
+            {
+              id: "store-1",
+              kind: "user",
+              threadId: "t1",
+              content: "from-store",
+              timestampMs: 1,
+            },
+          ],
+        },
+      });
+      render(<MessageList threadId="t1" />);
+      expect(screen.getByText("from-store")).toBeInTheDocument();
+    });
+  });
 });

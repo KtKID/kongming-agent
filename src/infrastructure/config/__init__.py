@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from infrastructure.config.errors import ConfigLoadError, ConfigValidationError
 from infrastructure.config.loader import load_config
+from infrastructure.config.manager import ConfigManager
 from infrastructure.config.models import (
     ApprovalConfig,
     CompactorConfig,
@@ -36,12 +37,13 @@ from infrastructure.config.models import (
     TraceConfig,
     WorkflowConfig,
 )
-from infrastructure.config.paths import get_kongming_home
+from infrastructure.config.paths import get_kongming_home, resolve_kongming_path
 
 __all__ = [
     "ApprovalConfig",
     "CompactorConfig",
     "Config",
+    "ConfigManager",
     "ConfigLoadError",
     "ConfigValidationError",
     "FileToolConfig",
@@ -58,4 +60,5 @@ __all__ = [
     "WorkflowConfig",
     "get_kongming_home",
     "load_config",
+    "resolve_kongming_path",
 ]

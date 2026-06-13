@@ -6,10 +6,10 @@ import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogContent,
-  DialogHeader,
-  DialogTitle,
   DialogDescription,
   DialogFooter,
+  DialogHeader,
+  DialogTitle,
 } from "@/components/ui/dialog";
 import { useAuthStore } from "@/stores/auth";
 import { apiPost, ApiError, RateLimitedError } from "@/lib/api";
@@ -25,20 +25,15 @@ export function LoginPage() {
   const [pending, setPending] = useState(false);
   const [retryCountdown, setRetryCountdown] = useState(0);
 
-  // 重置密码 dialog 状态
   const [resetOpen, setResetOpen] = useState(false);
   const [resetNewPw, setResetNewPw] = useState("");
   const [resetError, setResetError] = useState("");
   const [resetPending, setResetPending] = useState(false);
   const [resetDone, setResetDone] = useState(false);
 
-  // 429 倒计时
   useEffect(() => {
     if (retryCountdown <= 0) return;
-    const id = window.setTimeout(
-      () => setRetryCountdown((c) => c - 1),
-      1000,
-    );
+    const id = window.setTimeout(() => setRetryCountdown((c) => c - 1), 1000);
     return () => window.clearTimeout(id);
   }, [retryCountdown]);
 
@@ -139,7 +134,6 @@ export function LoginPage() {
         </form>
       </motion.div>
 
-      {/* 重置密码 Dialog */}
       <Dialog open={resetOpen} onOpenChange={setResetOpen}>
         <DialogContent>
           <DialogHeader>
@@ -169,10 +163,7 @@ export function LoginPage() {
                 </div>
               ) : null}
               <DialogFooter>
-                <Button
-                  type="submit"
-                  disabled={resetPending || !resetNewPw}
-                >
+                <Button type="submit" disabled={resetPending || !resetNewPw}>
                   {resetPending ? "重置中..." : "确认重置"}
                 </Button>
               </DialogFooter>

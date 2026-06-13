@@ -79,7 +79,11 @@ class TestGetSource:
         src = reg.get_source("generic_channel")
         assert src.type == "generic_channel"
         assert src.format == "jsonl"
-        assert src.path.endswith("logs/generic-channel/generic-channel.jsonl")
+        assert Path(src.path).parts[-3:] == (
+            "logs",
+            "generic-channel",
+            "generic-channel.jsonl",
+        )
 
     def test_unknown_type_raises(self, tmp_path: Path) -> None:
         cfg = _make_config()
@@ -98,6 +102,18 @@ class TestResolveSourcePath:
         reg = LogSourceRegistry(cfg, home)
         p = reg.resolve_source_path("web_server")
         assert p.is_absolute()
+
+    def test_kongming_relative_config_paths_use_home(self, tmp_path: Path) -> None:
+        cfg = _make_config(
+            full_log_path=".kongming/logs/full_log.jsonl",
+            trace_output_path=".kongming/trace.jsonl",
+        )
+        home = tmp_path / "home"
+        home.mkdir()
+        reg = LogSourceRegistry(cfg, home)
+
+        assert reg.resolve_source_path("full_log") == (home / "logs" / "full_log.jsonl").resolve()
+        assert reg.resolve_source_path("trace") == (home / "trace.jsonl").resolve()
 
     def test_unknown_type_raises(self, tmp_path: Path) -> None:
         cfg = _make_config()

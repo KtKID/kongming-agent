@@ -31,6 +31,8 @@ class WorkflowRunRequest:
     payload: Mapping[str, object]
     # 调用来源，例如 tool、cli-smoke、internal-test。
     source: str
+    # LLM 填写的一句 workflow 短描述，用于运行产物和 Viewer 展示。
+    desc: str | None = None
 
 
 @dataclass(frozen=True)

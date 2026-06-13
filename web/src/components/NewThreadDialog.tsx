@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useThreadsStore } from "@/stores/threads";
 import type { BackendKind } from "@/protocol";
+import { isAbsoluteProjectPath } from "@/lib/path";
 
 interface Props {
   open: boolean;
@@ -48,9 +49,9 @@ export function NewThreadDialog({ open, onOpenChange }: Props) {
   const isCodex = backendKind === "codex";
   const noPresetNeeded = isClaudeCode || isCodex;
   const normalizedCwd = cwd.trim();
-  const cwdValid = !normalizedCwd || normalizedCwd.startsWith("/");
+  const cwdValid = !normalizedCwd || isAbsoluteProjectPath(normalizedCwd);
   const canSubmit =
-    !!name.trim() && !busy && cwdValid && (noPresetNeeded || !!presetId);
+    !busy && cwdValid && (noPresetNeeded || !!presetId);
 
   const onSubmit = async () => {
     const trimmed = name.trim();
@@ -84,7 +85,7 @@ export function NewThreadDialog({ open, onOpenChange }: Props) {
         </DialogHeader>
         <div className="flex flex-col gap-3">
           <Input
-            placeholder="会话名（最多 200 字）"
+            placeholder="不填则使用服务器ID"
             value={name}
             onChange={(e) => setName(e.target.value)}
             autoFocus
@@ -102,7 +103,7 @@ export function NewThreadDialog({ open, onOpenChange }: Props) {
             </p>
           ) : (
             <p className="text-xs text-destructive">
-              工作目录需要绝对路径，例如 /Volumes/machub_app/proj/kongming-agent
+              工作目录需要绝对路径，例如 E:/xgt/proj/agent-proj/kongming-agent
             </p>
           )}
           <select

@@ -161,14 +161,14 @@ describe("stores/chat", () => {
   it("appendAssistantFinal 用 frame.run_id 区分同 turn 不同 run", () => {
     const store = useChatStore.getState();
     store.appendAssistantFinal("t1", {
-      kind: "assistant.final",
+      frame_type: "assistant.final",
       content: "first",
       turn: 1,
       run_id: "run-1",
       timestamp_ms: 100,
     });
     store.appendAssistantFinal("t1", {
-      kind: "assistant.final",
+      frame_type: "assistant.final",
       content: "second",
       turn: 1,
       run_id: "run-2",
@@ -190,7 +190,7 @@ describe("stores/chat", () => {
   it("appendSystemNotice 按 noticeKey + runId 原地更新同一条卡片", () => {
     const store = useChatStore.getState();
     store.appendSystemNotice("t1", {
-      kind: "system.notice",
+      frame_type: "system.notice",
       timestamp_ms: 100,
       notice_key: "evolution.review",
       source: "self_evolution",
@@ -202,7 +202,7 @@ describe("stores/chat", () => {
       run_id: "run-1",
     });
     store.appendSystemNotice("t1", {
-      kind: "system.notice",
+      frame_type: "system.notice",
       timestamp_ms: 200,
       notice_key: "evolution.review",
       source: "self_evolution",
@@ -231,7 +231,7 @@ describe("stores/chat", () => {
   it("appendSystemNotice 同 noticeKey 不同 runId 保留独立卡片", () => {
     const store = useChatStore.getState();
     store.appendSystemNotice("t1", {
-      kind: "system.notice",
+      frame_type: "system.notice",
       timestamp_ms: 100,
       notice_key: "evolution.review",
       source: "self_evolution",
@@ -242,7 +242,7 @@ describe("stores/chat", () => {
       run_id: "run-1",
     });
     store.appendSystemNotice("t1", {
-      kind: "system.notice",
+      frame_type: "system.notice",
       timestamp_ms: 200,
       notice_key: "evolution.review",
       source: "self_evolution",
@@ -269,7 +269,7 @@ describe("stores/chat", () => {
   it("applyEvolutionReview 回写系统卡片进度", () => {
     const store = useChatStore.getState();
     store.appendSystemNotice("t1", {
-      kind: "system.notice",
+      frame_type: "system.notice",
       timestamp_ms: 100,
       notice_key: "self_evolution.review",
       source: "self_evolution",
@@ -365,50 +365,67 @@ describe("stores/chat", () => {
     expect(item.details).toContain("applied_failed_count: 1");
   });
 
-  it("appendUsage 累加 thread 级 prompt / completion / total", () => {
+  it("appendUsage 把 v2 UsageFrame.usage 写到 usageByThread", () => {
     const store = useChatStore.getState();
     store.appendUsage("t1", {
-      kind: "usage",
-      prompt_tokens: 100,
-      completion_tokens: 40,
-      total_tokens: 140,
+      frame_type: "usage",
+      timestamp_ms: 100,
       turn: 1,
       run_id: "run-1",
-      timestamp_ms: 100,
+      usage: {
+        provider: "claude",
+        input_tokens: 100,
+        output_tokens: 40,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_creation: {
+          ephemeral_1h_input_tokens: 0,
+          ephemeral_5m_input_tokens: 0,
+        },
+        context_usage: 100,
+        model: "claude-opus-4",
+        context_window: 1000000,
+      },
     });
     store.appendUsage("t1", {
-      kind: "usage",
-      prompt_tokens: 60,
-      completion_tokens: 25,
-      total_tokens: 85,
+      frame_type: "usage",
+      timestamp_ms: 200,
       turn: 2,
       run_id: "run-1",
-      timestamp_ms: 200,
+      usage: {
+        provider: "claude",
+        input_tokens: 60,
+        output_tokens: 25,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_creation: {
+          ephemeral_1h_input_tokens: 0,
+          ephemeral_5m_input_tokens: 0,
+        },
+        context_usage: 60,
+        model: "claude-opus-4",
+        context_window: 1000000,
+      },
     });
 
-    expect(useChatStore.getState().usageByThread["t1"]).toEqual({
-      lastPrompt: 60,
-      lastCompletion: 25,
-      lastTotal: 85,
-      cumulativePrompt: 160,
-      cumulativeCompletion: 65,
-      cumulativeTotal: 225,
-      cumulativeCacheRead: null,
-      cumulativeCacheCreation: null,
-    });
+    const usage = useChatStore.getState().usageByThread["t1"]!;
+    if (usage.provider !== "claude") throw new Error("expected claude");
+    // 第二次 append 覆盖第一次
+    expect(usage.input_tokens).toBe(60);
+    expect(usage.output_tokens).toBe(25);
   });
 
   it("appendUsage 用 runId + turn 回填对应 assistant item", () => {
     const store = useChatStore.getState();
     store.appendAssistantFinal("t1", {
-      kind: "assistant.final",
+      frame_type: "assistant.final",
       content: "first",
       turn: 1,
       run_id: "run-1",
       timestamp_ms: 100,
     });
     store.appendAssistantFinal("t1", {
-      kind: "assistant.final",
+      frame_type: "assistant.final",
       content: "second",
       turn: 1,
       run_id: "run-2",
@@ -416,13 +433,24 @@ describe("stores/chat", () => {
     });
 
     store.appendUsage("t1", {
-      kind: "usage",
-      prompt_tokens: 120,
-      completion_tokens: 30,
-      total_tokens: 150,
+      frame_type: "usage",
+      timestamp_ms: 210,
       turn: 1,
       run_id: "run-2",
-      timestamp_ms: 210,
+      usage: {
+        provider: "claude",
+        input_tokens: 120,
+        output_tokens: 30,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_creation: {
+          ephemeral_1h_input_tokens: 0,
+          ephemeral_5m_input_tokens: 0,
+        },
+        context_usage: 120,
+        model: "claude-opus-4",
+        context_window: 1000000,
+      },
     });
 
     const items = useChatStore.getState().itemsByThread["t1"]!;
@@ -440,79 +468,99 @@ describe("stores/chat", () => {
     });
   });
 
-  it("hydrateUsageFromThreads 用 metadata 累计值初始化并保留较新的内存值", () => {
-    const store = useChatStore.getState();
-    store.hydrateUsageFromThreads([
-      {
-        id: "thread-aaaaaaaaaaaa",
-        name: "demo",
-        preset_id: "p1",
-        backend_kind: "generic_chat",
-        claude_thread_id: "",
-        codex_thread_id: "",
-        cwd: "",
-        created_at: 1,
-        updated_at: 2,
-        message_count: 0,
-        cumulative_prompt_tokens: 1200,
-        cumulative_completion_tokens: 340,
-        cumulative_total_tokens: 1540,
-        cumulative_cache_read_tokens: null,
-        cumulative_cache_creation_tokens: null,
-        schema_version: 4,
+  it("fetchThreadUsage 成功：把端点返回的 ThreadUsage 写入 usageByThread", async () => {
+    const tid = "thread-cccccccccccc";
+    const fakeUsage = {
+      provider: "claude" as const,
+      input_tokens: 42,
+      output_tokens: 17,
+      cache_read_input_tokens: 100,
+      cache_creation_input_tokens: 50,
+      cache_creation: {
+        ephemeral_1h_input_tokens: 30,
+        ephemeral_5m_input_tokens: 20,
       },
-    ]);
+      context_usage: 192,
+      model: "claude-sonnet-4-5",
+      context_window: 200000,
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ usage: fakeUsage }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+    try {
+      await useChatStore.getState().fetchThreadUsage(tid);
+      const stored = useChatStore.getState().usageByThread[tid]!;
+      if (stored.provider !== "claude") throw new Error("expected claude");
+      expect(stored.input_tokens).toBe(42);
+      expect(stored.model).toBe("claude-sonnet-4-5");
+      expect(stored.cache_creation.ephemeral_1h_input_tokens).toBe(30);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 
-    expect(useChatStore.getState().usageByThread["thread-aaaaaaaaaaaa"]).toEqual({
-      lastPrompt: 0,
-      lastCompletion: 0,
-      lastTotal: 0,
-      cumulativePrompt: 1200,
-      cumulativeCompletion: 340,
-      cumulativeTotal: 1540,
-      cumulativeCacheRead: null,
-      cumulativeCacheCreation: null,
-    });
+  it("fetchThreadUsage：usage=null 不写 store（保持 undefined → 底栏「等待对话」）", async () => {
+    const tid = "thread-dddddddddddd";
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ usage: null }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+    try {
+      await useChatStore.getState().fetchThreadUsage(tid);
+      expect(useChatStore.getState().usageByThread[tid]).toBeUndefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 
-    store.appendUsage("thread-aaaaaaaaaaaa", {
-      kind: "usage",
-      prompt_tokens: 20,
-      completion_tokens: 10,
-      total_tokens: 30,
-      turn: 1,
-      run_id: "run-1",
-      timestamp_ms: 3,
-    });
-    store.hydrateUsageFromThreads([
-      {
-        id: "thread-aaaaaaaaaaaa",
-        name: "demo",
-        preset_id: "p1",
-        backend_kind: "generic_chat",
-        claude_thread_id: "",
-        codex_thread_id: "",
-        cwd: "",
-        created_at: 1,
-        updated_at: 2,
-        message_count: 0,
-        cumulative_prompt_tokens: 1200,
-        cumulative_completion_tokens: 340,
-        cumulative_total_tokens: 1540,
-        cumulative_cache_read_tokens: null,
-        cumulative_cache_creation_tokens: null,
-        schema_version: 4,
+  it("fetchThreadUsage：404 静默失败，store 保持 undefined", async () => {
+    const tid = "thread-eeeeeeeeeeee";
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ detail: "not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch;
+    try {
+      await useChatStore.getState().fetchThreadUsage(tid);
+      expect(useChatStore.getState().usageByThread[tid]).toBeUndefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("v2 setState 模拟 WS usage_summary_updated 帧更新 usageByThread", () => {
+    // v2：直接把 ThreadUsage DTO 写入 store（不再有 summary / lastSnapshot 分离）
+    const tid = "thread-bbbbbbbbbbbb";
+    const usage = {
+      provider: "claude" as const,
+      input_tokens: 5000,
+      output_tokens: 800,
+      cache_read_input_tokens: 3000,
+      cache_creation_input_tokens: 200,
+      cache_creation: {
+        ephemeral_1h_input_tokens: 200,
+        ephemeral_5m_input_tokens: 0,
       },
-    ]);
-
-    expect(useChatStore.getState().usageByThread["thread-aaaaaaaaaaaa"]).toEqual({
-      lastPrompt: 20,
-      lastCompletion: 10,
-      lastTotal: 30,
-      cumulativePrompt: 1220,
-      cumulativeCompletion: 350,
-      cumulativeTotal: 1570,
-      cumulativeCacheRead: null,
-      cumulativeCacheCreation: null,
+      context_usage: 8200,
+      model: "claude-opus-4",
+      context_window: 1000000,
+    };
+    useChatStore.setState({
+      usageByThread: {
+        ...useChatStore.getState().usageByThread,
+        [tid]: usage,
+      },
     });
+    const stored = useChatStore.getState().usageByThread[tid]!;
+    if (stored.provider !== "claude") throw new Error("expected claude");
+    expect(stored.input_tokens).toBe(5000);
+    expect(stored.model).toBe("claude-opus-4");
+    expect(stored.context_window).toBe(1000000);
   });
 });

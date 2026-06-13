@@ -76,8 +76,8 @@ describe("ThreadSocket", () => {
     sock.connect();
     const ws = FakeWebSocket.instances[0]!;
     ws.triggerOpen();
-    ws.triggerMessage({ kind: "pong", timestamp_ms: 1 });
-    expect(fn).toHaveBeenCalledWith({ kind: "pong", timestamp_ms: 1 });
+    ws.triggerMessage({ frame_type: "pong", timestamp_ms: 1 });
+    expect(fn).toHaveBeenCalledWith({ frame_type: "pong", timestamp_ms: 1 });
     sock.close();
   });
 
@@ -138,7 +138,7 @@ describe("ThreadSocket", () => {
   it("send 在非 open 状态抛错", () => {
     const sock = new ThreadSocket("t1");
     expect(() =>
-      sock.send({ kind: "ping" }),
+      sock.send({ frame_type: "ping" }),
     ).toThrowError(/cannot send/);
     sock.close();
   });
@@ -148,8 +148,8 @@ describe("ThreadSocket", () => {
     sock.connect();
     const ws = FakeWebSocket.instances[0]!;
     ws.triggerOpen();
-    sock.send({ kind: "ping" });
-    expect(ws.sent).toEqual([JSON.stringify({ kind: "ping" })]);
+    sock.send({ frame_type: "ping" });
+    expect(ws.sent).toEqual([JSON.stringify({ frame_type: "ping" })]);
     sock.close();
   });
 });

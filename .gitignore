@@ -66,4 +66,5 @@ htmlcov/
 # 顶层 node_modules（项目根的依赖缓存，与 web/node_modules 分别管理）
 /node_modules/
 web/.npm-cache
+web/node_modules/
 .pip-cache

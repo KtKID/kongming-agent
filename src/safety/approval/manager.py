@@ -182,6 +182,10 @@ class ApprovalManager:
         """
         self._event_sinks.append(sink)
 
+    def has_event_sink_type(self, sink_type: type[ApprovalEventSink]) -> bool:
+        """检查指定 sink 类型是否已注册，供装配代码保持幂等。"""
+        return any(isinstance(sink, sink_type) for sink in self._event_sinks)
+
     @property
     def pending_count(self) -> int:
         """当前 pending 审批数（仅供监控 / 测试断言用）。"""
@@ -656,22 +660,36 @@ def make_manager_prompt_fn(
         # cwd 优先级：req.metadata.cwd（运行时显式传） > default_cwd（装配时 thread.cwd 解析后的值）
         req_cwd = (req.metadata or {}).get("cwd", "")
         resolved_cwd = req_cwd if req_cwd else default_cwd
+        request_metadata = dict(req.metadata) if req.metadata else {}
+        request_metadata.setdefault("run_id", req.run_id)
+        request_metadata.setdefault("session_id", req.session_id)
+        request_metadata.setdefault("turn", req.turn)
+        request_metadata.setdefault("call_id", req.call_id)
+        if req.reason:
+            request_metadata.setdefault("reason", req.reason)
         decision = await manager.request(
             channel=channel,
             thread_id=thread_id,
             cwd=resolved_cwd,
             tool_name=req.tool_name,
             tool_input=dict(req.arguments),
-            metadata=dict(req.metadata) if req.metadata else {},
+            metadata=request_metadata,
         )
-        return _decision_to_action(decision)
+        return _decision_to_action(
+            decision,
+            allow_session_action=channel != "cli",
+        )
 
     # 标记为 action-aware（让 InteractiveApproval 走 ApprovalAction 分支）
     prompt_fn.__action_aware__ = True  # type: ignore[attr-defined]
     return prompt_fn
 
 
-def _decision_to_action(decision: ApprovalDecision) -> ApprovalAction:
+def _decision_to_action(
+    decision: ApprovalDecision,
+    *,
+    allow_session_action: bool = True,
+) -> ApprovalAction:
     """ApprovalDecision → ApprovalAction 二态映射（reviewer 必修 #2）。
 
     阶段 1 仅二态（ACCEPT_ONCE / REJECT）；ACCEPT_FOR_SESSION 受协议帧 v0.5
@@ -686,7 +704,7 @@ def _decision_to_action(decision: ApprovalDecision) -> ApprovalAction:
     if decision.outcome == "approved":
         # TODO(stage 5)：协议帧 v0.5 上线后，按 decision.metadata.remember_for_session
         # 返回 ACCEPT_FOR_SESSION（接 GrantStore.put_session）
-        if decision.metadata.get("remember_for_session"):
+        if decision.metadata.get("remember_for_session") and allow_session_action:
             return ApprovalAction.ACCEPT_FOR_SESSION
         if decision.metadata.get("remember_persistent"):
             return ApprovalAction.ACCEPT_PERSIST

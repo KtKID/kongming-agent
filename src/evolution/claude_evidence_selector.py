@@ -54,8 +54,8 @@ def build_claude_transcript_window(
 
         entries = parse_jsonl_history(path, claude_thread_id)
 
-        # v0.1: 只保留 kind == "text" 的纯文本消息
-        text_entries = [e for e in entries if e.get("kind") == "text"]
+        # 只保留纯文本消息；历史 parser v0.2 后统一使用 frame_type 字段。
+        text_entries = [e for e in entries if (e.get("frame_type") or e.get("kind")) == "text"]
 
         if max_messages <= 0 or not text_entries:
             return _empty_window(thread_id, run_id, summary="empty jsonl")

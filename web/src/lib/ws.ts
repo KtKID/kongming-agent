@@ -1,10 +1,26 @@
 import { toast } from "sonner";
 import type { WSFrameC2S, WSFrameS2C } from "@/protocol";
 
+// ---------------------------------------------------------------------------
+// HeartbeatConfig
+// ---------------------------------------------------------------------------
+
+export interface HeartbeatConfig {
+  intervalMs: number;     // ping 间隔
+  timeoutMs: number;      // 单次 pong 超时
+  maxMissed: number;      // 连续丢几次判死
+}
+
+const DEFAULT_HEARTBEAT: HeartbeatConfig = {
+  intervalMs: 30_000,
+  timeoutMs: 10_000,
+  maxMissed: 3,
+};
+
 /**
  * kongming-agent v0.1.5 ThreadSocket
  *
- * 单 thread 的 WS 连接 + 自动重连 + 帧分发。
+ * 单 thread 的 WS 连接 + 自动重连 + 帧分发 + 心跳 RTT。
  *
  * ## 状态机
  *
@@ -24,6 +40,7 @@ import type { WSFrameC2S, WSFrameS2C } from "@/protocol";
  * - close() 后清 retryTimer 防止 unmount 后还在重连
  * - 重连计数在 onopen 时清零
  * - 非法 JSON 帧静默丢弃（保留连接）；解析失败的责任不在 caller
+ * - 心跳：定时发 ping + 等 pong；连续 maxMissed 次超时判定死连接并触发重连
  */
 
 type Listener = (frame: WSFrameS2C) => void;
@@ -49,7 +66,25 @@ export class ThreadSocket {
   /** 标识本实例是否已被 close()，防止 onclose 触发的 reconnect race */
   private disposed = false;
 
-  constructor(public threadId: string) {}
+  // ---- heartbeat ----
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private pongTimer: ReturnType<typeof setTimeout> | null = null;
+  private missedPongs = 0;
+  private _latencyMs: number | null = null;
+  private _heartbeatConfig: HeartbeatConfig;
+  private pendingPingTs: number | null = null;
+
+  /** 最近一次 RTT（毫秒），未收到 pong 时为 null */
+  get latencyMs(): number | null {
+    return this._latencyMs;
+  }
+
+  constructor(
+    public threadId: string,
+    heartbeatConfig?: Partial<HeartbeatConfig>,
+  ) {
+    this._heartbeatConfig = { ...DEFAULT_HEARTBEAT, ...heartbeatConfig };
+  }
 
   getState(): SocketState {
     return this.state;
@@ -109,12 +144,17 @@ export class ThreadSocket {
       }
       this.retryCount = 0;
       this.setState("open");
+      this.startHeartbeat();
     };
 
     socket.onmessage = (ev) => {
       if (this.disposed) return;
       try {
         const frame = JSON.parse(ev.data as string) as WSFrameS2C;
+        // pong 帧：更新 RTT，重置 missed 计数（仍然分发给 listeners）
+        if (frame.frame_type === "pong" && typeof frame.ts === "number") {
+          this.handlePong(frame.ts);
+        }
         for (const l of this.listeners) {
           try {
             l(frame);
@@ -142,6 +182,7 @@ export class ThreadSocket {
   /** 显式关闭：阻止后续 reconnect；listener 不清（caller 自管） */
   close(): void {
     this.disposed = true;
+    this.stopHeartbeat();
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
@@ -158,6 +199,7 @@ export class ThreadSocket {
   }
 
   private scheduleReconnect(): void {
+    this.stopHeartbeat();
     if (this.disposed) return;
     if (this.retryCount >= MAX_RETRY) {
       this.setState("failed");
@@ -182,6 +224,74 @@ export class ThreadSocket {
       } catch (err) {
         console.error("[ThreadSocket] state listener error", err);
       }
+    }
+  }
+
+  // ---- heartbeat methods ----
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.missedPongs = 0;
+    this._latencyMs = null;
+    this.pendingPingTs = null;
+    this.heartbeatTimer = setInterval(() => {
+      this.sendPing();
+    }, this._heartbeatConfig.intervalMs);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    if (this.pongTimer) {
+      clearTimeout(this.pongTimer);
+      this.pongTimer = null;
+    }
+    this.pendingPingTs = null;
+  }
+
+  private sendPing(): void {
+    if (this.disposed) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const ts = Date.now();
+    this.pendingPingTs = ts;
+    this.ws.send(JSON.stringify({ frame_type: "ping", ts }));
+
+    // 单次 pong 超时检测
+    this.pongTimer = setTimeout(() => {
+      this.pongTimer = null;
+      this.missedPongs++;
+      if (this.missedPongs >= this._heartbeatConfig.maxMissed) {
+        console.warn(
+          `[ThreadSocket] ${this._heartbeatConfig.maxMissed} pongs missed, reconnecting`,
+        );
+        if (this.ws) {
+          this.ws.close();
+        }
+      }
+    }, this._heartbeatConfig.timeoutMs);
+  }
+
+  private handlePong(ts: number): void {
+    if (this.pongTimer) {
+      clearTimeout(this.pongTimer);
+      this.pongTimer = null;
+    }
+    this.missedPongs = 0;
+    if (ts === this.pendingPingTs) {
+      this._latencyMs = Date.now() - ts;
+    }
+    this.pendingPingTs = null;
+  }
+
+  /** 运行时更新心跳配置（从后端拉取后调用） */
+  updateHeartbeatConfig(config: Partial<HeartbeatConfig>): void {
+    this._heartbeatConfig = { ...this._heartbeatConfig, ...config };
+    // 如果正在运行，重启心跳定时器
+    if (this.state === "open") {
+      this.stopHeartbeat();
+      this.startHeartbeat();
     }
   }
 }

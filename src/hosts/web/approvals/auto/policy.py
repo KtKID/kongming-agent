@@ -21,9 +21,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from web.approvals.auto import matchers
-from web.approvals.auto.config_store import ConfigStore, ProjectConfig
-from web.approvals.auto.rules import RuleDefinition, RuleSet
+import safety.auto_approval.matchers as matchers
+from safety.auto_approval.config_store import ConfigStore, ProjectConfig
+from safety.auto_approval.rules import RuleDefinition, RuleSet
 
 # ---------------------------------------------------------------------------
 # Decision dataclass

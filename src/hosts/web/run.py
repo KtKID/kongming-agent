@@ -100,6 +100,7 @@ def main() -> int:
                 host=cfg.web.host,
                 port=cfg.web.port,
                 log_level=log_level,
+                log_config=_build_uvicorn_log_config(),
             )
         except Exception as exc:
             progress.fail(f"uvicorn.run failed: {exc}")
@@ -108,6 +109,47 @@ def main() -> int:
     finally:
         # 显式释放锁（进程退出 OS 也会自动释放；本句是 best-effort 兜底）
         release_app_instance_lock(app_lock_fd)
+
+
+def _build_uvicorn_log_config() -> dict[str, Any]:
+    """构造带时间戳的 uvicorn 日志配置。"""
+    return {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "default": {
+                "()": "uvicorn.logging.DefaultFormatter",
+                "format": "%(asctime)s %(levelprefix)s %(message)s",
+                "datefmt": "%Y-%m-%d %H:%M:%S",
+            },
+            "access": {
+                "()": "uvicorn.logging.AccessFormatter",
+                "format": '%(asctime)s %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
+                "datefmt": "%Y-%m-%d %H:%M:%S",
+            },
+        },
+        "handlers": {
+            "default": {
+                "formatter": "default",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stderr",
+            },
+            "access": {
+                "formatter": "access",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stdout",
+            },
+        },
+        "loggers": {
+            "uvicorn": {"handlers": ["default"], "level": "INFO", "propagate": False},
+            "uvicorn.error": {"level": "INFO"},
+            "uvicorn.access": {
+                "handlers": ["access"],
+                "level": "INFO",
+                "propagate": False,
+            },
+        },
+    }
 
 
 def _build_manager_and_inbox_sink(*, app: Any) -> Any:

@@ -11,10 +11,10 @@
 # 临时跳过（仅紧急情况）：git commit --no-verify / git push --no-verify
 #
 # 分层设计：
-# - pre-commit 阶段（秒级，每次 commit 跑）：ruff + commit-separation + lint-imports
-# - pre-push 阶段（分钟级，push 前跑一次）：mypy + pytest（受影响测试 + 并行）
+# - pre-commit 阶段（每次 commit 跑）：ruff + commit-separation + lint-imports + mypy
+# - pre-push 阶段（push 前跑一次）：隔离环境下的受影响 unit 测试
 # - CI（GitHub Actions）：全量 fmt/lint/typecheck/unit tests，终极兜底
-# - e2e 不进任何本地 hook（含 opt-in 真模型测试），只留 CI
+# - e2e / integration / smoke 不进本地 push gate；真实模型测试走本地 nightly
 
 default_language_version:
   python: python3.11
@@ -59,22 +59,20 @@ repos:
         pass_filenames: false
         files: \.py$
 
-      # ----- pre-push 阶段：mypy（慢，挪到 push 前跑一次） -----
+      # ----- pre-commit 阶段：mypy（静态类型检查，提交前拦截） -----
       - id: mypy
         name: mypy (类型检查)
         entry: uv run mypy src
         language: system
         pass_filenames: false
         files: ^src/.*\.py$
-        stages: [pre-push]
 
-      # ----- pre-push 阶段：pytest 受影响测试（--picked 只跑 git 改动相关） -----
-      # -n 4 并行（限 4 worker 避免资源爆炸），--picked 只跑改动文件相关测试
-      # 全量回归在 GitHub Actions CI 里跑（.github/workflows/ci.yml）
-      - id: pytest-picked
-        name: pytest --picked (受影响 unit 测试，并行)
-        entry: uv run python scripts/run_with_timing.py --label pytest-picked -- uv run pytest tests/unit --picked --mode=branch -n 4 -q -W ignore::pytest.PytestUnraisableExceptionWarning
+      # ----- pre-push 阶段：隔离环境下的受影响 unit 测试 -----
+      # run_pre_push_tests.py 会清理真实 KONGMING_* 配置，只选择 tests/unit。
+      # 全量回归在 GitHub Actions CI 里跑；真实 e2e 走本地 nightly。
+      - id: pre-push-unit
+        name: pre-push unit tests (isolated)
+        entry: uv run python scripts/run_with_timing.py --label pre-push-unit -- uv run python scripts/run_pre_push_tests.py
         language: system
         pass_filenames: false
-        files: ^(src|tests/unit)/.*\.py$
         stages: [pre-push]

@@ -29,11 +29,14 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
+    minify: false,
     sourcemap: false,
     rollupOptions: {
       output: {
         manualChunks: {
           vendor: ["react", "react-dom", "react-router-dom"],
+          // mermaid 不显式切：lazy(MermaidBlock) 边界让 vite 自动把
+          // mermaid 库切到异步 chunk，无需 manualChunks 干预
         },
       },
     },

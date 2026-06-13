@@ -54,14 +54,14 @@ describe("useStreamingRender", () => {
     act(() => {
       for (let i = 0; i < 1000; i++) {
         sock.emit({
-          kind: "content.delta",
+          frame_type: "content.delta",
           timestamp_ms: 1,
           delta: "x",
           turn: 1,
           seq: i,
         });
       }
-      sock.emit({ kind: "turn.end", timestamp_ms: 2, turn: 1 });
+      sock.emit({ frame_type: "turn.end", timestamp_ms: 2, turn: 1 });
     });
     const dt = performance.now() - start;
     expect(dt).toBeLessThan(1000);
@@ -79,7 +79,7 @@ describe("useStreamingRender", () => {
     );
     act(() => {
       sock.emit({
-        kind: "approval.request",
+        frame_type: "approval.request",
         timestamp_ms: 1,
         call_id: "c1",
         tool_name: "Shell",
@@ -99,7 +99,7 @@ describe("useStreamingRender", () => {
     );
     act(() => {
       sock.emit({
-        kind: "system.notice",
+        frame_type: "system.notice",
         timestamp_ms: 10,
         notice_key: "evolution.review",
         source: "self_evolution",
@@ -111,7 +111,7 @@ describe("useStreamingRender", () => {
         run_id: "run-1",
       });
       sock.emit({
-        kind: "system.notice",
+        frame_type: "system.notice",
         timestamp_ms: 20,
         notice_key: "evolution.review",
         source: "self_evolution",
@@ -142,7 +142,7 @@ describe("useStreamingRender", () => {
     );
     act(() => {
       sock.emit({
-        kind: "error",
+        frame_type: "error",
         timestamp_ms: 1,
         error_code: "internal",
         message: "boom",

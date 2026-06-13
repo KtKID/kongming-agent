@@ -3,6 +3,11 @@
 // - typescript-eslint 推荐 + react-hooks
 // - 不开 too strict 的规则；happy path 优先
 // - 忽略 dist / node_modules / shadcn ui 复制实现 / e2e 用例（联调阶段单独跑）
+//
+// network-layer v0.1：
+// - 业务层禁止 import `@/network/tools`（tools 是 network 包私有工具）
+// - network 内部解除该限制
+// - flat config 后置覆盖前置，所以"解除限制"的对象必须放在"限制"的对象之后
 
 import tseslint from "typescript-eslint";
 import reactHooks from "eslint-plugin-react-hooks";
@@ -46,5 +51,28 @@ export default tseslint.config(
       // 允许 `e: unknown` catch 上的 instanceof 模式
       "@typescript-eslint/no-non-null-assertion": "off",
     },
+  },
+  // network-layer v0.1：业务层禁 @/network/tools
+  {
+    files: ["src/**/*.{ts,tsx}", "tests/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["@/network/tools", "@/network/tools/*"],
+              message:
+                "@/network/tools 是 network 包私有工具，只允许 @/network/ 内部 import",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  // network-layer v0.1：network 包内部解除限制
+  {
+    files: ["src/network/**/*.{ts,tsx}"],
+    rules: { "no-restricted-imports": "off" },
   },
 );

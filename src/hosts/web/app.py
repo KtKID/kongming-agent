@@ -481,27 +481,11 @@ def create_app(
     app.state.log_source_registry = LogSourceRegistry(cfg, home)
     app.state.log_read_service = LogReadService(app.state.log_source_registry)
 
-    # smart-approval-v1：进程级单例
-    # - policy 持 rule_set + config_store；config_store 每次 classify 重读盘，UI toggle 立即生效
-    # - audit 单文件 JSONL 追加（O_APPEND 并发安全）
-    # - 启动时把内置 default_rules.yaml 物化到 <home>/web/auto_approval/rules.yaml
-    #   （用户编辑这份；首次启动复制，已存在则保留用户改动）
-    from hosts.web.approvals.auto import (
-        AuditLogger,
-        AutoApprovalPolicy,
-        ConfigStore,
-        load_default_rules,
-        materialize_user_rules_yaml,
-    )
+    # smart-approval-v1：进程级单例。具体 policy/config/audit 装配放在
+    # app_support helper，保持 app shell import 边界干净。
+    from hosts.web.app_support.auto_approval import configure_auto_approval
 
-    _auto_approval_root = home / "web" / "auto_approval"
-    _auto_approval_root.mkdir(parents=True, exist_ok=True)
-    _user_rules_yaml = materialize_user_rules_yaml(home)
-    app.state.auto_approval_policy = AutoApprovalPolicy(
-        load_default_rules(_user_rules_yaml),
-        ConfigStore(_auto_approval_root),
-    )
-    app.state.auto_approval_audit = AuditLogger(_auto_approval_root / "audit.jsonl")
+    configure_auto_approval(app, home)
 
     # smart-approval-v2-inbox：全局审批 inbox broadcaster（per-process 单例）
     # 复用 /ws/thread-status 端点 fan-out approval.inbox.* 帧；

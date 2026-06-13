@@ -35,10 +35,10 @@ class TestListSources:
         resp = logs_client.get("/api/manage/logs/sources")
         assert resp.status_code == 200
 
-    def test_returns_seven_sources(self, logs_client: TestClient) -> None:
+    def test_returns_eight_sources(self, logs_client: TestClient) -> None:
         resp = logs_client.get("/api/manage/logs/sources")
         body = resp.json()
-        assert len(body) == 7
+        assert len(body) == 8
 
     def test_source_has_required_fields(self, logs_client: TestClient) -> None:
         resp = logs_client.get("/api/manage/logs/sources")

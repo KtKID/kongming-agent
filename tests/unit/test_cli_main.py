@@ -125,8 +125,8 @@ async def test_run_workflow_smoke_approves_and_executes_run_agent_workflow(capsy
     assert "[workflow-smoke] ok" in capsys.readouterr().out
 
 
-async def test_run_exposes_workflow_tools_to_cli_llm(monkeypatch) -> None:
-    """CLI 正常装配时应把通用 workflow 工具和兼容并行工具一起暴露给 LLM。"""
+async def test_run_exposes_workflow_and_role_tools_to_cli_llm(monkeypatch) -> None:
+    """CLI 正常装配时应把 workflow 工具和角色工具一起暴露给 LLM。"""
     captured: dict = {}
 
     class _DummyBridge:
@@ -182,8 +182,15 @@ async def test_run_exposes_workflow_tools_to_cli_llm(monkeypatch) -> None:
     registry = captured["tools"]
     assert "run_agent_workflow" in enabled_tool_names
     assert "run_parallel_subagents" in enabled_tool_names
+    assert "list_agent_roles" in enabled_tool_names
+    assert "create_agent_role" in enabled_tool_names
     assert "run_agent_workflow" in registry
     assert "run_parallel_subagents" in registry
+    assert "list_agent_roles" in registry
+    assert "create_agent_role" in registry
+    workflow_tool = registry["run_agent_workflow"]
+    role_tool = registry["create_agent_role"]
+    assert workflow_tool._handle.manager.role_manager is role_tool._manager  # type: ignore[attr-defined]
 
 
 def _build_cfg() -> Config:

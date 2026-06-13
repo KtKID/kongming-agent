@@ -390,6 +390,9 @@ def _maybe_load_env_file() -> None:
     .env 搜索路径由 :func:`dotenv.load_dotenv` 默认逻辑决定：cwd 及其祖先目录。
     这样无论从仓库根还是子目录启动都能找到。
     """
+    if os.environ.get("KONGMING_SKIP_DOTENV", "").lower() in {"1", "true", "yes", "on"}:
+        return
+
     try:
         from dotenv import load_dotenv
     except ImportError:
