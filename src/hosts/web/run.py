@@ -12,10 +12,11 @@ import socket
 import sys
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -276,6 +277,23 @@ def _format_base_url(host: str, port: int) -> str:
     return f"http://{host}:{port}"
 
 
+def _now_iso_for_timezone(timezone_name: str) -> str:
+    """按配置时区生成当前时间 ISO 字符串。
+
+    Args:
+        timezone_name: IANA timezone name，例如 ``Asia/Shanghai``。
+
+    Returns:
+        带时区 offset 的 ISO 时间字符串。
+    """
+    try:
+        tz: tzinfo = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        logger.warning("Invalid scheduler.default_timezone=%r; falling back to UTC", timezone_name)
+        tz = UTC
+    return datetime.now(tz).isoformat()
+
+
 def _bind_runtime_socket(host: str, port: int) -> tuple[socket.socket, str, int]:
     """预绑定 uvicorn socket，支持 ``port=0`` 的真实端口回填。
 
@@ -314,6 +332,7 @@ def _build_ready_payload(
     home: Path,
     dist_dir: Path | None,
     public_origin: str | None = None,
+    timezone_name: str = "UTC",
 ) -> dict[str, object]:
     """构造 ready JSON / server.json payload。
 
@@ -323,6 +342,7 @@ def _build_ready_payload(
         home: kongming home。
         dist_dir: 前端 dist 目录。
         public_origin: 手机等外部客户端访问 Web 的公开 origin。
+        timezone_name: 配置里的 IANA 时区名。
 
     Returns:
         可 JSON 序列化的 ready payload。
@@ -340,7 +360,7 @@ def _build_ready_payload(
         "home": str(home),
         "server_json": str(server_json),
         "dist_dir": str(dist_dir) if dist_dir is not None else None,
-        "started_at": datetime.now(UTC).isoformat(),
+        "started_at": _now_iso_for_timezone(timezone_name),
     }
 
 
@@ -367,6 +387,7 @@ def _write_ready_payload(
     home: Path,
     dist_dir: Path | None,
     public_origin: str | None = None,
+    timezone_name: str = "UTC",
     print_ready_json: bool,
 ) -> dict[str, object]:
     """写入 ``server.json``，并按需向 stdout 输出一次 ready JSON。
@@ -377,6 +398,7 @@ def _write_ready_payload(
         home: kongming home。
         dist_dir: 前端 dist 目录。
         public_origin: 手机等外部客户端访问 Web 的公开 origin。
+        timezone_name: 配置里的 IANA 时区名。
         print_ready_json: 是否输出 ready JSON。
 
     Returns:
@@ -388,6 +410,7 @@ def _write_ready_payload(
         home=home,
         dist_dir=dist_dir,
         public_origin=public_origin,
+        timezone_name=timezone_name,
     )
     _write_json_atomic(home / "web" / "server.json", payload)
     if print_ready_json:
@@ -422,6 +445,7 @@ async def _serve_with_ready_payload(
     home: Path,
     dist_dir: Path | None,
     public_origin: str | None,
+    timezone_name: str,
     log_level: str,
     print_ready_json: bool,
 ) -> None:
@@ -436,6 +460,7 @@ async def _serve_with_ready_payload(
         home: kongming home。
         dist_dir: 前端 dist 目录。
         public_origin: 手机等外部客户端访问 Web 的公开 origin。
+        timezone_name: 配置里的 IANA 时区名。
         log_level: uvicorn 日志级别。
         print_ready_json: 是否向 stdout 打印 ready payload。
     """
@@ -461,6 +486,7 @@ async def _serve_with_ready_payload(
                 home=home,
                 dist_dir=dist_dir,
                 public_origin=public_origin,
+                timezone_name=timezone_name,
                 print_ready_json=print_ready_json,
             )
             await server.main_loop()
@@ -580,6 +606,7 @@ def main(argv: list[str] | None = None) -> int:
                     home=home,
                     dist_dir=options.dist_dir,
                     public_origin=cfg.web.public_origin,
+                    timezone_name=cfg.scheduler.default_timezone,
                     log_level=log_level,
                     print_ready_json=options.print_ready_json,
                 )
