@@ -150,6 +150,14 @@ def test_mobile_pairing_router_happy_path_and_handoff_consume(tmp_path: Path) ->
         )
         assert exchanged["scopes"] == ["webview", "thread.read"]
 
+        exchanged_status = authed.get(
+            f"/api/xspace/mobile/pairing-sessions/{created['pairing_id']}",
+        )
+        assert exchanged_status.status_code == 200
+        exchanged_view = exchanged_status.json()
+        assert exchanged_view["status"] == "exchanged"
+        assert exchanged_view["claim"]["status"] == "exchanged"
+
         handoff_response = anonymous.post(
             "/api/xspace/mobile/session-handoff",
             headers={"Authorization": f"Bearer {exchanged['device_token']}"},
@@ -250,10 +258,59 @@ def test_mobile_pairing_auth_and_csrf_boundaries(tmp_path: Path) -> None:
         authed_connect = authed.get("/-/xspace/mobile/connect")
         assert authed_connect.status_code == 200
         assert "连接 XSpace Android" in authed_connect.text
+        assert "function renderState(data)" in authed_connect.text
+        assert 'status === "approved"' in authed_connect.text
+        assert 'status === "exchanged"' in authed_connect.text
+        assert 'status === "denied"' in authed_connect.text
+        assert "setActionsVisible(false)" in authed_connect.text
 
         pair_page = anonymous.get(created["copy_url"])
         assert pair_page.status_code == 200
         assert "xspace://pair-kongming" in pair_page.text
+    finally:
+        anonymous.close()
+        authed.__exit__(None, None, None)
+
+
+def test_mobile_pairing_status_view_after_denial(tmp_path: Path) -> None:
+    """验证拒绝后状态轮询接口返回终态，页面可隐藏授权按钮。"""
+    authed = _authed_client(tmp_path)
+    anonymous = _anonymous_client(authed.app)
+    try:
+        created = _create_pairing(authed, scopes=["webview"])
+        nonce = parse_qs(urlparse(created["copy_url"]).query)["nonce"][0]
+        claim_response = anonymous.post(
+            f"/api/xspace/mobile/pairing-sessions/{created['pairing_id']}/claim",
+            json={
+                "protocol_version": "1",
+                "nonce": nonce,
+                "device": {
+                    "device_id": "android-deny-test",
+                    "label": "Pixel Deny",
+                    "platform": "android",
+                    "app_version": "0.1.0",
+                },
+                "capabilities": {"webview": True},
+            },
+        )
+        assert claim_response.status_code == 200, claim_response.text
+        claim = claim_response.json()
+
+        deny_response = authed.post(
+            f"/api/xspace/mobile/pairing-sessions/{created['pairing_id']}/approve",
+            json={"claim_id": claim["claim_id"], "approved": False},
+            headers=CSRF_HEADERS,
+        )
+        assert deny_response.status_code == 200
+        assert deny_response.json() == {"status": "denied"}
+
+        denied_status = authed.get(
+            f"/api/xspace/mobile/pairing-sessions/{created['pairing_id']}",
+        )
+        assert denied_status.status_code == 200
+        denied_view = denied_status.json()
+        assert denied_view["status"] == "denied"
+        assert denied_view["claim"]["status"] == "denied"
     finally:
         anonymous.close()
         authed.__exit__(None, None, None)

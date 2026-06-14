@@ -229,12 +229,13 @@ def _render_connect_page() -> HTMLResponse:
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>XSpace Mobile Pairing</title>
-  <style>
-    body { font-family: system-ui, sans-serif; max-width: 760px; margin: 40px auto; }
-    pre { white-space: pre-wrap; word-break: break-all; background: #f4f4f4; padding: 12px; }
-    button { margin-right: 8px; padding: 8px 12px; }
-    .muted { color: #666; }
-  </style>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 760px; margin: 40px auto; }
+      pre { white-space: pre-wrap; word-break: break-all; background: #f4f4f4; padding: 12px; }
+      button { margin-right: 8px; padding: 8px 12px; }
+      .muted { color: #666; }
+      .hidden { display: none; }
+    </style>
 </head>
 <body>
   <h1>连接 XSpace Android</h1>
@@ -243,85 +244,144 @@ def _render_connect_page() -> HTMLResponse:
   <pre id="qr"></pre>
   <h2>复制链接</h2>
   <pre id="copy"></pre>
-  <h2>待授权设备</h2>
-  <pre id="claim">等待手机扫码...</pre>
-  <button id="approve" disabled>批准</button>
-  <button id="deny" disabled>拒绝</button>
-  <script>
-    const csrfHeaders = { "X-Requested-With": "XMLHttpRequest" };
-    let pairingId = null;
-    let claimId = null;
+    <h2>待授权设备</h2>
+    <pre id="claim">等待手机扫码...</pre>
+    <div id="actions" class="hidden">
+      <button id="approve" disabled>批准</button>
+      <button id="deny" disabled>拒绝</button>
+    </div>
+    <script>
+      const csrfHeaders = { "X-Requested-With": "XMLHttpRequest" };
+      const terminalStatuses = new Set(["denied", "expired", "exchanged"]);
+      let pairingId = null;
+      let claimId = null;
+      let pollTimer = null;
+      let actionInFlight = false;
 
-    async function api(path, options = {}) {
-      const headers = Object.assign(
-        { "Content-Type": "application/json" },
-        csrfHeaders,
-        options.headers || {},
-      );
-      const response = await fetch(path, Object.assign(
-        { credentials: "same-origin", headers },
-        options,
-      ));
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(JSON.stringify(data));
+      async function api(path, options = {}) {
+        const headers = Object.assign(
+          { "Content-Type": "application/json" },
+          csrfHeaders,
+          options.headers || {},
+        );
+        const response = await fetch(path, Object.assign(
+          { credentials: "same-origin", headers },
+          options,
+        ));
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(JSON.stringify(data));
+        }
+        return data;
       }
-      return data;
-    }
 
-    async function createSession() {
-      const data = await api("/api/xspace/mobile/pairing-sessions", {
-        method: "POST",
-        body: JSON.stringify({
-          protocol_version: "1",
-          client: "kongming-web",
-          requested_scopes: ["webview", "thread.read", "approval.resolve"],
-        }),
-      });
-      pairingId = data.pairing_id;
-      document.getElementById("status").textContent = `pairing ${pairingId} 已创建`;
-      document.getElementById("qr").textContent = data.qr_payload;
-      document.getElementById("copy").textContent = data.copy_url;
-      pollClaim();
-    }
+      function setActionsVisible(visible) {
+        document.getElementById("actions").classList.toggle("hidden", !visible);
+        document.getElementById("approve").disabled = !visible || actionInFlight;
+        document.getElementById("deny").disabled = !visible || actionInFlight;
+      }
 
-    async function pollClaim() {
-      if (!pairingId) return;
-      try {
-        const data = await api(`/api/xspace/mobile/pairing-sessions/${pairingId}`, {
-          method: "GET",
-        });
-        if (data.claim) {
-          claimId = data.claim.claim_id;
-          document.getElementById("claim").textContent = JSON.stringify(data.claim, null, 2);
-          document.getElementById("approve").disabled = false;
-          document.getElementById("deny").disabled = false;
+      function schedulePoll(delay = 1000) {
+        if (pollTimer) clearTimeout(pollTimer);
+        pollTimer = setTimeout(pollStatus, delay);
+      }
+
+      function renderState(data) {
+        const status = data.status;
+        const claim = data.claim;
+        const claimStatus = claim && claim.status;
+        const claimText = claim ? JSON.stringify(claim, null, 2) : "等待手机扫码...";
+        document.getElementById("claim").textContent = claimText;
+
+        if (claim && claimStatus === "pending_approval" && status === "pending_approval") {
+          claimId = claim.claim_id;
+          document.getElementById("status").textContent = "手机已扫码，等待桌面授权";
+          setActionsVisible(true);
+          schedulePoll();
           return;
         }
-        document.getElementById("claim").textContent = "等待手机扫码...";
-      } catch (error) {
-        document.getElementById("claim").textContent = String(error);
+
+        setActionsVisible(false);
+        if (status === "pending_scan") {
+          document.getElementById("status").textContent = `pairing ${data.pairing_id} 已创建，等待手机扫码`;
+        } else if (status === "approved") {
+          document.getElementById("status").textContent = "已批准，等待手机完成连接";
+        } else if (status === "exchanged") {
+          document.getElementById("status").textContent = "手机已连接";
+        } else if (status === "denied") {
+          document.getElementById("status").textContent = "已拒绝连接";
+        } else if (status === "expired") {
+          document.getElementById("status").textContent = "配对已过期，请刷新页面重新生成二维码";
+        } else {
+          document.getElementById("status").textContent = `状态：${status}`;
+        }
+
+        if (!terminalStatuses.has(status)) {
+          schedulePoll();
+        }
       }
-      setTimeout(pollClaim, 1000);
-    }
 
-    async function approve(approved) {
-      if (!pairingId || !claimId) return;
-      const data = await api(`/api/xspace/mobile/pairing-sessions/${pairingId}/approve`, {
-        method: "POST",
-        body: JSON.stringify({ claim_id: claimId, approved }),
+      async function createSession() {
+        const data = await api("/api/xspace/mobile/pairing-sessions", {
+          method: "POST",
+          body: JSON.stringify({
+            protocol_version: "1",
+            client: "kongming-web",
+            requested_scopes: ["webview", "thread.read", "approval.resolve"],
+          }),
+        });
+        pairingId = data.pairing_id;
+        document.getElementById("qr").textContent = data.qr_payload;
+        document.getElementById("copy").textContent = data.copy_url;
+        renderState({
+          pairing_id: pairingId,
+          status: "pending_scan",
+          expires_at: data.expires_at,
+          claim: null,
+        });
+      }
+
+      async function pollStatus() {
+        if (!pairingId) return;
+        try {
+          const data = await api(`/api/xspace/mobile/pairing-sessions/${pairingId}`, {
+            method: "GET",
+          });
+          renderState(data);
+        } catch (error) {
+          document.getElementById("claim").textContent = String(error);
+          schedulePoll();
+        }
+      }
+
+      async function approve(approved) {
+        if (!pairingId || !claimId) return;
+        actionInFlight = true;
+        setActionsVisible(true);
+        try {
+          const data = await api(`/api/xspace/mobile/pairing-sessions/${pairingId}/approve`, {
+            method: "POST",
+            body: JSON.stringify({ claim_id: claimId, approved }),
+          });
+          document.getElementById("status").textContent =
+            data.status === "approved" ? "已批准，等待手机完成连接" : "已拒绝连接";
+          setActionsVisible(false);
+          await pollStatus();
+        } catch (error) {
+          document.getElementById("status").textContent = String(error);
+          actionInFlight = false;
+          setActionsVisible(true);
+        } finally {
+          actionInFlight = false;
+        }
+      }
+
+      document.getElementById("approve").onclick = () => approve(true);
+      document.getElementById("deny").onclick = () => approve(false);
+      createSession().catch((error) => {
+        document.getElementById("status").textContent = String(error);
       });
-      document.getElementById("status").textContent = `状态：${data.status}`;
-      document.getElementById("approve").disabled = true;
-      document.getElementById("deny").disabled = true;
-    }
-
-    document.getElementById("approve").onclick = () => approve(true);
-    document.getElementById("deny").onclick = () => approve(false);
-    createSession().catch((error) => {
-      document.getElementById("status").textContent = String(error);
-    });
-  </script>
+    </script>
 </body>
 </html>
         """.strip()
