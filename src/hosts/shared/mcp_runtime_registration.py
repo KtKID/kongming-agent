@@ -27,6 +27,16 @@ from tools.runtime.registry import ToolRegistry
 
 _REGISTRATION_RUN_ID = "mcp-runtime-registration"
 _WEB_SEARCH_TOOL_NAME = "web_search"
+_MAX_DIAGNOSTIC_ERROR_MESSAGE_CHARS = 300
+_SENSITIVE_ERROR_MARKERS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "bearer",
+    "password",
+    "secret",
+    "token",
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +64,7 @@ class McpRuntimeRegistrationManager:
         self._event_sinks = tuple(event_sinks)
         self._mcp_manager_factory = mcp_manager_factory
         self._mcp_manager: Any | None = None
+        self._closed = False
         self._last_result = McpRuntimeRegistrationResult()
 
     @property
@@ -117,6 +128,7 @@ class McpRuntimeRegistrationManager:
         try:
             mcp_manager = self._mcp_manager_factory(mcp_cfg.servers)
             self._mcp_manager = mcp_manager
+            self._closed = False
             await mcp_manager.start_all()
         except Exception as exc:
             cleanup_diagnostics = await self._cleanup_startup_failure(mcp_manager)
@@ -128,7 +140,7 @@ class McpRuntimeRegistrationManager:
                 {
                     "reason": "mcp_startup_failed",
                     "error_class": type(exc).__name__,
-                    "error_message": str(exc),
+                    "error_message": _diagnostic_error_message(exc),
                     "mcp_manager": _manager_diagnostics(mcp_manager),
                     "cleanup": cleanup_diagnostics,
                     "web_search": web_search_diagnostics,
@@ -199,9 +211,13 @@ class McpRuntimeRegistrationManager:
 
     async def aclose(self) -> None:
         """关闭 MCP manager，输入为空，输出为子进程已清理。"""
+        if self._closed:
+            return
         manager = self._mcp_manager
         if manager is None:
+            self._closed = True
             return
+        self._closed = True
         aclose = getattr(manager, "aclose", None)
         if aclose is not None:
             await aclose()
@@ -247,7 +263,7 @@ class McpRuntimeRegistrationManager:
                 "attempted": True,
                 "closed": False,
                 "error_class": type(exc).__name__,
-                "error_message": str(exc),
+                "error_message": _diagnostic_error_message(exc),
             }
         return {"attempted": True, "closed": True}
 
@@ -397,8 +413,24 @@ def _manager_diagnostics(manager: Any | None) -> dict[str, Any]:
     try:
         diagnostics = diagnostics_fn()
     except Exception as exc:
-        return {"diagnostics_failed": type(exc).__name__, "error_message": str(exc)}
+        return {
+            "diagnostics_failed": type(exc).__name__,
+            "error_message": _diagnostic_error_message(exc),
+        }
     return _mapping(diagnostics)
+
+
+def _diagnostic_error_message(exc: BaseException) -> str:
+    """生成安全错误摘要，输入异常，输出脱敏且截断后的 diagnostics 文本。"""
+    message = str(exc).replace("\n", " ").strip()
+    if not message:
+        return type(exc).__name__
+    lowered = message.lower()
+    if any(marker in lowered for marker in _SENSITIVE_ERROR_MARKERS):
+        return "<redacted sensitive diagnostic>"
+    if len(message) <= _MAX_DIAGNOSTIC_ERROR_MESSAGE_CHARS:
+        return message
+    return f"{message[:_MAX_DIAGNOSTIC_ERROR_MESSAGE_CHARS].rstrip()}..."
 
 
 def _registry_has_tool(registry: object, name: str) -> bool:

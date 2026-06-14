@@ -218,7 +218,24 @@ class _WebSearchTool:
                     content="web_search max_results must be an integer >= 1.",
                     error_message="max_results must be an integer >= 1",
                 )
-        response = await self._manager.search(query, max_results=max_results)
+        try:
+            response = await self._manager.search(query, max_results=max_results)
+        except Exception as exc:
+            error_message = _exception_message(exc)
+            return ToolResult(
+                ok=False,
+                content=f"web_search failed: {error_message}",
+                data={
+                    "query": query,
+                    "results": [],
+                    "diagnostics": {
+                        "ok": False,
+                        "error_class": type(exc).__name__,
+                        "error_message": error_message,
+                    },
+                },
+                error_message=error_message,
+            )
         data = {
             "query": response.query,
             "results": [asdict(result) for result in response.results],
@@ -246,6 +263,12 @@ def _parse_positive_int(value: object, *, allow_string: bool) -> int | None:
         parsed = int(stripped)
         return parsed if parsed >= 1 else None
     return None
+
+
+def _exception_message(exc: Exception) -> str:
+    """生成异常消息，输入异常，输出适合 ToolResult 的短文本。"""
+    message = str(exc).strip()
+    return message or exc.__class__.__name__
 
 
 def _extract_search_items(value: object) -> list[Mapping[str, Any]]:

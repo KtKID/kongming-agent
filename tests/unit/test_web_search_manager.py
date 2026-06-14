@@ -128,6 +128,19 @@ class _FakeConflictingDiagnosticsSearchTool:
         )
 
 
+class _ExplodingSearchTool:
+    """fake 搜索工具，执行时抛异常。"""
+
+    name = "mcp__minimax__web_search"
+    description = "fake exploding search"
+    input_schema: dict[str, Any] = {"type": "object"}
+
+    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        """模拟底层 provider 抛错，输入搜索参数，输出 RuntimeError。"""
+        del args, ctx
+        raise RuntimeError("provider transport exploded")
+
+
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_web_search_manager_normalizes_fake_mcp_data() -> None:
@@ -199,6 +212,31 @@ async def test_web_search_tool_marks_provider_text_error_as_failed() -> None:
     assert result.data is not None
     assert result.data["diagnostics"]["ok"] is False
     assert result.data["diagnostics"]["result_count"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_web_search_tool_converts_provider_exception_to_failed_result() -> None:
+    """验证底层工具抛错，输入异常 provider，输出失败 ToolResult。"""
+    manager = WebSearchManager(
+        _ExplodingSearchTool(),
+        provider_name="minimax_web_search",
+        provider_tool_name="mcp__minimax__web_search",
+    )
+    tool = build_web_search_tool(manager)
+
+    result = await tool.execute(
+        {"query": "minimax mcp"},
+        ToolContext(run_id="r", session_id="s", turn=1, call_id="c"),
+    )
+
+    assert result.ok is False
+    assert result.error_message == "provider transport exploded"
+    assert result.content == "web_search failed: provider transport exploded"
+    assert result.data is not None
+    assert result.data["query"] == "minimax mcp"
+    assert result.data["results"] == []
+    assert result.data["diagnostics"]["error_class"] == "RuntimeError"
 
 
 @pytest.mark.asyncio

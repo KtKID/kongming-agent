@@ -111,6 +111,42 @@ class _RaisingCloseMcpManager(_RaisingMcpManager):
         raise RuntimeError("close exploded")
 
 
+class _SensitiveRaisingMcpManager(_RaisingMcpManager):
+    """启动异常包含敏感 marker 的 MCP manager fake。"""
+
+    async def start_all(self) -> None:
+        """模拟敏感启动错误，输入为空，输出 RuntimeError。"""
+        raise RuntimeError("MINIMAX_API_KEY=sk-secret-token transport exploded")
+
+
+class _ClosableMcpManager:
+    """可成功启动关闭的 MCP manager fake，用于验证 aclose 幂等。"""
+
+    def __init__(self, _servers: object) -> None:
+        """初始化 fake，输入 server 配置，输出可观察关闭计数。"""
+        self.closed = False
+        self.close_calls = 0
+
+    async def start_all(self) -> None:
+        """模拟启动成功，输入为空，输出 ready 状态。"""
+        self.closed = False
+
+    async def list_tools(self, server_id: str) -> list[object]:
+        """返回空工具列表，输入 server_id，输出空 descriptors。"""
+        del server_id
+        return []
+
+    async def aclose(self) -> None:
+        """记录关闭次数，输入为空，输出 closed 状态。"""
+        self.close_calls += 1
+        self.closed = True
+
+    def diagnostics(self) -> dict[str, object]:
+        """返回 fake 诊断，输入为空，输出 server 状态。"""
+        status = "closed" if self.closed else "ready"
+        return {"servers": {"minimax": {"status": status}}}
+
+
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_runtime_registration_registers_fake_mcp_web_search(tmp_path: Path) -> None:
@@ -312,6 +348,42 @@ web_search:
 
 @pytest.mark.asyncio
 @pytest.mark.unit
+async def test_runtime_registration_redacts_sensitive_startup_error(tmp_path: Path) -> None:
+    """验证启动异常脱敏，输入含 API key marker 的错误，输出安全 diagnostics。"""
+
+    def _factory(servers: object) -> _SensitiveRaisingMcpManager:
+        return _SensitiveRaisingMcpManager(servers)
+
+    cfg = load_config(
+        _write_config(
+            tmp_path,
+            """
+mcp:
+  enabled: true
+  servers:
+    - server_id: minimax
+      command: fake-mcp
+web_search:
+  enabled: true
+  search_tool_names:
+    - custom_search_tool
+""",
+        ),
+        load_env_file=False,
+    )
+    registry = ToolRegistry()
+    registry.register(_FakeUserSearchTool())
+    manager = McpRuntimeRegistrationManager(cfg, mcp_manager_factory=_factory)
+
+    result = await manager.register(registry)
+
+    assert result.diagnostics["error_class"] == "RuntimeError"
+    assert result.diagnostics["error_message"] == "<redacted sensitive diagnostic>"
+    assert "sk-secret-token" not in str(result.diagnostics)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_runtime_registration_clears_manager_when_cleanup_raises(tmp_path: Path) -> None:
     """验证 cleanup 抛错，输入关闭失败 manager，输出引用已清空和错误诊断。"""
     instances: list[_RaisingCloseMcpManager] = []
@@ -348,3 +420,41 @@ web_search:
     assert result.diagnostics["cleanup"]["error_class"] == "RuntimeError"
     assert instances[0].closed is True
     assert manager.mcp_manager is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_runtime_registration_aclose_is_idempotent(tmp_path: Path) -> None:
+    """验证关闭幂等，输入已启动 manager，输出底层 aclose 只调用一次。"""
+    instances: list[_ClosableMcpManager] = []
+
+    def _factory(servers: object) -> _ClosableMcpManager:
+        manager = _ClosableMcpManager(servers)
+        instances.append(manager)
+        return manager
+
+    cfg = load_config(
+        _write_config(
+            tmp_path,
+            """
+mcp:
+  enabled: true
+  servers:
+    - server_id: minimax
+      command: fake-mcp
+web_search:
+  enabled: false
+""",
+        ),
+        load_env_file=False,
+    )
+    registry = ToolRegistry()
+    manager = McpRuntimeRegistrationManager(cfg, mcp_manager_factory=_factory)
+
+    result = await manager.register(registry)
+    await manager.aclose()
+    await manager.aclose()
+
+    assert result.diagnostics["started_servers"] == ("minimax",)
+    assert instances[0].close_calls == 1
+    assert instances[0].closed is True
