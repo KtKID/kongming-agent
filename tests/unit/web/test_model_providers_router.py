@@ -27,7 +27,6 @@ def _isolate_provider_env(monkeypatch) -> None:
         "ZHIPU_API_KEY",
         "ZAI_API_KEY",
         "DEEPSEEK_API_KEY",
-        "CUSTOM_MINIMAX_KEY",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -132,14 +131,14 @@ def test_connections_reads_stable_minimax_env(monkeypatch) -> None:
 
 
 def test_connections_reads_minimax_preset_env(monkeypatch) -> None:
-    monkeypatch.setenv("CUSTOM_MINIMAX_KEY", "sk-live")
+    monkeypatch.setenv("MINIMAX_API_KEY", "sk-live")
     preset = LLMPresetConfig(
         id="minimax-cn",
         display_name="Minimax（CN）",
         provider="anthropic",
         base_url="https://api.minimaxi.com/anthropic",
         model="MiniMax-M3",
-        api_key_env="CUSTOM_MINIMAX_KEY",
+        api_key_env="MINIMAX_API_KEY",
     )
     client = _client(_config([preset]))
 
@@ -178,7 +177,7 @@ def test_connect_provider_writes_default_env_and_returns_connection(
         provider="anthropic",
         base_url="https://api.minimaxi.com/anthropic",
         model="MiniMax-M3",
-        api_key_env="CUSTOM_MINIMAX_KEY",
+        api_key_env="KONGMING_PROVIDER_MINIMAX_API_KEY",
     )
     client = _client_with_config_manager(_config([preset]), manager)
 
@@ -453,7 +452,7 @@ def test_connections_reads_deepseek_preset_env(monkeypatch) -> None:
 
 
 def test_model_families_returns_only_connected_real_presets(monkeypatch) -> None:
-    monkeypatch.setenv("CUSTOM_MINIMAX_KEY", "minimax-live")
+    monkeypatch.setenv("MINIMAX_API_KEY", "minimax-live")
     monkeypatch.setenv("GLM_API_KEY", "glm-live")
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     presets = [
@@ -463,7 +462,7 @@ def test_model_families_returns_only_connected_real_presets(monkeypatch) -> None
             provider="anthropic",
             base_url="https://api.minimaxi.com/anthropic",
             model="MiniMax-M3",
-            api_key_env="CUSTOM_MINIMAX_KEY",
+            api_key_env="MINIMAX_API_KEY",
         ),
         LLMPresetConfig(
             id="bigmodel-glm5",
@@ -510,14 +509,14 @@ def test_model_families_returns_only_connected_real_presets(monkeypatch) -> None
 
 
 def test_model_families_match_custom_proxy_preset_by_model(monkeypatch) -> None:
-    monkeypatch.setenv("CUSTOM_MINIMAX_KEY", "minimax-live")
+    monkeypatch.setenv("MINIMAX_API_KEY", "minimax-live")
     preset = LLMPresetConfig(
         id="custom-proxy-a",
         display_name="自定义代理",
         provider="anthropic",
         base_url="https://llm-proxy.example.test/anthropic",
         model="MiniMax-M3",
-        api_key_env="CUSTOM_MINIMAX_KEY",
+        api_key_env="MINIMAX_API_KEY",
     )
     client = _client(_config([preset]))
 

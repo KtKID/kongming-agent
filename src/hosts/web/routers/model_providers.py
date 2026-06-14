@@ -503,12 +503,6 @@ def _api_key_env_candidates(
         definition.default_api_key_env,
         *definition.fallback_api_key_envs,
     ]
-    if (
-        preset is not None
-        and preset.api_key_env
-        and preset.api_key_env != GENERIC_MODEL_API_KEY_ENV
-    ):
-        candidates.append(preset.api_key_env)
     result: list[str] = []
     for env_name in candidates:
         if env_name and env_name not in result:
