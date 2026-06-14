@@ -344,7 +344,7 @@ def test_connections_old_glm_preset_generic_model_key_stays_disconnected(
     }
 
 
-def test_connections_reads_provider_specific_glm_env_before_generic_model_key(
+def test_connections_old_glm_preset_waits_for_explicit_connect(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("KONGMING_MODEL_API_KEY", "minimax-live")
@@ -365,9 +365,9 @@ def test_connections_reads_provider_specific_glm_env_before_generic_model_key(
     glm = next(item for item in resp.json() if item["providerId"] == "glm")
     assert glm == {
         "providerId": "glm",
-        "status": "connected",
+        "status": "disconnected",
         "model": "glm-5.1",
-        "authLabel": "Bearer",
+        "authLabel": None,
     }
 
 

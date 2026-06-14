@@ -393,7 +393,10 @@ def _provider_connection_from_env(
     preset: LLMPresetConfig | None,
 ) -> ProviderConnectionDTO:
     """按当前 env 与 preset 推断服务商连接 DTO。"""
-    connected = bool(_resolve_api_key(definition, preset).value)
+    api_key = _resolve_api_key(definition, preset)
+    connected = (
+        bool(api_key.value) if preset is None else _preset_runtime_can_read_key(preset, api_key)
+    )
     return ProviderConnectionDTO(
         providerId=definition.provider_id,
         status="connected" if connected else "disconnected",
