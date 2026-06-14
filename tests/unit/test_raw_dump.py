@@ -90,6 +90,31 @@ def test_dump_enabled_writes_full_record(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
 
 @pytest.mark.unit
+def test_dump_enforces_private_file_and_directory_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """raw dump 目录必须是 0700，文件必须是 0600。"""
+    monkeypatch.setenv("KONGMING_TRACE_RAW_LLM", "1")
+
+    dump_dir = tmp_path / "debug"
+    path = dump_raw_llm_interaction(
+        provider="openai_responses",
+        url="https://example.com",
+        request_payload={},
+        request_headers={},
+        response_status=200,
+        response_headers={},
+        response_body={},
+        dump_dir=dump_dir,
+    )
+
+    assert path is not None
+    assert dump_dir.stat().st_mode & 0o777 == 0o700
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.unit
 def test_dump_redacts_sensitive_headers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Authorization / X-API-Key / Api-Key 的值必须被脱敏为 <redacted>。"""
     monkeypatch.setenv("KONGMING_TRACE_RAW_LLM", "1")

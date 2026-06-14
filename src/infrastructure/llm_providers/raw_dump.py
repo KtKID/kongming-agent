@@ -16,7 +16,8 @@ provider 完整返回（含厂商扩展字段如 ``logprobs`` / ``reasoning_cont
 **安全约束**：
 - request headers 的 ``Authorization`` / ``X-API-Key`` / ``Api-Key`` 字段
   落盘前被替换为 ``<redacted>``，防止 dump 文件变成 API key 泄露源
-- dump 目录默认位于 ``kongming_home`` 下
+- dump 目录默认位于 ``kongming_home`` 下，目录权限收敛到 ``0700``，文件权限
+  收敛到 ``0600``
 """
 
 from __future__ import annotations
@@ -89,6 +90,7 @@ def dump_raw_llm_interaction(
     target_dir = resolve_kongming_path(dump_dir or _DEFAULT_DIR)
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(target_dir, 0o700)
         ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
         nonce = uuid.uuid4().hex[:6]
         path = target_dir / f"raw-llm-{ts}-{nonce}.json"
@@ -109,8 +111,10 @@ def dump_raw_llm_interaction(
             "error": error,
         }
 
-        with path.open("w", encoding="utf-8") as f:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(record, f, ensure_ascii=False, indent=2, default=str)
+        os.chmod(path, 0o600)
         return path
     except Exception:
         # dump 永远不能拖垮主链路；调试工具失败静默。

@@ -537,32 +537,24 @@ def test_model_families_match_custom_proxy_preset_by_model(monkeypatch) -> None:
     ]
 
 
-def test_model_families_materializes_default_preset_with_default_env(monkeypatch) -> None:
+def test_model_families_without_preset_has_no_get_side_effects(monkeypatch) -> None:
     monkeypatch.setenv("MINIMAX_API_KEY", "")
     monkeypatch.setenv("KONGMING_PROVIDER_MINIMAX_API_KEY", "minimax-live")
     cfg = _config()
-    client = _client(cfg)
+    manager = _FakeConfigManager(monkeypatch)
+    client = _client_with_config_manager(cfg, manager)
 
     resp = client.get("/api/model-providers/model-families")
 
     assert resp.status_code == 200
-    assert resp.json() == [
-        {
-            "providerId": "minimax",
-            "providerLabel": "Minimax（CN）",
-            "familyId": "minimax:MiniMax-M3",
-            "displayName": "MiniMax-M3",
-            "presetId": "minimax-m3",
-            "model": "MiniMax-M3",
-            "connected": True,
-        }
-    ]
-    assert [preset.id for preset in cfg.web.llm_presets] == ["minimax-m3"]
-    assert [preset.api_key_env for preset in cfg.web.llm_presets] == ["MINIMAX_API_KEY"]
-    assert os.environ["MINIMAX_API_KEY"] == "minimax-live"
+    assert resp.json() == []
+    assert cfg.web.llm_presets == []
+    assert manager.writes == []
+    assert manager.presets == []
+    assert os.environ["MINIMAX_API_KEY"] == ""
 
 
-def test_model_families_syncs_fallback_key_for_existing_default_preset(
+def test_model_families_with_fallback_only_keeps_get_read_only(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("MINIMAX_API_KEY", "")
@@ -580,21 +572,11 @@ def test_model_families_syncs_fallback_key_for_existing_default_preset(
     resp = client.get("/api/model-providers/model-families")
 
     assert resp.status_code == 200
-    assert resp.json() == [
-        {
-            "providerId": "minimax",
-            "providerLabel": "Minimax（CN）",
-            "familyId": "minimax:MiniMax-M3",
-            "displayName": "MiniMax-M3",
-            "presetId": "minimax-m3",
-            "model": "MiniMax-M3",
-            "connected": True,
-        }
-    ]
-    assert os.environ["MINIMAX_API_KEY"] == "minimax-live"
+    assert resp.json() == []
+    assert os.environ["MINIMAX_API_KEY"] == ""
 
 
-def test_model_families_migrates_old_generic_preset_to_default_env(
+def test_model_families_keeps_old_generic_preset_read_only(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("GLM_API_KEY", "")
@@ -614,19 +596,11 @@ def test_model_families_migrates_old_generic_preset_to_default_env(
     resp = client.get("/api/model-providers/model-families")
 
     assert resp.status_code == 200
-    assert resp.json() == [
-        {
-            "providerId": "glm",
-            "providerLabel": "GLM（CN）",
-            "familyId": "glm:glm-5.1",
-            "displayName": "glm-5.1",
-            "presetId": "bigmodel-glm5",
-            "model": "glm-5.1",
-            "connected": True,
-        }
+    assert resp.json() == []
+    assert [preset.api_key_env for preset in cfg.web.llm_presets] == [
+        router_mod.GENERIC_MODEL_API_KEY_ENV
     ]
-    assert [preset.api_key_env for preset in cfg.web.llm_presets] == ["GLM_API_KEY"]
-    assert os.environ["GLM_API_KEY"] == "glm-fallback"
+    assert os.environ["GLM_API_KEY"] == ""
 
 
 def test_current_probe_uses_one_token_anthropic_request(monkeypatch) -> None:

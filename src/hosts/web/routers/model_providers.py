@@ -24,6 +24,7 @@ router = APIRouter(prefix="/api/model-providers", tags=["model-providers"])
 
 PROVIDER_TEST_TIMEOUT_SECONDS = 15.0
 PROVIDER_TEST_MAX_TOKENS = 1
+GENERIC_MODEL_API_KEY_ENV = "KONGMING_MODEL_API_KEY"
 
 
 @dataclass(frozen=True)
@@ -304,24 +305,10 @@ async def list_connected_model_families(request: Request) -> list[ConnectedModel
     for definition in PROVIDER_DEFINITIONS:
         preset = _find_provider_preset(definition, cfg.web.llm_presets)
         if preset is None:
-            api_key = _resolve_api_key(definition, preset)
-            if not api_key.value or api_key.env_name is None:
-                continue
-            _normalize_default_api_key_env(definition, api_key)
-            preset = _default_preset_for_provider(definition, definition.default_api_key_env)
-            config_manager = getattr(request.app.state, "config_manager", None)
-            if config_manager is not None:
-                config_manager.upsert_web_llm_preset(preset)
-            _attach_runtime_preset(cfg, preset)
-        else:
-            api_key = _resolve_api_key(definition, preset)
-            _normalize_default_api_key_env(definition, api_key)
-            if preset.api_key_env == "KONGMING_MODEL_API_KEY":
-                preset = preset.model_copy(update={"api_key_env": definition.default_api_key_env})
-                config_manager = getattr(request.app.state, "config_manager", None)
-                if config_manager is not None:
-                    config_manager.upsert_web_llm_preset(preset)
-                _attach_runtime_preset(cfg, preset)
+            continue
+        api_key = _resolve_api_key(definition, preset)
+        if not _preset_runtime_can_read_key(preset, api_key):
+            continue
         connection = _provider_connection_from_env(definition, preset)
         if connection.status != "connected":
             continue
@@ -494,17 +481,17 @@ def _resolve_api_key(
     return _ApiKeyResolution(env_name=None, value="")
 
 
-def _normalize_default_api_key_env(
-    definition: _ProviderDefinition,
+def _preset_runtime_can_read_key(
+    preset: LLMPresetConfig,
     api_key: _ApiKeyResolution,
-) -> None:
-    """把 fallback 命中的 key 映射到当前进程默认 env，供新 preset runtime 读取。"""
-    if (
-        api_key.env_name != definition.default_api_key_env
-        and api_key.value
-        and not os.environ.get(definition.default_api_key_env, "").strip()
-    ):
-        os.environ[definition.default_api_key_env] = api_key.value
+) -> bool:
+    """判断返回的 preset 在运行时工厂中能直接读到 key。"""
+    return bool(
+        api_key.value
+        and preset.api_key_env
+        and api_key.env_name == preset.api_key_env
+        and preset.api_key_env != GENERIC_MODEL_API_KEY_ENV
+    )
 
 
 def _api_key_env_candidates(
@@ -516,7 +503,11 @@ def _api_key_env_candidates(
         definition.default_api_key_env,
         *definition.fallback_api_key_envs,
     ]
-    if preset is not None and preset.api_key_env and preset.api_key_env != "KONGMING_MODEL_API_KEY":
+    if (
+        preset is not None
+        and preset.api_key_env
+        and preset.api_key_env != GENERIC_MODEL_API_KEY_ENV
+    ):
         candidates.append(preset.api_key_env)
     result: list[str] = []
     for env_name in candidates:
@@ -531,11 +522,13 @@ def _missing_api_key_message(
 ) -> str:
     """返回缺 key 提示。"""
     env_names = [definition.default_api_key_env, *definition.fallback_api_key_envs]
-    if preset is not None and preset.api_key_env and preset.api_key_env != "KONGMING_MODEL_API_KEY":
+    if (
+        preset is not None
+        and preset.api_key_env
+        and preset.api_key_env != GENERIC_MODEL_API_KEY_ENV
+    ):
         env_names.append(preset.api_key_env)
-    unique_env_names = [
-        name for idx, name in enumerate(env_names) if name and name not in env_names[:idx]
-    ]
+    unique_env_names = list(dict.fromkeys(name for name in env_names if name))
     return f"未找到 {definition.display_name} API Key；请配置 {' / '.join(unique_env_names)}。"
 
 
