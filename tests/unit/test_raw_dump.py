@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -90,6 +91,7 @@ def test_dump_enabled_writes_full_record(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows uses ACLs instead of POSIX modes")
 def test_dump_enforces_private_file_and_directory_modes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
