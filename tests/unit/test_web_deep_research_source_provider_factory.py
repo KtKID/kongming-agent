@@ -19,6 +19,7 @@ from application.agent_workflows.strategies.deep_research.source_provider import
     ResearchSourceManager,
 )
 from hosts.web.research_source_provider import (
+    MAX_STORED_SEARCH_PAYLOAD_KEYS,
     UserToolResearchSourceProviderAdapter,
     WebResearchSourceProviderFactory,
     WebResearchSourceProviderFactoryConfig,
@@ -195,6 +196,42 @@ async def test_search_only_provider_marks_missing_content_as_failed() -> None:
     assert record.error_code == "fetch_tool_unavailable"
     assert record.content_text is None
     assert record.url == "https://example.com/no-content"
+
+
+@pytest.mark.asyncio
+async def test_search_only_provider_bounds_stored_payload_cache() -> None:
+    """验证 search payload 缓存上限，输入大量候选，输出缓存裁剪且新候选可 fetch。"""
+    search_tool = _FakeUserTool(
+        {
+            "results": [
+                {
+                    "url": f"https://example.com/source-{index}",
+                    "title": f"Source {index}",
+                    "snippet": f"snippet {index}",
+                }
+                for index in range(MAX_STORED_SEARCH_PAYLOAD_KEYS + 50)
+            ]
+        }
+    )
+    provider = UserToolResearchSourceProviderAdapter(
+        name="user_tool",
+        search_tool=search_tool,
+        search_tool_name="web_search",
+    )
+
+    candidates = await provider.search(
+        ResearchSourceQuery(
+            query_id="q-many",
+            line="many sources",
+            intent="overview",
+            max_results=MAX_STORED_SEARCH_PAYLOAD_KEYS + 50,
+        )
+    )
+    last_record = await provider.fetch(candidates[-1])
+
+    assert len(provider._payloads_by_key) <= MAX_STORED_SEARCH_PAYLOAD_KEYS
+    assert last_record.status == "fetched"
+    assert last_record.content_text == f"snippet {MAX_STORED_SEARCH_PAYLOAD_KEYS + 49}"
 
 
 @pytest.mark.asyncio

@@ -102,6 +102,15 @@ class _RaisingMcpManager:
         return dict(self._diagnostics)
 
 
+class _RaisingCloseMcpManager(_RaisingMcpManager):
+    """关闭阶段抛错的 MCP manager fake，用于验证引用提前清理。"""
+
+    async def aclose(self) -> None:
+        """模拟关闭失败，输入为空，输出 RuntimeError。"""
+        self.closed = True
+        raise RuntimeError("close exploded")
+
+
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_runtime_registration_registers_fake_mcp_web_search(tmp_path: Path) -> None:
@@ -299,3 +308,43 @@ web_search:
     assert result.registered_tools == ("web_search",)
     assert result.diagnostics["web_search"]["reason"] == "registered"
     assert "web_search" in registry
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_runtime_registration_clears_manager_when_cleanup_raises(tmp_path: Path) -> None:
+    """验证 cleanup 抛错，输入关闭失败 manager，输出引用已清空和错误诊断。"""
+    instances: list[_RaisingCloseMcpManager] = []
+
+    def _factory(servers: object) -> _RaisingCloseMcpManager:
+        manager = _RaisingCloseMcpManager(servers)
+        instances.append(manager)
+        return manager
+
+    cfg = load_config(
+        _write_config(
+            tmp_path,
+            """
+mcp:
+  enabled: true
+  servers:
+    - server_id: minimax
+      command: fake-mcp
+web_search:
+  enabled: true
+  search_tool_names:
+    - custom_search_tool
+""",
+        ),
+        load_env_file=False,
+    )
+    registry = ToolRegistry()
+    registry.register(_FakeUserSearchTool())
+    manager = McpRuntimeRegistrationManager(cfg, mcp_manager_factory=_factory)
+
+    result = await manager.register(registry)
+
+    assert result.diagnostics["cleanup"]["closed"] is False
+    assert result.diagnostics["cleanup"]["error_class"] == "RuntimeError"
+    assert instances[0].closed is True
+    assert manager.mcp_manager is None

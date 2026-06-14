@@ -236,9 +236,9 @@ class McpRuntimeRegistrationManager:
         if mcp_manager is None:
             self._mcp_manager = None
             return {"attempted": False, "closed": False, "reason": "manager_unavailable"}
+        self._mcp_manager = None
         aclose = getattr(mcp_manager, "aclose", None)
         if aclose is None:
-            self._mcp_manager = None
             return {"attempted": False, "closed": False, "reason": "aclose_unavailable"}
         try:
             await aclose()
@@ -249,7 +249,6 @@ class McpRuntimeRegistrationManager:
                 "error_class": type(exc).__name__,
                 "error_message": str(exc),
             }
-        self._mcp_manager = None
         return {"attempted": True, "closed": True}
 
     async def _emit(self, kind: str, payload: dict[str, Any]) -> None:

@@ -44,6 +44,7 @@ DEFAULT_FETCH_TOOL_NAMES = (
     "fetch_url",
     "browser_fetch",
 )
+MAX_STORED_SEARCH_PAYLOAD_KEYS = 1024
 
 
 @dataclass(frozen=True)
@@ -437,6 +438,14 @@ def _store_payload(
     payload = _StoredSearchPayload(content_text=content_text, raw=raw)
     for key in _candidate_keys(candidate):
         store[key] = payload
+    _trim_payload_store(store)
+
+
+def _trim_payload_store(store: dict[str, _StoredSearchPayload]) -> None:
+    """限制搜索正文缓存大小，输入缓存 dict，输出为原地裁剪后的缓存。"""
+    overflow = len(store) - MAX_STORED_SEARCH_PAYLOAD_KEYS
+    for _ in range(max(overflow, 0)):
+        store.pop(next(iter(store)))
 
 
 def _lookup_payload(
