@@ -11,23 +11,25 @@ XSpace Android。关键测试职责：主链路覆盖 cookie handoff，边界测
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hosts.web.app import create_app
+from infrastructure.config.models import Config
 from tests.unit.test_web_app_lifespan import _seed_password
 from tests.unit.test_web_routers_threads import CSRF_HEADERS, FakeTM, _make_cfg
 
 
-def _authed_client(tmp_path: Path) -> TestClient:
+def _authed_client(tmp_path: Path, cfg: Config | None = None) -> TestClient:
     """创建已登录的 Web TestClient。
 
     关键输入：pytest 临时目录。
     关键输出：带 ``kongming_session`` cookie 的 TestClient。
     """
     _seed_password(tmp_path, "pwd")
-    app = create_app(_make_cfg(), FakeTM(), home_dir=tmp_path)
+    app = create_app(cfg or _make_cfg(), FakeTM(), home_dir=tmp_path)
     client = TestClient(app)
     client.__enter__()
     response = client.post(
@@ -67,6 +69,13 @@ def _create_pairing(client: TestClient, scopes: list[str] | None = None) -> dict
     return response.json()
 
 
+def _cfg_with_public_origin(public_origin: str) -> Config:
+    """构造带移动配对公开 origin 的测试 Config。"""
+    cfg = _make_cfg()
+    web_cfg = cfg.web.model_copy(update={"public_origin": public_origin})
+    return cfg.model_copy(update={"web": web_cfg})
+
+
 def test_mobile_pairing_router_happy_path_and_handoff_consume(tmp_path: Path) -> None:
     """验证 HTTP 主链路：create、claim、approve、exchange、handoff、consume。"""
     authed = _authed_client(tmp_path)
@@ -76,8 +85,6 @@ def test_mobile_pairing_router_happy_path_and_handoff_consume(tmp_path: Path) ->
         assert created["pairing_id"].startswith("pr_")
         assert "nonce" not in created
         assert created["copy_url"].startswith("http://testserver/-/xspace/mobile/pair")
-
-        from urllib.parse import parse_qs, urlparse
 
         query = parse_qs(urlparse(created["copy_url"]).query)
         nonce = query["nonce"][0]
@@ -211,8 +218,6 @@ def test_mobile_pairing_auth_and_csrf_boundaries(tmp_path: Path) -> None:
         assert csrf_create.status_code == 403
 
         created = _create_pairing(authed, scopes=["webview"])
-        from urllib.parse import parse_qs, urlparse
-
         nonce = parse_qs(urlparse(created["copy_url"]).query)["nonce"][0]
         claim = anonymous.post(
             f"/api/xspace/mobile/pairing-sessions/{created['pairing_id']}/claim",
@@ -249,6 +254,79 @@ def test_mobile_pairing_auth_and_csrf_boundaries(tmp_path: Path) -> None:
         pair_page = anonymous.get(created["copy_url"])
         assert pair_page.status_code == 200
         assert "xspace://pair-kongming" in pair_page.text
+    finally:
+        anonymous.close()
+        authed.__exit__(None, None, None)
+
+
+def test_mobile_pairing_uses_configured_public_origin(tmp_path: Path) -> None:
+    """验证局域网 public origin 会写入扫码、exchange 和 handoff URL。"""
+    public_origin = "http://192.168.31.23:57567"
+    authed = _authed_client(tmp_path, cfg=_cfg_with_public_origin(public_origin))
+    anonymous = _anonymous_client(authed.app)
+    try:
+        created = _create_pairing(authed, scopes=["webview"])
+        assert created["copy_url"].startswith(f"{public_origin}/-/xspace/mobile/pair")
+
+        copy_query = parse_qs(urlparse(created["copy_url"]).query)
+        qr_query = parse_qs(urlparse(created["qr_payload"]).query)
+        nonce = copy_query["nonce"][0]
+        assert copy_query["server"] == [public_origin]
+        assert qr_query["server"] == [public_origin]
+
+        pair_page = anonymous.get(created["copy_url"])
+        assert pair_page.status_code == 200
+        assert f"server={public_origin.replace(':', '%3A').replace('/', '%2F')}" in pair_page.text
+
+        claim_response = anonymous.post(
+            f"/api/xspace/mobile/pairing-sessions/{created['pairing_id']}/claim",
+            json={
+                "protocol_version": "1",
+                "nonce": nonce,
+                "device": {
+                    "device_id": "android-lan-test",
+                    "label": "Pixel LAN",
+                    "platform": "android",
+                    "app_version": "0.1.0",
+                },
+                "capabilities": {"webview": True},
+            },
+        )
+        assert claim_response.status_code == 200, claim_response.text
+        claim = claim_response.json()
+
+        approve_response = authed.post(
+            f"/api/xspace/mobile/pairing-sessions/{created['pairing_id']}/approve",
+            json={"claim_id": claim["claim_id"], "approved": True},
+            headers=CSRF_HEADERS,
+        )
+        assert approve_response.status_code == 200
+
+        exchange_response = anonymous.post(
+            f"/api/xspace/mobile/pairing-sessions/{created['pairing_id']}/exchange",
+            json={
+                "protocol_version": "1",
+                "claim_id": claim["claim_id"],
+                "nonce": nonce,
+                "device_id": "android-lan-test",
+            },
+        )
+        assert exchange_response.status_code == 200, exchange_response.text
+        exchanged = exchange_response.json()
+        assert exchanged["server"] == public_origin
+        assert exchanged["instance"]["url"] == public_origin
+        assert exchanged["web_session_url"].startswith(
+            f"{public_origin}/-/xspace/mobile/session/consume?handoff_token=kgm_ht_"
+        )
+
+        handoff_response = anonymous.post(
+            "/api/xspace/mobile/session-handoff",
+            headers={"Authorization": f"Bearer {exchanged['device_token']}"},
+        )
+        assert handoff_response.status_code == 200, handoff_response.text
+        assert handoff_response.json()["web_session_url"].startswith(
+            f"{public_origin}/-/xspace/mobile/session/consume?handoff_token=kgm_ht_"
+        )
     finally:
         anonymous.close()
         authed.__exit__(None, None, None)

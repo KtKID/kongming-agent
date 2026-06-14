@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class WebRuntimeOptions:
         home: kongming 运行时数据目录。
         config_path: 配置文件路径。
         dist_dir: 前端 dist 目录；为 ``None`` 时走环境变量或默认路径。
+        public_origin: 手机等外部客户端访问 Web 的公开 origin。
         print_ready_json: 是否在启动成功后向 stdout 输出一次 ready JSON。
     """
 
@@ -37,6 +39,7 @@ class WebRuntimeOptions:
     home: Path
     config_path: Path
     dist_dir: Path | None
+    public_origin: str | None
     print_ready_json: bool
 
 
@@ -56,6 +59,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--home", type=Path, help="Kongming runtime home directory.")
     parser.add_argument("--config", type=Path, help="Explicit config file path.")
     parser.add_argument("--dist-dir", type=Path, help="Frontend dist directory.")
+    parser.add_argument(
+        "--public-origin",
+        help="Public Web origin used by mobile pairing QR/copy/handoff URLs.",
+    )
     parser.add_argument(
         "--print-ready-json",
         action="store_true",
@@ -136,6 +143,28 @@ def _resolve_dist_dir(explicit_dist_dir: Path | None) -> Path | None:
     return None
 
 
+def _normalize_public_origin(value: str | None) -> str | None:
+    """归一化外部客户端访问 Web 的公开 origin。
+
+    Args:
+        value: CLI / env / config 提供的 origin 字符串。
+
+    Returns:
+        标准 ``scheme://host[:port]`` origin；空值返回 ``None``。
+    """
+    if value is None:
+        return None
+    origin = value.strip().rstrip("/")
+    if not origin:
+        return None
+    parsed = urlparse(origin)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("web public origin must be an http(s) origin")
+    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+        raise ValueError("web public origin must not include path, query, or fragment")
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
 def _resolve_runtime_options(argv: list[str] | None = None) -> WebRuntimeOptions:
     """解析 Web sidecar 运行时参数。
 
@@ -150,6 +179,9 @@ def _resolve_runtime_options(argv: list[str] | None = None) -> WebRuntimeOptions
     config_path = _resolve_config_path(home, args.config)
     dist_dir = _resolve_dist_dir(args.dist_dir)
     host = args.host or os.environ.get("KONGMING_WEB_HOST") or ""
+    public_origin = _normalize_public_origin(
+        args.public_origin or os.environ.get("KONGMING_WEB_PUBLIC_ORIGIN")
+    )
     raw_port = args.port
     if raw_port is None:
         env_port = os.environ.get("KONGMING_WEB_PORT")
@@ -162,6 +194,7 @@ def _resolve_runtime_options(argv: list[str] | None = None) -> WebRuntimeOptions
         home=home,
         config_path=config_path,
         dist_dir=dist_dir,
+        public_origin=public_origin,
         print_ready_json=bool(args.print_ready_json or args.once_ready_json),
     )
 
@@ -203,18 +236,28 @@ def _build_uvicorn_log_config() -> dict[str, object]:
     }
 
 
-def _override_web_bind_config(cfg: Any, *, host: str, port: int) -> Any:
+def _override_web_bind_config(
+    cfg: Any,
+    *,
+    host: str,
+    port: int,
+    public_origin: str | None = None,
+) -> Any:
     """把运行时绑定地址写入 Config 副本。
 
     Args:
         cfg: ``load_config`` 返回的配置对象。
         host: 实际绑定 host。
         port: 实际绑定端口，必须大于 0。
+        public_origin: 运行时指定的公开 origin；``None`` 时保留配置文件值。
 
     Returns:
         更新了 ``web.host`` / ``web.port`` 的 Config 副本。
     """
-    web_cfg = cfg.web.model_copy(update={"host": host, "port": port})
+    updates: dict[str, object] = {"host": host, "port": port}
+    if public_origin is not None:
+        updates["public_origin"] = public_origin
+    web_cfg = cfg.web.model_copy(update=updates)
     return cfg.model_copy(update={"web": web_cfg})
 
 
@@ -270,6 +313,7 @@ def _build_ready_payload(
     port: int,
     home: Path,
     dist_dir: Path | None,
+    public_origin: str | None = None,
 ) -> dict[str, object]:
     """构造 ready JSON / server.json payload。
 
@@ -278,6 +322,7 @@ def _build_ready_payload(
         port: 实际绑定端口。
         home: kongming home。
         dist_dir: 前端 dist 目录。
+        public_origin: 手机等外部客户端访问 Web 的公开 origin。
 
     Returns:
         可 JSON 序列化的 ready payload。
@@ -290,6 +335,7 @@ def _build_ready_payload(
         "host": host,
         "port": port,
         "base_url": base_url,
+        "public_origin": public_origin,
         "health_url": f"{base_url}/health",
         "home": str(home),
         "server_json": str(server_json),
@@ -320,6 +366,7 @@ def _write_ready_payload(
     port: int,
     home: Path,
     dist_dir: Path | None,
+    public_origin: str | None = None,
     print_ready_json: bool,
 ) -> dict[str, object]:
     """写入 ``server.json``，并按需向 stdout 输出一次 ready JSON。
@@ -329,12 +376,19 @@ def _write_ready_payload(
         port: 实际绑定端口。
         home: kongming home。
         dist_dir: 前端 dist 目录。
+        public_origin: 手机等外部客户端访问 Web 的公开 origin。
         print_ready_json: 是否输出 ready JSON。
 
     Returns:
         已写入的 ready payload。
     """
-    payload = _build_ready_payload(host=host, port=port, home=home, dist_dir=dist_dir)
+    payload = _build_ready_payload(
+        host=host,
+        port=port,
+        home=home,
+        dist_dir=dist_dir,
+        public_origin=public_origin,
+    )
     _write_json_atomic(home / "web" / "server.json", payload)
     if print_ready_json:
         sys.stdout.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
@@ -367,6 +421,7 @@ async def _serve_with_ready_payload(
     bound_port: int,
     home: Path,
     dist_dir: Path | None,
+    public_origin: str | None,
     log_level: str,
     print_ready_json: bool,
 ) -> None:
@@ -380,6 +435,7 @@ async def _serve_with_ready_payload(
         bound_port: 实际绑定端口。
         home: kongming home。
         dist_dir: 前端 dist 目录。
+        public_origin: 手机等外部客户端访问 Web 的公开 origin。
         log_level: uvicorn 日志级别。
         print_ready_json: 是否向 stdout 打印 ready payload。
     """
@@ -404,6 +460,7 @@ async def _serve_with_ready_payload(
                 port=bound_port,
                 home=home,
                 dist_dir=dist_dir,
+                public_origin=public_origin,
                 print_ready_json=print_ready_json,
             )
             await server.main_loop()
@@ -459,7 +516,12 @@ def main(argv: list[str] | None = None) -> int:
         bind_host = options.host or cfg.web.host or "127.0.0.1"
         bind_port = options.port if options.port >= 0 else int(cfg.web.port)
         runtime_socket, actual_host, actual_port = _bind_runtime_socket(bind_host, bind_port)
-        cfg = _override_web_bind_config(cfg, host=actual_host, port=actual_port)
+        cfg = _override_web_bind_config(
+            cfg,
+            host=actual_host,
+            port=actual_port,
+            public_origin=options.public_origin,
+        )
 
         runtime_factory = _make_runtime_factory(cfg)
         progress.report("factory")
@@ -517,6 +579,7 @@ def main(argv: list[str] | None = None) -> int:
                     bound_port=cfg.web.port,
                     home=home,
                     dist_dir=options.dist_dir,
+                    public_origin=cfg.web.public_origin,
                     log_level=log_level,
                     print_ready_json=options.print_ready_json,
                 )
