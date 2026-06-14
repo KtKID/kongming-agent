@@ -94,6 +94,13 @@ NARROW_SOURCE_TEST_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/unit/test_web_agent_workflow_manager_deep_research_binding.py",
         ),
     ),
+    (
+        "src/hosts/web/ctl.py",
+        (
+            "tests/unit/test_web_ctl.py",
+            "tests/unit/web/test_ctl_sidecar_contract.py",
+        ),
+    ),
 )
 
 SENSITIVE_ENV_NAMES = {

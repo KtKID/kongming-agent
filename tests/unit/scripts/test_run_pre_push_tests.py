@@ -193,6 +193,25 @@ def test_select_unit_tests_uses_narrow_source_hints_before_module_fallback(tmp_p
     assert "tests/unit/web/test_unrelated.py" not in selected
 
 
+def test_select_unit_tests_uses_narrow_source_hints_for_web_ctl(tmp_path: Path) -> None:
+    _touch(tmp_path / "tests/unit/test_web_ctl.py")
+    _touch(tmp_path / "tests/unit/web/test_ctl_sidecar_contract.py")
+    _touch(tmp_path / "tests/unit/web/test_unrelated.py")
+    _touch(tmp_path / "tests/unit/test_config_loader.py")
+    _touch(tmp_path / "tests/unit/test_arch_contracts.py")
+    _touch(tmp_path / "tests/unit/test_runtime_home_static_guards.py")
+
+    selected = pre_push.select_unit_tests(
+        tmp_path,
+        ["src/hosts/web/ctl.py"],
+    )
+
+    assert "tests/unit/test_web_ctl.py" in selected
+    assert "tests/unit/web/test_ctl_sidecar_contract.py" in selected
+    assert "tests/unit/test_config_loader.py" in selected
+    assert "tests/unit/web/test_unrelated.py" not in selected
+
+
 def test_web_stem_matching_stays_narrow(tmp_path: Path) -> None:
     _touch(tmp_path / "tests/unit/test_web_routers_threads.py")
     _touch(tmp_path / "tests/unit/web/test_webhooks_dispatcher.py")
