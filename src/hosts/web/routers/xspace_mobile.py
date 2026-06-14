@@ -11,6 +11,7 @@ API handler 只做 DTO 转换、鉴权边界和错误响应，业务状态机统
 from __future__ import annotations
 
 import html
+import logging
 from typing import Any, Literal
 from urllib.parse import urlencode
 
@@ -33,6 +34,7 @@ from hosts.web.xspace_mobile.models import (
 from hosts.web.xspace_mobile.token_service import MobileDeviceTokenService
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 _DEFAULT_SCOPES = ["webview", "thread.read", "approval.resolve"]
 
@@ -111,6 +113,19 @@ def _origin(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
 
+def _server_origin(request: Request) -> str:
+    """生成移动配对对外 server origin。
+
+    关键输入：FastAPI request 与 app.state.config.web.public_origin。
+    关键输出：手机可访问的 ``scheme://host[:port]`` origin。
+    """
+    cfg = getattr(request.app.state, "config", None)
+    public_origin = getattr(getattr(cfg, "web", None), "public_origin", None)
+    if isinstance(public_origin, str) and public_origin.strip():
+        return public_origin.strip().rstrip("/")
+    return _origin(request)
+
+
 def _web_session_url(request: Request, handoff_token: str) -> str:
     """生成 Android WebView 登录 URL。
 
@@ -118,7 +133,7 @@ def _web_session_url(request: Request, handoff_token: str) -> str:
     关键输出：可被 Android 打开的 consume URL。
     """
     query = urlencode({"handoff_token": handoff_token})
-    return f"{_origin(request)}/-/xspace/mobile/session/consume?{query}"
+    return f"{_server_origin(request)}/-/xspace/mobile/session/consume?{query}"
 
 
 def _mobile_error(error: errors.MobilePairingError) -> JSONResponse:
@@ -319,7 +334,7 @@ def _render_pair_page(request: Request) -> HTMLResponse:
     关键输入：带 pairing_id/nonce/v 查询参数的 request。
     关键输出：展示 deeplink 和复制 URL 的公开 HTML。
     """
-    origin = _origin(request)
+    origin = _server_origin(request)
     pairing_id = request.query_params.get("pairing_id", "")
     nonce = request.query_params.get("nonce", "")
     version = request.query_params.get("v", "1")
@@ -372,15 +387,31 @@ async def create_pairing_session(
     request: Request,
 ) -> JSONResponse:
     """创建配对会话。"""
+    origin = _server_origin(request)
     try:
         result = _manager(request).create_pairing_session(
             protocol_version=payload.protocol_version,
             client=payload.client,
             requested_scopes=payload.requested_scopes,
-            server_origin=_origin(request),
+            server_origin=origin,
         )
     except errors.MobilePairingError as exc:
+        logger.warning(
+            "xspace_mobile.create_pairing_session failed code=%s origin=%s client=%s scopes=%s",
+            errors.normalize_mobile_pairing_error_code(exc.code),
+            origin,
+            payload.client,
+            ",".join(payload.requested_scopes),
+        )
         return _mobile_error(exc)
+    logger.info(
+        "xspace_mobile.create_pairing_session success pairing_id=%s origin=%s client=%s scopes=%s expires_at=%s",
+        result.pairing_id,
+        origin,
+        payload.client,
+        ",".join(payload.requested_scopes),
+        result.expires_at.isoformat(),
+    )
     return JSONResponse(content=result.model_dump(mode="json", exclude={"nonce"}))
 
 
@@ -461,7 +492,7 @@ async def exchange_pairing_session(
                 content={"status": "pending_approval", "poll_after_ms": 1000},
             )
         return _mobile_error(exc)
-    server = _origin(request)
+    server = _server_origin(request)
     session, _claim = _manager(request).get_pairing_view(pairing_id)
     return JSONResponse(
         content={

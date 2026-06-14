@@ -123,6 +123,7 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("web", "enabled"),
     ("web", "host"),
     ("web", "port"),
+    ("web", "public_origin"),
     ("web", "dev_mode"),
     ("web", "initial_password"),
     ("web", "idle_timeout_seconds"),

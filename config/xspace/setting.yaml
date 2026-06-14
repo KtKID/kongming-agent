@@ -163,6 +163,8 @@ web:
   host: 127.0.0.1
   # x-space 可传 --port 0 动态分配；固定默认值保留给资源配置和显式端口模式。
   port: 60000
+  # 局域网扫码时填 http://局域网IP:端口；留空时按浏览器请求 origin 生成。
+  public_origin:
   dev_mode: false
   initial_password:
   cors_origins: []

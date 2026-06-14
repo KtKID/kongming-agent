@@ -34,6 +34,7 @@ def test_resolve_runtime_options_cli_wins(tmp_path: Path, monkeypatch) -> None:
     """CLI 参数优先于环境变量，并写回 home / dist env。"""
     monkeypatch.setenv("KONGMING_WEB_HOST", "0.0.0.0")
     monkeypatch.setenv("KONGMING_WEB_PORT", "8080")
+    monkeypatch.setenv("KONGMING_WEB_PUBLIC_ORIGIN", "http://10.0.0.10:8080")
     monkeypatch.setenv("KONGMING_HOME", str(tmp_path / "env-home"))
     monkeypatch.setenv("KONGMING_CONFIG", str(tmp_path / "env.yaml"))
     monkeypatch.setenv("KONGMING_WEB_DIST", str(tmp_path / "env-dist"))
@@ -53,12 +54,15 @@ def test_resolve_runtime_options_cli_wins(tmp_path: Path, monkeypatch) -> None:
             str(config),
             "--dist-dir",
             str(dist),
+            "--public-origin",
+            "http://192.168.31.23:57567/",
             "--print-ready-json",
         ]
     )
 
     assert options.host == "127.0.0.1"
     assert options.port == 0
+    assert options.public_origin == "http://192.168.31.23:57567"
     assert options.home == home.resolve()
     assert options.config_path == config.resolve()
     assert options.dist_dir == dist.resolve()
@@ -76,9 +80,15 @@ def test_resolve_runtime_options_accepts_once_ready_alias(tmp_path: Path, monkey
 
 def test_override_web_bind_config_sets_actual_host_port() -> None:
     """实际绑定地址会写入 Config 副本。"""
-    cfg = _override_web_bind_config(_cfg(), host="127.0.0.1", port=49152)
+    cfg = _override_web_bind_config(
+        _cfg(),
+        host="127.0.0.1",
+        port=49152,
+        public_origin="http://192.168.31.23:49152",
+    )
     assert cfg.web.host == "127.0.0.1"
     assert cfg.web.port == 49152
+    assert cfg.web.public_origin == "http://192.168.31.23:49152"
 
 
 def test_ready_payload_schema(tmp_path: Path) -> None:
@@ -88,10 +98,12 @@ def test_ready_payload_schema(tmp_path: Path) -> None:
         port=60000,
         home=tmp_path,
         dist_dir=tmp_path / "dist",
+        public_origin="http://192.168.31.23:60000",
     )
 
     assert payload["type"] == "kongming_web_ready"
     assert payload["base_url"] == "http://127.0.0.1:60000"
+    assert payload["public_origin"] == "http://192.168.31.23:60000"
     assert payload["health_url"] == "http://127.0.0.1:60000/health"
     assert payload["server_json"] == str(tmp_path / "web" / "server.json")
     assert payload["dist_dir"] == str(tmp_path / "dist")
@@ -106,6 +118,7 @@ def test_write_ready_payload_writes_file_and_stdout(tmp_path: Path, capsys) -> N
         port=60000,
         home=tmp_path,
         dist_dir=tmp_path / "dist",
+        public_origin="http://192.168.31.23:60000",
         print_ready_json=True,
     )
 
@@ -114,6 +127,7 @@ def test_write_ready_payload_writes_file_and_stdout(tmp_path: Path, capsys) -> N
     from_file = json.loads(server_json.read_text(encoding="utf-8"))
     from_stdout = json.loads(capsys.readouterr().out)
     assert from_file["type"] == "kongming_web_ready"
+    assert from_file["public_origin"] == "http://192.168.31.23:60000"
     assert from_stdout["server_json"] == str(server_json)
 
 

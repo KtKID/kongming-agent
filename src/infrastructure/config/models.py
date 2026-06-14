@@ -1155,6 +1155,8 @@ class WebConfig(BaseModel):
         host: uvicorn bind 的 IP；``"0.0.0.0"`` 接受外网访问，仅本机用
             ``"127.0.0.1"`` 更安全。
         port: HTTP / WS 端口。
+        public_origin: 移动配对等外部客户端使用的公开 origin。为空时按请求
+            origin 生成；局域网扫码场景可填 ``http://192.168.x.x:port``。
         dev_mode: 跳过登录鉴权（仅本地开发）；上线必须 False。
         initial_password: 首次部署启动时使用的明文初始密码。仅在
             ``password.hash`` 缺失时生效；落盘后长期以文件为准。
@@ -1187,6 +1189,7 @@ class WebConfig(BaseModel):
     enabled: bool = False
     host: str = "0.0.0.0"
     port: Annotated[int, Field(ge=1, le=65535)] = 8080
+    public_origin: str | None = None
     dev_mode: bool = False
     initial_password: str | None = None
     cors_origins: list[str] = Field(default_factory=list)
@@ -1227,6 +1230,22 @@ class WebConfig(BaseModel):
                 )
             seen.add(preset.id)
         return self
+
+    @field_validator("public_origin")
+    @classmethod
+    def _normalize_public_origin(cls, value: str | None) -> str | None:
+        """公开 origin 只接受 http(s) origin，返回去尾斜杠后的标准值。"""
+        if value is None:
+            return None
+        origin = value.strip().rstrip("/")
+        if not origin:
+            return None
+        parsed = urlparse(origin)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("web.public_origin must be an http(s) origin")
+        if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+            raise ValueError("web.public_origin must not include path, query, or fragment")
+        return f"{parsed.scheme}://{parsed.netloc}"
 
     @property
     def normalized_dashboard_poll_interval_seconds(self) -> int:
