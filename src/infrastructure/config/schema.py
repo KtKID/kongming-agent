@@ -1,8 +1,8 @@
 """manage 配置页字段元数据真源。
 
 本文件是 manage 配置页面的**字段元数据真源**：枚举 ``config/setting.yaml`` 全部
-16 个顶层模块（model / runner / session / trace / logging / host / approval /
-tool / compactor / retry / cli / evolution / stream / safety / scheduler / web）
+18 个顶层模块（model / runner / session / trace / logging / host / approval /
+tool / mcp / web_search / compactor / retry / cli / evolution / stream / safety / scheduler / web）
 下的所有 leaf 字段，每字段产出 :class:`FieldMeta`（路径 / 类型 / 是否可编辑 /
 枚举 / 描述 / 是否需要重启 / 所属 section group / 数值上下限）。
 
@@ -16,7 +16,7 @@ tool / compactor / retry / cli / evolution / stream / safety / scheduler / web�
 
 **漂移防护**：
 
-- 16 个顶层模块若新增字段、改名、调类型，必须**同步**修改本文件——否则 manage
+- 18 个顶层模块若新增字段、改名、调类型，必须**同步**修改本文件——否则 manage
   UI 与真实 yaml 不一致；
 - ``sitian`` / ``workflow`` 两顶层模块**不在本期范围**（一期 stage 1 只覆盖 5
   个 group），等后续 stage 再加。task #9 会写 pytest 检测漂移，覆盖范围一致性
@@ -383,6 +383,65 @@ _FIELD_METAS: list[FieldMeta] = [
         min_value=1.0,
         group="tool_approval",
     ),
+    # ---- mcp ----
+    FieldMeta(
+        path="mcp.enabled",
+        type="bool",
+        editable=True,
+        desc="是否启用 MCP client 启动与工具注册。需重启生效。",
+        restart_required=True,
+        group="tool_approval",
+    ),
+    FieldMeta(
+        path="mcp.servers",
+        type="list",
+        editable=False,
+        desc="stdio MCP server 配置列表，包含 command、args、env、secret_env_keys、timeout 和 aliases。请在 yaml 内手工维护。",
+        restart_required=True,
+        group="tool_approval",
+    ),
+    # ---- web_search ----
+    FieldMeta(
+        path="web_search.enabled",
+        type="bool",
+        editable=True,
+        desc="是否启用通用 Web Search provider 装配。需重启生效。",
+        restart_required=True,
+        group="tool_approval",
+    ),
+    FieldMeta(
+        path="web_search.provider_name",
+        type="string",
+        editable=True,
+        desc="Web Search provider 名称，会写入搜索结果 diagnostics。需重启生效。",
+        restart_required=True,
+        group="tool_approval",
+    ),
+    FieldMeta(
+        path="web_search.search_tool_name",
+        type="string",
+        editable=True,
+        desc="显式指定底层搜索工具名；为空时按候选列表自动探测。需重启生效。",
+        restart_required=True,
+        group="tool_approval",
+    ),
+    FieldMeta(
+        path="web_search.search_tool_names",
+        type="list",
+        editable=False,
+        desc="底层搜索工具自动探测候选名列表。请在 yaml 或环境变量内维护。需重启生效。",
+        restart_required=True,
+        group="tool_approval",
+    ),
+    FieldMeta(
+        path="web_search.max_results",
+        type="int",
+        editable=True,
+        desc="单次 Web Search 默认返回结果数。需重启生效。",
+        restart_required=True,
+        min_value=1.0,
+        group="tool_approval",
+    ),
     # ---- approval ----
     FieldMeta(
         path="approval.mode",
@@ -719,6 +778,54 @@ _FIELD_METAS: list[FieldMeta] = [
         restart_required=True,
         min_value=100.0,
         max_value=1_000_000.0,
+        group="host_observ",
+    ),
+    FieldMeta(
+        path="web.deep_research_source_provider.enabled",
+        type="bool",
+        editable=True,
+        desc="是否启用 deep_research Web 来源 provider 自动装配。需重启生效。",
+        restart_required=True,
+        group="host_observ",
+    ),
+    FieldMeta(
+        path="web.deep_research_source_provider.provider_name",
+        type="string",
+        editable=True,
+        desc="deep_research 来源 provider 名称，会写入 workflow artifact。需重启生效。",
+        restart_required=True,
+        group="host_observ",
+    ),
+    FieldMeta(
+        path="web.deep_research_source_provider.search_tool_name",
+        type="string",
+        editable=True,
+        desc="显式指定 deep_research 搜索工具名；为空时按候选列表自动探测。需重启生效。",
+        restart_required=True,
+        group="host_observ",
+    ),
+    FieldMeta(
+        path="web.deep_research_source_provider.fetch_tool_name",
+        type="string",
+        editable=True,
+        desc="显式指定 deep_research URL 读取工具名；为空时按候选列表自动探测。需重启生效。",
+        restart_required=True,
+        group="host_observ",
+    ),
+    FieldMeta(
+        path="web.deep_research_source_provider.search_tool_names",
+        type="list",
+        editable=False,
+        desc="deep_research 搜索工具自动探测候选名列表。需重启生效。",
+        restart_required=True,
+        group="host_observ",
+    ),
+    FieldMeta(
+        path="web.deep_research_source_provider.fetch_tool_names",
+        type="list",
+        editable=False,
+        desc="deep_research URL 读取工具自动探测候选名列表。需重启生效。",
+        restart_required=True,
         group="host_observ",
     ),
     # ---- trace ----

@@ -439,6 +439,22 @@ def create_app(
             except Exception:
                 logger.exception("ThreadManager.aclose_all() raised; ignoring during shutdown")
 
+            # MCP / Web Search 共享 manager 挂在 runtime_factory 上；它的生命周期
+            # 与 Web 进程一致，所有 thread runtime 关闭后统一释放 stdio 子进程。
+            runtime_factory = getattr(app.state, "runtime_factory", None)
+            mcp_runtime_registration = getattr(
+                runtime_factory,
+                "_mcp_runtime_registration",
+                None,
+            )
+            if mcp_runtime_registration is not None:
+                try:
+                    await mcp_runtime_registration.aclose()
+                except Exception:
+                    logger.exception(
+                        "McpRuntimeRegistrationManager.aclose failed; ignoring during shutdown"
+                    )
+
             # full-log-v0.1 阶段 1：放在最后 flush 队列，让前面所有 shutdown 阶段
             # 产生的最后几帧也能落盘。未 init / 已 closed 时 aclose() 是 no-op。
             try:

@@ -547,6 +547,128 @@ class ToolConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# MCP / Web Search
+# ---------------------------------------------------------------------------
+
+
+def _coerce_csv_tuple(value: Any) -> Any:
+    """把逗号分隔字符串转为 tuple，输入为原始配置值，输出为 pydantic 兼容值。"""
+    if isinstance(value, str):
+        return tuple(item.strip() for item in value.split(",") if item.strip())
+    return value
+
+
+class McpToolAliasConfig(BaseModel):
+    """MCP tool 到 Kongming Tool alias 的显式映射。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    tool_name: Annotated[str, Field(min_length=1)]
+    alias: Annotated[str, Field(min_length=1)]
+    enabled: bool = True
+
+    @field_validator("tool_name", "alias")
+    @classmethod
+    def _non_blank_name(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("MCP alias tool_name and alias must not be empty")
+        return stripped
+
+
+class McpServerConfig(BaseModel):
+    """单个 stdio MCP server 配置。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    server_id: Annotated[str, Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+$")]
+    enabled: bool = True
+    command: Annotated[str, Field(min_length=1)]
+    args: tuple[str, ...] = ()
+    env: dict[str, str] = Field(default_factory=dict)
+    secret_env_keys: tuple[str, ...] = ()
+    initialize_timeout_ms: Annotated[int, Field(gt=0)] = 10_000
+    call_timeout_ms: Annotated[int, Field(gt=0)] = 60_000
+    aliases: tuple[McpToolAliasConfig, ...] = ()
+
+    @field_validator("command")
+    @classmethod
+    def _command_not_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("mcp.servers[].command must not be empty")
+        return stripped
+
+    @field_validator("args", "secret_env_keys", mode="before")
+    @classmethod
+    def _coerce_string_tuple(cls, value: Any) -> Any:
+        return _coerce_csv_tuple(value)
+
+    @field_validator("aliases", mode="before")
+    @classmethod
+    def _coerce_alias_tuple(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            aliases: list[dict[str, object]] = []
+            for item in _coerce_csv_tuple(value):
+                separator = "=" if "=" in item else ":"
+                if separator in item:
+                    tool_name, alias = item.split(separator, 1)
+                else:
+                    tool_name = alias = item
+                aliases.append(
+                    {
+                        "tool_name": tool_name.strip(),
+                        "alias": alias.strip(),
+                        "enabled": True,
+                    }
+                )
+            return tuple(aliases)
+        return value
+
+
+class McpConfig(BaseModel):
+    """MCP client 全局配置段。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = False
+    servers: tuple[McpServerConfig, ...] = ()
+
+
+class WebSearchConfig(BaseModel):
+    """通用 Web Search provider 选择配置。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = True
+    provider_name: Annotated[str, Field(min_length=1)] = "minimax_web_search"
+    search_tool_name: str | None = None
+    search_tool_names: tuple[str, ...] = ("web_search", "mcp__minimax__web_search")
+    max_results: Annotated[int, Field(gt=0)] = 5
+
+    @field_validator("search_tool_names", mode="before")
+    @classmethod
+    def _coerce_search_tool_names(cls, value: Any) -> Any:
+        return _coerce_csv_tuple(value)
+
+    @field_validator("provider_name")
+    @classmethod
+    def _provider_name_not_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("web_search.provider_name must not be empty")
+        return stripped
+
+    @field_validator("search_tool_name")
+    @classmethod
+    def _blank_search_tool_name_to_none(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+
+# ---------------------------------------------------------------------------
 # Evolution / Memory
 # ---------------------------------------------------------------------------
 
@@ -975,6 +1097,51 @@ class WebFullLogConfig(BaseModel):
     queue_size: Annotated[int, Field(ge=100, le=1_000_000)] = 10000
 
 
+class WebDeepResearchSourceProviderConfig(BaseModel):
+    """Web Deep Research 来源 provider 配置。
+
+    Web 宿主在 thread runtime 装配时读取本配置，从已注册工具中挑选用户提供的
+    search/fetch 能力，并适配为 ``ResearchSourceProvider`` 注入 workflow
+    manager。默认开启自动探测；未找到搜索工具时装配层返回空 provider，策略继续
+    使用 payload fixture 或 deterministic fallback。
+
+    Attributes:
+        enabled: 是否启用 Web 搜索 provider 自动装配。
+        provider_name: 写入 deep_research artifact 的 provider 名。
+        search_tool_name: 显式指定搜索工具名；为空时按 search_tool_names 自动探测。
+        fetch_tool_name: 显式指定读取工具名；为空时按 fetch_tool_names 自动探测。
+        search_tool_names: 自动探测搜索工具名列表，按顺序匹配。
+        fetch_tool_names: 自动探测读取工具名列表，按顺序匹配。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    enabled: bool = True
+    provider_name: Annotated[str, Field(min_length=1)] = "web_user_tool_research_source"
+    search_tool_name: str | None = None
+    fetch_tool_name: str | None = None
+    search_tool_names: tuple[str, ...] = (
+        "deep_research_search",
+        "web_search",
+        "search_web",
+        "browser_search",
+    )
+    fetch_tool_names: tuple[str, ...] = (
+        "deep_research_fetch",
+        "web_fetch",
+        "fetch_url",
+        "browser_fetch",
+    )
+
+    @field_validator("search_tool_names", "fetch_tool_names", mode="before")
+    @classmethod
+    def _coerce_tool_name_tuple_from_env(cls, value: Any) -> Any:
+        """把 env 逗号分隔字符串转为工具名元组，输入为原始配置值，输出为 tuple 兼容值。"""
+        if isinstance(value, str):
+            return tuple(item.strip() for item in value.split(",") if item.strip())
+        return value
+
+
 class WebConfig(BaseModel):
     """v0.1.5 web 宿主壳配置段。
 
@@ -1045,6 +1212,9 @@ class WebConfig(BaseModel):
 
     llm_presets: list[LLMPresetConfig] = Field(default_factory=list)
     full_log: WebFullLogConfig = Field(default_factory=WebFullLogConfig)
+    deep_research_source_provider: WebDeepResearchSourceProviderConfig = Field(
+        default_factory=WebDeepResearchSourceProviderConfig
+    )
 
     @model_validator(mode="after")
     def _check_unique_preset_ids(self) -> WebConfig:
@@ -1086,6 +1256,8 @@ class Config(BaseModel):
     host: HostConfig = Field(default_factory=HostConfig)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     tool: ToolConfig = Field(default_factory=ToolConfig)
+    mcp: McpConfig = Field(default_factory=McpConfig)
+    web_search: WebSearchConfig = Field(default_factory=WebSearchConfig)
     compactor: CompactorConfig = Field(default_factory=CompactorConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     cli: CliConfig = Field(default_factory=CliConfig)
@@ -1109,6 +1281,9 @@ __all__ = [
     "HostConfig",
     "LLMPresetConfig",
     "LoggingConfig",
+    "McpConfig",
+    "McpServerConfig",
+    "McpToolAliasConfig",
     "ModelConfig",
     "ReasoningProfile",
     "RetryConfig",
@@ -1127,6 +1302,8 @@ __all__ = [
     "ToolConfig",
     "TraceConfig",
     "WebConfig",
+    "WebDeepResearchSourceProviderConfig",
     "WebFullLogConfig",
+    "WebSearchConfig",
     "WorkflowConfig",
 ]

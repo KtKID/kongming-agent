@@ -121,7 +121,7 @@ class DeepResearchStrategy:
                     type_label="object",
                     description="来源 provider 和检索偏好，v0.1 支持 fake/internal。",
                     example={
-                        "provider": "fake",
+                        "provider": "internal",
                         "language": "zh-CN",
                         "allowed_domains": [],
                         "blocked_domains": [],
@@ -165,7 +165,7 @@ class DeepResearchStrategy:
                             "jury_size": 3,
                             "reject_quorum": 2,
                         },
-                        "source_policy": {"provider": "fake"},
+                        "source_policy": {"provider": "internal"},
                     },
                 },
             ),
@@ -178,6 +178,7 @@ class DeepResearchStrategy:
     ) -> Any:
         """执行 deep_research，输入为 workflow 上下文和 JSON payload，输出为 AgentWorkflowResult。"""
         spec = parse_deep_research_spec(payload)
+        source_provider_diagnostics = _source_provider_diagnostics_payload(self._manager)
         context.audit_writer.write_event(
             {
                 "action": "deep_research.workflow_started",
@@ -190,6 +191,13 @@ class DeepResearchStrategy:
                 },
             }
         )
+        if source_provider_diagnostics is not None:
+            context.audit_writer.write_event(
+                {
+                    "action": "deep_research.source_provider_diagnostics",
+                    "payload": source_provider_diagnostics,
+                }
+            )
         self._manager.write_workflow_manifest(context=context, tasks=[], status="running")
 
         artifact_writer = DeepResearchArtifactWriter(context.workflow_dir)
@@ -351,6 +359,7 @@ class DeepResearchStrategy:
                 "stats": stats,
                 "report_path": str(report_path),
                 "phase_summaries": phase_summaries,
+                "source_provider_diagnostics": source_provider_diagnostics,
             }
         }
         self._manager.write_workflow_result(
@@ -476,6 +485,17 @@ def _provider_from_fixture(fixture: Mapping[str, object]) -> ResearchSourceProvi
         fetch_index=cast(Any, fetch_index),
         name=name.strip() if isinstance(name, str) and name.strip() else "fake_research_source",
     )
+
+
+def _source_provider_diagnostics_payload(manager: Any) -> dict[str, object] | None:
+    """读取来源 provider 诊断，输入为 manager，输出 JSON-safe payload 或 None。"""
+    diagnostics = getattr(manager, "deep_research_source_diagnostics", None)
+    if diagnostics is None:
+        return None
+    jsonable = to_jsonable(diagnostics)
+    if isinstance(jsonable, Mapping):
+        return {str(key): value for key, value in jsonable.items()}
+    return {"value": jsonable}
 
 
 def _write_plan(root: Path, *, context: WorkflowExecutionContext, spec: DeepResearchSpec) -> Path:

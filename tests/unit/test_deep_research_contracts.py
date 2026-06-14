@@ -38,6 +38,7 @@ def test_parse_deep_research_spec_accepts_minimal_topic_and_defaults() -> None:
     assert _sequence(_field(source_policy, "allowed_domains")) == []
     assert _sequence(_field(source_policy, "blocked_domains")) == []
     assert _field(source_policy, "prefer_primary_sources") is True
+    assert _field(source_policy, "provider") == "internal"
 
 
 @pytest.mark.parametrize(

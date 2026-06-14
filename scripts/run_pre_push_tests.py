@@ -73,6 +73,34 @@ NARROW_SOURCE_TEST_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/unit/safety/test_auto_approval_manager.py",
         ),
     ),
+    (
+        "src/application/web_search/manager.py",
+        (
+            "tests/unit/test_web_search_manager.py",
+            "tests/unit/test_mcp_runtime_registration.py",
+        ),
+    ),
+    (
+        "src/hosts/shared/mcp_runtime_registration.py",
+        (
+            "tests/unit/test_mcp_runtime_registration.py",
+            "tests/unit/test_web_search_manager.py",
+        ),
+    ),
+    (
+        "src/hosts/web/research_source_provider.py",
+        (
+            "tests/unit/test_web_deep_research_source_provider_factory.py",
+            "tests/unit/test_web_agent_workflow_manager_deep_research_binding.py",
+        ),
+    ),
+    (
+        "src/hosts/web/ctl.py",
+        (
+            "tests/unit/test_web_ctl.py",
+            "tests/unit/web/test_ctl_sidecar_contract.py",
+        ),
+    ),
 )
 
 SENSITIVE_ENV_NAMES = {
@@ -110,6 +138,7 @@ SMOKE_TESTS = (
     "tests/unit/test_arch_contracts.py",
     "tests/unit/test_runtime_home_static_guards.py",
 )
+PYTEST_TIMEOUT_SECONDS = 1_800
 
 # 手工维护源码到 unit 测试的兜底映射。新增 src 一级模块或高风险 web 路径时，
 # 需要同步补充这里，避免 push gate 只跑 smoke 而漏掉模块级测试。
@@ -476,10 +505,10 @@ def run_pytest(repo: Path, tests: Sequence[str]) -> int:
         start_new_session=True,
     )
     try:
-        return proc.wait(timeout=600)
+        return proc.wait(timeout=PYTEST_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         _terminate_process_tree(proc)
-        print("pre-push pytest timed out after 600 seconds", file=sys.stderr)
+        print(f"pre-push pytest timed out after {PYTEST_TIMEOUT_SECONDS} seconds", file=sys.stderr)
         return 124
 
 

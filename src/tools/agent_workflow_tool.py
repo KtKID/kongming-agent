@@ -537,7 +537,7 @@ class RunAgentWorkflowTool(BaseBuiltinTool):
                 "    ],\n"
                 '    "limits": {"jury_size": 3, "reject_quorum": 2, '
                 '"source_budget": 10, "fetch_budget": 10, "fact_cap": 20},\n'
-                '    "source_policy": {"provider": "fake", "language": "zh-CN", '
+                '    "source_policy": {"provider": "internal", "language": "zh-CN", '
                 '"freshness_days": null, "allowed_domains": [], '
                 '"blocked_domains": [], "prefer_primary_sources": true},\n'
                 '    "output_contract": "deep_research_report"\n'
@@ -958,7 +958,7 @@ def _normalize_deep_research_payload(payload: dict[str, Any]) -> dict[str, Any]:
             limits[key] = _coerce_int(limits.get(key))
     normalized["limits"] = limits
     source_policy = _object_copy(normalized.get("source_policy")) or {}
-    source_policy.setdefault("provider", "fake")
+    source_policy.setdefault("provider", "internal")
     source_policy.setdefault("language", "zh-CN")
     source_policy.setdefault("freshness_days", None)
     source_policy.setdefault("allowed_domains", [])

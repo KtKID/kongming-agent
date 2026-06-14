@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import shutil
 import signal
@@ -40,7 +41,37 @@ import click
 from dotenv import load_dotenv
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-load_dotenv(_REPO_ROOT / ".env")
+logger = logging.getLogger(__name__)
+
+
+def _dotenv_skip_enabled() -> bool:
+    """判断当前进程是否显式禁用仓库 dotenv 自动加载。"""
+    return os.environ.get("KONGMING_SKIP_DOTENV", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "y",
+        "t",
+    }
+
+
+def _load_repo_dotenv() -> None:
+    """按配置加载仓库根 .env，pre-push / 单测隔离场景可通过环境变量跳过。"""
+    if _dotenv_skip_enabled():
+        logger.debug("ctl: skipping repo .env due to KONGMING_SKIP_DOTENV")
+        return
+    env_path = _REPO_ROOT / ".env"
+    if not env_path.exists():
+        logger.debug("ctl: repo .env not present at %s", env_path)
+        return
+    try:
+        load_dotenv(env_path)
+    except OSError as exc:
+        logger.warning("ctl: failed to load repo .env at %s: %s", env_path, exc)
+
+
+_load_repo_dotenv()
 
 from hosts.web.app_support.startup_progress import StartupProgress  # noqa: E402
 from hosts.web.auth.middleware import (  # noqa: E402

@@ -502,6 +502,7 @@ def main(argv: list[str] | None = None) -> int:
         # 此处 attr 设置而非 factory 入参修改：ThreadManager 调用签名
         # ``factory(thread_id, preset_id, adapter, sinks)`` 不可破坏。
         setattr(runtime_factory, "_app", app)  # noqa: B010
+        app.state.runtime_factory = runtime_factory
         progress.report("app")
 
         log_level = cfg.logging.level.lower()
@@ -642,6 +643,7 @@ def _resolve_default_cwd_for_thread(app: Any, thread_id: str) -> str:
 
 def _make_runtime_factory(cfg: object) -> object:
     """Build a runtime factory for web thread cells and cron runs."""
+    from hosts.shared.mcp_runtime_registration import McpRuntimeRegistrationManager
     from hosts.shared.session_bridge import SessionBridge
     from infrastructure.config.models import Config, LLMPresetConfig
     from infrastructure.config.paths import get_kongming_home
@@ -672,6 +674,7 @@ def _make_runtime_factory(cfg: object) -> object:
     _instructions_cache: list[str | None] = [None]
     _origins_cache: list[list[str] | None] = [None]
     _scheduler_runtime_factory_cache: list[object | None] = [None]
+    _mcp_runtime_registration_cache: list[McpRuntimeRegistrationManager | None] = [None]
     _cache_lock = asyncio.Lock()
 
     async def _ensure_shared_assets(sinks: object) -> None:
@@ -751,6 +754,14 @@ def _make_runtime_factory(cfg: object) -> object:
                 event_sinks=sink_list,
             )
             register_task_progress_tool(registry, real_cfg)
+            mcp_runtime_registration = McpRuntimeRegistrationManager(
+                real_cfg,
+                event_sinks=sink_list,
+            )
+            await mcp_runtime_registration.register(
+                registry,
+                excluded_tool_names=("evolution_write",),
+            )
             enabled_tool_names = [name for name in registry.names() if name != "evolution_write"]
 
             _registry_cache[0] = registry
@@ -760,6 +771,7 @@ def _make_runtime_factory(cfg: object) -> object:
             _instructions_cache[0] = rendered
             _origins_cache[0] = origins
             _scheduler_runtime_factory_cache[0] = _scheduler_runtime_factory
+            _mcp_runtime_registration_cache[0] = mcp_runtime_registration
 
     async def factory(
         thread_id: str,
@@ -800,6 +812,7 @@ def _make_runtime_factory(cfg: object) -> object:
 
         await _ensure_shared_assets(sinks)
         factory._scheduler_runtime_factory = _scheduler_runtime_factory_cache[0]  # type: ignore[attr-defined]
+        factory._mcp_runtime_registration = _mcp_runtime_registration_cache[0]  # type: ignore[attr-defined]
         instructions = _instructions_cache[0]
         assert instructions is not None
         origins = _origins_cache[0] or []
@@ -875,6 +888,7 @@ def _make_runtime_factory(cfg: object) -> object:
             config=preset_cfg,
             workspace_root=Path(default_cwd),
             role_manager=agent_role_manager,
+            tool_registry=registry,
         )
         bridge = SessionBridge(
             runtime=runtime,
@@ -884,11 +898,8 @@ def _make_runtime_factory(cfg: object) -> object:
         )
         return runtime, bridge
 
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        asyncio.run(_ensure_shared_assets([]))
     factory._scheduler_runtime_factory = _scheduler_runtime_factory_cache[0]  # type: ignore[attr-defined]
+    factory._mcp_runtime_registration = _mcp_runtime_registration_cache[0]  # type: ignore[attr-defined]
     return factory
 
 
@@ -913,10 +924,28 @@ def _bind_agent_workflow_manager(
     config: Any,
     workspace_root: Path,
     role_manager: Any,
+    tool_registry: Any,
 ) -> None:
     """把当前 Web thread runtime 绑定到 workflow handle，输入为运行时和工作区，输出为可执行 workflow manager。"""
     from application.agent_workflows.manager import AgentWorkflowManager
     from application.subagents.manager import SubAgentManager
+    from hosts.web.research_source_provider import WebResearchSourceProviderFactory
+
+    source_provider_result = WebResearchSourceProviderFactory(config).build(tool_registry)
+    diagnostics = source_provider_result.diagnostics
+    if source_provider_result.provider is None:
+        logger.info(
+            "deep_research web source provider unavailable: reason=%s fallback=%s",
+            diagnostics.reason,
+            diagnostics.fallback_reason,
+        )
+    else:
+        logger.info(
+            "deep_research web source provider enabled: provider=%s search_tool=%s fetch_tool=%s",
+            diagnostics.provider_name,
+            diagnostics.search_tool_name,
+            diagnostics.fetch_tool_name,
+        )
 
     handle.bind(
         AgentWorkflowManager(
@@ -924,6 +953,8 @@ def _bind_agent_workflow_manager(
             config=config,
             workspace_root=workspace_root,
             role_manager=role_manager,
+            deep_research_source_provider=source_provider_result.provider,
+            deep_research_source_diagnostics=diagnostics,
         ),
         session_id=thread_id,
     )

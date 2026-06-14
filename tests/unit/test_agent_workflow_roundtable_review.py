@@ -367,6 +367,7 @@ def test_agent_workflow_manager_registers_roundtable_review(tmp_path: Path) -> N
 
     catalog = manager.list_workflow_strategies()
     assert [entry.mode for entry in catalog] == [
+        "deep_research",
         "map_reduce",
         "parallel",
         "roundtable_review",
