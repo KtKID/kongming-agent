@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -131,7 +132,11 @@ class McpRuntimeRegistrationManager:
             self._closed = False
             await mcp_manager.start_all()
         except Exception as exc:
-            cleanup_diagnostics = await self._cleanup_startup_failure(mcp_manager)
+            secret_env_keys = _secret_env_keys(mcp_cfg.servers)
+            cleanup_diagnostics = await self._cleanup_startup_failure(
+                mcp_manager,
+                secret_env_keys=secret_env_keys,
+            )
             web_search_diagnostics = _register_web_search_tool(
                 registry,
                 web_search_cfg=self._config.web_search,
@@ -140,8 +145,14 @@ class McpRuntimeRegistrationManager:
                 {
                     "reason": "mcp_startup_failed",
                     "error_class": type(exc).__name__,
-                    "error_message": _diagnostic_error_message(exc),
-                    "mcp_manager": _manager_diagnostics(mcp_manager),
+                    "error_message": _diagnostic_error_message(
+                        exc,
+                        secret_env_keys=secret_env_keys,
+                    ),
+                    "mcp_manager": _manager_diagnostics(
+                        mcp_manager,
+                        secret_env_keys=secret_env_keys,
+                    ),
                     "cleanup": cleanup_diagnostics,
                     "web_search": web_search_diagnostics,
                 }
@@ -247,7 +258,12 @@ class McpRuntimeRegistrationManager:
         self._last_result = result
         return result
 
-    async def _cleanup_startup_failure(self, mcp_manager: Any | None) -> dict[str, Any]:
+    async def _cleanup_startup_failure(
+        self,
+        mcp_manager: Any | None,
+        *,
+        secret_env_keys: Sequence[str] = (),
+    ) -> dict[str, Any]:
         """清理启动失败后的 MCP manager，输入 manager，输出清理诊断。"""
         if mcp_manager is None:
             self._mcp_manager = None
@@ -263,7 +279,10 @@ class McpRuntimeRegistrationManager:
                 "attempted": True,
                 "closed": False,
                 "error_class": type(exc).__name__,
-                "error_message": _diagnostic_error_message(exc),
+                "error_message": _diagnostic_error_message(
+                    exc,
+                    secret_env_keys=secret_env_keys,
+                ),
             }
         return {"attempted": True, "closed": True}
 
@@ -403,7 +422,11 @@ def _mapping(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _manager_diagnostics(manager: Any | None) -> dict[str, Any]:
+def _manager_diagnostics(
+    manager: Any | None,
+    *,
+    secret_env_keys: Sequence[str] = (),
+) -> dict[str, Any]:
     """读取 MCP manager 诊断，输入 manager，输出可序列化 dict。"""
     if manager is None:
         return {}
@@ -415,22 +438,64 @@ def _manager_diagnostics(manager: Any | None) -> dict[str, Any]:
     except Exception as exc:
         return {
             "diagnostics_failed": type(exc).__name__,
-            "error_message": _diagnostic_error_message(exc),
+            "error_message": _diagnostic_error_message(
+                exc,
+                secret_env_keys=secret_env_keys,
+            ),
         }
     return _mapping(diagnostics)
 
 
-def _diagnostic_error_message(exc: BaseException) -> str:
+def _diagnostic_error_message(
+    exc: BaseException,
+    *,
+    secret_env_keys: Sequence[str] = (),
+) -> str:
     """生成安全错误摘要，输入异常，输出脱敏且截断后的 diagnostics 文本。"""
     message = str(exc).replace("\n", " ").strip()
     if not message:
         return type(exc).__name__
-    lowered = message.lower()
-    if any(marker in lowered for marker in _SENSITIVE_ERROR_MARKERS):
-        return "<redacted sensitive diagnostic>"
-    if len(message) <= _MAX_DIAGNOSTIC_ERROR_MESSAGE_CHARS:
-        return message
-    return f"{message[:_MAX_DIAGNOSTIC_ERROR_MESSAGE_CHARS].rstrip()}..."
+    redacted = _redact_error_message(message, secret_env_keys=secret_env_keys)
+    if len(redacted) <= _MAX_DIAGNOSTIC_ERROR_MESSAGE_CHARS:
+        return redacted
+    return f"{redacted[:_MAX_DIAGNOSTIC_ERROR_MESSAGE_CHARS].rstrip()}..."
+
+
+def _redact_error_message(message: str, *, secret_env_keys: Sequence[str]) -> str:
+    """脱敏错误文本，输入原始异常消息和 secret key 列表，输出脱敏文本。"""
+    redacted = message
+    for key in secret_env_keys:
+        key_text = str(key).strip()
+        if not key_text:
+            continue
+        pattern = re.compile(
+            rf"\b({re.escape(key_text)})\b\s*[:=]\s*([\"']?)[^\s,\"']+\2",
+            flags=re.IGNORECASE,
+        )
+        redacted = pattern.sub(lambda match: f"{match.group(1)}=<redacted>", redacted)
+    sensitive_names = "|".join(re.escape(marker) for marker in _SENSITIVE_ERROR_MARKERS)
+    redacted = re.sub(
+        rf"(?i)\b([A-Za-z0-9_.-]*(?:{sensitive_names}|key))\b\s*[:=]\s*([\"']?)[^\s,\"']+\2",
+        lambda match: f"{match.group(1)}=<redacted>",
+        redacted,
+    )
+    redacted = re.sub(
+        r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+",
+        "Bearer <redacted>",
+        redacted,
+    )
+    return redacted
+
+
+def _secret_env_keys(servers: Sequence[Any]) -> tuple[str, ...]:
+    """收集 MCP server secret env key，输入 server 配置，输出去重 key 元组。"""
+    keys: list[str] = []
+    for server in servers:
+        for key in getattr(server, "secret_env_keys", ()) or ():
+            key_text = str(key).strip()
+            if key_text and key_text not in keys:
+                keys.append(key_text)
+    return tuple(keys)
 
 
 def _registry_has_tool(registry: object, name: str) -> bool:

@@ -321,6 +321,8 @@ mcp:
   servers:
     - server_id: minimax
       command: fake-mcp
+      secret_env_keys:
+        - MINIMAX_API_KEY
 web_search:
   enabled: true
   provider_name: user_provider
@@ -378,7 +380,7 @@ web_search:
     result = await manager.register(registry)
 
     assert result.diagnostics["error_class"] == "RuntimeError"
-    assert result.diagnostics["error_message"] == "<redacted sensitive diagnostic>"
+    assert result.diagnostics["error_message"] == "MINIMAX_API_KEY=<redacted> transport exploded"
     assert "sk-secret-token" not in str(result.diagnostics)
 
 

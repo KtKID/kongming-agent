@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -19,12 +20,54 @@ def test_main_exports_click_cli() -> None:
 def test_repo_dotenv_load_respects_skip_env(monkeypatch) -> None:
     """pre-push 隔离环境设置 KONGMING_SKIP_DOTENV 时，ctl 不读取仓库 .env。"""
     calls: list[Path] = []
-    monkeypatch.setenv("KONGMING_SKIP_DOTENV", "1")
+    monkeypatch.setenv("KONGMING_SKIP_DOTENV", "T")
     monkeypatch.setattr(ctl, "load_dotenv", lambda path: calls.append(path))
 
     ctl._load_repo_dotenv()
 
     assert calls == []
+
+
+def test_repo_dotenv_load_skips_missing_env(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    """仓库 .env 不存在时记录 debug，输入空目录，输出不调用 dotenv。"""
+    calls: list[Path] = []
+    monkeypatch.delenv("KONGMING_SKIP_DOTENV", raising=False)
+    monkeypatch.setattr(ctl, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(ctl, "load_dotenv", lambda path: calls.append(path))
+    caplog.set_level(logging.DEBUG, logger=ctl.__name__)
+
+    ctl._load_repo_dotenv()
+
+    assert calls == []
+    assert "repo .env not present" in caplog.text
+
+
+def test_repo_dotenv_load_warns_on_os_error(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    """dotenv 读取抛 OSError 时记录 warning，输入不可读 fake，输出不抛。"""
+    env_path = tmp_path / ".env"
+    env_path.write_text("KONGMING_WEB_PORT=1987\n", encoding="utf-8")
+    monkeypatch.delenv("KONGMING_SKIP_DOTENV", raising=False)
+    monkeypatch.setattr(ctl, "_REPO_ROOT", tmp_path)
+
+    def _raise_os_error(path: Path) -> bool:
+        assert path == env_path
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(ctl, "load_dotenv", _raise_os_error)
+    caplog.set_level(logging.WARNING, logger=ctl.__name__)
+
+    ctl._load_repo_dotenv()
+
+    assert "failed to load repo .env" in caplog.text
+    assert "permission denied" in caplog.text
 
 
 def test_status_accepts_home_and_reads_server_json(tmp_path: Path) -> None:

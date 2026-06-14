@@ -287,6 +287,18 @@ async def test_build_web_search_tool_registers_and_executes_with_tool_registry()
     assert "A title" in result.content
 
 
+@pytest.mark.unit
+def test_web_search_tool_schema_accepts_integer_or_string_max_results() -> None:
+    """验证 schema 与运行时一致，输入 max_results，输出 integer/string 均合法。"""
+    tool = build_web_search_tool(WebSearchManager(_FakeSearchTool()))
+    max_results_schema = tool.input_schema["properties"]["max_results"]
+
+    assert max_results_schema["anyOf"] == [
+        {"type": "integer", "minimum": 1},
+        {"type": "string", "pattern": "^[1-9][0-9]*$"},
+    ]
+
+
 @pytest.mark.asyncio
 @pytest.mark.unit
 @pytest.mark.parametrize("max_results", ["abc", 0, -1, True, 1.9, float("inf")])

@@ -188,8 +188,10 @@ class _WebSearchTool:
         "properties": {
             "query": {"type": "string", "description": "Search query."},
             "max_results": {
-                "type": "integer",
-                "minimum": 1,
+                "anyOf": [
+                    {"type": "integer", "minimum": 1},
+                    {"type": "string", "pattern": "^[1-9][0-9]*$"},
+                ],
                 "description": "Maximum number of search results to return.",
             },
         },
