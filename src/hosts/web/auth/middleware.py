@@ -212,6 +212,8 @@ def _is_path_allowlisted(path: str, *, allow_docs: bool) -> bool:
     if path in ("/health", "/api/health"):
         # 启动 / 重启探测端点：宿主在 lifespan 完成前 / cookie 失效场景下都要能拿 200
         return True
+    if _is_avatar_api_allowlisted(path):
+        return True
     if path.startswith("/ws/"):
         # WS 自身鉴权；HTTP 路径前缀 /ws/ 也放行（其它非 WS 协议的 GET 落到 404）
         return True
@@ -219,6 +221,15 @@ def _is_path_allowlisted(path: str, *, allow_docs: bool) -> bool:
         # 静态 / SPA fallback
         return True
     return bool(allow_docs and path in ("/docs", "/redoc", "/openapi.json"))
+
+
+def _is_avatar_api_allowlisted(path: str) -> bool:
+    """判断 Avatar API 是否交给 Router 做 Bearer/cookie 鉴权。
+
+    关键输入：HTTP path。
+    关键输出：Avatar v1 API 放行 Auth/CSRF middleware，最终权限由 Router 校验。
+    """
+    return path.startswith("/api/avatar/v1/")
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -286,7 +297,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         method = request.method.upper()
-        if method in CSRF_PROTECTED_METHODS:
+        if method in CSRF_PROTECTED_METHODS and not _is_avatar_api_allowlisted(request.url.path):
             header_val = request.headers.get(CSRF_HEADER_NAME)
             if header_val != CSRF_HEADER_VALUE:
                 return JSONResponse(
