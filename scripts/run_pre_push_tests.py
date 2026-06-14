@@ -73,6 +73,27 @@ NARROW_SOURCE_TEST_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tests/unit/safety/test_auto_approval_manager.py",
         ),
     ),
+    (
+        "src/application/web_search/manager.py",
+        (
+            "tests/unit/test_web_search_manager.py",
+            "tests/unit/test_mcp_runtime_registration.py",
+        ),
+    ),
+    (
+        "src/hosts/shared/mcp_runtime_registration.py",
+        (
+            "tests/unit/test_mcp_runtime_registration.py",
+            "tests/unit/test_web_search_manager.py",
+        ),
+    ),
+    (
+        "src/hosts/web/research_source_provider.py",
+        (
+            "tests/unit/test_web_deep_research_source_provider_factory.py",
+            "tests/unit/test_web_agent_workflow_manager_deep_research_binding.py",
+        ),
+    ),
 )
 
 SENSITIVE_ENV_NAMES = {
