@@ -11,6 +11,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+PUBLIC_ERROR_CODE_BY_INTERNAL_CODE: dict[str, str] = {
+    "invalid_request": "invalid_pairing_payload",
+    "claim_not_found": "pairing_not_found",
+    "handoff_expired": "token_expired",
+    "handoff_consumed": "reauth_required",
+    "invalid_token": "reauth_required",
+}
+
+HTTP_STATUS_BY_PUBLIC_ERROR_CODE: dict[str, int] = {
+    "unsupported_protocol": 400,
+    "invalid_pairing_payload": 400,
+    "pairing_not_found": 404,
+    "pairing_expired": 410,
+    "nonce_mismatch": 403,
+    "pairing_already_claimed": 409,
+    "approval_pending": 202,
+    "approval_denied": 403,
+    "device_revoked": 401,
+    "token_expired": 401,
+    "reauth_required": 401,
+}
+
 
 @dataclass(slots=True)
 class MobilePairingError(Exception):
@@ -32,6 +54,54 @@ class MobilePairingError(Exception):
         关键输出：包含错误码前缀的字符串。
         """
         return f"{self.code}: {self.message}"
+
+
+def normalize_mobile_pairing_error_code(code: str) -> str:
+    """归一化移动端公开错误码。
+
+    关键输入：Manager、Repository 或 TokenService 抛出的内部错误码。
+    关键输出：Android client 可稳定解析的公开错误码。
+    """
+    return PUBLIC_ERROR_CODE_BY_INTERNAL_CODE.get(code, code)
+
+
+def mobile_pairing_http_status(code_or_error: str | MobilePairingError) -> int:
+    """查询移动配对 HTTP 状态码。
+
+    关键输入：内部错误码、公开错误码或 ``MobilePairingError``。
+    关键输出：qdev 错误合同定义的 HTTP status。
+    """
+    code = code_or_error.code if isinstance(code_or_error, MobilePairingError) else code_or_error
+    public_code = normalize_mobile_pairing_error_code(code)
+    return HTTP_STATUS_BY_PUBLIC_ERROR_CODE[public_code]
+
+
+def mobile_pairing_error_body(
+    error: MobilePairingError,
+) -> dict[str, dict[str, str | bool]]:
+    """生成 Android client 解析的错误响应体。
+
+    关键输入：业务层抛出的 ``MobilePairingError``。
+    关键输出：``body.error.code/message/retryable`` 结构。
+    """
+    return {
+        "error": {
+            "code": normalize_mobile_pairing_error_code(error.code),
+            "message": error.message,
+            "retryable": error.retryable,
+        }
+    }
+
+
+def mobile_pairing_error_response(
+    error: MobilePairingError,
+) -> tuple[int, dict[str, dict[str, str | bool]]]:
+    """生成 Router 可直接消费的 HTTP 错误合同。
+
+    关键输入：业务层抛出的 ``MobilePairingError``。
+    关键输出：HTTP status 和 Android client 错误响应体。
+    """
+    return mobile_pairing_http_status(error), mobile_pairing_error_body(error)
 
 
 def unsupported_protocol(protocol_version: str) -> MobilePairingError:
@@ -165,6 +235,8 @@ def invalid_token(message: str = "invalid token") -> MobilePairingError:
 
 
 __all__ = [
+    "HTTP_STATUS_BY_PUBLIC_ERROR_CODE",
+    "PUBLIC_ERROR_CODE_BY_INTERNAL_CODE",
     "MobilePairingError",
     "approval_denied",
     "approval_pending",
@@ -174,7 +246,11 @@ __all__ = [
     "handoff_expired",
     "invalid_request",
     "invalid_token",
+    "mobile_pairing_error_body",
+    "mobile_pairing_error_response",
+    "mobile_pairing_http_status",
     "nonce_mismatch",
+    "normalize_mobile_pairing_error_code",
     "pairing_already_claimed",
     "pairing_expired",
     "pairing_not_found",

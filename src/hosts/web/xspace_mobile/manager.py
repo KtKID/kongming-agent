@@ -18,6 +18,7 @@ from urllib.parse import quote, urlencode
 from hosts.web.xspace_mobile import errors
 from hosts.web.xspace_mobile.models import (
     MobileDeviceDescriptor,
+    MobileDeviceRecord,
     PairingApprovalResult,
     PairingClaimRecord,
     PairingClaimResult,
@@ -343,6 +344,30 @@ class MobilePairingManager:
         """
         device_id = _require_text(device_id, "device_id")
         self._repository.revoke_device(device_id)
+
+    def list_devices(self) -> list[MobileDeviceRecord]:
+        """列出当前可用移动设备。
+
+        关键输入：Manager 持有的 repository。
+        关键输出：未吊销的设备记录列表。
+        """
+        return self._repository.list_devices()
+
+    def get_pairing_view(
+        self,
+        pairing_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> tuple[PairingSessionRecord, PairingClaimRecord | None]:
+        """读取 Web 连接页轮询所需 pairing 视图。
+
+        关键输入：pairing ID 和当前时间。
+        关键输出：配对会话记录及其 claim 记录。
+        """
+        pairing_id = _require_text(pairing_id, "pairing_id")
+        session = self._load_existing_session(pairing_id, now=now or _utc_now())
+        claim = self._repository.get_claim_for_pairing(pairing_id)
+        return session, claim
 
     def _ensure_supported_protocol(self, protocol_version: str) -> None:
         """校验协议版本。

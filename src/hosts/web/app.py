@@ -571,6 +571,24 @@ def create_app(
     configure_generic_channel_log(home / "logs" / "generic-channel")
     app.state.network_manager = _network_manager
 
+    # XSpace mobile pairing：SQLite 状态和 token 服务统一落到 <kongming_home>/web。
+    from hosts.web.xspace_mobile import (
+        MobileDeviceTokenService,
+        MobilePairingManager,
+        MobilePairingRepository,
+    )
+
+    app.state.xspace_mobile_pairing_repository = MobilePairingRepository(
+        home / "web" / "mobile_pairing.db",
+    )
+    app.state.xspace_mobile_token_service = MobileDeviceTokenService(
+        app.state.xspace_mobile_pairing_repository,
+    )
+    app.state.xspace_mobile_pairing_manager = MobilePairingManager(
+        app.state.xspace_mobile_pairing_repository,
+        app.state.xspace_mobile_token_service,
+    )
+
     # codex 通道（与 claude_code 平级，独立 SessionManager 单例）
     # codex-channel-image-paste §3：service 构造时注入 asset_storage，让
     # CodexImageCliArgsBuilder 能反推 asset 物理路径生成 --image flag
@@ -613,6 +631,7 @@ def create_app(
     from hosts.web.routers.whiteboard import router as whiteboard_router
     from hosts.web.routers.workspace_git import router as workspace_git_router
     from hosts.web.routers.workspace_shell import router as workspace_shell_router
+    from hosts.web.routers.xspace_mobile import router as xspace_mobile_router
 
     app.include_router(auth_router)
     app.include_router(threads_router)
@@ -640,6 +659,7 @@ def create_app(
     app.include_router(server_info_router)
     app.include_router(uploads_router)
     app.include_router(health_router)
+    app.include_router(xspace_mobile_router)
 
     # workflow dashboard
     if cfg.workflow.enabled:
