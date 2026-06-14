@@ -63,6 +63,30 @@ def test_runtime_env_keeps_process_env_over_config_default(
 
 
 @pytest.mark.unit
+async def test_secret_env_keys_are_injected_without_diagnostics_leak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证 secret env 注入，输入环境变量密钥，输出 runtime 可用且 diagnostics 不泄漏。"""
+    monkeypatch.setenv("MINIMAX_API_KEY", "secret-test-token")
+    config = _ServerConfig(
+        server_id="minimax",
+        command="definitely-missing-mcp-command",
+        args=(),
+        env={"MINIMAX_API_HOST": "https://api.minimax.io"},
+        secret_env_keys=("MINIMAX_API_KEY",),
+    )
+    runtime = _runtime_from_config(config)
+    manager = McpManager([config])
+
+    await manager.start_all()
+
+    diagnostics_text = repr(manager.diagnostics())
+    assert runtime.env["MINIMAX_API_KEY"] == "secret-test-token"
+    assert "secret-test-token" not in diagnostics_text
+    assert "MINIMAX_API_KEY" not in diagnostics_text
+
+
+@pytest.mark.unit
 async def test_start_all_initializes_and_lists_tools() -> None:
     manager = McpManager([_fake_config()])
     try:

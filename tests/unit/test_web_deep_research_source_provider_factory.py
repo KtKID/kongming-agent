@@ -169,6 +169,35 @@ async def test_factory_builds_search_only_provider_with_weak_fetched_record() ->
 
 
 @pytest.mark.asyncio
+async def test_search_only_provider_marks_missing_content_as_failed() -> None:
+    """验证 search-only 无正文，输入只有 URL 的搜索结果，输出 failed weak record。"""
+    search_tool = _FakeUserTool(
+        {
+            "results": [
+                {
+                    "url": "https://example.com/no-content",
+                    "title": "No Content",
+                }
+            ]
+        }
+    )
+    provider = UserToolResearchSourceProviderAdapter(
+        name="user_tool",
+        search_tool=search_tool,
+        search_tool_name="web_search",
+    )
+
+    candidates = await provider.search(_query())
+    record = await provider.fetch(candidates[0])
+
+    assert record.status == "failed"
+    assert record.tier == "weak"
+    assert record.error_code == "fetch_tool_unavailable"
+    assert record.content_text is None
+    assert record.url == "https://example.com/no-content"
+
+
+@pytest.mark.asyncio
 async def test_user_tool_adapter_accepts_minimax_organic_results() -> None:
     """验证 organic 搜索结果，输入为 MiniMax 形态，输出候选 URL。"""
     search_tool = _FakeUserTool(

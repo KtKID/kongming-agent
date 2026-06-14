@@ -79,7 +79,7 @@ web_search:
   # 保持通用 web_search 能力开启；没有底层搜索工具时只产生可诊断的缺失状态。
   enabled: true
   provider_name: minimax_web_search
-  search_tool_name:
+  search_tool_name: null
   search_tool_names:
     - web_search
     - mcp__minimax__web_search
@@ -185,8 +185,8 @@ web:
   deep_research_source_provider:
     enabled: true
     provider_name: web_user_tool_research_source
-    search_tool_name:
-    fetch_tool_name:
+    search_tool_name: null
+    fetch_tool_name: null
     search_tool_names:
       - deep_research_search
       - web_search

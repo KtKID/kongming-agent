@@ -54,9 +54,7 @@ class McpRuntimeRegistrationManager:
         self._event_sinks = tuple(event_sinks)
         self._mcp_manager_factory = mcp_manager_factory
         self._mcp_manager: Any | None = None
-        self._last_result = McpRuntimeRegistrationResult(
-            diagnostics={"enabled": False, "reason": "not_registered"}
-        )
+        self._last_result = McpRuntimeRegistrationResult()
 
     @property
     def mcp_manager(self) -> Any | None:
@@ -115,9 +113,36 @@ class McpRuntimeRegistrationManager:
             await self._emit("mcp.registration.skipped", result.diagnostics)
             return result
 
-        mcp_manager = self._mcp_manager_factory(mcp_cfg.servers)
-        self._mcp_manager = mcp_manager
-        await mcp_manager.start_all()
+        mcp_manager: Any | None = None
+        try:
+            mcp_manager = self._mcp_manager_factory(mcp_cfg.servers)
+            self._mcp_manager = mcp_manager
+            await mcp_manager.start_all()
+        except Exception as exc:
+            cleanup_diagnostics = await self._cleanup_startup_failure(mcp_manager)
+            web_search_diagnostics = _register_web_search_tool(
+                registry,
+                web_search_cfg=self._config.web_search,
+            )
+            diagnostics.update(
+                {
+                    "reason": "mcp_startup_failed",
+                    "error_class": type(exc).__name__,
+                    "error_message": str(exc),
+                    "mcp_manager": _manager_diagnostics(mcp_manager),
+                    "cleanup": cleanup_diagnostics,
+                    "web_search": web_search_diagnostics,
+                }
+            )
+            result = self._finish_result(
+                registry,
+                registered_tools=_registered_web_search_tools(web_search_diagnostics),
+                diagnostics=diagnostics,
+                excluded_tool_names=excluded_tool_names,
+            )
+            await self._emit("mcp.registration.failed", result.diagnostics)
+            return result
+        assert mcp_manager is not None
 
         descriptors = []
         manager_diagnostics = _mapping(getattr(mcp_manager, "diagnostics", lambda: {})())
@@ -205,6 +230,27 @@ class McpRuntimeRegistrationManager:
         )
         self._last_result = result
         return result
+
+    async def _cleanup_startup_failure(self, mcp_manager: Any | None) -> dict[str, Any]:
+        """清理启动失败后的 MCP manager，输入 manager，输出清理诊断。"""
+        if mcp_manager is None:
+            self._mcp_manager = None
+            return {"attempted": False, "closed": False, "reason": "manager_unavailable"}
+        aclose = getattr(mcp_manager, "aclose", None)
+        if aclose is None:
+            self._mcp_manager = None
+            return {"attempted": False, "closed": False, "reason": "aclose_unavailable"}
+        try:
+            await aclose()
+        except Exception as exc:
+            return {
+                "attempted": True,
+                "closed": False,
+                "error_class": type(exc).__name__,
+                "error_message": str(exc),
+            }
+        self._mcp_manager = None
+        return {"attempted": True, "closed": True}
 
     async def _emit(self, kind: str, payload: dict[str, Any]) -> None:
         """发出注册事件，输入事件 kind 和 payload，输出为 sink fan-out。"""
@@ -340,6 +386,20 @@ def _server_is_ready(diagnostics: dict[str, Any], server_id: str) -> bool:
 def _mapping(value: object) -> dict[str, Any]:
     """把 mapping 转成 dict，输入任意值，输出 dict。"""
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _manager_diagnostics(manager: Any | None) -> dict[str, Any]:
+    """读取 MCP manager 诊断，输入 manager，输出可序列化 dict。"""
+    if manager is None:
+        return {}
+    diagnostics_fn = getattr(manager, "diagnostics", None)
+    if not callable(diagnostics_fn):
+        return {}
+    try:
+        diagnostics = diagnostics_fn()
+    except Exception as exc:
+        return {"diagnostics_failed": type(exc).__name__, "error_message": str(exc)}
+    return _mapping(diagnostics)
 
 
 def _registry_has_tool(registry: object, name: str) -> bool:

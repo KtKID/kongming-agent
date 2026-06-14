@@ -106,11 +106,14 @@ class WebSearchManager:
     def _base_diagnostics(self, result: object) -> dict[str, Any]:
         """构造响应诊断，输入底层结果，输出 provider/tool/错误信息。"""
         data = _result_data(result)
-        diagnostics = _mapping_or_empty(data.get("diagnostics"))
-        diagnostics.update(_mapping_or_empty(data.get("mcp_diagnostics")))
-        result_diagnostics = _mapping_or_empty(_result_field(result, "diagnostics"))
-        diagnostics.update(result_diagnostics)
+        diagnostics = _merge_diagnostics_pessimistic(
+            _mapping_or_empty(data.get("diagnostics")),
+            _mapping_or_empty(data.get("mcp_diagnostics")),
+            _mapping_or_empty(_result_field(result, "diagnostics")),
+        )
         ok = bool(_result_field(result, "ok", True))
+        if diagnostics.get("ok") is False:
+            ok = False
         diagnostics.update(
             {
                 "ok": ok,
@@ -348,6 +351,19 @@ def _mapping_or_empty(value: object) -> dict[str, Any]:
     if isinstance(value, Mapping):
         return dict(value)
     return {}
+
+
+def _merge_diagnostics_pessimistic(*parts: Mapping[str, Any]) -> dict[str, Any]:
+    """合并诊断信息，输入多层 diagnostics，输出任一失败即失败的结果。"""
+    merged: dict[str, Any] = {}
+    saw_failure = False
+    for part in parts:
+        if part.get("ok") is False:
+            saw_failure = True
+        merged.update(dict(part))
+    if saw_failure:
+        merged["ok"] = False
+    return merged
 
 
 def _text_field(mapping: Mapping[str, Any], *keys: str) -> str | None:

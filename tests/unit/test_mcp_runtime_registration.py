@@ -77,6 +77,31 @@ class _FakeUserSearchTool:
         )
 
 
+class _RaisingMcpManager:
+    """启动阶段抛错的 MCP manager fake，用于验证注册门户兜底清理。"""
+
+    def __init__(self, _servers: object) -> None:
+        """初始化 fake，输入 server 配置，输出可观察 closed 状态。"""
+        self.closed = False
+        self._diagnostics: dict[str, object] = {
+            "servers": {"minimax": {"status": "starting"}},
+            "events": [{"type": "starting", "server_id": "minimax"}],
+        }
+
+    async def start_all(self) -> None:
+        """模拟启动失败，输入为空，输出 RuntimeError。"""
+        raise RuntimeError("stdio transport exploded")
+
+    async def aclose(self) -> None:
+        """记录清理调用，输入为空，输出 closed 状态。"""
+        self.closed = True
+        self._diagnostics["closed"] = True
+
+    def diagnostics(self) -> dict[str, object]:
+        """返回 fake 诊断，输入为空，输出诊断 dict。"""
+        return dict(self._diagnostics)
+
+
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_runtime_registration_registers_fake_mcp_web_search(tmp_path: Path) -> None:
@@ -229,3 +254,48 @@ web_search:
         assert result.diagnostics["web_search"]["reason"] == "search_tool_missing"
     finally:
         await manager.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_runtime_registration_cleans_up_when_start_all_raises(tmp_path: Path) -> None:
+    """验证 MCP 启动异常，输入抛错 manager，输出诊断 fallback 和资源清理。"""
+    instances: list[_RaisingMcpManager] = []
+
+    def _factory(servers: object) -> _RaisingMcpManager:
+        manager = _RaisingMcpManager(servers)
+        instances.append(manager)
+        return manager
+
+    cfg = load_config(
+        _write_config(
+            tmp_path,
+            """
+mcp:
+  enabled: true
+  servers:
+    - server_id: minimax
+      command: fake-mcp
+web_search:
+  enabled: true
+  provider_name: user_provider
+  search_tool_names:
+    - custom_search_tool
+""",
+        ),
+        load_env_file=False,
+    )
+    registry = ToolRegistry()
+    registry.register(_FakeUserSearchTool())
+    manager = McpRuntimeRegistrationManager(cfg, mcp_manager_factory=_factory)
+
+    result = await manager.register(registry)
+
+    assert result.diagnostics["reason"] == "mcp_startup_failed"
+    assert result.diagnostics["error_class"] == "RuntimeError"
+    assert result.diagnostics["cleanup"]["closed"] is True
+    assert instances[0].closed is True
+    assert manager.mcp_manager is None
+    assert result.registered_tools == ("web_search",)
+    assert result.diagnostics["web_search"]["reason"] == "registered"
+    assert "web_search" in registry

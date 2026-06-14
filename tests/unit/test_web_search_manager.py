@@ -107,6 +107,27 @@ class _FakeProviderErrorSearchTool:
         )
 
 
+class _FakeConflictingDiagnosticsSearchTool:
+    """fake 搜索工具，返回冲突 diagnostics 用于验证失败优先合并。"""
+
+    name = "mcp__minimax__web_search"
+    description = "fake conflicting diagnostics"
+    input_schema: dict[str, Any] = {"type": "object"}
+
+    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+        """返回冲突诊断，输入搜索参数，输出 ToolResult。"""
+        del args, ctx
+        return ToolResult(
+            ok=True,
+            content="ok",
+            data={
+                "results": [{"url": "https://example.com/diagnostics"}],
+                "diagnostics": {"ok": False, "error_message": "provider marked failure"},
+                "mcp_diagnostics": {"ok": True, "elapsed_ms": 12},
+            },
+        )
+
+
 @pytest.mark.asyncio
 @pytest.mark.unit
 async def test_web_search_manager_normalizes_fake_mcp_data() -> None:
@@ -178,6 +199,29 @@ async def test_web_search_tool_marks_provider_text_error_as_failed() -> None:
     assert result.data is not None
     assert result.data["diagnostics"]["ok"] is False
     assert result.data["diagnostics"]["result_count"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_web_search_manager_keeps_pessimistic_diagnostics() -> None:
+    """验证 diagnostics 合并，输入冲突 ok 字段，输出任一失败即失败。"""
+    manager = WebSearchManager(
+        _FakeConflictingDiagnosticsSearchTool(),
+        provider_name="minimax_web_search",
+        provider_tool_name="mcp__minimax__web_search",
+    )
+    tool = build_web_search_tool(manager)
+
+    result = await tool.execute(
+        {"query": "diagnostics merge"},
+        ToolContext(run_id="r", session_id="s", turn=1, call_id="c"),
+    )
+
+    assert result.ok is False
+    assert result.error_message == "provider marked failure"
+    assert result.data is not None
+    assert result.data["diagnostics"]["ok"] is False
+    assert result.data["diagnostics"]["elapsed_ms"] == 12
 
 
 @pytest.mark.asyncio

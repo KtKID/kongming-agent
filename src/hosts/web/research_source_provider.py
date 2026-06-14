@@ -405,7 +405,7 @@ def _search_content_text(item: Mapping[str, object]) -> str | None:
 def _weak_record(
     candidate: ResearchSourceCandidate,
     *,
-    status: SourceStatus = "candidate",
+    status: SourceStatus = "failed",
     error_code: str,
     error_message: str,
 ) -> ResearchSourceRecord:
