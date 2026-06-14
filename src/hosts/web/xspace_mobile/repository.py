@@ -736,6 +736,21 @@ class MobilePairingRepository:
             ).fetchone()
         return _device_from_row(row) if row else None
 
+    def list_devices(self, *, include_revoked: bool = False) -> list[MobileDeviceRecord]:
+        """列出移动设备。
+
+        关键输入：是否包含已吊销设备。
+        关键输出：按创建时间倒序排列的设备记录列表。
+        """
+        sql = "SELECT * FROM mobile_devices"
+        params: tuple[()] = ()
+        if not include_revoked:
+            sql += " WHERE revoked_at IS NULL"
+        sql += " ORDER BY created_at DESC"
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [_device_from_row(row) for row in rows]
+
     def touch_device(self, device_id: str, *, now: datetime | None = None) -> None:
         """更新设备最近使用时间。
 
