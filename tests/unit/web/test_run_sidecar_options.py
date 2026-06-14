@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from hosts.web.run import (
@@ -111,6 +112,22 @@ def test_ready_payload_schema(tmp_path: Path) -> None:
     assert "auth" not in payload
 
 
+def test_ready_payload_started_at_uses_configured_timezone(tmp_path: Path) -> None:
+    """server.json started_at 使用配置时区。"""
+    payload = _build_ready_payload(
+        host="127.0.0.1",
+        port=60000,
+        home=tmp_path,
+        dist_dir=tmp_path / "dist",
+        timezone_name="Asia/Shanghai",
+    )
+
+    started_at = payload["started_at"]
+    assert isinstance(started_at, str)
+    parsed = datetime.fromisoformat(started_at)
+    assert parsed.utcoffset() == timedelta(hours=8)
+
+
 def test_write_ready_payload_writes_file_and_stdout(tmp_path: Path, capsys) -> None:
     """ready payload 原子写入 server.json，并按需输出一行 stdout。"""
     _write_ready_payload(
@@ -119,6 +136,7 @@ def test_write_ready_payload_writes_file_and_stdout(tmp_path: Path, capsys) -> N
         home=tmp_path,
         dist_dir=tmp_path / "dist",
         public_origin="http://192.168.31.23:60000",
+        timezone_name="Asia/Shanghai",
         print_ready_json=True,
     )
 
@@ -128,7 +146,9 @@ def test_write_ready_payload_writes_file_and_stdout(tmp_path: Path, capsys) -> N
     from_stdout = json.loads(capsys.readouterr().out)
     assert from_file["type"] == "kongming_web_ready"
     assert from_file["public_origin"] == "http://192.168.31.23:60000"
+    assert datetime.fromisoformat(from_file["started_at"]).utcoffset() == timedelta(hours=8)
     assert from_stdout["server_json"] == str(server_json)
+    assert from_stdout["started_at"] == from_file["started_at"]
 
 
 def test_format_base_url_handles_ipv6() -> None:
