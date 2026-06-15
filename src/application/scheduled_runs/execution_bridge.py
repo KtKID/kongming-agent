@@ -423,7 +423,7 @@ class ExecutionBridge:
     def _resolve_run_audit_context(self, task: ScheduledTask) -> dict[str, str]:
         """v0.5.2: 解析 cron run audit payload 中要附加的 model 上下文。
 
-        返回 ``{preset_id, model_name}``：
+        返回 ``{preset_id, model_name, thread_id}``：
 
         - ``preset_id``：task 显式声明（空串表示走默认）
         - ``model_name``：preset 命中 → ``preset.model``；否则 fallback
@@ -431,7 +431,7 @@ class ExecutionBridge:
 
         所有 cron run 相关 audit（run_started / run_finished / run_failed /
         run_silent_suppressed / run_inactivity_timeout / run_skipped_by_concurrency
-        / run_approval_auto_allow）的 payload 都附加这两个字段，
+        / run_approval_auto_allow）的 payload 都附加这些字段，
         让 audits.jsonl 自描述"这条 run 用了什么模型"。
         """
         preset_id = task.preset_id or ""
@@ -440,7 +440,11 @@ class ExecutionBridge:
             model_name = self._preset_map[preset_id].model
         elif self._base_config is not None:
             model_name = self._base_config.model.name
-        return {"preset_id": preset_id, "model_name": model_name}
+        return {
+            "preset_id": preset_id,
+            "model_name": model_name,
+            "thread_id": task.thread_id,
+        }
 
     # ------------------------------------------------------------------
     # v0.5 approval wrapper 装配（per-task mode + audit sink 聚合）
@@ -520,7 +524,7 @@ class ExecutionBridge:
                 reason=decision.reason or "skipped by concurrency_policy",
             )
 
-        session_id = self._fresh_session_id(task.task_id)
+        session_id = task.thread_id or self._fresh_session_id(task.task_id)
         run_id = self._fresh_run_id(task.task_id)
         started_at = to_iso(utc_now())
 
@@ -531,6 +535,7 @@ class ExecutionBridge:
             trigger_type=task.trigger.trigger_type,
             origin=task.origin,
             is_scheduled_run=True,
+            thread_id=task.thread_id,
         )
         request = ScheduledRunRequest(
             user_input=task.target.input_text,
@@ -965,8 +970,14 @@ class ExecutionBridge:
 
         assert self._dispatcher is not None  # caller 已判
         final_message = run.final_message_excerpt or ""
+        delivery_task = task
+        if task.thread_id and task.thread_id == run.session_id and task.delivery is not None:
+            delivery_task = replace(
+                task,
+                delivery=replace(task.delivery, target=None),
+            )
         try:
-            result = await self._dispatcher.deliver(task, run, final_message)
+            result = await self._dispatcher.deliver(delivery_task, run, final_message)
         except Exception as exc:
             # 极少见：dispatcher 自身崩（半坏对象 / mock 漏方法 / 内部装配 bug）
             # 写 traceback 后两帧（避免 RunRecord 单字段过大），帮定位

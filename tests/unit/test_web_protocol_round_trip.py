@@ -242,8 +242,8 @@ def _make_thread_metadata() -> ThreadMetadataDTO:
         created_at=1_700_000_000.0,
         updated_at=1_700_000_010.5,
         message_count=3,
-        # v10 (claude-session-rename-archive-metadata-source): 加 is_archived 真源
-        schema_version=10,
+        # v11 (scheduled-task-thread): 加 thread_kind/source_kind/source_id
+        schema_version=11,
     )
 
 
@@ -702,7 +702,7 @@ def test_frame_type_default_cell_evicted():
 
 
 def test_thread_metadata_schema_version_default():
-    """``ThreadMetadataDTO.schema_version`` 默认 ``10``（claude-session-rename-archive-metadata-source，加 is_archived）。"""
+    """``ThreadMetadataDTO.schema_version`` 默认 ``11``（scheduled-task-thread 加业务类型字段）。"""
     dto = ThreadMetadataDTO(
         id="thread-abcdef012345",
         name="x",
@@ -712,4 +712,4 @@ def test_thread_metadata_schema_version_default():
         updated_at=0.0,
         message_count=0,
     )
-    assert dto.schema_version == 10
+    assert dto.schema_version == 11

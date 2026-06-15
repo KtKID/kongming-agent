@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import sys
 import tempfile
 from collections.abc import Iterator
@@ -34,6 +35,7 @@ from typing import Any
 from scheduler.domain import (
     GRACE_MIN_SECONDS,
     SCHEMA_VERSION,
+    THREAD_ID_PATTERN,
     ApprovalMode,
     ConcurrencyPolicy,
     DeliveryChannel,
@@ -223,6 +225,44 @@ def _json_dumps(payload: Any) -> str:
 # Dataclass <-> dict
 # ---------------------------------------------------------------------------
 
+_THREAD_TARGET_PREFIX = "thread:"
+_THREAD_ID_RE = re.compile(THREAD_ID_PATTERN)
+
+
+def _normalize_thread_id(value: object) -> str:
+    """把候选值规范化为合法 thread id；不合法时返回空串。"""
+    if not isinstance(value, str):
+        return ""
+    candidate = value.strip()
+    return candidate if _THREAD_ID_RE.match(candidate) is not None else ""
+
+
+def _thread_id_from_delivery_target(value: object) -> str:
+    """从 ``thread:<thread_id>`` target 中提取合法 thread id。"""
+    if not isinstance(value, str):
+        return ""
+    if not value.startswith(_THREAD_TARGET_PREFIX):
+        return ""
+    return _normalize_thread_id(value[len(_THREAD_TARGET_PREFIX) :])
+
+
+def _recover_task_thread_id(
+    payload: dict[str, Any],
+    *,
+    target_metadata: dict[str, str],
+    delivery: ScheduleDelivery | None,
+) -> str:
+    """按新字段、target metadata、delivery target 顺序恢复任务绑定 thread。"""
+    direct = _normalize_thread_id(payload.get("thread_id"))
+    if direct:
+        return direct
+    from_metadata = _normalize_thread_id(target_metadata.get("thread_id"))
+    if from_metadata:
+        return from_metadata
+    if delivery is not None:
+        return _thread_id_from_delivery_target(delivery.target)
+    return ""
+
 
 def _task_to_dict(task: ScheduledTask) -> dict[str, Any]:
     """``ScheduledTask`` → JSON-friendly dict（嵌套 dataclass 一并展开）。"""
@@ -272,6 +312,8 @@ def _task_to_dict(task: ScheduledTask) -> dict[str, Any]:
         payload["delivery"] = None
     # v0.4：preset_id
     payload["preset_id"] = task.preset_id
+    # scheduled-task-thread：兼容扩展字段，不提升 SCHEMA_VERSION。
+    payload["thread_id"] = task.thread_id
     return payload
 
 
@@ -315,6 +357,11 @@ def _dict_to_task(payload: dict[str, Any]) -> ScheduledTask:
             channel=DeliveryChannel(delivery_raw["channel"]),
             target=delivery_raw.get("target"),
         )
+    thread_id = _recover_task_thread_id(
+        payload,
+        target_metadata=target.metadata,
+        delivery=delivery,
+    )
     return ScheduledTask(
         task_id=payload["task_id"],
         name=payload["name"],
@@ -331,6 +378,7 @@ def _dict_to_task(payload: dict[str, Any]) -> ScheduledTask:
         updated_at=payload["updated_at"],
         delivery=delivery,
         preset_id=payload.get("preset_id", ""),
+        thread_id=thread_id,
     )
 
 

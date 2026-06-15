@@ -19,6 +19,7 @@ export type SchedulerTaskVM = {
   lastRunAt: string | null;
   timezone: string | null;
   presetId: string;
+  threadId: string;
   createdBy: string;
   // v0.5.4: 后端 GET /api/cron/tasks 现已返回这两个字段，
   // 用于 edit / duplicate 模式时直接预填表单（不再依赖外部 detail 接口）。
@@ -113,4 +114,3 @@ export type SchedulerStoreState = {
   filter: "all" | "running" | "paused" | "completed" | "failed";
   errorMessage: string | null;
 };
-

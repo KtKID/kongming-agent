@@ -69,6 +69,29 @@ def _ctx(session_id: str = "sess-test") -> ToolContext:
     return ToolContext(run_id="run-test", session_id=session_id, turn=1, call_id="call-1")
 
 
+class _FakeThreadProvisioner:
+    """测试用 provisioner：为 schedule_tool 创建专属 thread。"""
+
+    def __init__(self, thread_id: str = "thread-abcdef012345") -> None:
+        self.thread_id = thread_id
+        self.created: list[dict[str, str]] = []
+        self.deleted: list[str] = []
+
+    async def create_scheduled_task_thread(
+        self,
+        *,
+        task_id: str,
+        name: str,
+        preset_id: str,
+        cwd: str = "",
+    ) -> str:
+        self.created.append({"task_id": task_id, "name": name, "preset_id": preset_id, "cwd": cwd})
+        return self.thread_id
+
+    async def delete_thread(self, thread_id: str, *, keep_history: bool = False) -> None:
+        self.deleted.append(f"{thread_id}:{keep_history}")
+
+
 # ---------------------------------------------------------------------------
 # Group 1: Domain
 # ---------------------------------------------------------------------------
@@ -170,15 +193,17 @@ class TestStoreSerializationV04:
 class TestScheduleToolDeliveryTarget:
     """schedule_tool._do_create 对 delivery.target / preset_id 的填充逻辑。"""
 
-    async def test_do_create_fills_delivery_target_from_thread_session(
+    async def test_do_create_fills_delivery_target_from_provisioned_thread(
         self, tmp_path: Path
     ) -> None:
-        """ctx.session_id 匹配 thread-<12hex> 时，task.delivery.target 为
-        'thread:<session_id>'。"""
+        """注入 provisioner 时，task.delivery.target 指向新创建的专属 thread。"""
         store = Store(home_dir=tmp_path / "cron")
-        tool = build_schedule_tool(store, default_delivery_channel="web")
-        # thread_id 格式：thread-<12位十六进制>
-        session_id = "thread-abcdef012345"
+        provisioner = _FakeThreadProvisioner("thread-abcdef012345")
+        tool = build_schedule_tool(
+            store,
+            default_delivery_channel="web",
+            thread_provisioner=provisioner,
+        )
         r = await tool.execute(
             {
                 "action": "create",
@@ -186,16 +211,19 @@ class TestScheduleToolDeliveryTarget:
                 "schedule": "every 10s",
                 "input": "hi",
             },
-            _ctx(session_id=session_id),
+            _ctx(session_id="source-session"),
         )
         assert r.ok is True
         task = store.get_task(r.data["task_id"])
         assert task is not None
         assert task.delivery is not None
-        assert task.delivery.target == f"thread:{session_id}"
+        assert task.delivery.target == "thread:thread-abcdef012345"
+        assert task.thread_id == "thread-abcdef012345"
+        assert r.data["thread_id"] == "thread-abcdef012345"
+        assert provisioner.created[0]["task_id"] == r.data["task_id"]
 
-    async def test_do_create_no_target_when_cli_session(self, tmp_path: Path) -> None:
-        """ctx.session_id 不匹配 thread-<12hex> 时，delivery.target 为 None。"""
+    async def test_do_create_requires_thread_provisioner(self, tmp_path: Path) -> None:
+        """未注入 provisioner 时，create 返回结构化错误且不落盘。"""
         store = Store(home_dir=tmp_path / "cron")
         tool = build_schedule_tool(store, default_delivery_channel="web")
         r = await tool.execute(
@@ -207,16 +235,18 @@ class TestScheduleToolDeliveryTarget:
             },
             _ctx(session_id="some-random-id"),
         )
-        assert r.ok is True
-        task = store.get_task(r.data["task_id"])
-        assert task is not None
-        assert task.delivery is not None
-        assert task.delivery.target is None
+        assert r.ok is False
+        assert r.error_message == "thread_provisioner_required"
+        assert store.list_tasks() == []
 
     async def test_do_create_fills_preset_id_from_default(self, tmp_path: Path) -> None:
         """default_preset_id='claude-sonnet' 时，创建的 task.preset_id 填为该值。"""
         store = Store(home_dir=tmp_path / "cron")
-        tool = build_schedule_tool(store, default_preset_id="claude-sonnet")
+        tool = build_schedule_tool(
+            store,
+            default_preset_id="claude-sonnet",
+            thread_provisioner=_FakeThreadProvisioner("thread-bbbbbbbbbbbb"),
+        )
         r = await tool.execute(
             {
                 "action": "create",

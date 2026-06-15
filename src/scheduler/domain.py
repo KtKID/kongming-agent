@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -40,6 +41,11 @@ GRACE_MAX_SECONDS = 7200
 SILENT_MARKER = "[SILENT]"
 """final message 前缀触发投递抑制的标记。"""
 
+THREAD_ID_PATTERN = r"^thread-[a-f0-9]{12}$"
+"""Web thread id 格式；scheduler 只允许空串或符合该格式的绑定 thread。"""
+
+_THREAD_ID_RE = re.compile(THREAD_ID_PATTERN)
+
 SCHEMA_VERSION = 5
 """``scheduled_tasks.json`` / ``runs/*.jsonl`` 的持久化 schema 版本。
 
@@ -56,6 +62,10 @@ v0.4 新增（cron-thread-preset-v0.4）：``ScheduleDelivery.target`` 投递目
 v0.5 新增（scheduler-approval-task-level-v0.5）：``TaskExecutionPolicy``
 新增 ``approval_mode`` 字段（默认 None）。**不兼容 v0.4 数据**；
 旧版由 Store 启动时重置式迁移（备份 + 写空 v5）。
+
+scheduled-task-thread 兼容扩展：``ScheduledTask.thread_id`` 与
+``TaskExecutionContext.thread_id`` 采用新字段 + 旧 payload 回填，不提升
+``SCHEMA_VERSION``，避免触发重置式迁移。
 """
 
 
@@ -448,6 +458,9 @@ class ScheduledTask:
     """v0.4 新增：用哪个 LLM preset 执行。匹配 ``LLMPresetConfig.id``。
     空串表示用全局默认（base_config.model）。创建时从来源 thread 继承。"""
 
+    thread_id: str = ""
+    """绑定的专属 thread id；空串表示历史任务或未绑定任务。"""
+
     def __post_init__(self) -> None:
         if not isinstance(self.task_id, str) or not self.task_id:
             raise ValueError("task_id must be non-empty str")
@@ -481,6 +494,10 @@ class ScheduledTask:
             )
         if not isinstance(self.preset_id, str):
             raise TypeError(f"preset_id must be str, got {type(self.preset_id).__name__}")
+        if not isinstance(self.thread_id, str):
+            raise TypeError(f"thread_id must be str, got {type(self.thread_id).__name__}")
+        if self.thread_id and _THREAD_ID_RE.match(self.thread_id) is None:
+            raise ValueError(f"thread_id must match {THREAD_ID_PATTERN}, got {self.thread_id!r}")
         if not self.enabled and self.state not in _DISABLED_TASK_STATES:
             raise ValueError(
                 "enabled=False requires state in "
@@ -622,6 +639,7 @@ class TaskExecutionContext:
     trigger_type: TriggerType
     origin: TaskOrigin
     is_scheduled_run: bool
+    thread_id: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_id, str) or not self.task_id:
@@ -639,6 +657,10 @@ class TaskExecutionContext:
             raise TypeError(
                 f"is_scheduled_run must be bool, got {type(self.is_scheduled_run).__name__}"
             )
+        if not isinstance(self.thread_id, str):
+            raise TypeError(f"thread_id must be str, got {type(self.thread_id).__name__}")
+        if self.thread_id and _THREAD_ID_RE.match(self.thread_id) is None:
+            raise ValueError(f"thread_id must match {THREAD_ID_PATTERN}, got {self.thread_id!r}")
 
 
 @dataclass(frozen=True)

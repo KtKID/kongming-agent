@@ -54,12 +54,15 @@ export function ThreadList() {
     void fetchPresets();
   }, [fetchPresets]);
 
-  // 通用 tab 只显示 generic_chat thread。Claude / Codex 走各自 tab；
-  // 旧 legacy claude（backend_kind=generic_chat 但 claude_thread_id 非空）
-  // 会保留在这里，由 ThreadSourceIcon 渲染 Claude 图标。
-  const visibleThreads = threads.filter(
-    (t) => t.backend_kind === "generic_chat",
+  const genericThreads = threads.filter((t) => t.backend_kind === "generic_chat");
+  const chatThreads = genericThreads.filter(
+    (t) => (t.thread_kind ?? "chat") === "chat",
   );
+  const scheduledTaskThreads = genericThreads.filter(
+    (t) => t.thread_kind === "scheduled_task",
+  );
+  const hasVisibleThreads =
+    chatThreads.length > 0 || scheduledTaskThreads.length > 0;
 
   const onDelete = async (id: string) => {
     if (!window.confirm("确定删除这个 thread？历史不可恢复。")) return;
@@ -72,6 +75,77 @@ export function ThreadList() {
       toast.error(`删除失败：${msg}`);
     }
   };
+
+  const renderThread = (t: (typeof threads)[number]) => {
+    const active = params.thread_id === t.id;
+    const isEditing = editing && editingId === t.id;
+
+    const actions: HoverAction[] = [
+      {
+        icon: t.is_pinned ? PinOff : Pin,
+        label: t.is_pinned ? "取消置顶" : "置顶",
+        onClick: () => {
+          void pinThread(t.id, !t.is_pinned);
+        },
+      },
+      {
+        icon: Pencil,
+        label: "重命名",
+        onClick: () => {
+          setEditingId(t.id);
+          startEdit(t.name);
+        },
+      },
+      {
+        icon: Trash2,
+        label: "删除",
+        variant: "destructive",
+        onClick: () => void onDelete(t.id),
+      },
+    ];
+
+    return (
+      <SidebarSessionRow
+        key={t.id}
+        selected={active}
+        leading={
+          <>
+            <ThreadSourceIcon
+              backendKind={t.backend_kind}
+              threadKind={t.thread_kind}
+              claudeThreadId={t.claude_thread_id}
+              codexThreadId={t.codex_thread_id}
+              active={active}
+            />
+            <PhaseIndicator
+              phase={statuses[t.id]?.phase}
+              toolName={statuses[t.id]?.toolName}
+            />
+          </>
+        }
+        title={t.name || "未命名"}
+        actions={actions}
+        editing={isEditing}
+        editSlot={
+          <input
+            {...inputProps}
+            className="h-9 flex-1 rounded-xl border border-border/80 bg-background/85 px-3 text-sm outline-none focus:ring-1 focus:ring-ring"
+          />
+        }
+        onOpen={() => navigate(`/chat/${t.id}`)}
+      />
+    );
+  };
+
+  const renderSection = (title: string, items: typeof threads) =>
+    items.length > 0 ? (
+      <section className="flex flex-col gap-1" aria-label={title}>
+        <div className="px-1 text-[11px] font-medium text-muted-foreground">
+          {title}
+        </div>
+        <div className="flex flex-col gap-2">{items.map(renderThread)}</div>
+      </section>
+    ) : null;
 
   return (
     <aside className="flex h-full w-full flex-col">
@@ -92,70 +166,13 @@ export function ThreadList() {
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="flex flex-col gap-2 p-3">
-          {visibleThreads.length === 0 ? (
+          {hasVisibleThreads ? null : (
             <div className="rounded-2xl border border-dashed border-border/80 bg-card/40 px-3 py-6 text-center text-xs text-muted-foreground">
               还没有会话
             </div>
-          ) : null}
-          {visibleThreads.map((t) => {
-            const active = params.thread_id === t.id;
-            const isEditing = editing && editingId === t.id;
-
-            const actions: HoverAction[] = [
-              {
-                icon: t.is_pinned ? PinOff : Pin,
-                label: t.is_pinned ? "取消置顶" : "置顶",
-                onClick: () => {
-                  void pinThread(t.id, !t.is_pinned);
-                },
-              },
-              {
-                icon: Pencil,
-                label: "重命名",
-                onClick: () => {
-                  setEditingId(t.id);
-                  startEdit(t.name);
-                },
-              },
-              {
-                icon: Trash2,
-                label: "删除",
-                variant: "destructive",
-                onClick: () => void onDelete(t.id),
-              },
-            ];
-
-            return (
-              <SidebarSessionRow
-                key={t.id}
-                selected={active}
-                leading={
-                  <>
-                    <ThreadSourceIcon
-                      backendKind={t.backend_kind}
-                      claudeThreadId={t.claude_thread_id}
-                      codexThreadId={t.codex_thread_id}
-                      active={active}
-                    />
-                    <PhaseIndicator
-                      phase={statuses[t.id]?.phase}
-                      toolName={statuses[t.id]?.toolName}
-                    />
-                  </>
-                }
-                title={t.name || "未命名"}
-                actions={actions}
-                editing={isEditing}
-                editSlot={
-                  <input
-                    {...inputProps}
-                    className="h-9 flex-1 rounded-xl border border-border/80 bg-background/85 px-3 text-sm outline-none focus:ring-1 focus:ring-ring"
-                  />
-                }
-                onOpen={() => navigate(`/chat/${t.id}`)}
-              />
-            );
-          })}
+          )}
+          {renderSection("普通聊天", chatThreads)}
+          {renderSection("定时任务", scheduledTaskThreads)}
         </div>
       </div>
     </aside>

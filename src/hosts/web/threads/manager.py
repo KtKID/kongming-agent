@@ -406,24 +406,74 @@ class ThreadManager:
         """
         if backend_kind == "generic_chat" and (not preset_id or not preset_id.strip()):
             raise ValueError("preset_id required for generic_chat backend")
-        normalized_cwd = cwd.strip()
+        return await self._create_thread_metadata(
+            name=name,
+            preset_id=preset_id,
+            backend_kind=backend_kind,
+            thread_kind="chat",
+            source_kind="",
+            source_id="",
+            cwd=cwd,
+        )
 
+    async def create_scheduled_task_thread(
+        self,
+        *,
+        task_id: str,
+        name: str,
+        preset_id: str,
+        cwd: str = "",
+    ) -> str:
+        """创建定时任务专属 generic_chat thread 并返回 thread id。"""
+        normalized_task_id = task_id.strip()
+        if not normalized_task_id:
+            raise ValueError("task_id must not be empty")
+        if not preset_id or not preset_id.strip():
+            raise ValueError("preset_id required for scheduled task thread")
+        meta = await self._create_thread_metadata(
+            name=name or normalized_task_id,
+            preset_id=preset_id,
+            backend_kind="generic_chat",
+            thread_kind="scheduled_task",
+            source_kind="scheduled_task",
+            source_id=normalized_task_id,
+            cwd=cwd,
+        )
+        return meta.id
+
+    async def _create_thread_metadata(
+        self,
+        *,
+        name: str,
+        preset_id: str,
+        backend_kind: Literal["generic_chat", "claude_code", "codex"],
+        thread_kind: Literal["chat", "scheduled_task"],
+        source_kind: str,
+        source_id: str,
+        cwd: str,
+    ) -> ThreadMetadata:
+        """内部创建 thread metadata；允许 scheduled_task 门户传入业务类型字段。"""
+        if backend_kind == "generic_chat" and (not preset_id or not preset_id.strip()):
+            raise ValueError("preset_id required for generic_chat backend")
+        normalized_cwd = cwd.strip()
+        normalized_source_kind = source_kind.strip()
+        normalized_source_id = source_id.strip()
         thread_id = _generate_thread_id()
         resolved_name = name.strip() or thread_id
-        now = _now()
+        now = time.time()
         meta = ThreadMetadata(
             id=thread_id,
             name=resolved_name,
             preset_id=preset_id,
             backend_kind=backend_kind,
+            thread_kind=thread_kind,
+            source_kind=normalized_source_kind,
+            source_id=normalized_source_id,
             cwd=normalized_cwd,
             created_at=now,
             updated_at=now,
             message_count=0,
-            # v9 (usage-token-v2-bigbang)：删 cumulative_usage 字段；token 真源
-            # 在 SDK jsonl/rollout，由 UsageTokenManager v2 派生器现场算。
         )
-        # 写盘可能阻塞，放 to_thread
         await asyncio.to_thread(write_thread_metadata, self._home, meta)
         return meta
 

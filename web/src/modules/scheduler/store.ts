@@ -5,6 +5,7 @@
  */
 
 import { create } from "zustand";
+import { useThreadsStore } from "@/stores/threads";
 import type { SchedulerStoreState, SchedulerTaskVM } from "./types";
 import * as api from "./api";
 
@@ -104,9 +105,11 @@ export const useSchedulerStore = create<SchedulerStoreState & SchedulerActions>(
     createTask: async (req) => {
       try {
         const created = await api.createTask(req);
-        // 不在此处 refreshTasks / set selectedTaskId ——
-        // 留给调用方在关闭 dialog 之后再做，避免 Dialog 关闭过程中
-        // store 更新触发跨组件 setState（React error #185）。
+        try {
+          await useThreadsStore.getState().fetchThreads();
+        } catch (err) {
+          set({ errorMessage: String(err) });
+        }
         return created;
       } catch (err) {
         set({ errorMessage: String(err) });

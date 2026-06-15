@@ -2,7 +2,8 @@
  * 单任务行卡片
  */
 
-import { Play, Pause, Trash2, Loader2, Pencil, Copy } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Play, Pause, Trash2, Loader2, Pencil, Copy, History } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { SchedulerTaskVM } from "../types";
@@ -50,6 +51,7 @@ export function SchedulerTaskRow({
   onEdit,
   onDuplicate,
 }: Props) {
+  const navigate = useNavigate();
   const isRunning = task.state === "running";
   const isPaused = task.state === "paused";
 
@@ -104,6 +106,17 @@ export function SchedulerTaskRow({
         <Button variant="ghost" size="sm" onClick={onDuplicate} title="复制">
           <Copy className="h-3 w-3" />
         </Button>
+        {task.threadId ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => navigate(`/chat/${task.threadId}`)}
+            title="打开历史"
+            aria-label="打开历史"
+          >
+            <History className="h-3 w-3" />
+          </Button>
+        ) : null}
         <Button
           variant="ghost"
           size="sm"

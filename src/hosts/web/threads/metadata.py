@@ -3,7 +3,7 @@
 每个 thread 在 ``.kongming/web/threads/<thread_id>/metadata.json`` 落一份
 :class:`ThreadMetadata` 文件。本文件提供：
 
-- :class:`ThreadMetadata` Pydantic 模型（当前 schema_version=10）
+- :class:`ThreadMetadata` Pydantic 模型（当前 schema_version=11）
 - :func:`thread_metadata_path` —— 路径常量
 - :func:`write_thread_metadata` —— 原子写入（``tmp.replace(path)``）
 - :func:`read_thread_metadata` —— 读 + 校验；schema_version 不匹配 / JSON
@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # ``claude_thread_id`` / ``codex_thread_id`` 都表示 provider 底层可恢复 thread id。
 # 一个 Kongming thread 绑定一个 provider session/thread；老 v5 文件读入时把
 # ``sdk_session_id`` 迁移为 ``claude_thread_id``。
-THREAD_METADATA_SCHEMA_VERSION = 10
+THREAD_METADATA_SCHEMA_VERSION = 11
 
 
 class ThreadMetadata(BaseModel):
@@ -71,6 +71,10 @@ class ThreadMetadata(BaseModel):
         cwd: claude_code 后端运行时的工作目录绝对路径。v0.2.0 新增；用于定位
             ``~/.claude/projects/<encoded-cwd>/<claude_thread_id>.jsonl`` 历史文件。
             空字符串表示**不需要 / 未设置**（generic_chat 后端不消费此字段）。
+        thread_kind: 业务类型；``"chat"`` 表示普通对话，``"scheduled_task"``
+            表示定时任务专属 thread。
+        source_kind: 来源业务对象类型；定时任务固定为 ``"scheduled_task"``。
+        source_id: 来源业务对象 id；定时任务为 ``task_id``。
         created_at: Unix 时间戳（秒）。
         updated_at: Unix 时间戳（秒）；rename / 一轮对话结束时更新。
         message_count: 历史消息总数；用于 UI 上的"X 条消息"展示。
@@ -102,8 +106,8 @@ class ThreadMetadata(BaseModel):
 
             ``None`` 表示该 thread 还没跑过任何 turn。
         is_pinned: 置顶标记；``True`` 时 UI 列表优先排列。v0.2.4 新增。
-        schema_version: 当前 ``10``；``Literal[1, ..., 10]`` 同时接受老文件，
-            写盘时永远写 ``10``。
+        schema_version: 当前 ``11``；``Literal[1, ..., 11]`` 同时接受老文件，
+            写盘时永远写 ``11``。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -119,6 +123,15 @@ class ThreadMetadata(BaseModel):
 
     backend_kind: Literal["generic_chat", "claude_code", "codex"] = "generic_chat"
     """后端通道类型（transport 维度，与 token 语义 ``channel`` 解耦）。"""
+
+    thread_kind: Literal["chat", "scheduled_task"] = "chat"
+    """thread 业务类型；定时任务专属 thread 使用 ``scheduled_task``。"""
+
+    source_kind: str = ""
+    """来源业务对象类型；定时任务专属 thread 使用 ``scheduled_task``。"""
+
+    source_id: str = ""
+    """来源业务对象 id；定时任务专属 thread 使用 scheduler ``task_id``。"""
 
     claude_thread_id: str = ""
     """Claude SDK 底层 session id（仅 claude_code 通道有效）。"""
@@ -154,9 +167,9 @@ class ThreadMetadata(BaseModel):
     ``{is_archived: true}`` 触发；scanner 真源由本字段决定，jsonl 内的
     历史 ``archived`` 事件不再被读取。"""
 
-    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10] = 10
-    """schema 版本号（当前 v10，claude-session-rename-archive-metadata-source 引入）。
-    ``Literal[1..10]`` 接受所有历史文件，写盘永远写 10。"""
+    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] = 11
+    """schema 版本号（当前 v11，scheduled-task-thread 引入）。
+    ``Literal[1..11]`` 接受所有历史文件，写盘永远写 11。"""
 
 
 def thread_metadata_path(home: Path, thread_id: str) -> Path:
@@ -207,7 +220,7 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
 
     - 文件不存在 / 不是普通文件
     - JSON 解析失败（损坏 / 编码异常）
-    - schema_version 不在 ``{1, ..., 10}``（更高版本 = 该进程不认识，拒绝）
+    - schema_version 不在 ``{1, ..., 11}``（更高版本 = 该进程不认识，拒绝）
     - 字段校验失败（缺字段 / 类型不对 / 正则不匹配）
 
     **v1 → v2 懒升级**：``schema_version=1`` 且缺 ``backend_kind`` 时，
@@ -243,8 +256,12 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
     迁到本字段；旧文件读入时默认未归档（如需保留历史归档状态，由
     ``scripts/migrate_claude_titles_to_metadata.py`` 一次性迁移）。
 
-    返回的 :class:`ThreadMetadata` 实例已是最新 v10 形态。下次
-    :func:`write_thread_metadata` 会以 v10 写盘（默认 ``schema_version=10``，
+    **v10 → v11 懒升级**（scheduled-task-thread）：
+    补 ``thread_kind="chat"``、``source_kind=""`` 和 ``source_id=""``，
+    老 thread 默认进入普通聊天分组。
+
+    返回的 :class:`ThreadMetadata` 实例已是最新 v11 形态。下次
+    :func:`write_thread_metadata` 会以 v11 写盘（默认 ``schema_version=11``，
     无需调用方关心）。本函数**不**自己回写——避免读盘函数有副作用。
 
     所有 ``None`` 路径都会记 warning 日志，便于排查。
@@ -321,6 +338,13 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
     if data.get("schema_version") == 9:
         data.setdefault("is_archived", False)
         data["schema_version"] = 10
+    # v10 → v11 懒升级（scheduled-task-thread）：
+    # 补业务类型和来源字段，旧 thread 默认是普通聊天。
+    if data.get("schema_version") == 10:
+        data.setdefault("thread_kind", "chat")
+        data.setdefault("source_kind", "")
+        data.setdefault("source_id", "")
+        data["schema_version"] = 11
     # 兜底：任何 version 下如果 sdk_session_id 仍残留，强制迁移
     if "sdk_session_id" in data:
         data.setdefault("claude_thread_id", str(data.pop("sdk_session_id")))

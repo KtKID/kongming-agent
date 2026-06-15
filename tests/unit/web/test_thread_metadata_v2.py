@@ -31,12 +31,12 @@ from hosts.web.threads.metadata import (
 )
 
 
-def test_schema_version_constant_is_10() -> None:
-    """claude-session-rename-archive-metadata-source 起常量为 10（加 is_archived）。"""
-    assert THREAD_METADATA_SCHEMA_VERSION == 10
+def test_schema_version_constant_is_11() -> None:
+    """scheduled-task-thread 起常量为 11（加业务类型字段）。"""
+    assert THREAD_METADATA_SCHEMA_VERSION == 11
 
 
-def test_default_construction_uses_v10_and_generic_chat() -> None:
+def test_default_construction_uses_v11_and_generic_chat() -> None:
     meta = ThreadMetadata(
         id="thread-aaaaaaaaaaaa",
         name="t",
@@ -44,7 +44,7 @@ def test_default_construction_uses_v10_and_generic_chat() -> None:
         created_at=1.0,
         updated_at=1.0,
     )
-    assert meta.schema_version == 10
+    assert meta.schema_version == 11
     assert meta.backend_kind == "generic_chat"
     assert meta.preset_id == "p1"
     assert meta.claude_thread_id == ""
@@ -68,8 +68,8 @@ def test_claude_code_allows_empty_preset_id() -> None:
     assert meta.preset_id == ""
 
 
-def test_read_v1_file_auto_upgrades_to_v10(tmp_path: Path) -> None:
-    """v1 文件 → 连续懒升级 v1→v2→...→v9→v10（v10 加 is_archived）。"""
+def test_read_v1_file_auto_upgrades_to_v11(tmp_path: Path) -> None:
+    """v1 文件 → 连续懒升级 v1→v2→...→v10→v11（v11 加业务类型字段）。"""
     path = thread_metadata_path(tmp_path, "thread-aaaaaaaaaaaa")
     path.parent.mkdir(parents=True, exist_ok=True)
     # 模拟旧 v1 文件：缺 backend_kind，schema_version=1
@@ -81,7 +81,7 @@ def test_read_v1_file_auto_upgrades_to_v10(tmp_path: Path) -> None:
     loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
     assert loaded is not None
     assert loaded.backend_kind == "generic_chat"
-    assert loaded.schema_version == 10
+    assert loaded.schema_version == 11
     assert loaded.claude_thread_id == ""
     assert loaded.cwd == ""
     # v9 (usage-token-v2-bigbang): token 字段已物理删除

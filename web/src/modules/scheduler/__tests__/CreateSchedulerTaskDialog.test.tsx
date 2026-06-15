@@ -35,6 +35,7 @@ function makeTask(overrides: Partial<SchedulerTaskVM> = {}): SchedulerTaskVM {
     lastRunAt: null,
     timezone: "Asia/Shanghai",
     presetId: "preset-a",
+    threadId: "",
     createdBy: "user",
     inputText: "原始内容",
     agentName: "default",

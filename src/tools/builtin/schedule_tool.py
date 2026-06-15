@@ -20,7 +20,6 @@ v0.2 提供六个 action：
 
 from __future__ import annotations
 
-import re
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -30,8 +29,10 @@ from scheduler.domain import (
     DEFAULT_INACTIVITY_TIMEOUT,
     ApprovalMode,
     ConcurrencyPolicy,
+    DeliveryChannel,
     DueTaskReservation,
     MisfirePolicy,
+    ScheduleDelivery,
     ScheduledTask,
     SessionMode,
     TaskExecutionPolicy,
@@ -40,6 +41,7 @@ from scheduler.domain import (
     TaskTarget,
     TriggerType,
 )
+from scheduler.manager import SchedulerManager, ScheduleThreadProvisioner
 from scheduler.schedule_parser import parse_schedule
 from scheduler.store import Store, TaskNotFoundError
 from scheduler.timing import (
@@ -50,8 +52,6 @@ from scheduler.timing import (
     utc_now,
 )
 from tools.runtime.base import BaseBuiltinTool
-
-_THREAD_ID_RE = re.compile(r"^thread-[a-f0-9]{12}$")
 
 # RuntimeFactoryFn: (store) -> (runtime, bridge)
 # 留 Any 避免循环 import：scheduler.runtime_factory 装配 NativeRuntime 时
@@ -145,6 +145,7 @@ class ScheduleTool(BaseBuiltinTool):
         default_timezone: str = "UTC",
         default_delivery_channel: str = "web",
         default_preset_id: str = "",
+        thread_provisioner: ScheduleThreadProvisioner | None = None,
     ) -> None:
         """v0.3 新增 ``default_timezone`` / ``default_delivery_channel`` 参数：
 
@@ -164,6 +165,7 @@ class ScheduleTool(BaseBuiltinTool):
         self._default_timezone = default_timezone
         self._default_delivery_channel = default_delivery_channel
         self._default_preset_id = default_preset_id
+        self._thread_provisioner = thread_provisioner
 
     async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         """主入口：按 action 分派。
@@ -230,11 +232,6 @@ class ScheduleTool(BaseBuiltinTool):
         schedule_expr = self._require(args, "schedule")
         input_text = self._require(args, "input")
         agent_name = (args.get("agent") or "default").strip() or "default"
-        # v0.4：从 ctx.session_id 推导 delivery target（thread 来源的任务自动
-        # 回投到该 thread）。
-        delivery_target = (
-            f"thread:{ctx.session_id}" if _THREAD_ID_RE.match(ctx.session_id) else None
-        )
         preset_id = args.get("preset", "") or self._default_preset_id
         # v0.3：timezone 走配置默认（cfg.scheduler.default_timezone），
         # 不让 LLM 凭空填 UTC 导致 cron 表达式时间偏移。
@@ -287,13 +284,11 @@ class ScheduleTool(BaseBuiltinTool):
 
         task_id = f"task-{uuid.uuid4().hex[:12]}"
         # v0.3：默认填 delivery（dispatcher 看到 None 会 SKIPPED 整条投递链路）
-        from scheduler.domain import DeliveryChannel, ScheduleDelivery
-
         try:
             channel = DeliveryChannel(self._default_delivery_channel)
         except ValueError:
             channel = DeliveryChannel.WEB
-        delivery = ScheduleDelivery(channel=channel, target=delivery_target)
+        delivery = ScheduleDelivery(channel=channel)
 
         now = to_iso(utc_now())
         task = ScheduledTask(
@@ -323,10 +318,17 @@ class ScheduleTool(BaseBuiltinTool):
             delivery=delivery,
             preset_id=preset_id,
         )
-        self._store.create_task(task)
+        if self._thread_provisioner is None:
+            return ToolResult(
+                ok=False,
+                content="schedule create requires a scheduled-task thread provisioner",
+                error_message="thread_provisioner_required",
+            )
+        manager = SchedulerManager(self._store, thread_provisioner=self._thread_provisioner)
+        created = await manager.create_task_with_thread(task)
         self._store.append_audit(
             action="create",
-            task_id=task_id,
+            task_id=created.task_id,
             actor=f"agent:{ctx.session_id}",
             payload={
                 "source": "schedule_tool",
@@ -335,23 +337,27 @@ class ScheduleTool(BaseBuiltinTool):
                 "trigger_type": trigger.trigger_type.value,
                 "agent": agent_name,
                 "approval_mode": approval_mode.value if approval_mode else None,
-                "preset_id": preset_id,
+                "preset_id": created.preset_id,
+                "thread_id": created.thread_id,
             },
         )
         content = (
-            f"created task {task_id}\n"
+            f"created task {created.task_id}\n"
             f"  name: {name}\n"
             f"  schedule: {schedule_expr} -> {trigger.trigger_type.value} {trigger.expr}\n"
             f"  agent: {agent_name}\n"
             f"  next_run: {next_run_at}\n"
         )
+        if created.thread_id:
+            content += f"  thread_id: {created.thread_id}\n"
         if approval_mode is not None:
             content += f"  approval_mode: {approval_mode.value}\n"
         return ToolResult(
             ok=True,
             content=content,
             data={
-                "task_id": task_id,
+                "task_id": created.task_id,
+                "thread_id": created.thread_id,
                 "trigger_type": trigger.trigger_type.value,
                 "expr": trigger.expr,
                 "next_run_at": next_run_at,
@@ -569,6 +575,7 @@ def build_schedule_tool(
     default_timezone: str = "UTC",
     default_delivery_channel: str = "web",
     default_preset_id: str = "",
+    thread_provisioner: ScheduleThreadProvisioner | None = None,
 ) -> ScheduleTool:
     """工厂：装配期由 ``register_schedule_tool_if_enabled`` 调用。
 
@@ -583,6 +590,8 @@ def build_schedule_tool(
             带 ``delivery=None`` 让 dispatcher SKIPPED**。
         default_preset_id: v0.4 新增。task 默认 preset_id（来自调用方配置）。
             空串表示用全局默认 model。
+        thread_provisioner: scheduled-task-thread 新增。存在时 create action 先
+            provision 专属 thread，再写 task。
 
     Returns:
         配置好的 :class:`ScheduleTool`。
@@ -593,6 +602,7 @@ def build_schedule_tool(
         default_timezone=default_timezone,
         default_delivery_channel=default_delivery_channel,
         default_preset_id=default_preset_id,
+        thread_provisioner=thread_provisioner,
     )
 
 

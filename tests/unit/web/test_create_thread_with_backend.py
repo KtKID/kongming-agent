@@ -474,3 +474,42 @@ async def test_real_create_thread_empty_name_uses_thread_id(tmp_path: Path) -> N
     meta = await tm.create_thread("", "preset-1")
     assert meta.name == meta.id
     assert meta.name.startswith("thread-")
+
+
+@pytest.mark.asyncio
+async def test_real_create_thread_rejects_thread_kind_argument(tmp_path: Path) -> None:
+    """公共 create_thread 入口只创建 chat thread。"""
+    from hosts.web.threads.manager import ThreadManager
+
+    cfg = _make_cfg()
+
+    async def _fake_factory(tid: str, pid: str, adapter: Any, sinks: list[Any]) -> tuple[Any, Any]:
+        del tid, pid, adapter, sinks
+        raise NotImplementedError
+
+    tm = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=_fake_factory)
+    with pytest.raises(TypeError):
+        await tm.create_thread(  # type: ignore[call-arg]
+            "scheduled",
+            "preset-1",
+            thread_kind="scheduled_task",
+        )
+
+
+def test_post_threads_rejects_thread_kind_payload(tmp_path: Path) -> None:
+    """REST 公共创建入口拒绝业务类型字段。"""
+    tm = FakeTM()
+    client = _login_client(tmp_path, tm)
+    try:
+        resp = client.post(
+            "/api/threads",
+            json={
+                "name": "scheduled",
+                "preset_id": "p1",
+                "thread_kind": "scheduled_task",
+            },
+            headers=CSRF_HEADERS,
+        )
+        assert resp.status_code == 422
+    finally:
+        client.__exit__(None, None, None)

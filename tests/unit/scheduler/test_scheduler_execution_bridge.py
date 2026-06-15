@@ -56,12 +56,15 @@ from core.errors import AgentError
 from core.message import Message
 from core.result import Result
 from core.runner import Runner
+from scheduler.delivery import DeliveryResult
 from scheduler.domain import (
     ConcurrencyPolicy,
+    DeliveryChannel,
     DueTaskReservation,
     MisfirePolicy,
     RunFailureReason,
     RunStatus,
+    ScheduleDelivery,
     ScheduledRun,
     ScheduledTask,
     ScheduleTrigger,
@@ -83,8 +86,12 @@ from scheduler.timing import to_iso, utc_now
 class _StubLLM:
     """无操作 LLM：execute 不会真去调它（Runner 被替换）。"""
 
+    def __init__(self, content: str = "") -> None:
+        self._content = content
+
     async def complete(self, request: LLMRequest) -> LLMResponse:  # pragma: no cover
-        return LLMResponse(message=Message(role="assistant", content=""))
+        del request
+        return LLMResponse(message=Message(role="assistant", content=self._content))
 
 
 class _AllowApproval:
@@ -112,6 +119,8 @@ def _make_task(
     inactivity_timeout_seconds: int | None = 600,
     max_turns: int | None = 5,
     concurrency_policy: ConcurrencyPolicy = ConcurrencyPolicy.FORBID,
+    thread_id: str = "",
+    delivery: ScheduleDelivery | None = None,
 ) -> ScheduledTask:
     now = to_iso(utc_now())
     return ScheduledTask(
@@ -145,6 +154,8 @@ def _make_task(
         created_by="cli",
         created_at=now,
         updated_at=now,
+        delivery=delivery,
+        thread_id=thread_id,
     )
 
 
@@ -265,6 +276,23 @@ class FakeRunner(Runner):
         return self._result_factory(list(enabled_tools or ()))
 
 
+class _CaptureDispatcher:
+    """记录 bridge 传入 dispatcher 的 task delivery target。"""
+
+    def __init__(self) -> None:
+        self.targets: list[str | None] = []
+
+    async def deliver(
+        self,
+        task: ScheduledTask,
+        run: ScheduledRun,
+        final_message: str,
+    ) -> DeliveryResult:
+        del run, final_message
+        self.targets.append(task.delivery.target if task.delivery is not None else None)
+        return DeliveryResult.delivered(at=to_iso(utc_now()))
+
+
 # ---------------------------------------------------------------------------
 # 通用 fixture / helper
 # ---------------------------------------------------------------------------
@@ -284,6 +312,7 @@ def _build_bridge(
     inner_approval: Any | None = None,
     event_sinks: Sequence[EventSink] = (),
     poll_interval: float = 0.02,
+    dispatcher: Any | None = None,
 ) -> ExecutionBridge:
     return ExecutionBridge(
         runner=runner,
@@ -295,6 +324,7 @@ def _build_bridge(
         event_sinks=event_sinks,
         agent_spec=_make_agent_spec(),
         store=store,
+        dispatcher=dispatcher,
         watchdog_poll_interval_seconds=poll_interval,
     )
 
@@ -319,6 +349,79 @@ async def test_completed_run_records_status(store: Store) -> None:
     # session_id / run_id 是 fresh 的
     assert run.session_id is not None and run.session_id != ""
     assert run.run_id != ""
+
+
+@pytest.mark.asyncio
+async def test_thread_bound_task_uses_thread_session(store: Store) -> None:
+    runner = FakeRunner()
+    task = _make_task(thread_id="thread-aaaaaaaaaaaa")
+    bridge = _build_bridge(store=store, runner=runner)
+
+    run = await bridge.execute(_make_reservation(task))
+
+    assert run.status is RunStatus.COMPLETED
+    assert run.session_id == "thread-aaaaaaaaaaaa"
+    assert runner.captured[0].session_id == "thread-aaaaaaaaaaaa"
+    audits = store.list_audits(task_id=task.task_id)
+    started = next(a for a in audits if a["action"] == "run_started")
+    assert started["payload"]["thread_id"] == "thread-aaaaaaaaaaaa"
+
+
+@pytest.mark.asyncio
+async def test_thread_bound_task_writes_context_to_thread_session(store: Store) -> None:
+    sessions: dict[str, InMemorySession] = {}
+
+    def session_factory(sid: str) -> InMemorySession:
+        session = sessions.get(sid)
+        if session is None:
+            session = InMemorySession(sid)
+            sessions[sid] = session
+        return session
+
+    task = _make_task(thread_id="thread-cccccccccccc")
+    bridge = ExecutionBridge(
+        runner=Runner(),
+        llm=_StubLLM("cron done"),
+        tools={},
+        enabled_tool_names=(),
+        inner_approval=_AllowApproval(),
+        session_factory=session_factory,
+        event_sinks=(),
+        agent_spec=_make_agent_spec(),
+        store=store,
+        watchdog_poll_interval_seconds=0.02,
+    )
+
+    run = await bridge.execute(_make_reservation(task))
+
+    assert run.status is RunStatus.COMPLETED
+    assert run.session_id == "thread-cccccccccccc"
+    history = await sessions["thread-cccccccccccc"].history()
+    assert [(m.role, m.content) for m in history] == [
+        ("system", "you are an agent"),
+        ("user", "do the thing"),
+        ("assistant", "cron done"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_thread_bound_task_suppresses_target_delivery_duplicate(store: Store) -> None:
+    runner = FakeRunner()
+    dispatcher = _CaptureDispatcher()
+    task = _make_task(
+        thread_id="thread-bbbbbbbbbbbb",
+        delivery=ScheduleDelivery(
+            channel=DeliveryChannel.WEB,
+            target="thread:thread-bbbbbbbbbbbb",
+        ),
+    )
+    bridge = _build_bridge(store=store, runner=runner, dispatcher=dispatcher)
+
+    run = await bridge.execute(_make_reservation(task))
+
+    assert run.status is RunStatus.COMPLETED
+    assert run.delivery_status.value == "delivered"
+    assert dispatcher.targets == [None]
 
 
 @pytest.mark.asyncio
