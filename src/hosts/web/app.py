@@ -600,7 +600,7 @@ def create_app(
     )
     app.state.avatar_manager = AvatarManager(
         app.state.avatar_message_repository,
-        AvatarAssistantManager(),
+        AvatarAssistantManager(thread_manager),
     )
 
     # codex 通道（与 claude_code 平级，独立 SessionManager 单例）
@@ -682,10 +682,12 @@ def create_app(
         app.include_router(workflow_router)
 
     # 9. WS endpoint
+    from hosts.web.avatar.channel_manager import register_avatar_channel_routes
     from hosts.web.websocket.cron import register_cron_ws_routes
     from hosts.web.websocket.routes import register_ws_routes
     from hosts.web.websocket.thread_status import register_thread_status_routes
 
+    register_avatar_channel_routes(app)
     register_ws_routes(app)
     # v0.3 cron-delivery M4：cron 全局 WS 端点 /ws/cron。
     # broker 是模块级单例（web/websocket/cron.py:get_broker），与 web/run.py 装配的

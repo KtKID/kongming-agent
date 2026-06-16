@@ -18,6 +18,7 @@ from .models import (
     AvatarAckItemResult,
     AvatarAckRequest,
     AvatarCapabilities,
+    AvatarChatAccepted,
     AvatarChatRequest,
     AvatarMessageInput,
     AvatarMessageListQuery,
@@ -135,13 +136,13 @@ class AvatarManager:
         """返回 Avatar 能力声明。"""
         return self._assistant.capabilities()
 
-    def chat(self, request: AvatarChatRequest) -> None:
+    async def chat(self, request: AvatarChatRequest) -> AvatarChatAccepted:
         """处理 Avatar chat 请求。
 
         关键输入：AvatarChatRequest。
-        关键输出：v1 固定返回 disabled 错误。
+        关键输出：AvatarChatAccepted。
         """
-        self._assistant.chat(request)
+        return await self._assistant.chat(request)
 
 
 __all__ = ["AvatarManager"]

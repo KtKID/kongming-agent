@@ -16,6 +16,11 @@ HTTP_STATUS_BY_AVATAR_ERROR_CODE: dict[str, int] = {
     "avatar_invalid_filter": 400,
     "avatar_capability_disabled": 501,
     "avatar_invalid_request": 400,
+    "avatar_thread_not_found": 404,
+    "avatar_invalid_thread": 400,
+    "avatar_preset_required": 400,
+    "avatar_runtime_refresh_failed": 503,
+    "avatar_run_failed": 500,
 }
 
 
@@ -87,6 +92,37 @@ def invalid_request(message: str) -> AvatarMessageError:
     return AvatarMessageError("avatar_invalid_request", message)
 
 
+def thread_not_found(thread_id: str) -> AvatarMessageError:
+    """构造 Avatar thread 缺失错误。"""
+    return AvatarMessageError("avatar_thread_not_found", f"avatar thread not found: {thread_id}")
+
+
+def invalid_thread(thread_id: str) -> AvatarMessageError:
+    """构造 Avatar thread 类型非法错误。"""
+    return AvatarMessageError(
+        "avatar_invalid_thread",
+        f"avatar thread is not generic_chat: {thread_id}",
+    )
+
+
+def preset_required() -> AvatarMessageError:
+    """构造首发创建缺少 preset 错误。"""
+    return AvatarMessageError("avatar_preset_required", "presetId is required")
+
+
+def runtime_refresh_failed(thread_id: str) -> AvatarMessageError:
+    """构造 runtime preset 刷新失败错误。"""
+    return AvatarMessageError(
+        "avatar_runtime_refresh_failed",
+        f"avatar runtime refresh failed: {thread_id}",
+    )
+
+
+def run_failed(message: str) -> AvatarMessageError:
+    """构造 Avatar run 启动失败错误。"""
+    return AvatarMessageError("avatar_run_failed", message)
+
+
 __all__ = [
     "HTTP_STATUS_BY_AVATAR_ERROR_CODE",
     "AvatarMessageError",
@@ -96,5 +132,10 @@ __all__ = [
     "invalid_cursor",
     "invalid_filter",
     "invalid_request",
+    "invalid_thread",
     "message_not_found",
+    "preset_required",
+    "run_failed",
+    "runtime_refresh_failed",
+    "thread_not_found",
 ]
