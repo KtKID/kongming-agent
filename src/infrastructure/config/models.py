@@ -23,6 +23,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from sitian.config import SiTianConfig
 
+CURRENT_CONFIG_SCHEMA_VERSION: Literal["v0.5"] = "v0.5"
+ConfigSchemaVersion = Literal["v0.5"]
+
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
@@ -1267,6 +1270,7 @@ class Config(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    config_schema_version: ConfigSchemaVersion = CURRENT_CONFIG_SCHEMA_VERSION
     model: ModelConfig
     runner: RunnerConfig = Field(default_factory=RunnerConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
@@ -1290,10 +1294,12 @@ class Config(BaseModel):
 
 
 __all__ = [
+    "CURRENT_CONFIG_SCHEMA_VERSION",
     "ApprovalConfig",
     "CliConfig",
     "CompactorConfig",
     "Config",
+    "ConfigSchemaVersion",
     "EvolutionConfig",
     "EvolutionMemoryConfig",
     "FileToolConfig",

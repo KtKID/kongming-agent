@@ -57,6 +57,7 @@ def test_xspace_runtime_config_loads_with_product_defaults() -> None:
     """x-space 产品配置必须能通过正式 Config 校验。"""
     cfg = load_config(XSPACE_CONFIG, load_env_file=False)
 
+    assert cfg.config_schema_version == "v0.5"
     assert cfg.web.enabled is True
     assert cfg.web.host == "127.0.0.1"
     assert cfg.web.port == 60000

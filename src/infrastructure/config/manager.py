@@ -17,6 +17,7 @@ from infrastructure.config import schema, writer
 from infrastructure.config.env_writer import EnvWriteResult, write_env_values
 from infrastructure.config.loader import _ENV_FIELD_PATHS as _LOADER_ENV_FIELD_PATHS
 from infrastructure.config.loader import load_config
+from infrastructure.config.migrations import migrate_config_if_needed
 from infrastructure.config.models import LLMPresetConfig
 from infrastructure.config.schema import FieldMeta, FieldSource
 from infrastructure.config.writer import (
@@ -164,6 +165,7 @@ class ConfigManager:
 
     def read_raw(self) -> RawResponse:
         """读 yaml 文件原文 + path + mtime。"""
+        migrate_config_if_needed(self._yaml_path)
         content = self._yaml_path.read_text(encoding="utf-8")
         mtime = self._yaml_path.stat().st_mtime
         return RawResponse(
