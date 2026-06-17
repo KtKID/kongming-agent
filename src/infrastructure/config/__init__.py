@@ -44,7 +44,13 @@ from infrastructure.config.models import (
     WebSearchConfig,
     WorkflowConfig,
 )
-from infrastructure.config.paths import get_kongming_home, resolve_kongming_path
+from infrastructure.config.paths import (
+    default_kongming_home_config_path,
+    find_existing_kongming_home_config,
+    get_kongming_home,
+    kongming_home_config_candidates,
+    resolve_kongming_path,
+)
 
 __all__ = [
     "ApprovalConfig",
@@ -71,7 +77,10 @@ __all__ = [
     "TraceConfig",
     "WebSearchConfig",
     "WorkflowConfig",
+    "default_kongming_home_config_path",
+    "find_existing_kongming_home_config",
     "get_kongming_home",
+    "kongming_home_config_candidates",
     "load_config",
     "MigrationResult",
     "migrate_config_if_needed",

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import UnionType
 from typing import Any, get_args, get_origin
 
+import pytest
 import yaml
 from pydantic import BaseModel
 
@@ -15,6 +17,14 @@ from infrastructure.config.paths import resolve_kongming_path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 XSPACE_CONFIG = REPO_ROOT / "config" / "xspace" / "setting.yaml"
+
+
+@pytest.fixture(autouse=True)
+def _clean_kongming_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """清理会覆盖 x-space 资源配置默认值的 Kongming env。"""
+    for name in tuple(os.environ):
+        if name.startswith("KONGMING_"):
+            monkeypatch.delenv(name, raising=False)
 
 
 def _unwrap_model_type(annotation: object) -> type[BaseModel] | None:
@@ -61,11 +71,21 @@ def test_xspace_runtime_config_loads_with_product_defaults() -> None:
     assert cfg.web.enabled is True
     assert cfg.web.host == "127.0.0.1"
     assert cfg.web.port == 60000
+    assert cfg.web.host_environment == "browser"
     assert cfg.web.dev_mode is False
     assert cfg.session.backend == "file"
     assert cfg.scheduler.default_timezone == "Asia/Shanghai"
     assert cfg.model.api_key == ""
     assert cfg.web.initial_password is None
+
+
+def test_xspace_runtime_env_marks_xspace_host(monkeypatch) -> None:
+    """XSpace 运行态由启动 env 标记，覆盖持久配置默认值。"""
+    monkeypatch.setenv("KONGMING_WEB_HOST_ENVIRONMENT", "xspace")
+
+    cfg = load_config(XSPACE_CONFIG, load_env_file=False)
+
+    assert cfg.web.host_environment == "xspace"
 
 
 def test_xspace_runtime_config_declares_every_config_leaf_field() -> None:

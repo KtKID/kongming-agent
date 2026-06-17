@@ -80,6 +80,50 @@ def test_client_config_returns_xspace_capabilities(tmp_path: Path) -> None:
     }
 
 
+def test_xspace_runtime_init_updates_client_config_before_login(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """XSpace native init 可在登录前设置运行态，WebView 加载后读到 xspace。"""
+    monkeypatch.delenv("KONGMING_WEB_HOST_ENVIRONMENT", raising=False)
+    _seed_password(tmp_path, "test-pwd")
+    app = create_app(_make_cfg(), FakeTM(), home_dir=tmp_path)
+
+    with TestClient(app) as client:
+        init_response = client.post("/api/xspace/runtime/init", headers=CSRF_HEADERS)
+        login_response = client.post(
+            "/api/auth/login",
+            json={"password": "test-pwd"},
+            headers=CSRF_HEADERS,
+        )
+        response = client.get("/api/config/client")
+
+    assert init_response.status_code == 200
+    assert init_response.json() == {
+        "host_environment": "xspace",
+        "config_client_path": "/api/config/client",
+    }
+    assert login_response.status_code == 200
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["host_environment"] == "xspace"
+    assert payload["capabilities"] == {
+        "xspace_host": True,
+        "native_file_dialog": True,
+    }
+
+
+def test_xspace_runtime_init_requires_csrf_header(tmp_path: Path) -> None:
+    """XSpace native init 免登录，但仍要求启动调用带 CSRF header。"""
+    _seed_password(tmp_path, "test-pwd")
+    app = create_app(_make_cfg(), FakeTM(), home_dir=tmp_path)
+
+    with TestClient(app) as client:
+        response = client.post("/api/xspace/runtime/init")
+
+    assert response.status_code == 403
+
+
 def test_client_config_smoke_migrates_legacy_config_path(
     tmp_path: Path,
     monkeypatch,

@@ -14,10 +14,13 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+_WEB_HOST_ENVIRONMENT_ENV = "KONGMING_WEB_HOST_ENVIRONMENT"
+WebHostEnvironment = Literal["browser", "xspace"]
 
 
 @dataclass(frozen=True)
@@ -31,6 +34,7 @@ class WebRuntimeOptions:
         config_path: 配置文件路径。
         dist_dir: 前端 dist 目录；为 ``None`` 时走环境变量或默认路径。
         public_origin: 手机等外部客户端访问 Web 的公开 origin。
+        host_environment: Web sidecar 启动宿主环境。
         print_ready_json: 是否在启动成功后向 stdout 输出一次 ready JSON。
     """
 
@@ -40,6 +44,7 @@ class WebRuntimeOptions:
     config_path: Path
     dist_dir: Path | None
     public_origin: str | None
+    host_environment: WebHostEnvironment
     print_ready_json: bool
 
 
@@ -62,6 +67,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--public-origin",
         help="Public Web origin used by mobile pairing QR/copy/handoff URLs.",
+    )
+    parser.add_argument(
+        "--host-environment",
+        choices=("browser", "xspace"),
+        help="Client runtime host environment exposed to the Web frontend.",
     )
     parser.add_argument(
         "--print-ready-json",
@@ -115,10 +125,12 @@ def _resolve_config_path(home: Path, explicit_config: Path | None) -> Path:
     if env_config and env_config.strip():
         return Path(env_config).expanduser().resolve()
 
-    home_config = home / "config" / "setting.yaml"
-    if home_config.exists():
-        os.environ["KONGMING_CONFIG"] = str(home_config)
-        return home_config
+    from infrastructure.config.paths import find_existing_kongming_home_config
+
+    existing_home_config = find_existing_kongming_home_config(home)
+    if existing_home_config is not None:
+        os.environ["KONGMING_CONFIG"] = str(existing_home_config)
+        return existing_home_config
 
     return Path("config/setting.yaml")
 
@@ -165,6 +177,20 @@ def _normalize_public_origin(value: str | None) -> str | None:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def _normalize_host_environment(value: str | None) -> WebHostEnvironment | None:
+    """归一化 Web sidecar 宿主环境。"""
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    if normalized not in {"browser", "xspace"}:
+        raise ValueError("web host environment must be 'browser' or 'xspace'")
+    if normalized == "xspace":
+        return "xspace"
+    return "browser"
+
+
 def _resolve_runtime_options(argv: list[str] | None = None) -> WebRuntimeOptions:
     """解析 Web sidecar 运行时参数。
 
@@ -176,12 +202,19 @@ def _resolve_runtime_options(argv: list[str] | None = None) -> WebRuntimeOptions
     """
     args = _build_arg_parser().parse_args(argv)
     home = _resolve_home(args.home)
-    config_path = _resolve_config_path(home, args.config)
     dist_dir = _resolve_dist_dir(args.dist_dir)
     host = args.host or os.environ.get("KONGMING_WEB_HOST") or ""
     public_origin = _normalize_public_origin(
         args.public_origin or os.environ.get("KONGMING_WEB_PUBLIC_ORIGIN")
     )
+    host_environment = (
+        _normalize_host_environment(
+            args.host_environment or os.environ.get(_WEB_HOST_ENVIRONMENT_ENV)
+        )
+        or "browser"
+    )
+    os.environ[_WEB_HOST_ENVIRONMENT_ENV] = host_environment
+    config_path = _resolve_config_path(home, args.config)
     raw_port = args.port
     if raw_port is None:
         env_port = os.environ.get("KONGMING_WEB_PORT")
@@ -195,6 +228,7 @@ def _resolve_runtime_options(argv: list[str] | None = None) -> WebRuntimeOptions
         config_path=config_path,
         dist_dir=dist_dir,
         public_origin=public_origin,
+        host_environment=host_environment,
         print_ready_json=bool(args.print_ready_json or args.once_ready_json),
     )
 
@@ -242,6 +276,7 @@ def _override_web_bind_config(
     host: str,
     port: int,
     public_origin: str | None = None,
+    host_environment: WebHostEnvironment | None = None,
 ) -> Any:
     """把运行时绑定地址写入 Config 副本。
 
@@ -250,6 +285,7 @@ def _override_web_bind_config(
         host: 实际绑定 host。
         port: 实际绑定端口，必须大于 0。
         public_origin: 运行时指定的公开 origin；``None`` 时保留配置文件值。
+        host_environment: 运行时指定的宿主环境；``None`` 时保留配置文件值。
 
     Returns:
         更新了 ``web.host`` / ``web.port`` 的 Config 副本。
@@ -257,8 +293,25 @@ def _override_web_bind_config(
     updates: dict[str, object] = {"host": host, "port": port}
     if public_origin is not None:
         updates["public_origin"] = public_origin
+    if host_environment is not None:
+        updates["host_environment"] = host_environment
     web_cfg = cfg.web.model_copy(update=updates)
     return cfg.model_copy(update={"web": web_cfg})
+
+
+def _load_config_with_runtime_overrides(
+    config_path: Path,
+    *,
+    host_environment: WebHostEnvironment | None,
+) -> Any:
+    """读取配置，并让启动宿主环境作为进程级 env 覆盖先于校验生效。"""
+    from infrastructure.config import load_config
+
+    if host_environment is None:
+        return load_config(config_path)
+
+    os.environ[_WEB_HOST_ENVIRONMENT_ENV] = host_environment
+    return load_config(config_path)
 
 
 def _format_base_url(host: str, port: int) -> str:
@@ -481,7 +534,6 @@ def main(argv: list[str] | None = None) -> int:
     from hosts.web.app_support.app_lock import acquire_app_instance_lock, release_app_instance_lock
     from hosts.web.app_support.startup_progress import StartupProgress
     from hosts.web.threads.manager import ThreadManager
-    from infrastructure.config import load_config
 
     try:
         options = _resolve_runtime_options(argv)
@@ -502,7 +554,10 @@ def main(argv: list[str] | None = None) -> int:
         progress = StartupProgress(home)
         progress.report("imports")
 
-        cfg = load_config(options.config_path)
+        cfg = _load_config_with_runtime_overrides(
+            options.config_path,
+            host_environment=options.host_environment,
+        )
         progress.report("config")
 
         if not cfg.web.enabled:
@@ -521,6 +576,7 @@ def main(argv: list[str] | None = None) -> int:
             host=actual_host,
             port=actual_port,
             public_origin=options.public_origin,
+            host_environment=options.host_environment,
         )
 
         runtime_factory = _make_runtime_factory(cfg)

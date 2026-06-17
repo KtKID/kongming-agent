@@ -495,15 +495,19 @@ def create_app(
     app.state.claude_session_manager = _SharedSessionManager()
 
     # manage-config-tab #6：ConfigManager 单例（操作 setting.yaml 的唯一入口）。
-    # yaml_path 优先用 KONGMING_CONFIG env（与 cli.main 一致），否则回落到
-    # repo_root/config/setting.yaml。repo_root 用模块顶部的 _REPO_ROOT 常量
-    # （与 ./start.sh web restart 的物理位置同源）。
+    # yaml_path 优先用 KONGMING_CONFIG env；未显式设置时优先绑定当前
+    # kongming_home 下的用户级 setting.yaml，再回落到 repo_root/config/setting.yaml。
     import os as _os
 
     from infrastructure.config import ConfigManager
+    from infrastructure.config.paths import find_existing_kongming_home_config
 
+    _home_config_path = find_existing_kongming_home_config(home)
     _config_yaml_path = Path(
-        _os.environ.get("KONGMING_CONFIG", str(_REPO_ROOT / "config" / "setting.yaml")),
+        _os.environ.get(
+            "KONGMING_CONFIG",
+            str(_home_config_path or (_REPO_ROOT / "config" / "setting.yaml")),
+        ),
     )
     app.state.config_manager = ConfigManager(
         yaml_path=_config_yaml_path,
@@ -632,6 +636,7 @@ def create_app(
     from hosts.web.routers.workspace_git import router as workspace_git_router
     from hosts.web.routers.workspace_shell import router as workspace_shell_router
     from hosts.web.routers.xspace_mobile import router as xspace_mobile_router
+    from hosts.web.routers.xspace_runtime import router as xspace_runtime_router
 
     app.include_router(auth_router)
     app.include_router(threads_router)
@@ -660,6 +665,7 @@ def create_app(
     app.include_router(uploads_router)
     app.include_router(health_router)
     app.include_router(xspace_mobile_router)
+    app.include_router(xspace_runtime_router)
 
     # workflow dashboard
     if cfg.workflow.enabled:
