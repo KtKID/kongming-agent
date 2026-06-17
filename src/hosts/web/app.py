@@ -511,6 +511,7 @@ def create_app(
     )
     app.state.config_manager = ConfigManager(
         yaml_path=_config_yaml_path,
+        env_path=home / ".env",
     )
     app.state.config_restart_repo_root = _REPO_ROOT
 

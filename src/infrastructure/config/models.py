@@ -1145,6 +1145,9 @@ class WebDeepResearchSourceProviderConfig(BaseModel):
         return value
 
 
+WebHostEnvironment = Literal["browser", "xspace"]
+
+
 class WebConfig(BaseModel):
     """v0.1.5 web 宿主壳配置段。
 
@@ -1160,6 +1163,8 @@ class WebConfig(BaseModel):
         port: HTTP / WS 端口。
         public_origin: 移动配对等外部客户端使用的公开 origin。为空时按请求
             origin 生成；局域网扫码场景可填 ``http://192.168.x.x:port``。
+        host_environment: Web sidecar 宿主环境。``browser`` 表示普通浏览器，
+            ``xspace`` 表示由 XSpace 桌面宿主启动。
         dev_mode: 跳过登录鉴权（仅本地开发）；上线必须 False。
         initial_password: 首次部署启动时使用的明文初始密码。仅在
             ``password.hash`` 缺失时生效；落盘后长期以文件为准。
@@ -1193,6 +1198,7 @@ class WebConfig(BaseModel):
     host: str = "0.0.0.0"
     port: Annotated[int, Field(ge=1, le=65535)] = 8080
     public_origin: str | None = None
+    host_environment: WebHostEnvironment = "browser"
     dev_mode: bool = False
     initial_password: str | None = None
     cors_origins: list[str] = Field(default_factory=list)
