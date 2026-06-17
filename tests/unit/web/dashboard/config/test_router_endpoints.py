@@ -240,13 +240,14 @@ def test_get_effective_env_override(client: TestClient, monkeypatch: pytest.Monk
 
 
 def test_get_raw_returns_content_and_mtime(client: TestClient, tmp_yaml_path: Path) -> None:
-    """GET /raw → body.content 等于 tmp yaml 原文（含注释），mtime > 0。"""
+    """GET /raw → body.content 返回迁移后的 yaml（保留原注释），mtime > 0。"""
     resp = client.get("/api/manage/config/raw")
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["content"] == _BASE_YAML
+    assert payload["content"].splitlines()[0].startswith("config_schema_version: v0.5")
     # 文件含注释 → content 也含注释
     assert "# 这是 timeout 注释" in payload["content"]
+    assert "temperature: 0.5" in payload["content"]
     assert payload["mtime"] > 0
     assert payload["path"] == str(tmp_yaml_path)
 
