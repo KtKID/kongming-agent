@@ -20,6 +20,7 @@ import type {
   SendRequest,
   HistoryLoadRequest,
   InterruptRequest,
+  ChoiceSubmitRequest,
   SessionStatusRequest,
   SessionStatus,
   RawFrameEnvelope,
@@ -56,6 +57,10 @@ export class GenericChatProvider implements ChatProvider {
       reasoning_effort: reasoningEffort ?? null,
       attachments,
     });
+  }
+
+  async submitChoice(handle: NetworkHandle, request: ChoiceSubmitRequest): Promise<void> {
+    handle.send(request.frame);
   }
 
   async loadHistory(request: HistoryLoadRequest): Promise<ChatHistoryBatch> {

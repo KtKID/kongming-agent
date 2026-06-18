@@ -31,9 +31,15 @@ import { ChatManager } from "@/chat/ChatManager";
 import { makeNetworkHandle, getTimelineStore, useChatTimeline } from "@/chat/runtimeWiring";
 import { toViewModel, toGenericRenderItems } from "@/chat/ChatRenderAdapter";
 import type { RawFrameEnvelope } from "@/chat/types";
+import { ChoiceManager, type ChoiceState } from "@/modules/choice/ChoiceManager";
+import { ChoicePanel } from "@/modules/choice/ChoicePanel";
 import { networkManager } from "@/network";
-import type { ChannelHandle, SocketState } from "@/network";
-import type { CardScope } from "@/protocol";
+import type { ChannelHandle, ChannelKind, SocketState } from "@/network";
+import type {
+  CardScope,
+  ChoiceRequestFrame,
+  ChoiceSubmitFrame,
+} from "@/protocol";
 import { useChatStore } from "@/stores/chat";
 import { useConnectionStatusStore } from "@/stores/connectionStatus";
 import { useThreadsStore } from "@/stores/threads";
@@ -93,6 +99,10 @@ export function ChatPage() {
   const [genericHandle, setGenericHandle] = useState<ChannelHandle | null>(null);
   const [genericChannelState, setGenericChannelState] =
     useState<SocketState>("closed");
+  const [choiceState, setChoiceState] = useState<ChoiceState | null>(null);
+  const [choiceSubmitting, setChoiceSubmitting] = useState(false);
+  const choiceSubmittingRef = useRef(choiceSubmitting);
+  choiceSubmittingRef.current = choiceSubmitting;
   const setThreadWsActive = useConnectionStatusStore((s) => s.setThreadWsActive);
   const setThreadWsState = useConnectionStatusStore((s) => s.setThreadWsState);
   const setThreadWsLatency = useConnectionStatusStore((s) => s.setThreadWsLatency);
@@ -346,6 +356,16 @@ export function ChatPage() {
           ? frame.frame_type
           : undefined;
       switch (frameType) {
+        case "choice.request":
+          setChoiceState(ChoiceManager.receive(frame as ChoiceRequestFrame));
+          setChoiceSubmitting(false);
+          break;
+        case "turn.start":
+          if (choiceSubmittingRef.current) {
+            setChoiceState(null);
+            setChoiceSubmitting(false);
+          }
+          break;
         case "approval.request":
           // 审批 dialog 弹窗队列不属于时间线（横幅 record 由 provider 翻成 status）。
           pushApproval(frame as Parameters<typeof pushApproval>[0]);
@@ -353,6 +373,9 @@ export function ChatPage() {
         case "error":
           // 横幅 record 由 provider 翻成 error record；这里补 toast（旧链路语义）。
           toast.error(String((frame as { message?: unknown }).message ?? ""));
+          if (choiceSubmittingRef.current) {
+            setChoiceSubmitting(false);
+          }
           break;
         case "cell.evicted":
           // thread cell 回收：toast.warning + 清该 thread 的临时流式态。
@@ -410,6 +433,25 @@ export function ChatPage() {
         modelFamilyId: currentFamily?.familyId ?? null,
       },
     });
+  };
+
+  const onChoiceSubmit = async (frame: ChoiceSubmitFrame) => {
+    if (!threadId || !chatManager || genericChannelState !== "open") {
+      toast.error("选择提交失败：连接尚未就绪。");
+      return;
+    }
+    try {
+      await chatManager.submitChoice({
+        provider: "generic",
+        threadId,
+        frame,
+      });
+      setChoiceSubmitting(true);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast.error(`选择提交失败：${message}`);
+      setChoiceSubmitting(false);
+    }
   };
 
   const onSelectModelPreset = async (presetId: string) => {
@@ -607,6 +649,20 @@ export function ChatPage() {
                           timezone={clientConfig?.timezone}
                         />
                       </div>
+                      {choiceState ? (
+                        <ChoicePanel
+                          state={choiceState}
+                          disabled={
+                            choiceSubmitting ||
+                            !threadId ||
+                            !genericHandle ||
+                            genericChannelState !== "open" ||
+                            isRunning
+                          }
+                          onChange={setChoiceState}
+                          onSubmit={onChoiceSubmit}
+                        />
+                      ) : null}
                       <Composer
                         disabled={
                           !threadId ||

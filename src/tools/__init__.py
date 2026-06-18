@@ -241,6 +241,17 @@ def register_task_progress_tool(
     registry.register(cast(Tool, build_task_progress_tool_from_config(cfg)))
 
 
+def register_choice_tool(
+    registry: ToolRegistry,
+    *,
+    event_sinks: Sequence[EventSink] = (),
+) -> None:
+    """Register the model-facing user choice tool."""
+    from tools.builtin.choice_tool import build_choice_tool
+
+    registry.register(cast(Tool, build_choice_tool(event_sinks=event_sinks)))
+
+
 __all__ = [
     "AutoAllowApproval",
     "AutoDenyApproval",
@@ -261,5 +272,6 @@ __all__ = [
     "register_agent_workflow_tool",
     "register_agent_role_tool",
     "register_schedule_tool_if_enabled",
+    "register_choice_tool",
     "register_task_progress_tool",
 ]

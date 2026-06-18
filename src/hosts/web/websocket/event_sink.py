@@ -35,6 +35,7 @@ from devtools import get_full_logger
 from hosts.web.protocol import (
     ApprovalDecisionFrame,
     ApprovalOutcome,
+    ChoiceRequestFrame,
     ContentDeltaFrame,
     ErrorCode,
     ErrorFrame,
@@ -291,6 +292,17 @@ class WSEventSink:
                 error_message=_optional_str(payload.get("error_message")),
                 content=str(content_raw) if content_raw is not None else "",
                 data=data_raw if isinstance(data_raw, dict) else None,
+                run_id=run_id,
+                timestamp_ms=ts,
+            )
+
+        if kind == "choice.requested":
+            return ChoiceRequestFrame(
+                request_id=str(payload.get("request_id", "")),
+                title=str(payload.get("title", "")),
+                description=str(payload.get("description", "")),
+                questions=list(payload.get("questions") or []),
+                turn=turn,
                 run_id=run_id,
                 timestamp_ms=ts,
             )

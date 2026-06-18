@@ -24,7 +24,10 @@
  * `timestamp_ms`、本文件所有 `*At` 字段都是同一数值语义，中途不做 number→string 转换。
  */
 
-import type { UserInputAttachment } from "@/protocol";
+import type {
+  ChoiceSubmitFrame,
+  UserInputAttachment,
+} from "@/protocol";
 import type { ReasoningEffort } from "@/components/Composer";
 
 // 复用既有真源，转手 re-export，让 chat/* 其它模块从本文件统一 import，
@@ -113,6 +116,16 @@ export interface SendRequest {
   common: CommonSendInput;
   /** provider 独有配置层，按联合类型分发。 */
   provider: ProviderSendOptions;
+}
+
+/** ChoicePanel 确认后的结构化提交请求。 */
+export interface ChoiceSubmitRequest {
+  /** 当前线程 id。 */
+  threadId: string;
+  /** 首版只支持 generic_chat 频道。 */
+  provider: "generic";
+  /** 与后端 ChoiceSubmitFrame 一一对应的 wire 帧。 */
+  frame: ChoiceSubmitFrame;
 }
 
 // ---------------------------------------------------------------------------
@@ -626,6 +639,8 @@ export interface ChatProvider {
   mapInboundFrame(envelope: RawFrameEnvelope): ChatEvent[];
   /** 打断当前 provider 会话。 */
   interrupt(handle: NetworkHandle, request: InterruptRequest): Promise<void>;
+  /** 提交 ChoicePanel 结构化选择结果；支持该能力的 provider 实现。 */
+  submitChoice?(handle: NetworkHandle, request: ChoiceSubmitRequest): Promise<void>;
   /** 查询 provider session 状态。Generic 返回固定的「无 session」结果。 */
   checkSessionStatus(request: SessionStatusRequest): Promise<SessionStatus>;
 }
@@ -638,6 +653,8 @@ export interface ChatManagerApi {
   loadHistory(request: HistoryLoadRequest): Promise<void>;
   /** 把 NetworkManager 收到的原始帧灌入聊天状态机。 */
   ingestFrame(envelope: RawFrameEnvelope): void;
+  /** 提交 ChoicePanel 结构化选择结果。 */
+  submitChoice(request: ChoiceSubmitRequest): Promise<void>;
   /** 打断当前会话执行。 */
   interrupt(request: InterruptRequest): Promise<void>;
   /** 查询 provider 会话状态。 */

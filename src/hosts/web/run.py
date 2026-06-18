@@ -657,6 +657,7 @@ def _make_runtime_factory(cfg: object) -> object:
         ToolRegistry,
         build_default_approval,
         build_default_registry,
+        register_choice_tool,
         register_evolution_write_tool_if_enabled,
         register_schedule_tool_if_enabled,
         register_task_progress_tool,
@@ -753,6 +754,7 @@ def _make_runtime_factory(cfg: object) -> object:
                 real_cfg,
                 event_sinks=sink_list,
             )
+            register_choice_tool(registry, event_sinks=sink_list)
             register_task_progress_tool(registry, real_cfg)
             mcp_runtime_registration = McpRuntimeRegistrationManager(
                 real_cfg,

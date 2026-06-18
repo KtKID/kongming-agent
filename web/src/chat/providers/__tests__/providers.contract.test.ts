@@ -51,6 +51,30 @@ describe("GenericChatProvider", () => {
     expect(sent[0]).toMatchObject({ frame_type: "interrupt" });
   });
 
+  it("submitChoice → choice.submit 帧", async () => {
+    const { handle, sent } = fakeHandle();
+    await p.submitChoice?.(handle, {
+      provider: "generic",
+      threadId: "t1",
+      frame: {
+        frame_type: "choice.submit",
+        request_id: "call-1",
+        answers: [
+          {
+            question_id: "scope",
+            option_id: "minimal",
+            option_label: "最小实现",
+            custom_text: null,
+          },
+        ],
+      },
+    });
+    expect(sent[0]).toMatchObject({
+      frame_type: "choice.submit",
+      request_id: "call-1",
+    });
+  });
+
   it("checkSessionStatus 固定 active:false（generic 无 session）", async () => {
     const s = await p.checkSessionStatus({ threadId: "t1", provider: "generic" });
     expect(s.active).toBe(false);
