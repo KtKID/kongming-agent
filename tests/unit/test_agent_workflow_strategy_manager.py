@@ -225,6 +225,25 @@ def test_agent_workflow_manager_registers_parallel_strategy_catalog(tmp_path: Pa
         "roundtable_review",
         "task_flow",
     ]
+    for entry in catalog:
+        assert entry.title.strip()
+        assert entry.summary.strip()
+
+    title_by_mode = {entry.mode: entry.title for entry in catalog}
+    summary_by_mode = {entry.mode: entry.summary for entry in catalog}
+    assert title_by_mode == {
+        "deep_research": "Deep Research 研究工作流",
+        "map_reduce": "Map-Reduce 代码分析",
+        "parallel": "并行子任务",
+        "roundtable_review": "多 Agent 圆桌评审",
+        "task_flow": "任务流 Task Flow",
+    }
+    assert "互不依赖" in summary_by_mode["parallel"]
+    assert "code_findings" in summary_by_mode["map_reduce"]
+    assert "ReviewBoard" in summary_by_mode["roundtable_review"]
+    assert "带引用报告" in summary_by_mode["deep_research"]
+    assert "通用计划执行 workflow" in summary_by_mode["task_flow"]
+
     deep_research_description = manager.describe_workflow_strategy("deep_research")
     assert deep_research_description.status == "available"
     assert deep_research_description.runnable is True
