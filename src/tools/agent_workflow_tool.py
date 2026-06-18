@@ -243,6 +243,80 @@ _DEEP_RESEARCH_PAYLOAD_SCHEMA: dict[str, Any] = {
     "required": ["topic"],
 }
 
+_TASK_FLOW_PAYLOAD_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "task_flow payload 顶层直接包含 objective、planning、plan、execution。"
+        "plan.nodes 是可视化步骤数组；简单任务直接填写，复杂多方案任务先提问再填写。"
+    ),
+    "properties": {
+        "mode": {"type": "string", "enum": ["task_flow"]},
+        "objective": {"type": "string"},
+        "planning": {
+            "type": "object",
+            "properties": {
+                "interaction_mode": {
+                    "type": "string",
+                    "enum": ["auto", "guided", "choice_required", "llm_decide"],
+                    "default": "llm_decide",
+                },
+                "choice_policy": {
+                    "type": "string",
+                    "default": "ask_when_multiple_viable_paths",
+                },
+            },
+        },
+        "plan": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "nodes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "title": {"type": "string"},
+                            "description": {"type": "string"},
+                            "depends_on": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed"],
+                                "default": "pending",
+                            },
+                        },
+                        "required": ["title"],
+                    },
+                },
+                "steps": {
+                    "type": "array",
+                    "description": "nodes 的兼容别名，会归一化为 plan.nodes。",
+                },
+            },
+            "required": ["nodes"],
+        },
+        "execution": {
+            "type": "object",
+            "properties": {
+                "on_unexpected_severe_issue": {
+                    "type": "string",
+                    "default": "ask_user",
+                },
+                "progress_tool": {
+                    "type": "string",
+                    "enum": ["update_task_progress"],
+                    "default": "update_task_progress",
+                },
+            },
+        },
+        "audit_tags": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["objective", "plan"],
+}
+
 
 class AgentWorkflowHandle:
     """工作流 manager 的延迟绑定句柄，输入为 runtime 装配结果，输出为 tool 可用 manager。"""
@@ -391,7 +465,8 @@ class RunAgentWorkflowTool(BaseBuiltinTool):
         "按 mode 执行已注册的 agent workflow 策略。"
         "mode='parallel' 用于任务并行扇出；mode='map_reduce' 用于结构化分片分析；"
         "mode='roundtable_review' 用于多 Agent 圆桌评审；"
-        "mode='deep_research' 用于带来源、事实和投票比分的深度研究。"
+        "mode='deep_research' 用于带来源、事实和投票比分的深度研究；"
+        "mode='task_flow' 用于通用计划执行和 Progress task 可视化。"
         "map_reduce 的 payload 顶层必须直接包含 objective、input_source、shard_strategy、"
         "mapper、reducer、limits、output_contract；不要把这些字段包在 MapReduceWorkflowSpec 里。"
     )
@@ -400,7 +475,13 @@ class RunAgentWorkflowTool(BaseBuiltinTool):
         "properties": {
             "mode": {
                 "type": "string",
-                "enum": ["parallel", "map_reduce", "roundtable_review", "deep_research"],
+                "enum": [
+                    "parallel",
+                    "map_reduce",
+                    "roundtable_review",
+                    "deep_research",
+                    "task_flow",
+                ],
                 "description": "Workflow orchestration mode.",
             },
             "payload": {
@@ -411,6 +492,7 @@ class RunAgentWorkflowTool(BaseBuiltinTool):
                     "shard_strategy、mapper、reducer、limits、output_contract。"
                     "roundtable_review 必须使用 participants.select 选择角色，"
                     "不要使用 reviewers。"
+                    "task_flow 使用 objective 和 plan.nodes 创建可视化执行计划。"
                     '不要写成 {"MapReduceWorkflowSpec": {...}}。'
                 ),
                 "properties": {
@@ -426,6 +508,7 @@ class RunAgentWorkflowTool(BaseBuiltinTool):
                     **_MAP_REDUCE_PAYLOAD_SCHEMA["properties"],
                     **_ROUNDTABLE_REVIEW_PAYLOAD_SCHEMA["properties"],
                     **_DEEP_RESEARCH_PAYLOAD_SCHEMA["properties"],
+                    **_TASK_FLOW_PAYLOAD_SCHEMA["properties"],
                 },
             },
         },
@@ -541,6 +624,32 @@ class RunAgentWorkflowTool(BaseBuiltinTool):
                 '"freshness_days": null, "allowed_domains": [], '
                 '"blocked_domains": [], "prefer_primary_sources": true},\n'
                 '    "output_contract": "deep_research_report"\n'
+                "  }\n"
+                "}"
+            )
+        if mode == "task_flow":
+            return (
+                f"{base}\n\n"
+                "run_agent_workflow task_flow 参数修正提示：\n"
+                "1. task_flow payload 顶层必须包含 objective 和 plan.nodes。\n"
+                "2. 简单任务直接填写 plan.nodes；多方案任务先向用户提问，用户确认后再调用。\n"
+                "3. 执行计划时，每完成一个 step 调用 update_task_progress 更新进度。\n"
+                "4. 重新调用前先按下面骨架修正参数：\n"
+                "{\n"
+                '  "mode": "task_flow",\n'
+                '  "payload": {\n'
+                '    "objective": "完成用户任务目标",\n'
+                '    "planning": {"interaction_mode": "llm_decide", '
+                '"choice_policy": "ask_when_multiple_viable_paths"},\n'
+                '    "plan": {\n'
+                '      "title": "任务执行计划",\n'
+                '      "nodes": [\n'
+                '        {"id": "step-1", "title": "确认目标", '
+                '"description": "整理任务边界"}\n'
+                "      ]\n"
+                "    },\n"
+                '    "execution": {"on_unexpected_severe_issue": "ask_user", '
+                '"progress_tool": "update_task_progress"}\n'
                 "  }\n"
                 "}"
             )
@@ -678,6 +787,8 @@ def _normalize_workflow_payload(
     if mode == "deep_research":
         payload = _unwrap_deep_research_spec_payload(payload)
         payload = _normalize_deep_research_payload(payload)
+    if mode == "task_flow":
+        payload = _normalize_task_flow_payload(payload)
     normalized = dict(payload)
     normalized.setdefault("mode", mode)
     return normalized
@@ -968,6 +1079,40 @@ def _normalize_deep_research_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("output_contract", "deep_research_report")
     if not isinstance(normalized.get("source_fixture"), dict):
         normalized["source_fixture"] = {}
+    normalized["audit_tags"] = _coerce_string_array(normalized.get("audit_tags"))
+    return normalized
+
+
+def _normalize_task_flow_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """归一化 task_flow 参数，输入为模型生成 payload，输出为 parser 友好 payload。"""
+    normalized = dict(payload)
+    objective = normalized.get("objective", normalized.get("goal"))
+    if isinstance(objective, str):
+        normalized["objective"] = objective.strip()
+
+    plan = _object_copy(normalized.get("plan"))
+    if plan is None:
+        plan = {}
+        if "nodes" in normalized:
+            plan["nodes"] = normalized.get("nodes")
+        if "steps" in normalized:
+            plan["steps"] = normalized.get("steps")
+    if "nodes" not in plan and "steps" in plan:
+        plan["nodes"] = plan.get("steps")
+    if "nodes" in plan and isinstance(plan["nodes"], tuple):
+        plan["nodes"] = list(plan["nodes"])
+    normalized["plan"] = plan
+
+    planning = _object_copy(normalized.get("planning")) or {}
+    planning.setdefault("interaction_mode", "llm_decide")
+    planning.setdefault("choice_policy", "ask_when_multiple_viable_paths")
+    normalized["planning"] = planning
+
+    execution = _object_copy(normalized.get("execution")) or {}
+    execution.setdefault("on_unexpected_severe_issue", "ask_user")
+    execution.setdefault("progress_tool", "update_task_progress")
+    normalized["execution"] = execution
+
     normalized["audit_tags"] = _coerce_string_array(normalized.get("audit_tags"))
     return normalized
 
@@ -1276,6 +1421,14 @@ def _format_result(result: Any) -> str:
                 report_path = artifact_paths.get("report_path")
                 if isinstance(report_path, str):
                     lines.extend(["", f"deep_research_report: {report_path}"])
+        task_flow = data.get("task_flow")
+        if isinstance(task_flow, dict):
+            plan_path = task_flow.get("plan_path")
+            progress_path = task_flow.get("progress_path")
+            if isinstance(plan_path, str):
+                lines.extend(["", f"task_flow_plan: {plan_path}"])
+            if isinstance(progress_path, str):
+                lines.append(f"task_flow_progress: {progress_path}")
     return "\n".join(lines)
 
 

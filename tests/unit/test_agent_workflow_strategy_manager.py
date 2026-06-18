@@ -223,6 +223,7 @@ def test_agent_workflow_manager_registers_parallel_strategy_catalog(tmp_path: Pa
         "map_reduce",
         "parallel",
         "roundtable_review",
+        "task_flow",
     ]
     deep_research_description = manager.describe_workflow_strategy("deep_research")
     assert deep_research_description.status == "available"
@@ -243,3 +244,8 @@ def test_agent_workflow_manager_registers_parallel_strategy_catalog(tmp_path: Pa
     roundtable_description = manager.describe_workflow_strategy("roundtable_review")
     assert roundtable_description.status == "available"
     assert roundtable_description.runnable is True
+    task_flow_description = manager.describe_workflow_strategy("task_flow")
+    assert task_flow_description.title == "任务流 Task Flow"
+    assert task_flow_description.status == "available"
+    assert task_flow_description.runnable is True
+    assert any(field.name == "plan.nodes" for field in task_flow_description.inputs)
