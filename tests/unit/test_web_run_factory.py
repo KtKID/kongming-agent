@@ -12,6 +12,7 @@ Mock NativeRuntime.build and verify:
 
 from __future__ import annotations
 
+import hashlib
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -133,6 +134,8 @@ def mock_deps():
     The factory uses lazy imports inside the closure, so we must patch
     at the source module level, not at web.run level.
     """
+    from prompting.instructions.instruction_loader import InstructionSource
+
     with (
         patch("runtime_assembly.native_runtime.NativeRuntime") as MockRuntime,
         patch("hosts.shared.session_bridge.SessionBridge") as MockBridge,
@@ -140,6 +143,10 @@ def mock_deps():
             "prompting.instructions.instruction_loader.assemble_instructions",
             new_callable=AsyncMock,
         ) as mock_asm,
+        patch(
+            "prompting.instructions.instruction_loader.load_instruction_sources",
+            new_callable=AsyncMock,
+        ) as mock_sources,
         patch(
             "prompting.skills.skill_loader.load_skill_specs", new_callable=AsyncMock
         ) as mock_skills,
@@ -149,6 +156,10 @@ def mock_deps():
         patch("tools.register_evolution_write_tool_if_enabled") as mock_register_evolution,
     ):
         mock_asm.return_value = ("test instructions", ["prompts", "env", "runtime"])
+        mock_sources.return_value = [
+            InstructionSource(origin="runtime", content="runtime context"),
+            InstructionSource(origin="agent_spec", content="test instructions"),
+        ]
         mock_skills.return_value = []
         mock_runtime_instance = MagicMock()
         MockRuntime.build.return_value = mock_runtime_instance
@@ -164,6 +175,7 @@ def mock_deps():
             "NativeRuntime": MockRuntime,
             "SessionBridge": MockBridge,
             "assemble_instructions": mock_asm,
+            "load_instruction_sources": mock_sources,
             "load_skill_specs": mock_skills,
             "build_default_approval": mock_approval,
             "registry": mock_reg_instance,
@@ -394,12 +406,108 @@ class TestInstructionsCaching:
 
         factory = _make_runtime_factory(test_cfg)
 
-        # Call factory twice — instructions should only be assembled once
         await factory("thread-1", "test-local", mock_adapter, [])
         await factory("thread-2", "test-local", mock_adapter, [])
 
-        mock_deps["assemble_instructions"].assert_called_once()
+        mock_deps["assemble_instructions"].assert_not_called()
+        assert mock_deps["load_instruction_sources"].call_count == 2
         assert mock_deps["NativeRuntime"].build.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_workflow_prompt_listing_is_pre_file_source_with_cache_key(
+        self, test_cfg, mock_adapter, mock_deps
+    ):
+        from hosts.web.run import _make_runtime_factory
+
+        factory = _make_runtime_factory(test_cfg)
+        await factory("thread-1", "test-local", mock_adapter, [])
+
+        _args, kwargs = mock_deps["NativeRuntime"].build.call_args
+        instructions = kwargs["instructions"]
+        assert "# workflow_catalog" in instructions
+        assert "describe_agent_workflow_strategy" in instructions
+        assert "run_agent_workflow" in instructions
+        assert instructions.index("# workflow_catalog") < instructions.index("# agent_spec")
+
+        cache_key = getattr(factory, "_workflow_prompt_cache_key")
+        assert cache_key.workflow_template_version == "workflow-prompt-catalog-template-v1"
+        assert cache_key.workflow_listing_hash
+        base_instructions = "# runtime\nruntime context\n\n# agent_spec\ntest instructions"
+        assert cache_key.base_instructions_hash == (
+            "sha256:" + hashlib.sha256(base_instructions.encode()).hexdigest()
+        )
+
+    @pytest.mark.asyncio
+    async def test_workflow_prompt_listing_hash_change_refreshes_cache(
+        self, test_cfg, mock_adapter, mock_deps
+    ):
+        from application.agent_workflows.prompt_catalog import WorkflowPromptListingRender
+        from hosts.web.run import _make_runtime_factory
+
+        first_render = WorkflowPromptListingRender(
+            text="# workflow catalog\nfirst",
+            origin="workflow_catalog",
+            template_version="workflow-prompt-catalog-template-v1",
+            listing_hash="hash-1",
+        )
+        second_render = WorkflowPromptListingRender(
+            text="# workflow catalog\nsecond",
+            origin="workflow_catalog",
+            template_version="workflow-prompt-catalog-template-v1",
+            listing_hash="hash-2",
+        )
+
+        with patch(
+            "application.agent_workflows.prompt_catalog.build_default_workflow_prompt_listing",
+            side_effect=[first_render, first_render, second_render, second_render],
+        ):
+            factory = _make_runtime_factory(test_cfg)
+            await factory("thread-1", "test-local", mock_adapter, [])
+            await factory("thread-2", "test-local", mock_adapter, [])
+            await factory("thread-3", "test-local", mock_adapter, [])
+
+        assert mock_deps["assemble_instructions"].call_count == 0
+        assert mock_deps["load_instruction_sources"].call_count == 4
+        _args, kwargs = mock_deps["NativeRuntime"].build.call_args
+        assert "# workflow_catalog\n# workflow catalog\nsecond" in kwargs["instructions"]
+        cache_key = getattr(factory, "_workflow_prompt_cache_key")
+        assert cache_key.workflow_listing_hash == "hash-2"
+
+    @pytest.mark.asyncio
+    async def test_base_instructions_hash_change_refreshes_cache(
+        self, test_cfg, mock_adapter, mock_deps
+    ):
+        from application.agent_workflows.prompt_catalog import WorkflowPromptListingRender
+        from hosts.web.run import _make_runtime_factory
+        from prompting.instructions.instruction_loader import InstructionSource
+
+        render = WorkflowPromptListingRender(
+            text="# workflow catalog\nstable",
+            origin="workflow_catalog",
+            template_version="workflow-prompt-catalog-template-v1",
+            listing_hash="stable-hash",
+        )
+        base_one = [InstructionSource(origin="runtime", content="base-one")]
+        base_two = [InstructionSource(origin="runtime", content="base-two")]
+        mock_deps["load_instruction_sources"].side_effect = [
+            base_one,
+            base_two,
+            base_two,
+        ]
+        with patch(
+            "application.agent_workflows.prompt_catalog.build_default_workflow_prompt_listing",
+            return_value=render,
+        ):
+            factory = _make_runtime_factory(test_cfg)
+            await factory("thread-1", "test-local", mock_adapter, [])
+            await factory("thread-2", "test-local", mock_adapter, [])
+
+        mock_deps["assemble_instructions"].assert_not_called()
+        assert mock_deps["load_instruction_sources"].call_count == 3
+        cache_key = getattr(factory, "_workflow_prompt_cache_key")
+        assert cache_key.base_instructions_hash == (
+            "sha256:" + hashlib.sha256(b"# runtime\nbase-two").hexdigest()
+        )
 
 
 class TestSchedulerRuntimeFactory:
@@ -426,7 +534,8 @@ class TestSchedulerRuntimeFactory:
         _, kwargs = mock_bridge.call_args
         assert kwargs["tools"] is mock_deps["registry"]
         assert kwargs["enabled_tool_names"] == ["read_file", "shell"]
-        assert kwargs["instructions"] == "test instructions"
+        assert "# workflow_catalog" in kwargs["instructions"]
+        assert "# agent_spec\ntest instructions" in kwargs["instructions"]
 
 
 class TestEventSinks:

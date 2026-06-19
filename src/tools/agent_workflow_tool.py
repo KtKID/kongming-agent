@@ -12,6 +12,7 @@ AgentWorkflowHandle 调用 manager，再把 workflow 产物路径、子 agent �
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -463,26 +464,15 @@ class RunAgentWorkflowTool(BaseBuiltinTool):
     name = "run_agent_workflow"
     description = (
         "按 mode 执行已注册的 agent workflow 策略。"
-        "mode='parallel' 用于任务并行扇出；mode='map_reduce' 用于结构化分片分析；"
-        "mode='roundtable_review' 用于多 Agent 圆桌评审；"
-        "mode='deep_research' 用于带来源、事实和投票比分的深度研究；"
-        "mode='task_flow' 用于通用计划执行和 Progress task 可视化。"
-        "map_reduce 的 payload 顶层必须直接包含 objective、input_source、shard_strategy、"
-        "mapper、reducer、limits、output_contract；不要把这些字段包在 MapReduceWorkflowSpec 里。"
+        "需要具体 payload 字段、示例和风险提示时，先调用 "
+        "describe_agent_workflow_strategy(mode=...) 查询。"
     )
     input_schema: dict[str, Any] = {  # noqa: RUF012
         "type": "object",
         "properties": {
             "mode": {
                 "type": "string",
-                "enum": [
-                    "parallel",
-                    "map_reduce",
-                    "roundtable_review",
-                    "deep_research",
-                    "task_flow",
-                ],
-                "description": "Workflow orchestration mode.",
+                "description": "Workflow orchestration mode registered in AgentWorkflowManager.",
             },
             "payload": {
                 "type": "object",
@@ -689,6 +679,45 @@ class RunAgentWorkflowTool(BaseBuiltinTool):
         )
 
 
+class DescribeAgentWorkflowStrategyTool(BaseBuiltinTool):
+    """Describe a registered agent workflow strategy."""
+
+    name = "describe_agent_workflow_strategy"
+    description = (
+        "查询已注册 agent workflow 策略的详细参数说明、适用场景、风险提示、输出和示例。"
+        "先用 workflow catalog 选择 mode，再调用本工具生成 run_agent_workflow payload。"
+    )
+    input_schema: dict[str, Any] = {  # noqa: RUF012
+        "type": "object",
+        "properties": {
+            "mode": {
+                "type": "string",
+                "description": "Workflow strategy mode, for example map_reduce or task_flow.",
+            }
+        },
+        "required": ["mode"],
+    }
+
+    def __init__(self, handle: AgentWorkflowHandle) -> None:
+        self._handle = handle
+
+    async def _run(
+        self,
+        args: dict[str, Any],
+        ctx: ToolContext,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """查询 workflow 策略详情，输入为 mode 和上下文，输出文本说明和结构化数据。"""
+        manager = self._handle.get(ctx)
+        if manager is None:
+            raise RuntimeError("agent workflow manager is not bound")
+        mode = args.get("mode")
+        if not isinstance(mode, str) or not mode.strip():
+            raise ValueError("'mode' must be a non-empty string")
+        description = manager.describe_workflow_strategy(mode.strip())
+        data = _workflow_strategy_description_data(description)
+        return _format_workflow_strategy_description(data), data
+
+
 AgentWorkflowTool = RunParallelSubagentsTool
 
 
@@ -698,6 +727,12 @@ def build_agent_workflow_tool(handle: AgentWorkflowHandle) -> RunParallelSubagen
 
 def build_run_agent_workflow_tool(handle: AgentWorkflowHandle) -> RunAgentWorkflowTool:
     return RunAgentWorkflowTool(handle)
+
+
+def build_describe_agent_workflow_strategy_tool(
+    handle: AgentWorkflowHandle,
+) -> DescribeAgentWorkflowStrategyTool:
+    return DescribeAgentWorkflowStrategyTool(handle)
 
 
 def _parse_tasks(raw: Any) -> list[dict[str, object]]:
@@ -1476,11 +1511,194 @@ def _result_data(result: Any) -> dict[str, Any]:
     return data
 
 
+def _workflow_strategy_description_data(description: Any) -> dict[str, Any]:
+    """投影 workflow strategy description，输入为 description 对象，输出 JSON 友好字典。"""
+    mode = description.mode
+    inputs = [
+        {
+            "name": item.name,
+            "required": item.required,
+            "type_label": item.type_label,
+            "description": item.description,
+            "example": _json_safe_value(
+                item.example,
+                context=f"workflow strategy {mode} input {item.name} example",
+            ),
+        }
+        for item in description.inputs
+    ]
+    return {
+        "mode": mode,
+        "title": description.title,
+        "status": description.status,
+        "runnable": description.runnable,
+        "summary": description.summary,
+        "when_to_use": list(description.when_to_use),
+        "warnings": list(description.warnings),
+        "inputs": inputs,
+        "payload_schema": _workflow_payload_schema_from_inputs(inputs),
+        "outputs": list(description.outputs),
+        "examples": [
+            _json_safe_value(
+                example,
+                context=f"workflow strategy {mode} examples[{index}]",
+            )
+            for index, example in enumerate(description.examples)
+        ],
+        "depends_on": list(description.depends_on),
+    }
+
+
+def _format_workflow_strategy_description(data: dict[str, Any]) -> str:
+    """格式化 workflow strategy description，输入为数据字典，输出模型可读文本。"""
+    lines = [
+        f"workflow_strategy: {data['mode']}",
+        f"title: {data['title']}",
+        f"status: {data['status']}",
+        f"runnable: {data['runnable']}",
+        f"summary: {data['summary']}",
+        "",
+        "when_to_use:",
+    ]
+    lines.extend(f"- {item}" for item in data["when_to_use"])
+    if data["warnings"]:
+        lines.append("")
+        lines.append("warnings:")
+        lines.extend(f"- {item}" for item in data["warnings"])
+    if data["inputs"]:
+        lines.append("")
+        lines.append("inputs:")
+        for item in data["inputs"]:
+            required = "required" if item["required"] else "optional"
+            lines.append(
+                f"- {item['name']} ({required}, {item['type_label']}): {item['description']}"
+            )
+            if item["example"] is not None:
+                example = json.dumps(item["example"], ensure_ascii=False, sort_keys=True)
+                lines.append(f"  example: {example}")
+    if data["payload_schema"]:
+        schema = json.dumps(
+            data["payload_schema"],
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        lines.append("")
+        lines.append("payload_schema:")
+        lines.append(schema)
+    if data["outputs"]:
+        lines.append("")
+        lines.append("outputs:")
+        lines.extend(f"- {item}" for item in data["outputs"])
+    if data["examples"]:
+        lines.append("")
+        lines.append("examples:")
+        for example in data["examples"]:
+            lines.append(json.dumps(example, ensure_ascii=False, sort_keys=True))
+    return "\n".join(lines)
+
+
+def _workflow_payload_schema_from_inputs(
+    inputs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """从 input 字段说明派生 payload schema，输入为字段列表，输出 JSON-schema 风格对象。"""
+    schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {},
+    }
+    required: list[str] = []
+    for item in inputs:
+        name = item["name"]
+        if not isinstance(name, str) or not name.strip():
+            continue
+        path = tuple(part for part in name.split(".") if part)
+        if not path:
+            continue
+        if item["required"] and path[0] not in required:
+            required.append(path[0])
+        _insert_payload_schema_property(schema, path, item)
+    if required:
+        schema["required"] = required
+    return schema
+
+
+def _insert_payload_schema_property(
+    schema: dict[str, Any],
+    path: tuple[str, ...],
+    item: dict[str, Any],
+) -> None:
+    """写入嵌套 payload schema 属性，输入为 schema/path/item，输出原地更新。"""
+    current = schema
+    for segment in path[:-1]:
+        properties = current.setdefault("properties", {})
+        child = properties.setdefault(
+            segment,
+            {
+                "type": "object",
+                "additionalProperties": True,
+                "properties": {},
+            },
+        )
+        current = child
+    properties = current.setdefault("properties", {})
+    leaf = path[-1]
+    properties[leaf] = _payload_schema_property(item)
+    if item["required"]:
+        required = current.setdefault("required", [])
+        if leaf not in required:
+            required.append(leaf)
+
+
+def _payload_schema_property(item: dict[str, Any]) -> dict[str, Any]:
+    """生成单个 payload 字段 schema，输入为字段说明，输出 JSON-schema 风格属性。"""
+    schema = _schema_type_from_type_label(item["type_label"])
+    schema["description"] = item["description"]
+    schema["x-type_label"] = item["type_label"]
+    if item["example"] is not None:
+        schema["examples"] = [item["example"]]
+    return schema
+
+
+def _schema_type_from_type_label(type_label: Any) -> dict[str, Any]:
+    """映射字段类型标签，输入为 type_label，输出 JSON-schema 风格类型。"""
+    label = str(type_label).strip().lower()
+    if label.startswith("array"):
+        schema: dict[str, Any] = {"type": "array"}
+        if "object" in label:
+            schema["items"] = {"type": "object"}
+        elif "string" in label:
+            schema["items"] = {"type": "string"}
+        return schema
+    if label in {"object", "dict", "mapping"}:
+        return {"type": "object", "additionalProperties": True}
+    if label in {"number", "float", "integer", "int"}:
+        return {"type": "number"}
+    if label in {"boolean", "bool"}:
+        return {"type": "boolean"}
+    return {"type": "string"}
+
+
+def _json_safe_value(value: Any, *, context: str) -> Any:
+    """校验 JSON 可序列化值，输入为任意值和上下文，输出原值或带定位错误。"""
+    if value is None:
+        return None
+    try:
+        json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError as exc:
+        raise ValueError(
+            f"{context} must be JSON serializable; got {type(value).__name__}"
+        ) from exc
+    return value
+
+
 __all__ = [
     "AgentWorkflowHandle",
     "AgentWorkflowTool",
+    "DescribeAgentWorkflowStrategyTool",
     "RunAgentWorkflowTool",
     "RunParallelSubagentsTool",
     "build_agent_workflow_tool",
+    "build_describe_agent_workflow_strategy_tool",
     "build_run_agent_workflow_tool",
 ]

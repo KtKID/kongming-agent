@@ -369,6 +369,70 @@ async def test_assemble_sitian_root_none_no_sitian_origin(
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_assemble_pre_file_sources_before_prompt_files_env_and_sitian(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证早期 source 顺序，输入为 workflow source/file/env/sitian，输出 workflow 位于文件前。"""
+    _patch_assemble_deps(monkeypatch)
+    monkeypatch.setenv("KONGMING_EXTRA_INSTRUCTIONS", "env instructions")
+    extra_file = tmp_path / "extra.md"
+    extra_file.write_text("file instructions", encoding="utf-8")
+
+    sitian_dir = tmp_path / "sitian"
+    channel_dir = sitian_dir / "claude"
+    channel_dir.mkdir(parents=True)
+    (channel_dir / "workspace_state.json").write_text(
+        json.dumps(
+            {
+                "updatedAt": "2026-05-10T08:00:00+00:00",
+                "sources": {"total": 1, "active": 1},
+                "workItems": [
+                    {
+                        "id": "wf",
+                        "title": "workflow catalog",
+                        "status": "active",
+                        "priority": "high",
+                        "updatedAt": "2026-05-10T07:55:00+00:00",
+                        "nextActions": ["验证顺序"],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    rendered, origins = await assemble_instructions(
+        kongming_home=tmp_path,
+        extra_files=[extra_file],
+        pre_file_sources=[
+            InstructionSource(
+                origin="workflow_catalog",
+                content="# workflow catalog\nworkflow listing",
+            )
+        ],
+        sitian_root=sitian_dir,
+    )
+
+    assert origins == [
+        "runtime",
+        "workflow_catalog",
+        "agent_spec",
+        "file:extra.md",
+        "env:KONGMING_EXTRA_INSTRUCTIONS",
+        "sitian",
+    ]
+    assert rendered.index("# workflow_catalog") < rendered.index("# agent_spec")
+    assert rendered.index("# workflow_catalog") < rendered.index("# file:extra.md")
+    assert rendered.index("# workflow_catalog") < rendered.index(
+        "# env:KONGMING_EXTRA_INSTRUCTIONS"
+    )
+    assert rendered.index("# workflow_catalog") < rendered.index("# sitian")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_assemble_sitian_root_valid_injects_origin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
