@@ -1,7 +1,7 @@
 """LLM 任务进度内置工具。
 
 本脚本提供 update_task_progress 工具，让模型只写当前 ToolContext.session_id 绑定的 session。
-关键流程：校验参数字段，补齐默认 display_order 和 orchestration_task_id，调用 SessionTaskProgressManager 写入 source=llm 快照。
+关键流程：校验参数字段，按 workflow_id + step_id 派生稳定 progress key，调用 SessionTaskProgressManager 写入 source=llm 快照。
 关键函数：TaskProgressTool._run 执行工具写入，build_task_progress_tool_from_config 按 Config 装配工具。
 """
 
@@ -24,6 +24,7 @@ from tools.runtime.base import BaseBuiltinTool
 _TOP_LEVEL_KEYS = frozenset({"tasks"})
 _TASK_KEYS = frozenset(
     {
+        "step_id",
         "task_id",
         "task_run_id",
         "desc",
@@ -35,6 +36,7 @@ _TASK_KEYS = frozenset(
         "error_message",
     }
 )
+_WORKFLOW_KEY_PREFIX = "wf-"
 
 
 class TaskProgressTool(BaseBuiltinTool):
@@ -44,7 +46,9 @@ class TaskProgressTool(BaseBuiltinTool):
     description = (
         "更新当前会话的任务进度快照。"
         "只能写入当前 ToolContext.session_id 绑定的 session；参数不能指定 session_id。"
-        "每个 task 必须包含 orchestration_task_id、task_id、task_run_id、desc；"
+        "推荐每个 task 只填写 workflow_id、step_id、desc、status；"
+        "后端会派生 id、orchestration_task_id 和 task_run_id。"
+        "旧字段 task_id、task_run_id、orchestration_task_id 仅作为兼容输入；"
         "status 默认 pending，display_order 默认按数组顺序。"
     )
     input_schema: dict[str, Any] = {  # noqa: RUF012
@@ -57,6 +61,11 @@ class TaskProgressTool(BaseBuiltinTool):
                 "items": {
                     "type": "object",
                     "properties": {
+                        "step_id": {
+                            "type": "string",
+                            "description": "计划步骤 ID；task_flow 中对应 plan node id。",
+                            "maxLength": TASK_PROGRESS_MAX_ID_LENGTH,
+                        },
                         "task_id": {"type": "string", "maxLength": TASK_PROGRESS_MAX_ID_LENGTH},
                         "task_run_id": {
                             "type": "string",
@@ -86,7 +95,7 @@ class TaskProgressTool(BaseBuiltinTool):
                             "maxLength": TASK_PROGRESS_MAX_ERROR_LENGTH,
                         },
                     },
-                    "required": ["orchestration_task_id", "task_id", "task_run_id", "desc"],
+                    "required": ["desc"],
                     "additionalProperties": False,
                 },
             }
@@ -117,6 +126,7 @@ class TaskProgressTool(BaseBuiltinTool):
             raise ValueError("tasks must be a list")
 
         tasks: list[TaskProgressItem] = []
+        seen_progress_keys: set[str] = set()
         for index, raw in enumerate(raw_tasks):
             if not isinstance(raw, dict):
                 raise ValueError(f"tasks[{index}] must be an object")
@@ -125,9 +135,22 @@ class TaskProgressTool(BaseBuiltinTool):
             unknown_task_keys = sorted(set(raw) - _TASK_KEYS)
             if unknown_task_keys:
                 raise ValueError(f"tasks[{index}] has unknown fields: {unknown_task_keys}")
-            orchestration_task_id = self._required_str(raw, "orchestration_task_id", index)
-            task_id = self._required_str(raw, "task_id", index)
-            task_run_id = self._required_str(raw, "task_run_id", index)
+            step_id = self._required_step_id(raw, index)
+            task_id = step_id
+            workflow_id = self._optional_str(raw, "workflow_id")
+            legacy_orchestration_task_id = self._optional_str(raw, "orchestration_task_id")
+            orchestration_task_id = self._derive_progress_key(
+                workflow_id=workflow_id,
+                step_id=step_id,
+                legacy_orchestration_task_id=legacy_orchestration_task_id,
+                explicit_step_id="step_id" in raw,
+            )
+            if orchestration_task_id in seen_progress_keys:
+                raise ValueError(
+                    f"tasks[{index}] derives duplicate progress key: {orchestration_task_id}"
+                )
+            seen_progress_keys.add(orchestration_task_id)
+            task_run_id = self._optional_str(raw, "task_run_id") or step_id
             desc = self._required_str(raw, "desc", index)
             display_order = raw.get("display_order", index)
             task_payload = {
@@ -138,7 +161,7 @@ class TaskProgressTool(BaseBuiltinTool):
                 "desc": desc,
                 "status": raw.get("status", "pending"),
                 "display_order": display_order,
-                "workflow_id": self._optional_str(raw, "workflow_id"),
+                "workflow_id": workflow_id,
                 "source_status": self._optional_str(raw, "source_status"),
                 "error_message": self._optional_str(raw, "error_message"),
             }
@@ -164,6 +187,13 @@ class TaskProgressTool(BaseBuiltinTool):
             raise ValueError(f"tasks[{index}].{key} must be a non-empty string")
         return value.strip()
 
+    def _required_step_id(self, raw: dict[str, Any], index: int) -> str:
+        """读取 step_id；兼容旧 task_id 字段。"""
+        value = raw.get("step_id", raw.get("task_id"))
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"tasks[{index}].step_id must be a non-empty string")
+        return value.strip()
+
     def _optional_str(self, raw: dict[str, Any], key: str) -> str | None:
         value = raw.get(key)
         if value is None:
@@ -172,6 +202,26 @@ class TaskProgressTool(BaseBuiltinTool):
             raise ValueError(f"{key} must be a string")
         stripped = value.strip()
         return stripped or None
+
+    def _derive_progress_key(
+        self,
+        *,
+        workflow_id: str | None,
+        step_id: str,
+        legacy_orchestration_task_id: str | None,
+        explicit_step_id: bool,
+    ) -> str:
+        """按新合同派生 progress key，并兼容旧 manual key。"""
+        if workflow_id:
+            return f"{workflow_id}:{step_id}"
+        if legacy_orchestration_task_id and legacy_orchestration_task_id.startswith(
+            _WORKFLOW_KEY_PREFIX
+        ):
+            legacy_workflow_id = legacy_orchestration_task_id.split(":", 1)[0]
+            return f"{legacy_workflow_id}:{step_id}"
+        if explicit_step_id or legacy_orchestration_task_id is None:
+            return f"manual:{step_id}"
+        return legacy_orchestration_task_id
 
 
 def build_task_progress_tool(manager: SessionTaskProgressManager) -> TaskProgressTool:
