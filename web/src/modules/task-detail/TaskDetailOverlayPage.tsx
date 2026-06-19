@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import type { ReactNode } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
-import { FileText, Workflow, X } from "lucide-react";
+import { ArrowLeft, FileText, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { WorkflowViewerEmbed } from "@/modules/agent-workflow-viewer";
@@ -45,12 +45,21 @@ export function TaskDetailOverlayPage() {
 
   return (
     <div
-      className="fixed inset-0 z-[60] bg-background/72 backdrop-blur-sm"
+      className="absolute inset-0 z-40 bg-background/72 backdrop-blur-sm"
       data-testid="task-detail-overlay"
     >
-      <div className="flex h-full min-h-0 p-3">
+      <div className="flex h-full min-h-0 p-2 sm:p-3">
         <section className="obsidian-panel-soft flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-xl border border-border/80 bg-background/96 shadow-2xl">
           <aside className="flex w-44 shrink-0 flex-col border-r border-border/70 bg-card/60 p-3">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="mb-3 h-8 w-full justify-start gap-1.5 px-2 text-muted-foreground hover:text-foreground"
+              onClick={() => navigate(`/chat/${threadId}`)}
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              返回对话
+            </Button>
             <div className="mb-4 min-w-0">
               <div className="truncate text-sm font-semibold text-foreground">任务详情</div>
               <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
@@ -71,17 +80,6 @@ export function TaskDetailOverlayPage() {
                 label="Workflows"
               />
             </nav>
-            <div className="mt-auto pt-3">
-              <Button
-                variant="outline"
-                size="sm"
-                className="w-full justify-start gap-1.5"
-                onClick={() => navigate(`/chat/${threadId}`)}
-              >
-                <X className="h-3.5 w-3.5" />
-                关闭
-              </Button>
-            </div>
           </aside>
 
           <main className="flex min-h-0 min-w-0 flex-1 flex-col p-3">
@@ -120,11 +118,12 @@ function TabLink({
   return (
     <Link
       to={to}
+      aria-current={active ? "page" : undefined}
       className={cn(
-        "flex h-9 items-center gap-2 rounded-lg px-2.5 text-sm font-medium transition-colors",
+        "flex h-9 items-center gap-2 rounded-lg border px-2.5 text-sm font-medium transition-colors",
         active
-          ? "bg-primary/12 text-foreground"
-          : "text-muted-foreground hover:bg-secondary/70 hover:text-foreground",
+          ? "border-border/80 bg-secondary/90 text-foreground shadow-sm"
+          : "border-transparent text-muted-foreground hover:border-border/60 hover:bg-secondary/60 hover:text-foreground",
       )}
     >
       {icon}

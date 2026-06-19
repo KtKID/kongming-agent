@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Outlet, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TaskDetailOverlayPage } from "../TaskDetailOverlayPage";
@@ -87,7 +87,13 @@ describe("TaskDetailOverlayPage", () => {
     renderOverlay("/chat/thread-aaaaaaaaaaaa/task-detail");
 
     expect(screen.getByTestId("chat-dom")).toBeInTheDocument();
-    expect(await screen.findByTestId("task-detail-overlay")).toBeInTheDocument();
+    const overlay = await screen.findByTestId("task-detail-overlay");
+    expect(overlay).toHaveClass("absolute");
+    expect(screen.getByRole("button", { name: "返回对话" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "会话内容" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
     expect(await screen.findByText("manifest.json")).toBeInTheDocument();
     expect(await screen.findByText(/run_count/)).toBeInTheDocument();
 
@@ -100,11 +106,27 @@ describe("TaskDetailOverlayPage", () => {
     });
   });
 
+  it("returns to the thread chat without relying on browser history", async () => {
+    renderOverlay("/chat/thread-aaaaaaaaaaaa/task-detail");
+
+    expect(await screen.findByTestId("task-detail-overlay")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "返回对话" }));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("task-detail-overlay")).toBeNull();
+    });
+    expect(screen.getByTestId("chat-dom")).toBeInTheDocument();
+  });
+
   it("deep links agent workflows into the Workflows tab", async () => {
     renderOverlay("/chat/thread-aaaaaaaaaaaa/agent-workflows/wf-review");
 
     expect(screen.getByTestId("chat-dom")).toBeInTheDocument();
     expect(await screen.findByTestId("task-detail-overlay")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Workflows" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
     expect(screen.getByTestId("workflow-embed")).toHaveTextContent(
       "thread-aaaaaaaaaaaa:wf-review",
     );
