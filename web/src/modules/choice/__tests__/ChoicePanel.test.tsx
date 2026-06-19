@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -60,6 +60,8 @@ describe("ChoicePanel", () => {
     await user.click(screen.getByTestId("choice-option-minimal"));
     await user.click(screen.getByTestId("choice-next"));
     await user.click(screen.getByTestId("choice-option-__custom__"));
+    const customOption = screen.getByTestId("choice-option-__custom__");
+    expect(within(customOption).getByTestId("choice-custom-text")).toBeInTheDocument();
     await user.type(screen.getByTestId("choice-custom-text"), "只做 Web。");
     await user.click(screen.getByTestId("choice-confirm"));
 

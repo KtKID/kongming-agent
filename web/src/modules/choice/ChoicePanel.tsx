@@ -106,21 +106,32 @@ export function ChoicePanel({
             {options.map((option) => {
               const selected = answer.optionId === option.id;
               const isCustom = option.id === CUSTOM_CHOICE_OPTION_ID;
+              const selectOption = () => {
+                if (disabled) return;
+                onChange(ChoiceManager.select(state, question.id, option.id));
+              };
               return (
-                <button
+                <div
                   key={option.id}
-                  type="button"
+                  role="button"
+                  tabIndex={disabled ? -1 : 0}
                   className={cn(
                     "w-full rounded-md border p-3 text-left transition-colors",
                     selected
                       ? "border-primary bg-primary/10 text-foreground"
                       : "border-border/70 bg-card/75 text-foreground hover:border-primary/45 hover:bg-primary/5",
+                    disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer",
                   )}
-                  onClick={() =>
-                    onChange(ChoiceManager.select(state, question.id, option.id))
-                  }
-                  disabled={disabled}
+                  onClick={selectOption}
+                  onKeyDown={(event) => {
+                    if (event.target instanceof HTMLTextAreaElement) return;
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      selectOption();
+                    }
+                  }}
                   aria-pressed={selected}
+                  aria-disabled={disabled}
                   data-testid={`choice-option-${option.id}`}
                 >
                   <div className="flex items-start gap-2">
@@ -144,30 +155,29 @@ export function ChoicePanel({
                       </span>
                     </span>
                   </div>
-                </button>
+                  {isCustom && selected ? (
+                    <Textarea
+                      className="mt-3 min-h-20 resize-none bg-card/80 text-sm"
+                      value={answer.customText}
+                      onChange={(event) =>
+                        onChange(
+                          ChoiceManager.setCustomText(
+                            state,
+                            question.id,
+                            event.target.value,
+                          ),
+                        )
+                      }
+                      disabled={disabled}
+                      placeholder="输入你的选择"
+                      aria-label="自定义选择"
+                      data-testid="choice-custom-text"
+                    />
+                  ) : null}
+                </div>
               );
             })}
           </div>
-
-          {answer.optionId === CUSTOM_CHOICE_OPTION_ID ? (
-            <Textarea
-              className="mt-2 min-h-20 resize-none bg-card/80 text-sm"
-              value={answer.customText}
-              onChange={(event) =>
-                onChange(
-                  ChoiceManager.setCustomText(
-                    state,
-                    question.id,
-                    event.target.value,
-                  ),
-                )
-              }
-              disabled={disabled}
-              placeholder="输入你的选择"
-              aria-label="自定义选择"
-              data-testid="choice-custom-text"
-            />
-          ) : null}
         </div>
 
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
