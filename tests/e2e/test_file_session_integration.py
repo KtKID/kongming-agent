@@ -184,10 +184,16 @@ class TestTC13AssistantUsagePersisted:
         assert result.status == "completed"
         jsonl_path = Path(store_path) / "usage-test" / "usage-test.jsonl"
         records = [json.loads(line) for line in jsonl_path.read_text(encoding="utf-8").splitlines()]
-        assistant_record = records[-1]
+        message_records = [
+            record for record in records if record.get("record_type", "message") == "message"
+        ]
+        audit_records = [record for record in records if record.get("record_type") == "audit_event"]
+        assistant_record = message_records[-1]
         assert assistant_record["message"]["role"] == "assistant"
         assert assistant_record["usage"] == {
             "prompt_tokens": 12,
             "completion_tokens": 7,
             "total_tokens": 19,
         }
+        assert any(record["kind"] == "llm.request" for record in audit_records)
+        assert any(record["kind"] == "llm.response" for record in audit_records)

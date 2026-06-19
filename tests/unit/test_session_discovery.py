@@ -119,6 +119,29 @@ def test_find_session_by_id_and_most_recent(tmp_path: Path) -> None:
     assert find_session_by_id(summaries, "missing") is None
 
 
+def test_discover_file_sessions_skips_audit_events_in_message_count(tmp_path: Path) -> None:
+    _write_file_session(
+        tmp_path,
+        "audit",
+        [
+            _record("user", "question", created_at=10.0),
+            {
+                "record_type": "audit_event",
+                "created_at": 20.0,
+                "kind": "llm.request",
+                "payload": {"request": {"model": "m"}},
+            },
+            _record("assistant", "answer", created_at=30.0),
+        ],
+    )
+
+    summaries = discover_file_sessions(tmp_path)
+
+    assert summaries[0].message_count == 2
+    assert summaries[0].updated_at == 30.0
+    assert summaries[0].preview == "question"
+
+
 def _write_file_session(root: Path, session_id: str, records: list[dict]) -> None:
     session_dir = root / session_id
     session_dir.mkdir(parents=True)
