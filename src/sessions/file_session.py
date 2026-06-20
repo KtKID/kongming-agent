@@ -216,6 +216,7 @@ class FileSession:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, self._manifest_path)
+        _fsync_directory(self._session_dir)
 
     def _write_system_prompt_snapshot(self) -> None:
         """把最终 system prompt 写入 thread 级快照文件。"""
@@ -250,14 +251,17 @@ class FileSession:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, self._system_prompt_path)
+            os.chmod(self._system_prompt_path, _SYSTEM_PROMPT_FILE_MODE)
+            _fsync_directory(self._session_dir)
             actual_mode = stat.S_IMODE(self._system_prompt_path.stat().st_mode)
             if actual_mode & _GROUP_OTHER_MODE:
                 raise PermissionError(
                     f"system_prompt.json must not be group/world accessible: {oct(actual_mode)}"
                 )
-        except Exception:
+        except BaseException:
             if fd >= 0:
-                os.close(fd)
+                with suppress(OSError):
+                    os.close(fd)
             # 只清理失败写入留下的临时文件；权限校验失败本身会继续抛出。
             with suppress(OSError):
                 tmp_path.unlink()
@@ -310,6 +314,8 @@ class FileSession:
             self._last_message_id = last_id
 
         self._materialized = True
+        if not self._system_prompt_path.exists():
+            self._write_system_prompt_snapshot()
 
     # ------------------------------------------------------------------
     # validate
@@ -374,3 +380,15 @@ class ValidationResult:
         if self.valid:
             return "ValidationResult(valid=True)"
         return f"ValidationResult(valid=False, errors={self.errors!r})"
+
+
+def _fsync_directory(path: Path) -> None:
+    """同步目录项，确保 atomic replace 后文件名持久化。"""
+    try:
+        dir_fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)

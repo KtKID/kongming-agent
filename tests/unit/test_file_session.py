@@ -514,6 +514,20 @@ class TestAdvanceRunIndex:
         fs2 = _make_session(store_path=store_path)
         assert await fs2.advance_run_index() == 3
 
+    async def test_recover_backfills_missing_system_prompt_snapshot(self, store_path: str) -> None:
+        fs1 = _make_session(store_path=store_path)
+        await fs1.append(Message.user("seed"))
+
+        snapshot_path = Path(store_path) / "test-session" / "system_prompt.json"
+        snapshot_path.unlink()
+
+        _make_session(store_path=store_path)
+
+        with open(snapshot_path) as f:
+            snapshot = json.load(f)
+        assert snapshot["record_type"] == "system_prompt"
+        assert snapshot["content"] == "# system\nYou are test."
+
     async def test_legacy_manifest_without_run_count_falls_back_to_zero(
         self, store_path: str
     ) -> None:
