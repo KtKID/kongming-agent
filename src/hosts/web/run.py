@@ -672,8 +672,10 @@ def _make_runtime_factory(cfg: object) -> object:
 
     assert isinstance(cfg, Config)
     real_cfg: Config = cfg
-    preset_map: dict[str, LLMPresetConfig] = {p.id: p for p in real_cfg.web.llm_presets}
     home = get_kongming_home()
+
+    def _current_preset_map() -> dict[str, LLMPresetConfig]:
+        return {p.id: p for p in real_cfg.web.llm_presets}
 
     _registry_cache: list[ToolRegistry | None] = [None]
     _enabled_tools_cache: list[list[str] | None] = [None]
@@ -753,7 +755,7 @@ def _make_runtime_factory(cfg: object) -> object:
                     enabled_tool_names=enabled_tool_names,
                     instructions=_instructions_cache[0],
                     dispatcher=cron_dispatcher,
-                    preset_map=preset_map,
+                    preset_map=_current_preset_map(),
                 )
 
             register_schedule_tool_if_enabled(
@@ -797,7 +799,7 @@ def _make_runtime_factory(cfg: object) -> object:
     ) -> tuple[Any, Any]:
         from infrastructure.config.paths import resolve_kongming_path
 
-        preset = preset_map.get(preset_id)
+        preset = _current_preset_map().get(preset_id)
         if preset is None:
             raise ValueError(f"unknown preset_id: {preset_id!r}")
 

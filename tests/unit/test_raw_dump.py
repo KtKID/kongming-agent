@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,32 @@ def test_dump_enabled_writes_full_record(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert record["response"]["body"]["id"] == "call_-7695903923470590663"
     assert record["response"]["body"]["usage"]["total_tokens"] == 12
     assert record["error"] is None
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows uses ACLs instead of POSIX modes")
+def test_dump_enforces_private_file_and_directory_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """raw dump 目录必须是 0700，文件必须是 0600。"""
+    monkeypatch.setenv("KONGMING_TRACE_RAW_LLM", "1")
+
+    dump_dir = tmp_path / "debug"
+    path = dump_raw_llm_interaction(
+        provider="openai_responses",
+        url="https://example.com",
+        request_payload={},
+        request_headers={},
+        response_status=200,
+        response_headers={},
+        response_body={},
+        dump_dir=dump_dir,
+    )
+
+    assert path is not None
+    assert dump_dir.stat().st_mode & 0o777 == 0o700
+    assert path.stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.unit

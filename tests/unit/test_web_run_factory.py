@@ -231,6 +231,42 @@ class TestModelConfigOverride:
         assert preset_cfg.model.reasoning_effort == "high"
 
     @pytest.mark.asyncio
+    async def test_glm_preset_reads_provider_specific_key(self, test_cfg, mock_adapter, mock_deps):
+        from hosts.web.run import _make_runtime_factory
+        from infrastructure.config.models import LLMPresetConfig
+
+        glm_preset = LLMPresetConfig(
+            id="bigmodel-glm5",
+            display_name="智谱 GLM-5.1",
+            provider="openai_compatible",
+            base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+            model="glm-5.1",
+            api_key_env="GLM_API_KEY",
+            reasoning_effort="high",
+        )
+        test_cfg.web = test_cfg.web.model_copy(
+            update={"llm_presets": [*test_cfg.web.llm_presets, glm_preset]}
+        )
+
+        factory = _make_runtime_factory(test_cfg)
+        with patch.dict(
+            os.environ,
+            {
+                "KONGMING_MODEL_API_KEY": "generic-key",
+                "GLM_API_KEY": "glm-key",
+            },
+        ):
+            await factory("thread-glm", "bigmodel-glm5", mock_adapter, [])
+
+        call_kwargs = mock_deps["NativeRuntime"].build.call_args
+        preset_cfg = call_kwargs[0][0]
+
+        assert preset_cfg.model.name == "glm-5.1"
+        assert preset_cfg.model.base_url == "https://open.bigmodel.cn/api/coding/paas/v4"
+        assert preset_cfg.model.api_key == "glm-key"
+        assert preset_cfg.model.provider == "openai_compatible"
+
+    @pytest.mark.asyncio
     async def test_missing_env_key_gives_empty(self, test_cfg, mock_adapter, mock_deps):
         from hosts.web.run import _make_runtime_factory
 
@@ -242,6 +278,63 @@ class TestModelConfigOverride:
         call_kwargs = mock_deps["NativeRuntime"].build.call_args
         preset_cfg = call_kwargs[0][0]
         assert preset_cfg.model.api_key == ""
+
+    @pytest.mark.asyncio
+    async def test_factory_reads_presets_added_after_factory_creation(
+        self, test_cfg, mock_adapter, mock_deps
+    ):
+        from hosts.web.run import _make_runtime_factory
+        from infrastructure.config.models import LLMPresetConfig
+
+        factory = _make_runtime_factory(test_cfg)
+        dynamic_preset = LLMPresetConfig(
+            id="dynamic-glm",
+            display_name="动态 GLM",
+            provider="openai_compatible",
+            base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+            model="glm-5.1",
+            api_key_env="GLM_API_KEY",
+        )
+        test_cfg.web = test_cfg.web.model_copy(
+            update={"llm_presets": [*test_cfg.web.llm_presets, dynamic_preset]}
+        )
+
+        with patch.dict(os.environ, {"GLM_API_KEY": "glm-key"}):
+            await factory("thread-dynamic", "dynamic-glm", mock_adapter, [])
+
+        call_kwargs = mock_deps["NativeRuntime"].build.call_args
+        preset_cfg = call_kwargs[0][0]
+        assert preset_cfg.model.name == "glm-5.1"
+        assert preset_cfg.model.api_key == "glm-key"
+
+
+class TestProviderFactoryPresetOverride:
+    """provider_factory 与 Web runtime 使用同一 preset key 语义。"""
+
+    def test_apply_preset_reads_preset_api_key_env(self, test_cfg):
+        from infrastructure.config.models import LLMPresetConfig
+        from infrastructure.llm_providers.provider_factory import apply_preset
+
+        preset = LLMPresetConfig(
+            id="bigmodel-glm5",
+            display_name="智谱 GLM-5.1",
+            provider="openai_compatible",
+            base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+            model="glm-5.1",
+            api_key_env="GLM_API_KEY",
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "KONGMING_MODEL_API_KEY": "generic-key",
+                "GLM_API_KEY": "glm-key",
+            },
+        ):
+            preset_cfg = apply_preset(test_cfg, preset)
+
+        assert preset_cfg.model.name == "glm-5.1"
+        assert preset_cfg.model.api_key == "glm-key"
+        assert preset_cfg.model.provider == "openai_compatible"
 
 
 class TestApprovalWiring:

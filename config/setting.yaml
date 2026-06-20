@@ -575,7 +575,7 @@ web:
     display_name: "智谱 GLM-5.1"
     base_url: https://open.bigmodel.cn/api/coding/paas/v4
     model: glm-5.1
-    api_key_env: KONGMING_MODEL_API_KEY
+    api_key_env: GLM_API_KEY
     reasoning_effort: high
   - id: minimax-m3
     display_name: "MiniMax M3"
