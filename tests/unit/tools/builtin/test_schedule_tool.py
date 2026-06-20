@@ -44,8 +44,31 @@ def _thread_ctx() -> ToolContext:
 
 def _make_tool(tmp_path: Path) -> tuple[ScheduleTool, Store]:
     store = Store(home_dir=tmp_path / "cron")
-    tool = build_schedule_tool(store)
+    tool = build_schedule_tool(store, thread_provisioner=_FakeThreadProvisioner())
     return tool, store
+
+
+class _FakeThreadProvisioner:
+    """测试用 thread provisioner：给 schedule tool 注入专属 thread 创建能力。"""
+
+    def __init__(self, thread_id: str = "thread-dddddddddddd") -> None:
+        self.thread_id = thread_id
+        self.created: list[dict[str, str]] = []
+        self.deleted: list[str] = []
+
+    async def create_scheduled_task_thread(
+        self,
+        *,
+        task_id: str,
+        name: str,
+        preset_id: str,
+        cwd: str = "",
+    ) -> str:
+        self.created.append({"task_id": task_id, "name": name, "preset_id": preset_id, "cwd": cwd})
+        return self.thread_id
+
+    async def delete_thread(self, thread_id: str, *, keep_history: bool = False) -> None:
+        self.deleted.append(f"{thread_id}:{keep_history}")
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +77,24 @@ def _make_tool(tmp_path: Path) -> tuple[ScheduleTool, Store]:
 
 
 class TestScheduleToolCreate:
+    async def test_create_requires_thread_provisioner(self, tmp_path: Path) -> None:
+        store = Store(home_dir=tmp_path / "cron")
+        tool = build_schedule_tool(store)
+
+        result = await tool.execute(
+            {
+                "action": "create",
+                "name": "missing provisioner",
+                "schedule": "every 10s",
+                "input": "x",
+            },
+            _ctx(),
+        )
+
+        assert result.ok is False
+        assert result.error_message == "thread_provisioner_required"
+        assert store.list_tasks() == []
+
     async def test_create_every_seconds_succeeds(self, tmp_path: Path) -> None:
         tool, store = _make_tool(tmp_path)
         r: ToolResult = await tool.execute(
@@ -101,10 +142,13 @@ class TestScheduleToolCreate:
         self, tmp_path: Path
     ) -> None:
         store = Store(home_dir=tmp_path / "cron")
+        provisioner = _FakeThreadProvisioner("thread-eeeeeeeeeeee")
         tool = build_schedule_tool(
             store,
             default_timezone="Asia/Shanghai",
             default_delivery_channel="web",
+            default_preset_id="preset-default",
+            thread_provisioner=provisioner,
         )
 
         result = await tool.execute(
@@ -129,8 +173,12 @@ class TestScheduleToolCreate:
         assert task.trigger.timezone == "Asia/Shanghai"
         assert task.delivery is not None
         assert task.delivery.channel.value == "web"
-        assert task.delivery.target == "thread:thread-cc29272b9a9b"
+        assert task.delivery.target == "thread:thread-eeeeeeeeeeee"
+        assert task.thread_id == "thread-eeeeeeeeeeee"
+        assert result.data["thread_id"] == "thread-eeeeeeeeeeee"
         assert task.created_by == "agent:thread-cc29272b9a9b"
+        assert provisioner.created[0]["task_id"] == task_id
+        assert provisioner.created[0]["preset_id"] == "preset-default"
 
         raw = json.loads((tmp_path / "cron" / "scheduled_tasks.json").read_text(encoding="utf-8"))
         persisted = raw["tasks"][0]
@@ -139,8 +187,9 @@ class TestScheduleToolCreate:
         assert persisted["trigger"]["expr"] == "12 10 * * *"
         assert persisted["trigger"]["timezone"] == "Asia/Shanghai"
         assert persisted["delivery"]["channel"] == "web"
-        assert persisted["delivery"]["target"] == "thread:thread-cc29272b9a9b"
+        assert persisted["delivery"]["target"] == "thread:thread-eeeeeeeeeeee"
         assert persisted["created_by"] == "agent:thread-cc29272b9a9b"
+        assert persisted["thread_id"] == "thread-eeeeeeeeeeee"
 
     async def test_create_once_in_past_returns_error_and_persists_nothing(
         self, tmp_path: Path
@@ -448,7 +497,11 @@ class TestScheduleToolRunNow:
         def factory(_: Store) -> tuple[Any, Any]:
             return _StubRuntime(), _StubBridge()
 
-        tool = build_schedule_tool(store, runtime_factory_fn=factory)
+        tool = build_schedule_tool(
+            store,
+            runtime_factory_fn=factory,
+            thread_provisioner=_FakeThreadProvisioner(),
+        )
         r = await tool.execute({"action": "run_now", "task_id": "task-nosuch"}, _ctx())
         assert r.ok is False
         assert r.error_message == "task_not_found"
@@ -462,7 +515,11 @@ class TestScheduleToolRunNow:
             assert s is store
             return stub_runtime, stub_bridge
 
-        tool = build_schedule_tool(store, runtime_factory_fn=factory)
+        tool = build_schedule_tool(
+            store,
+            runtime_factory_fn=factory,
+            thread_provisioner=_FakeThreadProvisioner(),
+        )
         # 先 create
         create = await tool.execute(
             {"action": "create", "name": "n", "schedule": "every 10s", "input": "x"},
@@ -497,7 +554,11 @@ class TestScheduleToolRunNow:
         def factory(_: Store) -> tuple[Any, Any]:
             return stub_runtime, _ExplodingBridge()
 
-        tool = build_schedule_tool(store, runtime_factory_fn=factory)
+        tool = build_schedule_tool(
+            store,
+            runtime_factory_fn=factory,
+            thread_provisioner=_FakeThreadProvisioner(),
+        )
         create = await tool.execute(
             {"action": "create", "name": "n", "schedule": "every 10s", "input": "x"},
             _ctx(),

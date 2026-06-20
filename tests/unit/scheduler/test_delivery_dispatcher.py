@@ -67,6 +67,17 @@ class _RaisingSink(DeliverySink):
         raise self._error
 
 
+class _TargetSink:
+    """记录 target 定向投递调用。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+
+    async def deliver_to_target(self, target: str, task_name: str, message: str) -> bool:
+        self.calls.append((target, task_name, message))
+        return True
+
+
 def _make_task(
     *,
     task_id: str = "t-disp",
@@ -302,6 +313,22 @@ async def test_dispatcher_routes_to_web_sink():
     assert sink_task is task
     assert sink_run is run
     assert sink_msg == "hi via web"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_broadcast_only_skips_target_sink_when_target_is_none():
+    """同 thread delivery 已由 bridge 清空 target：保留 Web 广播，跳过 target sink。"""
+    web_sink = _StubSink()
+    target_sink = _TargetSink()
+    dispatcher = DeliveryDispatcher(web_sink=web_sink, target_sink=target_sink)
+
+    task = _make_task(delivery=ScheduleDelivery(channel=DeliveryChannel.WEB, target=None))
+    run = _make_run()
+    result = await dispatcher.deliver(task, run, "thread-visible result")
+
+    assert result.status is DeliveryStatus.DELIVERED
+    assert len(web_sink.calls) == 1
+    assert target_sink.calls == []
 
 
 @pytest.mark.asyncio

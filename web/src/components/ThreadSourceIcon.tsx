@@ -1,11 +1,11 @@
-import { MessageSquare } from "lucide-react";
-import type { BackendKind } from "@/protocol";
+import { Clock, MessageSquare, type LucideIcon } from "lucide-react";
+import type { BackendKind, ThreadKind } from "@/protocol";
 import { cn } from "@/lib/utils";
 
 type SourceVisual = {
   label: string;
   imageSrc?: string;
-  icon?: typeof MessageSquare;
+  icon?: LucideIcon;
 };
 
 const SOURCE_VISUALS: Record<BackendKind, SourceVisual> = {
@@ -16,9 +16,13 @@ const SOURCE_VISUALS: Record<BackendKind, SourceVisual> = {
 
 export function resolveThreadSourceVisual(input: {
   backendKind?: BackendKind;
+  threadKind?: ThreadKind;
   claudeThreadId?: string;
   codexThreadId?: string;
 }): SourceVisual {
+  if (input.threadKind === "scheduled_task") {
+    return { label: "定时任务", icon: Clock };
+  }
   if (input.claudeThreadId?.trim()) return SOURCE_VISUALS.claude_code;
   if (input.codexThreadId?.trim()) return SOURCE_VISUALS.codex;
   return SOURCE_VISUALS[input.backendKind ?? "generic_chat"];
@@ -26,6 +30,7 @@ export function resolveThreadSourceVisual(input: {
 
 interface ThreadSourceIconProps {
   backendKind?: BackendKind;
+  threadKind?: ThreadKind;
   claudeThreadId?: string;
   codexThreadId?: string;
   active?: boolean;
@@ -33,12 +38,14 @@ interface ThreadSourceIconProps {
 
 export function ThreadSourceIcon({
   backendKind,
+  threadKind,
   claudeThreadId,
   codexThreadId,
   active = false,
 }: ThreadSourceIconProps) {
   const source = resolveThreadSourceVisual({
     backendKind,
+    threadKind,
     claudeThreadId,
     codexThreadId,
   });

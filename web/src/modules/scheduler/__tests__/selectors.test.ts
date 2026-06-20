@@ -25,6 +25,7 @@ function makeTask(
     lastRunAt: null,
     timezone: "Asia/Shanghai",
     presetId: "default",
+    threadId: "",
     createdBy: "test",
     inputText: "",
     agentName: "default",

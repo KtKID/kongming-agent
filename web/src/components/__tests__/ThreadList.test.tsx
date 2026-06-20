@@ -179,6 +179,74 @@ describe("ThreadList", () => {
     expect(claudeBadge.querySelector("img")).toHaveAttribute("src", "/brand/claude-app-icon.png");
   });
 
+  it("按 thread_kind 分成普通聊天和定时任务分组，并可打开定时任务历史", async () => {
+    const user = userEvent.setup();
+    useThreadsStore.setState({
+      threads: [
+        {
+          id: "thread-aaaaaaaaaaaa",
+          name: "普通会话",
+          preset_id: "p1",
+          backend_kind: "generic_chat",
+          claude_thread_id: "",
+          codex_thread_id: "",
+          cwd: "",
+          created_at: 1,
+          updated_at: 100,
+          message_count: 0,
+          is_pinned: false,
+          is_archived: false,
+          thread_kind: "chat",
+          source_kind: "",
+          source_id: "",
+          schema_version: 11,
+        },
+        {
+          id: "thread-bbbbbbbbbbbb",
+          name: "每天早报",
+          preset_id: "p1",
+          backend_kind: "generic_chat",
+          claude_thread_id: "",
+          codex_thread_id: "",
+          cwd: "",
+          created_at: 1,
+          updated_at: 90,
+          message_count: 0,
+          is_pinned: false,
+          is_archived: false,
+          thread_kind: "scheduled_task",
+          source_kind: "scheduled_task",
+          source_id: "task-1",
+          schema_version: 11,
+        },
+      ],
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/chat"]}>
+        <Routes>
+          <Route path="/chat" element={<ThreadList />} />
+          <Route
+            path="/chat/:thread_id"
+            element={<div data-testid="chat-target" />}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("region", { name: "普通聊天" })).toHaveTextContent(
+      "普通会话",
+    );
+    expect(screen.getByRole("region", { name: "定时任务" })).toHaveTextContent(
+      "每天早报",
+    );
+    expect(screen.getByLabelText("定时任务 会话")).toBeInTheDocument();
+
+    await user.click(screen.getByText("每天早报"));
+
+    expect(screen.getByTestId("chat-target")).toBeInTheDocument();
+  });
+
   it("点击新建对话进入 generic pending 空白页状态", async () => {
     const user = userEvent.setup();
     render(

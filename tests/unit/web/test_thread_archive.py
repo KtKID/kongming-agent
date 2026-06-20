@@ -4,7 +4,7 @@
 覆盖：
 
 1. ``ThreadManager.set_archived(tid, True)`` 写盘后 ``read_thread_metadata``
-   读出 ``is_archived=True`` + ``schema_version=10``。
+   读出 ``is_archived=True`` + ``schema_version=11``。
 2. ``set_archived(tid, False)`` 反向往返还原。
 3. ``set_archived`` 对不存在 thread_id 抛 ``KeyError``。
 4. ``set_archived`` 后已 boot cell 的 ``cell.metadata`` 同步更新。
@@ -57,7 +57,7 @@ async def _fake_factory(tid: str, pid: str, adapter: Any, sinks: list[Any]) -> t
 
 @pytest.mark.asyncio
 async def test_set_archived_true_roundtrip(tmp_path: Path) -> None:
-    """set_archived(tid, True) 写盘后 read 拿到 is_archived=True + schema v10。"""
+    """set_archived(tid, True) 写盘后 read 拿到 is_archived=True + schema v11。"""
     from hosts.web.threads.manager import ThreadManager
 
     cfg = _make_cfg()
@@ -69,13 +69,13 @@ async def test_set_archived_true_roundtrip(tmp_path: Path) -> None:
     assert updated.is_archived is True
     assert updated.id == meta.id
     assert updated.name == meta.name
-    assert updated.schema_version == 10
+    assert updated.schema_version == 11
 
     # 重新读盘确认持久化
     on_disk = read_thread_metadata(tmp_path, meta.id)
     assert on_disk is not None
     assert on_disk.is_archived is True
-    assert on_disk.schema_version == 10
+    assert on_disk.schema_version == 11
 
 
 @pytest.mark.asyncio
@@ -223,7 +223,7 @@ def test_patch_thread_is_archived_true_returns_dto(tmp_path: Path) -> None:
         body = resp.json()
         assert body["id"] == thread_id
         assert body["is_archived"] is True
-        assert body["schema_version"] == 10
+        assert body["schema_version"] == 11
     finally:
         client.__exit__(None, None, None)
 

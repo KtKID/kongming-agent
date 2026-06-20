@@ -726,14 +726,19 @@ def _make_runtime_factory(cfg: object) -> object:
                 role_dir=home / "agent_roles",
             )
 
+            app_ref = getattr(factory, "_app", None)
+            thread_manager = getattr(getattr(app_ref, "state", None), "thread_manager", None)
             cron_dispatcher = None
             if real_cfg.scheduler.enabled:
-                from hosts.web.app_support.cron_delivery import WebDeliverySink
+                from hosts.web.app_support.cron_delivery import ThreadTargetSink, WebDeliverySink
                 from hosts.web.websocket.cron import get_broker
                 from scheduler.delivery import DeliveryDispatcher
 
                 cron_dispatcher = DeliveryDispatcher(
                     web_sink=WebDeliverySink(get_broker()),
+                    target_sink=ThreadTargetSink(thread_manager)
+                    if thread_manager is not None
+                    else None,
                 )
 
             def _scheduler_runtime_factory(store):  # type: ignore[no-untyped-def]
@@ -754,6 +759,8 @@ def _make_runtime_factory(cfg: object) -> object:
                 registry,
                 real_cfg,
                 runtime_factory_fn=_scheduler_runtime_factory,
+                default_preset_id=next(iter(preset_map), ""),
+                thread_provisioner=thread_manager,
             )
             register_evolution_write_tool_if_enabled(
                 registry,

@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,7 @@ CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 class _FakeTM:
     def __init__(self) -> None:
         self._threads: dict[str, ThreadMetadata] = {}
+        self.deleted_threads: list[str] = []
 
     @property
     def started(self) -> bool:
@@ -89,6 +91,36 @@ class _FakeTM:
 
     def resolve_approval(self, thread_id: str, call_id: str, approved: bool) -> None:
         return None
+
+    async def create_scheduled_task_thread(
+        self,
+        *,
+        task_id: str,
+        name: str,
+        preset_id: str,
+        cwd: str = "",
+    ) -> str:
+        del cwd
+        thread_id = f"thread-{len(self._threads) + 1:012x}"
+        now = time.time()
+        self._threads[thread_id] = ThreadMetadata(
+            id=thread_id,
+            name=name or task_id,
+            preset_id=preset_id,
+            backend_kind="generic_chat",
+            thread_kind="scheduled_task",
+            source_kind="scheduled_task",
+            source_id=task_id,
+            created_at=now,
+            updated_at=now,
+            message_count=0,
+        )
+        return thread_id
+
+    async def delete_thread(self, thread_id: str, *, keep_history: bool = False) -> None:
+        del keep_history
+        self.deleted_threads.append(thread_id)
+        self._threads.pop(thread_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +255,14 @@ def _make_cfg() -> Config:
             "web": {
                 "enabled": True,
                 "dev_mode": True,
+                "llm_presets": [
+                    {
+                        "id": "preset-default",
+                        "display_name": "Default",
+                        "base_url": "http://127.0.0.1:1234/v1",
+                        "model": "fake",
+                    }
+                ],
             },
             "scheduler": {
                 # 关闭真实 ticker；store 由测试手动挂入
@@ -309,6 +349,7 @@ def test_list_cron_tasks_includes_disabled(tmp_path: Path) -> None:
         assert alive["state"] == "scheduled"
         assert alive["trigger_type"] == "interval"
         assert alive["trigger_expr"] == "10"
+        assert alive["thread_id"] == ""
         assert alive["preset_id"] == "preset-default"
         # disabled 也要返
         dead = next(it for it in items if it["task_id"] == "dead")

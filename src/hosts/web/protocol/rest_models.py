@@ -319,6 +319,9 @@ class ThreadMetadataDTO(_FrameBase):
     name: Annotated[str, Field(max_length=200)]
     preset_id: str
     backend_kind: Literal["generic_chat", "claude_code", "codex"] = "generic_chat"
+    thread_kind: Literal["chat", "scheduled_task"] = "chat"
+    source_kind: str = ""
+    source_id: str = ""
     claude_thread_id: str = ""
     codex_thread_id: str = ""
     cwd: str = ""
@@ -330,7 +333,7 @@ class ThreadMetadataDTO(_FrameBase):
     # ``get_thread_usage`` 派生结果。
     is_pinned: bool = False
     is_archived: bool = False
-    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10] = 10
+    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] = 11
 
 
 class CreateGenericThreadFromFirstMessageResponse(_FrameBase):
