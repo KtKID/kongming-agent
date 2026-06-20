@@ -6,8 +6,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from core.contracts import Event
 from hosts.web.websocket.thread_status import (
     ThreadStatusBroadcaster,
+    ThreadStatusEventSink,
+    get_broadcaster,
     reset_broadcaster_for_testing,
 )
 
@@ -168,6 +171,78 @@ async def test_emit_missing_frame_type_does_nothing() -> None:
     await b.emit(THREAD_ID, {})
 
     ws.send_json.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# EventSink: Runner event → phase 映射
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_event_sink_run_cancelled_maps_to_idle_after_running_phase() -> None:
+    b = get_broadcaster()
+    ws = _make_ws()
+    await b.attach(ws)
+    sink = ThreadStatusEventSink(THREAD_ID)
+
+    await sink.emit(
+        Event(
+            kind="tool.call.start",
+            run_id="run-1",
+            turn=3,
+            payload={"tool_name": "run_shell"},
+        )
+    )
+    await sink.emit(
+        Event(
+            kind="run.cancelled",
+            run_id="run-1",
+            turn=3,
+            payload={
+                "cancelled_at_turn": 3,
+                "cancelled_tool_call_id": "call-1",
+                "cancel_reason": "user_interrupt",
+            },
+        )
+    )
+
+    phases = [call.args[0]["phase"] for call in ws.send_json.call_args_list]
+    assert phases == ["tool_calling", "idle"]
+    assert ws.send_json.call_args_list[0].args[0]["toolName"] == "run_shell"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "phase"),
+    [
+        ("completed", "complete"),
+        ("cancelled", "idle"),
+        ("failed", "error"),
+    ],
+)
+async def test_event_sink_run_end_status_maps_to_terminal_phase(
+    status: str,
+    phase: str,
+) -> None:
+    b = get_broadcaster()
+    ws = _make_ws()
+    await b.attach(ws)
+    sink = ThreadStatusEventSink(THREAD_ID)
+
+    await sink.emit(
+        Event(
+            kind="run.end",
+            run_id="run-1",
+            turn=3,
+            payload={"status": status, "turn_count": 3},
+        )
+    )
+
+    ws.send_json.assert_called_once()
+    frame = ws.send_json.call_args[0][0]
+    assert frame["frame_type"] == "thread-status"
+    assert frame["threadId"] == THREAD_ID
+    assert frame["phase"] == phase
 
 
 # ---------------------------------------------------------------------------
