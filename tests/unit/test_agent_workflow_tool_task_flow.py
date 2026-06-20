@@ -22,15 +22,16 @@ from tools.agent_workflow_tool import (
 )
 
 
-def test_run_agent_workflow_schema_exposes_task_flow_mode_and_payload_fields() -> None:
-    """验证 tool schema，输入为默认 tool，输出为 task_flow mode 和 payload 字段断言。"""
+def test_run_agent_workflow_schema_exposes_task_flow_payload_fields() -> None:
+    """验证 tool schema，输入为默认 tool，输出为开放 mode 和 task_flow payload 字段断言。"""
     tool = build_run_agent_workflow_tool(AgentWorkflowHandle())
 
     mode_schema = tool.input_schema["properties"]["mode"]
     payload_schema = tool.input_schema["properties"]["payload"]
     payload_properties = payload_schema["properties"]
 
-    assert "task_flow" in mode_schema["enum"]
+    assert mode_schema["type"] == "string"
+    assert "enum" not in mode_schema
     assert {"objective", "planning", "plan", "execution"}.issubset(payload_properties)
     assert payload_properties["plan"]["properties"]["nodes"]["items"]["required"] == ["title"]
 

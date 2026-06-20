@@ -138,25 +138,20 @@ async def test_returns_combined_three_sections_by_default(tmp_path: Path) -> Non
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_tools_template_mentions_workflow_tools(tmp_path: Path) -> None:
-    """TOOLS 模板应明确提示 workflow、角色工具和 map_reduce 入口。"""
+async def test_tools_template_omits_workflow_guidance(tmp_path: Path) -> None:
+    """TOOLS 模板保持精简，把 workflow 细节交给工具 schema 承载。"""
     await materialize_and_load_prompts(tmp_path)
 
     tools_text = read_section_text(tmp_path / "prompts", "TOOLS.md")
 
-    assert "run_agent_workflow" in tools_text
-    assert "run_parallel_subagents" in tools_text
-    assert "list_agent_roles" in tools_text
-    assert "create_agent_role" in tools_text
-    assert "participants.select" in tools_text
-    assert 'mode="map_reduce"' in tools_text
-    assert "并行子任务" in tools_text
-    assert "Map-Reduce 代码分析" in tools_text
-    assert "多 Agent 圆桌评审" in tools_text
-    assert "Deep Research 研究工作流" in tools_text
-    assert "任务流 Task Flow" in tools_text
-    assert "desc" in tools_text
-    assert "tools schema" in tools_text
+    assert "Workflow 编排" not in tools_text
+    assert "Workflow 策略目录" not in tools_text
+    assert "run_agent_workflow" not in tools_text
+    assert "run_parallel_subagents" not in tools_text
+    assert "list_agent_roles" not in tools_text
+    assert "create_agent_role" not in tools_text
+    assert "participants.select" not in tools_text
+    assert 'mode="map_reduce"' not in tools_text
 
 
 @pytest.mark.unit

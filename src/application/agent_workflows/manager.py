@@ -249,6 +249,20 @@ class AgentWorkflowManager:
         _register_default_workflow_strategies(strategy_manager, _CatalogOnlyWorkflowFacade())
         return strategy_manager.list_strategies()
 
+    @classmethod
+    def list_default_workflow_strategy_descriptions(
+        cls,
+    ) -> tuple[WorkflowStrategyDescription, ...]:
+        """列出默认 workflow 策略详情，输入为空，输出为 prompt catalog 可复用的说明列表。"""
+        strategy_manager = AgentWorkflowStrategyManager(
+            context_factory=_catalog_only_workflow_context
+        )
+        _register_default_workflow_strategies(strategy_manager, _CatalogOnlyWorkflowFacade())
+        return tuple(
+            strategy_manager.describe_strategy(entry.mode)
+            for entry in strategy_manager.list_strategies()
+        )
+
     @property
     def workspace_root(self) -> Path:
         """返回 workflow 运行的工作区根目录，输入为 manager 状态，输出为绝对路径。"""

@@ -22,15 +22,16 @@ from tools.agent_workflow_tool import (
 )
 
 
-def test_run_agent_workflow_schema_exposes_deep_research_mode_and_payload_fields() -> None:
-    """验证 tool schema，输入为默认 tool，输出为 deep_research mode 和 payload 字段断言。"""
+def test_run_agent_workflow_schema_exposes_deep_research_payload_fields() -> None:
+    """验证 tool schema，输入为默认 tool，输出为开放 mode 和 deep_research payload 字段断言。"""
     tool = build_run_agent_workflow_tool(AgentWorkflowHandle())
 
     mode_schema = tool.input_schema["properties"]["mode"]
     payload_schema = tool.input_schema["properties"]["payload"]
     payload_properties = payload_schema["properties"]
 
-    assert "deep_research" in mode_schema["enum"]
+    assert mode_schema["type"] == "string"
+    assert "enum" not in mode_schema
     assert {"topic", "objective", "limits", "source_policy", "output_contract"}.issubset(
         payload_properties
     )
