@@ -395,6 +395,39 @@ class TestSessionBridge:
         )
 
 
+class TestSessionFactoryBootstrap:
+    """Verify web session bootstrap includes the rendered instruction snapshot."""
+
+    @pytest.mark.asyncio
+    async def test_session_bootstrap_carries_rendered_instructions(
+        self, test_cfg, mock_adapter, mock_deps
+    ):
+        from hosts.web.run import _make_runtime_factory
+
+        session_obj = object()
+        with patch("sessions.build_session", return_value=session_obj) as mock_build_session:
+            factory = _make_runtime_factory(test_cfg)
+            await factory("thread-bootstrap", "test-local", mock_adapter, [])
+
+            _args, kwargs = mock_deps["NativeRuntime"].build.call_args
+            instructions = kwargs["instructions"]
+            session_factory = kwargs["session_factory"]
+            assert session_factory("thread-bootstrap") is session_obj
+
+        build_call = mock_build_session.call_args
+        assert build_call.args[1] == "thread-bootstrap"
+        bootstrap = build_call.kwargs["bootstrap"]
+        assert bootstrap.instruction_text == instructions
+        assert bootstrap.instruction_text_hash == (
+            "sha256:" + hashlib.sha256(instructions.encode()).hexdigest()
+        )
+        assert bootstrap.instruction_sources == [
+            "runtime",
+            "workflow_catalog",
+            "agent_spec",
+        ]
+
+
 class TestInstructionsCaching:
     """Verify instructions are loaded once and cached."""
 

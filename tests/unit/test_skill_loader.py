@@ -458,7 +458,9 @@ class TestFormatSkillListing:
             ),
         ]
 
-        assert format_skill_listing(specs) == format_skill_listing(specs)
+        assert format_skill_listing(specs) == (
+            "- commit: Create a git commit\n- review: Review code - Before merging"
+        )
 
     def test_boundary_exactly_250_chars_not_truncated(self) -> None:
         """desc + ' - ' + when_to_use 总长正好 250 字 → 不截断。"""

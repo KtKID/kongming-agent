@@ -1130,6 +1130,7 @@ def _make_runtime_factory(cfg: object) -> object:
             instruction_text_hash=f"sha256:{hashlib.sha256(instructions.encode()).hexdigest()}",
             created_at=time.time(),
             cwd=default_cwd,
+            instruction_text=instructions,
         )
 
         def session_factory(sid: str) -> Any:
