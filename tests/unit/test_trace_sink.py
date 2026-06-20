@@ -326,17 +326,26 @@ async def test_llm_response_local_trace_drops_content_and_tool_arguments(tmp_pat
                         ],
                     },
                     "usage": {"total_tokens": 12},
-                    "provider_metadata": {"cache_read_input_tokens": 5},
+                    "provider_metadata": {
+                        "cache_read_input_tokens": 5,
+                        "Authorization": "Bearer secret",
+                        "headers": {"x-api-key": "secret"},
+                    },
                 },
                 "finish_reason": "tool_calls",
                 "has_tool_calls": True,
                 "usage": {"total_tokens": 12},
-                "provider_metadata": {"cache_read_input_tokens": 5},
+                "provider_metadata": {
+                    "cache_read_input_tokens": 5,
+                    "Authorization": "Bearer secret",
+                    "headers": {"x-api-key": "secret"},
+                },
             },
         )
     )
 
     line = _read_jsonl(path)[0]
+    payload = line["payload"]
     response = line["payload"]["response"]
     assert response["finish_reason"] == "tool_calls"
     assert response["message"]["role"] == "assistant"
@@ -345,6 +354,7 @@ async def test_llm_response_local_trace_drops_content_and_tool_arguments(tmp_pat
     assert response["message"]["tool_names"] == ["read_file"]
     assert response["usage"] == {"total_tokens": 12}
     assert response["provider_metadata"] == {"cache_read_input_tokens": 5}
+    assert payload["provider_metadata"] == {"cache_read_input_tokens": 5}
     assert "content" not in response["message"]
     assert "tool_calls" not in response["message"]
 

@@ -83,7 +83,9 @@ async def test_provider_metadata_lands_in_trace_jsonl(
 ) -> None:
     """provider_metadata 从 LLMResponse 经 Runner 落盘到 JSONL 的 llm.response 事件。"""
     metadata = {
+        "Authorization": "Bearer secret",
         "cache_read_input_tokens": 50,
+        "headers": {"x-api-key": "secret"},
         "id": "msg_test_123",
         "model": "claude-test",
     }
@@ -134,6 +136,9 @@ async def test_provider_metadata_lands_in_trace_jsonl(
     assert pm["cache_read_input_tokens"] == 50
     assert pm["id"] == "msg_test_123"
     assert pm["model"] == "claude-test"
+    assert "Authorization" not in pm
+    assert "headers" not in pm
+    assert payload["response"]["provider_metadata"] == pm
 
 
 @pytest.mark.e2e

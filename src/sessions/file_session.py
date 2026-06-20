@@ -26,6 +26,7 @@ import logging
 import os
 import time
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -235,6 +236,8 @@ class FileSession:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, self._system_prompt_path)
+        with suppress(OSError):
+            os.chmod(self._system_prompt_path, 0o600)
 
     def _recover(self) -> None:
         """从磁盘恢复 session 状态。"""

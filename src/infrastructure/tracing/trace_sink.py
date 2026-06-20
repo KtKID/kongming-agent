@@ -65,6 +65,23 @@ _SAFE_REQUEST_METADATA_KEYS: frozenset[str] = frozenset(
 )
 """允许写入本地 trace 的 request metadata 字段。"""
 
+_SAFE_PROVIDER_METADATA_KEYS: frozenset[str] = frozenset(
+    {
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "cached_input_tokens",
+        "finish_reason",
+        "id",
+        "input_tokens",
+        "model",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "stop_reason",
+        "total_tokens",
+    }
+)
+"""允许写入本地 trace 的 response provider metadata 字段。"""
+
 
 class JsonlTraceSink:
     """Write every :class:`~core.contracts.Event` as one JSON line.
@@ -289,6 +306,7 @@ def _sanitize_local_trace_event(event: dict[str, Any]) -> dict[str, Any]:
             event["payload"] = {
                 **payload,
                 "response": _summarize_llm_response_payload(response),
+                "provider_metadata": _safe_provider_metadata(payload.get("provider_metadata")),
             }
     return event
 
@@ -347,11 +365,24 @@ def _safe_scalar(raw: Any) -> str | int | float | bool | None:
 
 def _safe_request_metadata(raw: Any) -> dict[str, str | int | float | bool | None]:
     """保留 request metadata 白名单字段，输入为任意对象，输出安全标量字典。"""
+    return _safe_metadata(raw, _SAFE_REQUEST_METADATA_KEYS)
+
+
+def _safe_provider_metadata(raw: Any) -> dict[str, str | int | float | bool | None]:
+    """保留 response provider metadata 白名单字段，输入为任意对象，输出安全标量字典。"""
+    return _safe_metadata(raw, _SAFE_PROVIDER_METADATA_KEYS)
+
+
+def _safe_metadata(
+    raw: Any,
+    allowed_keys: frozenset[str],
+) -> dict[str, str | int | float | bool | None]:
+    """按字段白名单保留安全标量 metadata。"""
     if not isinstance(raw, dict):
         return {}
     safe: dict[str, str | int | float | bool | None] = {}
     for key, value in raw.items():
-        if not isinstance(key, str) or key not in _SAFE_REQUEST_METADATA_KEYS:
+        if not isinstance(key, str) or key not in allowed_keys:
             continue
         if isinstance(value, (str, int, float, bool)) or value is None:
             safe[key] = value
@@ -390,9 +421,7 @@ def _summarize_llm_response_payload(response: dict[str, Any]) -> dict[str, Any]:
         "finish_reason": response.get("finish_reason"),
         "message": message_summary,
         "usage": dict(response.get("usage", {})) if isinstance(response.get("usage"), dict) else {},
-        "provider_metadata": dict(response.get("provider_metadata", {}))
-        if isinstance(response.get("provider_metadata"), dict)
-        else {},
+        "provider_metadata": _safe_provider_metadata(response.get("provider_metadata")),
     }
 
 

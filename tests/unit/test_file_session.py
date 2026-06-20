@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 from typing import ClassVar
 
@@ -118,6 +119,7 @@ class TestTC2FirstAppendMaterialize:
         }
         session_dir = Path(store_path) / "test-session"
         assert list(session_dir.glob("system_prompt.json.*.tmp")) == []
+        assert stat.S_IMODE(Path(path).stat().st_mode) == 0o600
 
     async def test_system_prompt_snapshot_file_is_skipped_without_text(
         self, store_path: str
