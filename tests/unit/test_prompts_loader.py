@@ -150,6 +150,12 @@ async def test_tools_template_mentions_workflow_tools(tmp_path: Path) -> None:
     assert "create_agent_role" in tools_text
     assert "participants.select" in tools_text
     assert 'mode="map_reduce"' in tools_text
+    assert "并行子任务" in tools_text
+    assert "Map-Reduce 代码分析" in tools_text
+    assert "多 Agent 圆桌评审" in tools_text
+    assert "Deep Research 研究工作流" in tools_text
+    assert "任务流 Task Flow" in tools_text
+    assert "desc" in tools_text
     assert "tools schema" in tools_text
 
 

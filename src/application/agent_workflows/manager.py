@@ -37,6 +37,7 @@ from application.agent_workflows.strategies.parallel import ParallelWorkflowStra
 from application.agent_workflows.strategies.roundtable_review.strategy import (
     RoundtableReviewStrategy,
 )
+from application.agent_workflows.strategies.task_flow.strategy import TaskFlowStrategy
 from application.subagents.manager import SubAgentManager, SubAgentRun, SubAgentTask
 from application.subagents.permissions import (
     SubAgentCreationRecord,
@@ -185,6 +186,33 @@ class AgentWorkflowAuditWriter:
         tmp.replace(path)
 
 
+class _CatalogOnlyWorkflowFacade:
+    """只用于生成默认策略目录的轻量 facade，输入为属性访问，输出为明确运行期错误。"""
+
+    def __getattr__(self, name: str) -> object:
+        """拒绝 catalog 查询之外的运行期能力，输入为属性名，输出为 RuntimeError。"""
+        raise RuntimeError(f"workflow catalog facade cannot provide runtime attribute: {name}")
+
+
+def _catalog_only_workflow_context(request: WorkflowRunRequest) -> WorkflowExecutionContext:
+    """拒绝通过 catalog-only manager 执行策略，输入为运行请求，输出为 RuntimeError。"""
+    raise RuntimeError(
+        f"workflow strategy {request.mode!r} cannot run from the catalog-only registry"
+    )
+
+
+def _register_default_workflow_strategies(
+    strategy_manager: AgentWorkflowStrategyManager,
+    workflow_facade: object,
+) -> None:
+    """注册默认 workflow 策略，输入为策略管理器和 facade，输出为已写入注册表。"""
+    strategy_manager.register(ParallelWorkflowStrategy(workflow_facade))
+    strategy_manager.register(DeepResearchStrategy(workflow_facade))
+    strategy_manager.register(MapReduceStrategy(workflow_facade))
+    strategy_manager.register(RoundtableReviewStrategy(workflow_facade))
+    strategy_manager.register(TaskFlowStrategy(workflow_facade))
+
+
 class AgentWorkflowManager:
     """协调子 agent 执行并持有 workflow 审计产物。"""
 
@@ -208,12 +236,18 @@ class AgentWorkflowManager:
         self._strategy_manager = AgentWorkflowStrategyManager(
             context_factory=self._build_workflow_context
         )
-        self._strategy_manager.register(ParallelWorkflowStrategy(self))
-        self._strategy_manager.register(DeepResearchStrategy(self))
-        self._strategy_manager.register(MapReduceStrategy(self))
-        self._strategy_manager.register(RoundtableReviewStrategy(self))
+        _register_default_workflow_strategies(self._strategy_manager, self)
         self._task_progress_manager = _build_task_progress_manager(config)
         self._task_progress_state: dict[tuple[str, str], dict[str, dict[str, object]]] = {}
+
+    @classmethod
+    def list_default_workflow_strategies(cls) -> tuple[WorkflowStrategyCatalogEntry, ...]:
+        """列出默认 workflow 策略目录，输入为空，输出为 Web catalog 可复用的注册结果。"""
+        strategy_manager = AgentWorkflowStrategyManager(
+            context_factory=_catalog_only_workflow_context
+        )
+        _register_default_workflow_strategies(strategy_manager, _CatalogOnlyWorkflowFacade())
+        return strategy_manager.list_strategies()
 
     @property
     def workspace_root(self) -> Path:

@@ -963,12 +963,14 @@ async def test_run_workflow_specs_unknown_mode_uses_strategy_registry(
         "map_reduce",
         "parallel",
         "roundtable_review",
+        "task_flow",
     )
     assert exc_info.value.runnable_modes == (
         "deep_research",
         "map_reduce",
         "parallel",
         "roundtable_review",
+        "task_flow",
     )
     assert exc_info.value.operation == "run"
 
