@@ -470,30 +470,14 @@ async def _dispatch_frame(
         attachments_dicts: list[dict[str, Any]] | None = (
             [a.model_dump() for a in raw_attachments] if raw_attachments else None
         )
-        task = asyncio.create_task(
-            _run_once_safely(
-                cell,
-                frame.text,
-                websocket,
-                reasoning_effort=effort,
-                attachments=attachments_dicts,
-            ),
-            name=f"web-run-once-{thread_id}",
+        _start_run_once_task(
+            cell,
+            thread_id,
+            websocket,
+            frame.text,
+            reasoning_effort=effort,
+            attachments=attachments_dicts,
         )
-        # 把 task 暂存到 cell（便于 evict 时 cancel）
-        cell.current_run_task = task
-
-        # interrupt-run-v0.1：done_callback 在 task 完成时（正常 / 异常 / cancel）
-        # 把 cell.current_run_task 清成 None，避免下次收到 InterruptFrame 时
-        # 看到一个已 done 的 task 误判为"正在跑"。callback 只在 task 仍是当前
-        # 引用时才清，防止 race（新 run 刚启动覆盖了 current_run_task）。
-        def _clear_run_task(
-            t: asyncio.Task[Any], *, _cell: Any = cell, _task: asyncio.Task[Any] = task
-        ) -> None:
-            if getattr(_cell, "current_run_task", None) is _task:
-                _cell.current_run_task = None
-
-        task.add_done_callback(_clear_run_task)
         log_generic_channel_event(
             "run_task_started",
             thread_id=thread_id,
@@ -503,6 +487,49 @@ async def _dispatch_frame(
             text_len=len(frame.text),
             reasoning_effort=effort,
             attachment_count=len(attachments_dicts) if attachments_dicts else 0,
+        )
+    elif frame_type == "choice.submit":
+        choice_task: asyncio.Task[Any] | None = getattr(cell, "current_run_task", None)
+        if choice_task is not None and not choice_task.done():
+            await _send_error_frame(
+                websocket,
+                "internal",
+                "当前任务仍在运行，请稍后再确认选择。",
+            )
+            log_generic_channel_event(
+                "choice_submit_rejected",
+                level="WARNING",
+                thread_id=thread_id,
+                conn_id=conn_id,
+                frame_type=frame_type,
+                request_id=getattr(frame, "request_id", None),
+                reason="active_run",
+            )
+            return
+        try:
+            choice_text = format_choice_submit_as_user_input(frame)
+        except ValueError as exc:
+            await _send_error_frame(websocket, "internal", str(exc))
+            log_generic_channel_event(
+                "choice_submit_rejected",
+                level="WARNING",
+                thread_id=thread_id,
+                conn_id=conn_id,
+                frame_type=frame_type,
+                request_id=getattr(frame, "request_id", None),
+                reason="invalid_payload",
+                error=str(exc),
+            )
+            return
+        _start_run_once_task(cell, thread_id, websocket, choice_text)
+        log_generic_channel_event(
+            "choice_submit_run_started",
+            thread_id=thread_id,
+            conn_id=conn_id,
+            frame_type=frame_type,
+            request_id=getattr(frame, "request_id", None),
+            answer_count=len(getattr(frame, "answers", []) or []),
+            text_len=len(choice_text),
         )
     elif frame_type == "interrupt":
         # interrupt-run-v0.1：浏览器点 Stop。检查当前 run 是否真在跑：
@@ -608,9 +635,92 @@ def _frame_log_fields(frame: Any) -> dict[str, Any]:
         }
     if frame_type == "interrupt":
         return {"run_id": getattr(frame, "run_id", None)}
+    if frame_type == "choice.submit":
+        answers = getattr(frame, "answers", None)
+        return {
+            "request_id": getattr(frame, "request_id", None),
+            "answer_count": len(answers) if answers else 0,
+        }
     if frame_type == "ping":
         return {"client_ts": getattr(frame, "ts", None)}
     return {}
+
+
+def _start_run_once_task(
+    cell: Any,
+    thread_id: str,
+    websocket: WebSocket,
+    text: str,
+    *,
+    reasoning_effort: str | None = None,
+    attachments: list[dict[str, Any]] | None = None,
+) -> asyncio.Task[Any]:
+    """创建并登记一次后台 run_once task。"""
+    task = asyncio.create_task(
+        _run_once_safely(
+            cell,
+            text,
+            websocket,
+            reasoning_effort=reasoning_effort,
+            attachments=attachments,
+        ),
+        name=f"web-run-once-{thread_id}",
+    )
+    cell.current_run_task = task
+
+    def _clear_run_task(
+        t: asyncio.Task[Any], *, _cell: Any = cell, _task: asyncio.Task[Any] = task
+    ) -> None:
+        if getattr(_cell, "current_run_task", None) is _task:
+            _cell.current_run_task = None
+
+    task.add_done_callback(_clear_run_task)
+    return task
+
+
+def format_choice_submit_as_user_input(frame: Any) -> str:
+    """把 ChoiceSubmitFrame 转成稳定的下一轮用户消息文本。"""
+    request_id = str(getattr(frame, "request_id", "") or "").strip()
+    if not request_id:
+        raise ValueError("choice.submit.request_id must be a non-empty string")
+    answers = list(getattr(frame, "answers", []) or [])
+    if not answers:
+        raise ValueError("choice.submit.answers must contain at least one item")
+
+    lines = [
+        "用户已完成选择：",
+        f"request_id: {request_id}",
+        "",
+    ]
+    for index, answer in enumerate(answers, start=1):
+        question_id = str(getattr(answer, "question_id", "") or "").strip()
+        option_id = str(getattr(answer, "option_id", "") or "").strip()
+        option_label = str(getattr(answer, "option_label", "") or "").strip()
+        custom_text_raw = getattr(answer, "custom_text", None)
+        custom_text = custom_text_raw.strip() if isinstance(custom_text_raw, str) else ""
+        if not question_id:
+            raise ValueError(f"choice.submit.answers[{index - 1}].question_id is required")
+        if not option_id:
+            raise ValueError(f"choice.submit.answers[{index - 1}].option_id is required")
+        if not option_label:
+            raise ValueError(f"choice.submit.answers[{index - 1}].option_label is required")
+        if option_id == "__custom__" and not custom_text:
+            raise ValueError(
+                f"choice.submit.answers[{index - 1}].custom_text is required for __custom__"
+            )
+
+        lines.append(f"{index}. question_id={question_id}")
+        lines.append(f"选择：{option_id} / {option_label}")
+        if custom_text:
+            lines.append(f"自定义：{custom_text}")
+        value = getattr(answer, "value", None)
+        if isinstance(value, dict) and value:
+            value_text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+            if len(value_text) > 1000:
+                value_text = value_text[:1000] + "...[truncated]"
+            lines.append(f"value: {value_text}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 async def _run_once_safely(

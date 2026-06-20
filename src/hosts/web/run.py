@@ -838,6 +838,7 @@ def _make_runtime_factory(cfg: object) -> object:
         ToolRegistry,
         build_default_approval,
         build_default_registry,
+        register_choice_tool,
         register_evolution_write_tool_if_enabled,
         register_schedule_tool_if_enabled,
         register_task_progress_tool,
@@ -845,8 +846,10 @@ def _make_runtime_factory(cfg: object) -> object:
 
     assert isinstance(cfg, Config)
     real_cfg: Config = cfg
-    preset_map: dict[str, LLMPresetConfig] = {p.id: p for p in real_cfg.web.llm_presets}
     home = get_kongming_home()
+
+    def _current_preset_map() -> dict[str, LLMPresetConfig]:
+        return {p.id: p for p in real_cfg.web.llm_presets}
 
     _registry_cache: list[ToolRegistry | None] = [None]
     _enabled_tools_cache: list[list[str] | None] = [None]
@@ -900,14 +903,19 @@ def _make_runtime_factory(cfg: object) -> object:
                 role_dir=home / "agent_roles",
             )
 
+            app_ref = getattr(factory, "_app", None)
+            thread_manager = getattr(getattr(app_ref, "state", None), "thread_manager", None)
             cron_dispatcher = None
             if real_cfg.scheduler.enabled:
-                from hosts.web.app_support.cron_delivery import WebDeliverySink
+                from hosts.web.app_support.cron_delivery import ThreadTargetSink, WebDeliverySink
                 from hosts.web.websocket.cron import get_broker
                 from scheduler.delivery import DeliveryDispatcher
 
                 cron_dispatcher = DeliveryDispatcher(
                     web_sink=WebDeliverySink(get_broker()),
+                    target_sink=ThreadTargetSink(thread_manager)
+                    if thread_manager is not None
+                    else None,
                 )
 
             def _scheduler_runtime_factory(store):  # type: ignore[no-untyped-def]
@@ -921,19 +929,22 @@ def _make_runtime_factory(cfg: object) -> object:
                     enabled_tool_names=enabled_tool_names,
                     instructions=_instructions_cache[0],
                     dispatcher=cron_dispatcher,
-                    preset_map=preset_map,
+                    preset_map=_current_preset_map(),
                 )
 
             register_schedule_tool_if_enabled(
                 registry,
                 real_cfg,
                 runtime_factory_fn=_scheduler_runtime_factory,
+                default_preset_id=next(iter(_current_preset_map()), ""),
+                thread_provisioner=thread_manager,
             )
             register_evolution_write_tool_if_enabled(
                 registry,
                 real_cfg,
                 event_sinks=sink_list,
             )
+            register_choice_tool(registry, event_sinks=sink_list)
             register_task_progress_tool(registry, real_cfg)
             mcp_runtime_registration = McpRuntimeRegistrationManager(
                 real_cfg,
@@ -962,7 +973,7 @@ def _make_runtime_factory(cfg: object) -> object:
     ) -> tuple[Any, Any]:
         from infrastructure.config.paths import resolve_kongming_path
 
-        preset = preset_map.get(preset_id)
+        preset = _current_preset_map().get(preset_id)
         if preset is None:
             raise ValueError(f"unknown preset_id: {preset_id!r}")
 

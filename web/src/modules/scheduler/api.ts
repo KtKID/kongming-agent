@@ -27,6 +27,7 @@ type CronTaskDTO = {
   next_run_at: string | null;
   last_run_at: string | null;
   preset_id: string;
+  thread_id?: string;
   created_by: string;
   // v0.5.4: 后端把任务内容与 agent 名直接随 GET /tasks 返回，
   // 供 edit / duplicate 模式预填表单（旧字段缺失时映射为空串兜底）。
@@ -127,6 +128,7 @@ function taskFromDTO(dto: CronTaskDTO): SchedulerTaskVM {
     lastRunAt: dto.last_run_at,
     timezone: null,
     presetId: dto.preset_id,
+    threadId: dto.thread_id ?? "",
     createdBy: dto.created_by,
     inputText: dto.input_text ?? "",
     agentName: dto.agent_name ?? "",

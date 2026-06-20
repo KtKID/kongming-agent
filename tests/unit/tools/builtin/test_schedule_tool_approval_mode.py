@@ -30,9 +30,27 @@ def _ctx() -> ToolContext:
     )
 
 
+class _FakeThreadProvisioner:
+    """测试用 provisioner：让 create 路径满足专属 thread 合同。"""
+
+    async def create_scheduled_task_thread(
+        self,
+        *,
+        task_id: str,
+        name: str,
+        preset_id: str,
+        cwd: str = "",
+    ) -> str:
+        del task_id, name, preset_id, cwd
+        return "thread-aaaaaaaaaaaa"
+
+    async def delete_thread(self, thread_id: str, *, keep_history: bool = False) -> None:
+        del thread_id, keep_history
+
+
 def _make_tool(tmp_path: Path) -> tuple[ScheduleTool, Store]:
     store = Store(home_dir=tmp_path / "cron")
-    tool = build_schedule_tool(store)
+    tool = build_schedule_tool(store, thread_provisioner=_FakeThreadProvisioner())
     return tool, store
 
 

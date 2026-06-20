@@ -126,6 +126,8 @@ def register_schedule_tool_if_enabled(
     cfg: Config,
     *,
     runtime_factory_fn: Any | None = None,
+    default_preset_id: str = "",
+    thread_provisioner: Any | None = None,
 ) -> Store | None:
     """按 ``cfg.scheduler.enabled`` 外部 register schedule_tool。
 
@@ -143,6 +145,8 @@ def register_schedule_tool_if_enabled(
         cfg: 全局 :class:`Config`。
         runtime_factory_fn: 可选 callable，签名 ``(store) -> (runtime, bridge)``；
             ``run_now`` action 用。``None`` 时 ``run_now`` 直接报错。
+        default_preset_id: schedule tool 创建任务时使用的默认 preset id。
+        thread_provisioner: 定时任务专属 thread 创建入口。
 
     Returns:
         构造的 :class:`scheduler.store.Store` 实例；``None`` 表示 cron 关闭未注册。
@@ -172,6 +176,8 @@ def register_schedule_tool_if_enabled(
                 runtime_factory_fn=runtime_factory_fn,
                 default_timezone=cfg.scheduler.default_timezone,
                 default_delivery_channel=cfg.scheduler.default_delivery_channel,
+                default_preset_id=default_preset_id,
+                thread_provisioner=thread_provisioner,
             ),
         )
     )
@@ -241,6 +247,17 @@ def register_task_progress_tool(
     registry.register(cast(Tool, build_task_progress_tool_from_config(cfg)))
 
 
+def register_choice_tool(
+    registry: ToolRegistry,
+    *,
+    event_sinks: Sequence[EventSink] = (),
+) -> None:
+    """Register the model-facing user choice tool."""
+    from tools.builtin.choice_tool import build_choice_tool
+
+    registry.register(cast(Tool, build_choice_tool(event_sinks=event_sinks)))
+
+
 __all__ = [
     "AutoAllowApproval",
     "AutoDenyApproval",
@@ -261,5 +278,6 @@ __all__ = [
     "register_agent_workflow_tool",
     "register_agent_role_tool",
     "register_schedule_tool_if_enabled",
+    "register_choice_tool",
     "register_task_progress_tool",
 ]

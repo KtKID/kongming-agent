@@ -384,6 +384,7 @@ DEFAULT_ALLOW_TOOLS_SILENT: tuple[str, ...] = (
     "list_agent_roles",
     "create_agent_role",
     "update_task_progress",
+    "present_choices",
 )
 
 

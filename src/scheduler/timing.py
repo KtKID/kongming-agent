@@ -133,7 +133,7 @@ def compute_first_run_at(trigger: ScheduleTrigger, *, now: datetime | None = Non
         return to_iso(now + timedelta(minutes=minutes))
 
     if trigger_type is TriggerType.CRON:
-        from croniter import croniter  # type: ignore[import-untyped]
+        from croniter import croniter  # type: ignore[import-untyped,unused-ignore]
 
         # 按 trigger.timezone 解释 cron 表达式；非法 IANA 名退回 UTC（base 自身 tz）
         tz: ZoneInfo | None

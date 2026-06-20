@@ -70,6 +70,7 @@ from tools import (
     build_default_registry,
     register_agent_role_tool,
     register_agent_workflow_tool,
+    register_choice_tool,
     register_evolution_write_tool_if_enabled,
     register_schedule_tool_if_enabled,
     register_task_progress_tool,
@@ -515,6 +516,7 @@ async def _run(
     )
     register_agent_role_tool(registry, agent_role_manager)
     register_agent_workflow_tool(registry, agent_workflow_handle)
+    register_choice_tool(registry, event_sinks=event_sinks)
     register_task_progress_tool(registry, cfg)
 
     # approval 按配置模式选：interactive 走 ApprovalManager + CLI sink；

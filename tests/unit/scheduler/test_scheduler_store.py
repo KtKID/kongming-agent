@@ -50,7 +50,9 @@ from scheduler.store import (
     SchedulerBusyError,
     Store,
     TaskNotFoundError,
+    _dict_to_task,
     _period_seconds,
+    _task_to_dict,
 )
 from scheduler.timing import to_iso
 
@@ -102,6 +104,7 @@ def _make_task(
     next_run_at: str | None = None,
     last_run_at: str | None = None,
     misfire: MisfirePolicy = MisfirePolicy.SKIP,
+    thread_id: str = "",
 ) -> ScheduledTask:
     return ScheduledTask(
         task_id=task_id,
@@ -117,6 +120,7 @@ def _make_task(
         created_by="tester",
         created_at=_t(0),
         updated_at=_t(0),
+        thread_id=thread_id,
     )
 
 
@@ -161,6 +165,41 @@ def test_create_and_get_task_round_trip(tmp_path: Path) -> None:
     assert fetched.trigger.trigger_type is TriggerType.INTERVAL
     assert fetched.trigger.expr == "10"
     assert fetched.policy.silent_marker_enabled is True
+
+
+def test_task_thread_id_round_trip(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    task = _make_task(task_id="t-thread", thread_id="thread-aaaaaaaaaaaa")
+    store.create_task(task)
+
+    fetched = store.get_task("t-thread")
+
+    assert fetched is not None
+    assert fetched.thread_id == "thread-aaaaaaaaaaaa"
+    payload = json.loads((tmp_path / "scheduled_tasks.json").read_text(encoding="utf-8"))
+    assert payload["tasks"][0]["thread_id"] == "thread-aaaaaaaaaaaa"
+
+
+def test_dict_to_task_recovers_thread_id_from_metadata() -> None:
+    task = _make_task()
+    payload = _task_to_dict(task)
+    payload.pop("thread_id")
+    payload["target"]["metadata"]["thread_id"] = "thread-bbbbbbbbbbbb"
+
+    restored = _dict_to_task(payload)
+
+    assert restored.thread_id == "thread-bbbbbbbbbbbb"
+
+
+def test_dict_to_task_recovers_thread_id_from_delivery_target() -> None:
+    task = _make_task()
+    payload = _task_to_dict(task)
+    payload.pop("thread_id")
+    payload["delivery"] = {"channel": "web", "target": "thread:thread-cccccccccccc"}
+
+    restored = _dict_to_task(payload)
+
+    assert restored.thread_id == "thread-cccccccccccc"
 
 
 def test_create_task_duplicate_raises_value_error(tmp_path: Path) -> None:

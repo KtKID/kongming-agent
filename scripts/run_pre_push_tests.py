@@ -139,6 +139,7 @@ SMOKE_TESTS = (
     "tests/unit/test_runtime_home_static_guards.py",
 )
 PYTEST_TIMEOUT_SECONDS = 1_800
+MAX_PRE_PUSH_TEST_FILES = 80
 
 # 手工维护源码到 unit 测试的兜底映射。新增 src 一级模块或高风险 web 路径时，
 # 需要同步补充这里，避免 push gate 只跑 smoke 而漏掉模块级测试。
@@ -370,7 +371,9 @@ def _select_from_hint(repo: Path, hint: str) -> set[str]:
     return _tests_with_prefix(repo, hint)
 
 
-def _source_related_tests(repo: Path, source_path: str) -> set[str]:
+def _source_related_tests(
+    repo: Path, source_path: str, *, include_module_fallback: bool = True
+) -> set[str]:
     """根据源码或脚本路径生成候选 unit 测试。"""
 
     stem = Path(source_path).stem
@@ -395,6 +398,8 @@ def _source_related_tests(repo: Path, source_path: str) -> set[str]:
         selected.update(
             _tests_matching_stem(repo, stem, web=source_path.startswith("src/hosts/web/"))
         )
+        if not include_module_fallback:
+            return selected
         for prefix, mapped_hints in MODULE_TEST_HINTS:
             if source_path.startswith(prefix):
                 for hint in mapped_hints:
@@ -411,6 +416,24 @@ def _existing_smoke_tests(repo: Path) -> set[str]:
 def select_unit_tests(repo: Path, changed_files: Sequence[str]) -> list[str]:
     """把改动文件映射成 push gate 应运行的 unit 测试路径。"""
 
+    selected = _select_unit_tests(repo, changed_files, include_module_fallback=True)
+    if len(selected) <= MAX_PRE_PUSH_TEST_FILES:
+        return selected
+
+    bounded = _select_unit_tests(repo, changed_files, include_module_fallback=False)
+    print(
+        "pre-push: selected unit test files exceed fast-gate limit; "
+        f"using bounded set ({len(selected)} -> {len(bounded)}, "
+        f"limit={MAX_PRE_PUSH_TEST_FILES})"
+    )
+    return bounded
+
+
+def _select_unit_tests(
+    repo: Path, changed_files: Sequence[str], *, include_module_fallback: bool
+) -> list[str]:
+    """按是否启用模块级兜底生成 unit 测试路径列表。"""
+
     selected: set[str] = set()
     source_changed = False
     config_changed = False
@@ -426,7 +449,13 @@ def select_unit_tests(repo: Path, changed_files: Sequence[str]) -> list[str]:
             continue
         if path.startswith(("src/", "scripts/")) and path.endswith((".py", ".sh")):
             source_changed = True
-            selected.update(_source_related_tests(repo, path))
+            selected.update(
+                _source_related_tests(
+                    repo,
+                    path,
+                    include_module_fallback=include_module_fallback,
+                )
+            )
 
     if source_changed or config_changed:
         selected.update(_existing_smoke_tests(repo))

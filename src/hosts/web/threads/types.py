@@ -71,6 +71,15 @@ class ThreadManagerProtocol(Protocol):
         cwd: str = "",
     ) -> ThreadMetadata: ...
 
+    async def create_scheduled_task_thread(
+        self,
+        *,
+        task_id: str,
+        name: str,
+        preset_id: str,
+        cwd: str = "",
+    ) -> str: ...
+
     async def create_generic_thread_from_first_message(
         self,
         *,

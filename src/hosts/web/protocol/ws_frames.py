@@ -110,6 +110,24 @@ class UserInputFrame(_C2SFrameBase):
     attachments: list[UserInputAttachment] | None = None
 
 
+class ChoiceAnswerDTO(_C2SFrameBase):
+    """用户对单个 Choice 问题的确认答案。"""
+
+    question_id: str
+    option_id: str
+    option_label: str
+    custom_text: str | None = None
+    value: dict[str, Any] | None = None
+
+
+class ChoiceSubmitFrame(_C2SFrameBase):
+    """浏览器提交 ChoicePanel 的结构化选择结果。"""
+
+    frame_type: Literal["choice.submit"] = "choice.submit"
+    request_id: str
+    answers: list[ChoiceAnswerDTO]
+
+
 # ---------------------------------------------------------------------------
 # S2C 帧（后端 → 浏览器，15 个）
 # ---------------------------------------------------------------------------
@@ -330,6 +348,36 @@ class UsageFrame(_S2CFrameBase):
     """嵌套 channel-specific DTO dict（含 ``provider`` discriminator）。"""
 
 
+class ChoiceOptionDTO(_C2SFrameBase):
+    """Choice 请求里的单个 LLM 候选选项。"""
+
+    id: str
+    label: str
+    description: str
+    value: dict[str, Any] | None = None
+
+
+class ChoiceQuestionDTO(_C2SFrameBase):
+    """Choice 请求里的单个问题。"""
+
+    id: str
+    title: str
+    description: str | None = None
+    options: list[ChoiceOptionDTO]
+
+
+class ChoiceRequestFrame(_S2CFrameBase):
+    """后端要求浏览器在 composer 上方展示选择面板。"""
+
+    frame_type: Literal["choice.request"] = "choice.request"
+    request_id: str
+    title: str
+    description: str
+    questions: list[ChoiceQuestionDTO]
+    turn: int
+    run_id: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Discriminated unions
 #
@@ -347,7 +395,7 @@ class UsageFrame(_S2CFrameBase):
 
 
 WSFrameC2S = Annotated[
-    UserInputFrame | ApprovalAckFrame | PingFrame | InterruptFrame,
+    UserInputFrame | ApprovalAckFrame | PingFrame | InterruptFrame | ChoiceSubmitFrame,
     Field(discriminator="frame_type"),
 ]
 """C2S 帧 union（discriminated by ``frame_type``）。"""
@@ -369,7 +417,8 @@ WSFrameS2C = Annotated[
     | PongFrame
     | SystemNoticeFrame
     | CellEvictedFrame
-    | RunInterruptedFrame,
+    | RunInterruptedFrame
+    | ChoiceRequestFrame,
     Field(discriminator="frame_type"),
 ]
 """S2C 帧 union（discriminated by ``frame_type``）。"""
@@ -390,6 +439,11 @@ __all__: list[str] = [
     "ApprovalRequestFrame",
     "AssistantFinalFrame",
     "CellEvictedFrame",
+    "ChoiceAnswerDTO",
+    "ChoiceOptionDTO",
+    "ChoiceQuestionDTO",
+    "ChoiceRequestFrame",
+    "ChoiceSubmitFrame",
     "ContentDeltaFrame",
     "ErrorFrame",
     "InterruptFrame",

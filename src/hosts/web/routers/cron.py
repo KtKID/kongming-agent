@@ -50,6 +50,7 @@ from scheduler.domain import (
     TaskTarget,
     TriggerType,
 )
+from scheduler.manager import SchedulerManager
 from scheduler.schedule_parser import parse_schedule
 from scheduler.store import TaskNotFoundError
 from scheduler.timing import compute_first_run_at, to_iso, utc_now
@@ -88,6 +89,7 @@ class CronTaskDTO(BaseModel):
     trigger_expr: str
     next_run_at: str | None
     last_run_at: str | None
+    thread_id: str
     preset_id: str
     created_by: str
     # v0.5.4: 前端编辑弹窗需要回填这两个字段，否则用户改 schedule 后整条
@@ -206,6 +208,7 @@ def _task_to_dto(task: ScheduledTask) -> CronTaskDTO:
         trigger_expr=task.trigger.expr,
         next_run_at=task.next_run_at,
         last_run_at=task.last_run_at,
+        thread_id=task.thread_id,
         preset_id=task.preset_id,
         created_by=task.created_by,
         # v0.5.4: 透出 target 嵌套字段供前端编辑回填
@@ -250,11 +253,48 @@ def _require_store(request: Request) -> Store:
     return store
 
 
+def _require_thread_manager(request: Request) -> Any:
+    manager = getattr(request.app.state, "thread_manager", None)
+    if manager is None:
+        raise HTTPException(
+            status_code=503,
+            detail="thread manager not configured",
+        )
+    return manager
+
+
+def _require_config(request: Request) -> Any:
+    cfg = getattr(request.app.state, "config", None)
+    if cfg is None:
+        raise HTTPException(
+            status_code=503,
+            detail="app config not configured",
+        )
+    return cfg
+
+
 def _require_task(store: Store, task_id: str) -> ScheduledTask:
     task = store.get_task(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
     return task
+
+
+def _resolve_thread_preset_id(request: Request, task_preset_id: str) -> str:
+    """解析专属 thread 使用的 preset id。
+
+    cron task 自身的 ``preset_id`` 保持请求语义：调用方未传时为空串，执行时
+    继续走默认 provider。专属 generic_chat thread 仍需要一个 preset 才能在
+    用户打开历史后继续对话，因此这里仅为 thread 创建解析默认 Web preset。
+    """
+    candidate = task_preset_id.strip()
+    if candidate:
+        return candidate
+    cfg = _require_config(request)
+    presets = list(getattr(cfg.web, "llm_presets", []) or [])
+    if presets:
+        return str(presets[0].id)
+    raise HTTPException(status_code=422, detail="preset_id required for scheduled task thread")
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +358,8 @@ async def create_cron_task(request: Request, body: CreateCronTaskRequest) -> Cro
 
     now_iso = to_iso(utc_now())
     task_id = uuid.uuid4().hex[:16]
+    task_preset_id = (body.preset_id or "").strip()
+    thread_preset_id = _resolve_thread_preset_id(request, task_preset_id)
 
     try:
         task = ScheduledTask(
@@ -338,15 +380,24 @@ async def create_cron_task(request: Request, body: CreateCronTaskRequest) -> Cro
             created_at=now_iso,
             updated_at=now_iso,
             delivery=ScheduleDelivery(channel=DeliveryChannel.WEB),
-            preset_id=body.preset_id or "",
+            preset_id=task_preset_id,
         )
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     try:
-        created = store.create_task(task)
+        manager = SchedulerManager(
+            store,
+            thread_provisioner=_require_thread_manager(request),
+        )
+        created = await manager.create_task_with_thread(
+            task,
+            thread_preset_id=thread_preset_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     store.append_audit(
         action="create",
@@ -355,6 +406,7 @@ async def create_cron_task(request: Request, body: CreateCronTaskRequest) -> Cro
         payload={
             "source": "cron_router",
             "preset_id": created.preset_id or "",
+            "thread_id": created.thread_id,
             "trigger_type": created.trigger.trigger_type.value,
         },
     )

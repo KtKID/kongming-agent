@@ -84,12 +84,16 @@ def test_create_once_task_happy(tmp_path: Path) -> None:
         assert body["trigger_expr"] is not None  # ISO timestamp
         assert body["next_run_at"] is not None
         assert body["task_id"]
+        assert body["thread_id"].startswith("thread-")
 
         # store 侧确认
         task = store.get_task(body["task_id"])
         assert task is not None
         assert task.state is TaskState.SCHEDULED
         assert task.trigger.trigger_type is TriggerType.ONCE
+        assert task.thread_id == body["thread_id"]
+        assert task.delivery is not None
+        assert task.delivery.target == f"thread:{body['thread_id']}"
         assert (
             task.target.input_text
             == "在当前目录创建一个名为 scheduler-test-once.txt 的文件，内容写入当前时间戳"
@@ -98,6 +102,8 @@ def test_create_once_task_happy(tmp_path: Path) -> None:
         # audit
         audits = store.list_audits(task_id=body["task_id"])
         assert any(a["action"] == "create" and a["actor"] == "web" for a in audits)
+        create_audit = next(a for a in audits if a["action"] == "create")
+        assert create_audit["payload"]["thread_id"] == body["thread_id"]
     finally:
         client.__exit__(None, None, None)
 
@@ -228,11 +234,13 @@ def test_create_cron_task_happy_path(
         assert body["trigger_type"] == "cron"
         assert body["trigger_expr"] == expected_expr
         assert body["next_run_at"] is not None
+        assert body["thread_id"].startswith("thread-")
 
         task = store.get_task(body["task_id"])
         assert task is not None
         assert task.trigger.trigger_type is TriggerType.CRON
         assert task.trigger.expr == expected_expr
+        assert task.thread_id == body["thread_id"]
     finally:
         client.__exit__(None, None, None)
 
@@ -423,5 +431,52 @@ def test_create_task_no_store_returns_503(tmp_path: Path) -> None:
             headers=CSRF_HEADERS,
         )
         assert resp.status_code == 503
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_create_task_no_config_returns_503(tmp_path: Path) -> None:
+    """config 未挂时，默认 thread preset 解析返回 503。"""
+    client, _ = _login_client_with_store(tmp_path)
+    try:
+        delattr(client.app.state, "config")
+        resp = client.post(
+            "/api/cron/tasks",
+            json={
+                "name": "missing-config",
+                "agent_name": "default",
+                "input_text": "test",
+                "schedule_type": "cron",
+                "cron_expr": "0 0 * * *",
+                "timezone": "UTC",
+            },
+            headers=CSRF_HEADERS,
+        )
+        assert resp.status_code == 503
+        assert "config" in resp.json()["detail"]
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_create_task_no_thread_manager_returns_503(tmp_path: Path) -> None:
+    """thread_manager 未挂时，创建专属 thread 返回 503。"""
+    client, _ = _login_client_with_store(tmp_path)
+    try:
+        delattr(client.app.state, "thread_manager")
+        resp = client.post(
+            "/api/cron/tasks",
+            json={
+                "name": "missing-thread-manager",
+                "agent_name": "default",
+                "input_text": "test",
+                "schedule_type": "cron",
+                "cron_expr": "0 0 * * *",
+                "timezone": "UTC",
+                "preset_id": "preset-default",
+            },
+            headers=CSRF_HEADERS,
+        )
+        assert resp.status_code == 503
+        assert "thread manager" in resp.json()["detail"]
     finally:
         client.__exit__(None, None, None)

@@ -95,6 +95,14 @@ export type HistoryMessageRole = "user" | "assistant" | "tool";
 export type BackendKind = "generic_chat" | "claude_code" | "codex";
 
 /**
+ * Thread 业务类型。
+ *
+ * `chat`：用户普通对话。
+ * `scheduled_task`：定时任务专属历史 thread。
+ */
+export type ThreadKind = "chat" | "scheduled_task";
+
+/**
  * `system.notice` 的系统提示状态（由后端语义层直接给出）。
  */
 export type SystemNoticeStatus =
@@ -357,7 +365,7 @@ export interface ThreadTaskProgressViewModel {
  * `id` 形如 `thread-<12 位 hex>`；
  * `name.length <= 200`；
  * `message_count >= 0`；
- * `schema_version`：当前 v6；老文件由后端读盘时懒升级。
+ * `schema_version`：当前 v11；老文件由后端读盘时懒升级。
  *
  * v0.1.6 新增 `backend_kind`；老 v1 文件读入默认 `generic_chat`。
  * v0.2 新增 `claude_thread_id` + `cwd`（claude_code thread 与 SDK session 持久化绑定）；
@@ -367,6 +375,7 @@ export interface ThreadTaskProgressViewModel {
  * v0.2.3 将旧 `sdk_session_id` 改名为 `claude_thread_id`。
  * v0.2.x（schema v10）新增 `is_archived`，作为归档真源（替代旧 jsonl ``archived``
  * 事件方案）；老 v9 文件懒升级补 `is_archived=false`。
+ * scheduled-task-thread（schema v11）新增 `thread_kind/source_kind/source_id`。
  * `preset_id` 在 `backend_kind="claude_code"` 时允许空字符串占位。
  */
 export interface ThreadMetadataDTO {
@@ -400,8 +409,14 @@ export interface ThreadMetadataDTO {
   is_pinned: boolean;
   /** 是否归档；归档的 thread 不在历史列表中显示（claude_code 真源由本字段决定，不再读 jsonl ``archived`` 事件） */
   is_archived: boolean;
-  /** 元数据 schema 版本号，当前 10（新增 is_archived 作为归档真源） */
-  schema_version?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
+  /** 业务类型；缺失时按普通聊天处理。 */
+  thread_kind?: ThreadKind;
+  /** 业务来源类型；定时任务 thread 使用 scheduled_task。 */
+  source_kind?: string;
+  /** 业务来源 ID；定时任务 thread 使用 task_id。 */
+  source_id?: string;
+  /** 元数据 schema 版本号，当前 11（新增 scheduled_task thread 来源字段） */
+  schema_version?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11;
 }
 
 // usage-token-v2-bigbang: token 数据通过独立端点 GET /threads/<tid>/usage 拿，
@@ -952,6 +967,20 @@ export interface InterruptFrame {
   run_id?: string | null;
 }
 
+export interface ChoiceAnswerDTO {
+  question_id: string;
+  option_id: string;
+  option_label: string;
+  custom_text?: string | null;
+  value?: Record<string, unknown> | null;
+}
+
+export interface ChoiceSubmitFrame {
+  frame_type: "choice.submit";
+  request_id: string;
+  answers: ChoiceAnswerDTO[];
+}
+
 // ============================================================================
 // ===== S2C 帧（后端 → 浏览器，15 个；对应 Python ws_frames.py）=====
 //
@@ -998,6 +1027,31 @@ export interface ApprovalRequestFrame {
   policy_hint?: string;
   /** elevated 审批时的确认令牌（8 hex），用户需输入后才能点同意 */
   confirm_token?: string;
+}
+
+export interface ChoiceOptionDTO {
+  id: string;
+  label: string;
+  description: string;
+  value?: Record<string, unknown> | null;
+}
+
+export interface ChoiceQuestionDTO {
+  id: string;
+  title: string;
+  description?: string | null;
+  options: ChoiceOptionDTO[];
+}
+
+export interface ChoiceRequestFrame {
+  frame_type: "choice.request";
+  timestamp_ms: number;
+  request_id: string;
+  title: string;
+  description: string;
+  questions: ChoiceQuestionDTO[];
+  turn: number;
+  run_id?: string;
 }
 
 /**
@@ -1190,7 +1244,8 @@ export type WSFrameC2S =
   | UserInputFrame
   | ApprovalAckFrame
   | PingFrame
-  | InterruptFrame;
+  | InterruptFrame
+  | ChoiceSubmitFrame;
 
 /** S2C 帧 union（后端 → 浏览器）。 */
 export type WSFrameS2C =
@@ -1209,7 +1264,8 @@ export type WSFrameS2C =
   | TurnEndFrame
   | PongFrame
   | CellEvictedFrame
-  | RunInterruptedFrame;
+  | RunInterruptedFrame
+  | ChoiceRequestFrame;
 
 // ============================================================================
 // ===== 类型守卫示例（Type Guards）=====
