@@ -578,6 +578,8 @@ def create_app(
 
     # XSpace mobile pairing：SQLite 状态和 token 服务统一落到 <kongming_home>/web。
     from hosts.web.xspace_mobile import (
+        LoginQrAuthService,
+        LoginQrManager,
         MobileDeviceTokenService,
         MobilePairingManager,
         MobilePairingRepository,
@@ -592,6 +594,14 @@ def create_app(
     app.state.xspace_mobile_pairing_manager = MobilePairingManager(
         app.state.xspace_mobile_pairing_repository,
         app.state.xspace_mobile_token_service,
+    )
+    app.state.xspace_mobile_login_qr_manager = LoginQrManager(
+        app.state.xspace_mobile_pairing_repository,
+        app.state.xspace_mobile_token_service,
+    )
+    app.state.xspace_mobile_login_qr_auth_service = LoginQrAuthService(
+        manager=app.state.xspace_mobile_login_qr_manager,
+        rate_limiter=rate_limiter,
     )
 
     # codex 通道（与 claude_code 平级，独立 SessionManager 单例）
@@ -624,6 +634,7 @@ def create_app(
     from hosts.web.routers.cron import router as cron_router
     from hosts.web.routers.diagrams import router as diagrams_router
     from hosts.web.routers.health import router as health_router
+    from hosts.web.routers.login_qr import router as login_qr_router
     from hosts.web.routers.manage import router as manage_router
     from hosts.web.routers.model_providers import router as model_providers_router
     from hosts.web.routers.presets import router as presets_router
@@ -665,6 +676,7 @@ def create_app(
     app.include_router(server_info_router)
     app.include_router(uploads_router)
     app.include_router(health_router)
+    app.include_router(login_qr_router)
     app.include_router(xspace_mobile_router)
     app.include_router(xspace_runtime_router)
 

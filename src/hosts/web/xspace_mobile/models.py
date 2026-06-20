@@ -15,6 +15,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from hosts.web.xspace_mobile.server_origin import LoginQrOriginView
+
 
 class PairingSessionStatus(StrEnum):
     """配对会话状态枚举。
@@ -258,6 +260,162 @@ class PairingExchangeResult(BaseModel):
     device_token: str
     handoff_token: str
     handoff_expires_at: datetime
+
+
+class LoginQrSessionStatus(StrEnum):
+    """登录二维码会话状态枚举。
+
+    职责：固定登录二维码从创建、扫码、确认到 exchange 的状态机取值。
+    关键输入：数据库或业务层传入的状态字符串。
+    关键输出：类型安全的登录二维码会话状态。
+    """
+
+    PENDING_SCAN = "pending_scan"
+    PENDING_CONFIRM = "pending_confirm"
+    CONFIRMED = "confirmed"
+    EXCHANGED = "exchanged"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+
+
+class LoginQrClaimStatus(StrEnum):
+    """登录二维码 claim 状态枚举。
+
+    职责：固定 APK claim 的确认和兑换状态。
+    关键输入：数据库或业务层传入的状态字符串。
+    关键输出：类型安全的登录二维码 claim 状态。
+    """
+
+    PENDING_CONFIRM = "pending_confirm"
+    APPROVED = "approved"
+    DENIED = "denied"
+    EXCHANGED = "exchanged"
+
+
+class LoginQrSessionRecord(BaseModel):
+    """登录二维码会话持久化记录。
+
+    职责：映射 ``login_qr_sessions`` 表的一行。
+    关键输入：会话 ID、origin 快照、nonce/browser token hash、状态和授权证据。
+    关键输出：Repository/Manager 使用的登录二维码会话快照。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    login_qr_id: str
+    purpose: Literal["login"] = "login"
+    protocol_version: str
+    origin_mode: Literal["public_https", "lan_ip"]
+    server_origin: str
+    origin_scheme: Literal["https", "http"]
+    origin_host: str
+    origin_port: int | None = None
+    nonce_hash: str
+    browser_token_hash: str
+    requested_scopes: list[str]
+    status: LoginQrSessionStatus
+    claim_id: str | None = None
+    authorization_method: Literal["password", "device_token", "admin_session"] | None = None
+    authorized_user_id: str | None = None
+    expires_at: datetime
+    created_at: datetime
+    claimed_at: datetime | None = None
+    confirmed_at: datetime | None = None
+    exchanged_at: datetime | None = None
+
+
+class LoginQrClaimRecord(BaseModel):
+    """登录二维码 claim 持久化记录。
+
+    职责：映射 ``login_qr_claims`` 表的一行。
+    关键输入：claim ID、登录二维码 ID、设备信息、能力声明和状态。
+    关键输出：Repository/Manager 使用的登录二维码 claim 快照。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    claim_id: str
+    login_qr_id: str
+    device_id: str
+    label: str
+    platform: Literal["android"]
+    app_version: str
+    capabilities: dict[str, bool]
+    status: LoginQrClaimStatus
+    created_at: datetime
+
+
+class LoginQrSessionCreateResult(BaseModel):
+    """创建登录二维码结果 DTO。
+
+    职责：返回二维码、复制链接、nonce 明文和浏览器私密 token。
+    关键输入：Manager 生成的 session record、nonce 和 browser token。
+    关键输出：Router 可直接序列化的创建结果。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    login_qr_id: str
+    browser_token: str
+    nonce: str
+    expires_at: datetime
+    server_origin: LoginQrOriginView
+    server: str
+    qr_payload: str
+    copy_url: str
+    status: LoginQrSessionStatus = LoginQrSessionStatus.PENDING_SCAN
+
+
+class LoginQrClaimResult(BaseModel):
+    """APK claim 登录二维码结果 DTO。
+
+    职责：返回 claim ID 和等待登录页确认状态。
+    关键输入：Repository 原子 claim 后的 claim record。
+    关键输出：APK 轮询 exchange 所需的 claim 信息。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    login_qr_id: str
+    claim_id: str
+    status: LoginQrClaimStatus
+    poll_after_ms: int = Field(default=1000, ge=0)
+
+
+class LoginQrConfirmResult(BaseModel):
+    """登录页确认登录二维码结果 DTO。
+
+    职责：返回密码确认后的 confirmed 状态。
+    关键输入：已确认的 session 和 claim。
+    关键输出：登录页和 APK 轮询提示使用的确认结果。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    login_qr_id: str
+    claim_id: str
+    status: LoginQrSessionStatus
+    poll_after_ms: int = Field(default=1000, ge=0)
+
+
+class LoginQrExchangeResult(BaseModel):
+    """登录二维码 exchange 结果 DTO。
+
+    职责：返回 APK 最终需要保存和打开的 token 信息。
+    关键输入：已确认 claim、device token 签发结果和 handoff 签发结果。
+    关键输出：device token 明文、handoff token 明文和 server origin 快照。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    login_qr_id: str
+    claim_id: str
+    device_id: str
+    device_token: str
+    handoff_token: str
+    handoff_expires_at: datetime
+    server_origin: LoginQrOriginView
+    scopes: list[str]
     status: PairingSessionStatus = PairingSessionStatus.EXCHANGED
 
 

@@ -71,9 +71,15 @@ _SECTION_COMMENTS: dict[tuple[str, ...], str] = {
 
 _V0_TO_V05_FIELDS: tuple[_FieldMigration, ...] = (
     _FieldMigration(
+        ("web", "server_origin"),
+        None,
+        "扫码登录和外部客户端 handoff 使用的服务器访问地址；公网填 https://域名，局域网填 http://私网IP:端口。",
+        _WEB_PARENT,
+    ),
+    _FieldMigration(
         ("web", "public_origin"),
         None,
-        "移动配对和外部客户端使用的公开访问地址；留空时按当前请求 origin 生成。",
+        "兼容旧字段：移动配对和外部客户端使用的公开访问地址；新功能优先使用 server_origin。",
         _WEB_PARENT,
     ),
     _FieldMigration(

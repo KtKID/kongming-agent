@@ -169,7 +169,9 @@ web:
   host: 127.0.0.1
   # x-space 可传 --port 0 动态分配；固定默认值保留给资源配置和显式端口模式。
   port: 60000
-  # 局域网扫码时填 http://局域网IP:端口；留空时按浏览器请求 origin 生成。
+  # 二维码扫码登录使用的服务器 origin；公网填 https://域名，局域网填 http://局域网IP:端口。
+  server_origin:
+  # 兼容旧移动配对字段；新扫码登录优先使用 server_origin。
   public_origin:
   # 持久配置默认保持 browser；XSpace 运行态由 `POST /api/xspace/runtime/init` 覆盖。
   host_environment: browser
