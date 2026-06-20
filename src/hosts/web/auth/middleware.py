@@ -219,6 +219,8 @@ def _is_path_allowlisted(path: str, *, allow_docs: bool) -> bool:
         return True
     if _is_xspace_runtime_auth_allowlisted(path):
         return True
+    if _is_avatar_api_allowlisted(path):
+        return True
     if path.startswith("/ws/"):
         # WS 自身鉴权；HTTP 路径前缀 /ws/ 也放行（其它非 WS 协议的 GET 落到 404）
         return True
@@ -277,6 +279,15 @@ def _is_xspace_runtime_auth_allowlisted(path: str) -> bool:
     :class:`CSRFMiddleware` 校验。
     """
     return path == "/api/xspace/runtime/init"
+
+
+def _is_avatar_api_allowlisted(path: str) -> bool:
+    """判断 Avatar API 是否交给 Router 做 Bearer/cookie 鉴权。
+
+    关键输入：HTTP path。
+    关键输出：Avatar v1 API 放行 Auth/CSRF middleware，最终权限由 Router 校验。
+    """
+    return path.startswith("/api/avatar/v1/")
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -344,8 +355,10 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         method = request.method.upper()
-        if method in CSRF_PROTECTED_METHODS and not _is_xspace_mobile_csrf_allowlisted(
-            request.url.path,
+        if (
+            method in CSRF_PROTECTED_METHODS
+            and not _is_xspace_mobile_csrf_allowlisted(request.url.path)
+            and not _is_avatar_api_allowlisted(request.url.path)
         ):
             header_val = request.headers.get(CSRF_HEADER_NAME)
             if header_val != CSRF_HEADER_VALUE:

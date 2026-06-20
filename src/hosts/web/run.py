@@ -736,11 +736,14 @@ def _build_manager_and_inbox_sink(*, app: Any) -> Any:
             fail-safe 降级到「所有 cwd 默认 ask + 60s」行为）。
     """
     from hosts.web.approvals.global_inbox import get_inbox_broadcaster
+    from hosts.web.avatar import AvatarManager
+    from hosts.web.avatar.approval_sink import AvatarApprovalSink
     from safety.approval.manager import get_approval_manager
     from safety.approval.rules import ApprovalRules
     from safety.inbox.event_sink import InboxEventSink
 
     broadcaster = get_inbox_broadcaster()
+    avatar_manager = getattr(app.state, "avatar_manager", None) if app is not None else None
     policy = getattr(app.state, "auto_approval_policy", None) if app is not None else None
     manager = get_approval_manager(
         rules=ApprovalRules(policy=policy),
@@ -750,6 +753,10 @@ def _build_manager_and_inbox_sink(*, app: Any) -> Any:
     if not has_inbox_sink:
         sink = InboxEventSink(broadcaster=broadcaster, manager=manager)
         manager.register_event_sink(sink)
+    if isinstance(avatar_manager, AvatarManager) and not manager.has_event_sink_type(
+        AvatarApprovalSink
+    ):
+        manager.register_event_sink(AvatarApprovalSink(avatar_manager))
     return manager
 
 

@@ -604,6 +604,20 @@ def create_app(
         rate_limiter=rate_limiter,
     )
 
+    # Avatar message registry：Kongming 侧只提供消息注册 / REST 消费 / ack 真源，
+    # XSpace Avatar 负责形象、气泡和展示策略。
+    from hosts.web.avatar import AvatarManager
+    from hosts.web.avatar.assistant_manager import AvatarAssistantManager
+    from hosts.web.avatar.repository import AvatarMessageRepository
+
+    app.state.avatar_message_repository = AvatarMessageRepository(
+        home / "web" / "avatar_messages.db",
+    )
+    app.state.avatar_manager = AvatarManager(
+        app.state.avatar_message_repository,
+        AvatarAssistantManager(thread_manager),
+    )
+
     # codex 通道（与 claude_code 平级，独立 SessionManager 单例）
     # codex-channel-image-paste §3：service 构造时注入 asset_storage，让
     # CodexImageCliArgsBuilder 能反推 asset 物理路径生成 --image flag
@@ -628,6 +642,7 @@ def create_app(
     from hosts.web.integrations.codex import router as codex_router
     from hosts.web.routers.agent_workflows import router as agent_workflows_router
     from hosts.web.routers.auth import router as auth_router
+    from hosts.web.routers.avatar import router as avatar_router
     from hosts.web.routers.claude import router as claude_router
     from hosts.web.routers.codex import router as codex_rest_router
     from hosts.web.routers.config import router as config_router
@@ -651,6 +666,7 @@ def create_app(
     from hosts.web.routers.xspace_runtime import router as xspace_runtime_router
 
     app.include_router(auth_router)
+    app.include_router(avatar_router)
     app.include_router(threads_router)
     app.include_router(thread_task_progress_router)
     app.include_router(agent_workflows_router)
@@ -687,10 +703,12 @@ def create_app(
         app.include_router(workflow_router)
 
     # 9. WS endpoint
+    from hosts.web.avatar.channel_manager import register_avatar_channel_routes
     from hosts.web.websocket.cron import register_cron_ws_routes
     from hosts.web.websocket.routes import register_ws_routes
     from hosts.web.websocket.thread_status import register_thread_status_routes
 
+    register_avatar_channel_routes(app)
     register_ws_routes(app)
     # v0.3 cron-delivery M4：cron 全局 WS 端点 /ws/cron。
     # broker 是模块级单例（web/websocket/cron.py:get_broker），与 web/run.py 装配的

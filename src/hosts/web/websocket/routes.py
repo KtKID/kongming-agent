@@ -96,38 +96,71 @@ def register_ws_routes(app: FastAPI) -> None:
 
     @app.websocket("/ws/threads/{thread_id}")
     async def thread_ws(websocket: WebSocket, thread_id: str) -> None:
-        await _thread_ws_handler(websocket, thread_id)
+        await handle_thread_ws_channel(websocket, thread_id)
 
 
-async def _thread_ws_handler(websocket: WebSocket, thread_id: str) -> None:
+async def handle_thread_ws_channel(
+    websocket: WebSocket,
+    thread_id: str,
+    *,
+    network_channel: str = "generic",
+    require_cookie: bool = True,
+    allowed_backend_kind: str | None = None,
+    include_evolution_replay: bool = True,
+) -> None:
+    """处理 thread WS channel 连接。
+
+    关键输入：WebSocket、thread_id、网络频道名、鉴权开关和允许的 backend_kind。
+    关键输出：连接生命周期进入通用 C2S/S2C frame 循环。
+    """
+    await _thread_ws_handler(
+        websocket,
+        thread_id,
+        network_channel=network_channel,
+        require_cookie=require_cookie,
+        allowed_backend_kind=allowed_backend_kind,
+        include_evolution_replay=include_evolution_replay,
+    )
+
+
+async def _thread_ws_handler(
+    websocket: WebSocket,
+    thread_id: str,
+    *,
+    network_channel: str = "generic",
+    require_cookie: bool = True,
+    allowed_backend_kind: str | None = None,
+    include_evolution_replay: bool = True,
+) -> None:
     """WS 连接生命周期：鉴权 → boot → 推 history → 入帧循环 → cleanup。"""
     # 1. cookie 验
-    serializer: URLSafeTimedSerializer | None = getattr(websocket.app.state, "serializer", None)
-    if serializer is None:
-        log_generic_channel_event(
-            "auth_rejected",
-            level="WARNING",
-            thread_id=thread_id,
-            reason="auth_not_configured",
-        )
-        # 装配缺失，按 1008 关
-        await websocket.close(
-            code=WS_CLOSE_POLICY_VIOLATION,
-            reason="auth not configured",
-        )
-        return
+    if require_cookie:
+        serializer: URLSafeTimedSerializer | None = getattr(websocket.app.state, "serializer", None)
+        if serializer is None:
+            log_generic_channel_event(
+                "auth_rejected",
+                level="WARNING",
+                thread_id=thread_id,
+                reason="auth_not_configured",
+            )
+            # 装配缺失，按 1008 关
+            await websocket.close(
+                code=WS_CLOSE_POLICY_VIOLATION,
+                reason="auth not configured",
+            )
+            return
 
-    raw_cookie = websocket.cookies.get(SESSION_COOKIE_NAME)
-    payload = verify_session_cookie(raw_cookie, serializer)
-    if payload is None:
-        log_generic_channel_event(
-            "auth_rejected",
-            level="WARNING",
-            thread_id=thread_id,
-            reason="not_authenticated",
-        )
-        await websocket.close(code=WS_CLOSE_POLICY_VIOLATION, reason="not authenticated")
-        return
+        raw_cookie = websocket.cookies.get(SESSION_COOKIE_NAME)
+        payload = verify_session_cookie(raw_cookie, serializer)
+        if payload is None:
+            log_generic_channel_event(
+                "auth_rejected",
+                level="WARNING",
+                thread_id=thread_id,
+                reason="not_authenticated",
+            )
+            await websocket.close(code=WS_CLOSE_POLICY_VIOLATION, reason="not authenticated")
+            return
 
     # 2. thread_id 正则
     if not THREAD_ID_RE.match(thread_id):
@@ -142,6 +175,21 @@ async def _thread_ws_handler(websocket: WebSocket, thread_id: str) -> None:
 
     # 3. boot_or_attach
     tm: ThreadManagerProtocol = websocket.app.state.thread_manager
+    if allowed_backend_kind is not None and not _thread_has_backend_kind(
+        tm,
+        thread_id,
+        allowed_backend_kind,
+    ):
+        log_generic_channel_event(
+            "thread_rejected",
+            level="WARNING",
+            thread_id=thread_id,
+            reason="invalid_backend_kind",
+            expected_backend_kind=allowed_backend_kind,
+        )
+        await websocket.close(code=WS_CLOSE_POLICY_VIOLATION, reason="invalid thread kind")
+        return
+
     try:
         cell = await tm.boot_or_attach(thread_id)
     except KeyError:
@@ -169,7 +217,7 @@ async def _thread_ws_handler(websocket: WebSocket, thread_id: str) -> None:
     network_manager = getattr(websocket.app.state, "network_manager", None)
     if network_manager is None:
         network_manager = get_network_manager()
-    conn_id = await network_manager.register("generic", websocket, thread_id)
+    conn_id = await network_manager.register(network_channel, websocket, thread_id)
     log_generic_channel_event("registered", thread_id=thread_id, conn_id=conn_id)
     cell.attach_ws(websocket)
     cell.touch()
@@ -177,7 +225,8 @@ async def _thread_ws_handler(websocket: WebSocket, thread_id: str) -> None:
     # 5. 推 thread.history
     try:
         await _send_history_frame(websocket, cell)
-        await _send_evolution_replay_frames(websocket, cell)
+        if include_evolution_replay:
+            await _send_evolution_replay_frames(websocket, cell)
         log_generic_channel_event("history_replay_sent", thread_id=thread_id, conn_id=conn_id)
     except Exception as exc:
         logger.exception("send history frame failed for thread_id=%s", thread_id)
@@ -215,6 +264,25 @@ async def _thread_ws_handler(websocket: WebSocket, thread_id: str) -> None:
                     thread_id=thread_id,
                     conn_id=conn_id,
                 )
+
+
+def _thread_has_backend_kind(
+    tm: ThreadManagerProtocol,
+    thread_id: str,
+    backend_kind: str,
+) -> bool:
+    """判断 thread 是否存在且属于指定 backend_kind。
+
+    关键输入：ThreadManagerProtocol、thread_id 和目标 backend_kind。
+    关键输出：匹配时返回 True，缺失或类型不匹配时返回 False。
+    """
+    list_threads = getattr(tm, "list_threads", None)
+    if not callable(list_threads):
+        return False
+    for metadata in list_threads():
+        if getattr(metadata, "id", None) == thread_id:
+            return getattr(metadata, "backend_kind", None) == backend_kind
+    return False
 
 
 async def _receive_loop(
