@@ -71,9 +71,11 @@ async function request<T>(
   method: string,
   path: string,
   body?: unknown,
+  extraHeaders?: Record<string, string>,
 ): Promise<T> {
   const headers: Record<string, string> = {
     "X-Requested-With": "XMLHttpRequest",
+    ...(extraHeaders ?? {}),
   };
   if (body !== undefined) headers["Content-Type"] = "application/json";
 
@@ -91,11 +93,6 @@ async function request<T>(
     throw new ApiError(0, "network", `网络错误：${msg}`);
   }
 
-  if (response.status === 401) {
-    await handle401();
-    throw new ApiError(401, "unauthenticated", "session expired");
-  }
-
   if (response.status === 429) {
     const retryHeader = response.headers.get("Retry-After");
     const retry = retryHeader ? Number(retryHeader) : 300;
@@ -106,11 +103,27 @@ async function request<T>(
   }
 
   if (!response.ok) {
-    let data: ErrorResponseDTO | null = null;
+    let data: (ErrorResponseDTO & {
+      error?: { code?: string; message?: string; retryable?: boolean };
+    }) | null = null;
     try {
-      data = (await response.json()) as ErrorResponseDTO;
+      data = (await response.json()) as ErrorResponseDTO & {
+        error?: { code?: string; message?: string; retryable?: boolean };
+      };
     } catch {
       // 非 json 错误体；按 statusText 兜底
+    }
+    if (response.status === 401 && !data?.error?.code) {
+      await handle401();
+      throw new ApiError(401, "unauthenticated", "session expired");
+    }
+    if (data?.error?.code) {
+      throw new ApiError(
+        response.status,
+        data.error.code,
+        data.error.message ?? response.statusText ?? "request failed",
+        { retryable: data.error.retryable ?? false },
+      );
     }
     throw new ApiError(
       response.status,
@@ -128,6 +141,10 @@ async function request<T>(
 }
 
 export const apiGet = <T>(path: string) => request<T>("GET", path);
+export const apiGetWithHeaders = <T>(
+  path: string,
+  headers: Record<string, string>,
+) => request<T>("GET", path, undefined, headers);
 export const apiPost = <T>(path: string, body?: unknown) =>
   request<T>("POST", path, body);
 export const apiPut = <T>(path: string, body?: unknown) =>

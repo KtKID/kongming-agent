@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { useAuthStore } from "@/stores/auth";
 import { apiPost, ApiError, RateLimitedError } from "@/lib/api";
+import { LoginQrPanel } from "@/features/login-qr/LoginQrPanel";
 
 /**
  * /login 页：单密码登录 + 忘记密码重置流程。
@@ -93,45 +94,56 @@ export function LoginPage() {
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.24, ease: [0, 0, 0.2, 1] }}
-        className="w-full max-w-sm rounded-xl border border-border bg-card p-8 shadow-lg"
+        className="w-full max-w-4xl rounded-xl border border-border bg-card p-6 shadow-lg md:p-8"
       >
-        <div className="mb-6 flex flex-col items-center gap-2">
-          <div className="h-10 w-10 rounded-lg bg-accent" />
-          <h1 className="text-xl font-semibold tracking-tight">
-            kongming-agent
-          </h1>
-          <p className="text-xs text-muted-foreground">输入密码继续</p>
+        <div className="mb-6 flex items-center gap-3">
+          <div className="h-10 w-10 shrink-0 rounded-lg bg-accent" />
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight">
+              kongming-agent
+            </h1>
+            <p className="text-xs text-muted-foreground">登录 Kongming Runtime</p>
+          </div>
         </div>
-        <form onSubmit={onSubmit} className="flex flex-col gap-3">
-          <Input
-            type="password"
-            placeholder="密码"
-            autoFocus
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            disabled={disabled}
-            aria-label="密码"
-          />
-          {error ? (
-            <div
-              role="alert"
-              className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive"
-            >
-              {error}
-              {retryCountdown > 0 ? `（${retryCountdown}s）` : null}
+        <div className="grid gap-8 md:grid-cols-[minmax(0,1fr)_minmax(320px,1fr)]">
+          <section className="flex flex-col gap-4">
+            <div>
+              <h2 className="text-sm font-semibold">密码登录</h2>
+              <p className="mt-1 text-xs text-muted-foreground">输入密码继续</p>
             </div>
-          ) : null}
-          <Button type="submit" disabled={disabled || !password}>
-            {pending ? "登录中..." : "登录"}
-          </Button>
-          <button
-            type="button"
-            onClick={openReset}
-            className="text-xs text-muted-foreground hover:text-foreground hover:underline"
-          >
-            忘记密码？
-          </button>
-        </form>
+            <form onSubmit={onSubmit} className="flex flex-col gap-3">
+              <Input
+                type="password"
+                placeholder="密码"
+                autoFocus
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                disabled={disabled}
+                aria-label="密码"
+              />
+              {error ? (
+                <div
+                  role="alert"
+                  className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive"
+                >
+                  {error}
+                  {retryCountdown > 0 ? `（${retryCountdown}s）` : null}
+                </div>
+              ) : null}
+              <Button type="submit" disabled={disabled || !password}>
+                {pending ? "登录中..." : "登录"}
+              </Button>
+              <button
+                type="button"
+                onClick={openReset}
+                className="text-xs text-muted-foreground hover:text-foreground hover:underline"
+              >
+                忘记密码？
+              </button>
+            </form>
+          </section>
+          <LoginQrPanel />
+        </div>
       </motion.div>
 
       <Dialog open={resetOpen} onOpenChange={setResetOpen}>

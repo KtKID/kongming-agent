@@ -130,6 +130,36 @@ web:
     assert "port 49153" in result.output
 
 
+def test_status_reads_home_root_setting_yaml(tmp_path: Path, monkeypatch) -> None:
+    """server.json 缺 port 时优先读取 <home>/setting.yaml。"""
+    home = tmp_path / "kongming-home"
+    server_json = home / "web" / "server.json"
+    config = home / "setting.yaml"
+    server_json.parent.mkdir(parents=True)
+    server_json.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+    config.write_text(
+        """
+model:
+  name: fake
+  base_url: http://127.0.0.1:1234/v1
+  api_key: ""
+web:
+  enabled: true
+  host: "127.0.0.1"
+  port: 49156
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("KONGMING_CONFIG", raising=False)
+    monkeypatch.delenv("KONGMING_WEB_PORT", raising=False)
+    monkeypatch.setenv("KONGMING_SKIP_DOTENV", "1")
+
+    result = CliRunner().invoke(ctl.cli, ["status", "--home", str(home)])
+
+    assert result.exit_code == 0, f"exception={result.exception!r}\noutput={result.output}"
+    assert "port 49156" in result.output
+
+
 def test_status_handles_server_json_missing_pid(tmp_path: Path) -> None:
     """server.json 缺 pid 时回退 pid 文件，不抛 KeyError。"""
     home = tmp_path / "kongming-home"

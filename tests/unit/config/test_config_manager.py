@@ -154,7 +154,9 @@ def test_read_schema_returns_all_fields_and_groups(manager: ConfigManager) -> No
 def test_read_raw_returns_path_mtime_content(manager: ConfigManager, yaml_file: Path) -> None:
     resp: RawResponse = manager.read_raw()
     assert resp.path == str(yaml_file)
-    assert resp.content == _MINI_YAML
+    assert resp.content.splitlines()[0].startswith("config_schema_version: v0.5")
+    assert "# kongming-agent test config" in resp.content
+    assert "temperature: 0.5" in resp.content
     # mtime 与 stat 一致（容忍浮点精度 1µs）
     assert abs(resp.mtime - yaml_file.stat().st_mtime) < 1e-6
 

@@ -123,7 +123,9 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("web", "enabled"),
     ("web", "host"),
     ("web", "port"),
+    ("web", "server_origin"),
     ("web", "public_origin"),
+    ("web", "host_environment"),
     ("web", "dev_mode"),
     ("web", "initial_password"),
     ("web", "idle_timeout_seconds"),
@@ -473,6 +475,7 @@ def load_config(
     path: str | Path | None = None,
     *,
     load_env_file: bool = True,
+    migrate: bool = True,
 ) -> Config:
     """加载并校验整体配置。
 
@@ -482,6 +485,8 @@ def load_config(
         load_env_file: 是否在加载配置前先把项目根 ``.env`` 注入进程环境变量。
             默认 ``True``——生产体验优先。测试想断言"纯 yaml 默认值"行为时
             显式传 ``False`` 可关闭。
+        migrate: 是否在校验前迁移配置文件。正式入口保持默认 ``True``；writer
+            保存临时文件时传 ``False``，避免校验步骤改变待写 YAML 的格式范围。
 
     Returns:
         校验通过的 :class:`Config` 实例。
@@ -495,6 +500,10 @@ def load_config(
     if load_env_file:
         dotenv_env = _maybe_load_env_file(resolved) or {}
 
+    if migrate:
+        from infrastructure.config.migrations import migrate_config_if_needed
+
+        migrate_config_if_needed(resolved)
     raw_data = _load_yaml(resolved)
     # 加载 per-module YAML 文件（context yaml / tools yaml / llm yaml / infrastructure.tracing yaml）
     config_dir = resolved.parent

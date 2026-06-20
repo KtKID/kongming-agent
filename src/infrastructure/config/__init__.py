@@ -20,10 +20,13 @@ from __future__ import annotations
 from infrastructure.config.errors import ConfigLoadError, ConfigValidationError
 from infrastructure.config.loader import load_config
 from infrastructure.config.manager import ConfigManager
+from infrastructure.config.migrations import MigrationResult, migrate_config_if_needed
 from infrastructure.config.models import (
+    CURRENT_CONFIG_SCHEMA_VERSION,
     ApprovalConfig,
     CompactorConfig,
     Config,
+    ConfigSchemaVersion,
     FileToolConfig,
     HostConfig,
     LoggingConfig,
@@ -41,13 +44,21 @@ from infrastructure.config.models import (
     WebSearchConfig,
     WorkflowConfig,
 )
-from infrastructure.config.paths import get_kongming_home, resolve_kongming_path
+from infrastructure.config.paths import (
+    default_kongming_home_config_path,
+    find_existing_kongming_home_config,
+    get_kongming_home,
+    kongming_home_config_candidates,
+    resolve_kongming_path,
+)
 
 __all__ = [
     "ApprovalConfig",
     "CompactorConfig",
     "Config",
+    "ConfigSchemaVersion",
     "ConfigManager",
+    "CURRENT_CONFIG_SCHEMA_VERSION",
     "ConfigLoadError",
     "ConfigValidationError",
     "FileToolConfig",
@@ -66,7 +77,12 @@ __all__ = [
     "TraceConfig",
     "WebSearchConfig",
     "WorkflowConfig",
+    "default_kongming_home_config_path",
+    "find_existing_kongming_home_config",
     "get_kongming_home",
+    "kongming_home_config_candidates",
     "load_config",
+    "MigrationResult",
+    "migrate_config_if_needed",
     "resolve_kongming_path",
 ]

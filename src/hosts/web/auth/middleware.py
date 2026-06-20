@@ -59,6 +59,7 @@ CSRF_HEADER_NAME = "X-Requested-With"
 CSRF_HEADER_VALUE = "XMLHttpRequest"
 CSRF_PROTECTED_METHODS = frozenset({"POST", "PATCH", "DELETE", "PUT"})
 _MOBILE_PAIRING_PUBLIC_POST_SUFFIXES = frozenset({"claim", "exchange"})
+_MOBILE_LOGIN_QR_PUBLIC_POST_SUFFIXES = frozenset({"claim", "exchange"})
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +200,7 @@ def _is_path_allowlisted(path: str, *, allow_docs: bool) -> bool:
     - ``/api/auth/logout``：哪怕 cookie 已过期也允许 client 显式登出（清 cookie）
     - ``/health`` / ``/api/health``：启动 / 重启探测端点；lifespan 未完成 /
       cookie 失效时也要能拿 200
+    - ``/api/xspace/runtime/init``：XSpace native 宿主在 WebView 加载前写入运行态
     - 静态 / SPA 路径：``/``、``/assets/...``、``/index.html`` 等所有非 ``/api/`` 非 ``/ws/`` 的
     - WS 路径：HTTP middleware 不处理 WS upgrade 路径，但 starlette 仍会送进来 GET 请求；
       这里挡掉 ``/ws/`` 让 WS endpoint 自己鉴权
@@ -214,6 +216,8 @@ def _is_path_allowlisted(path: str, *, allow_docs: bool) -> bool:
         # 启动 / 重启探测端点：宿主在 lifespan 完成前 / cookie 失效场景下都要能拿 200
         return True
     if _is_xspace_mobile_auth_allowlisted(path):
+        return True
+    if _is_xspace_runtime_auth_allowlisted(path):
         return True
     if path.startswith("/ws/"):
         # WS 自身鉴权；HTTP 路径前缀 /ws/ 也放行（其它非 WS 协议的 GET 落到 404）
@@ -234,6 +238,11 @@ def _is_xspace_mobile_auth_allowlisted(path: str) -> bool:
         return True
     if path == "/api/xspace/mobile/session-handoff":
         return True
+    if path == "/api/xspace/mobile/login-qr-sessions":
+        return True
+    login_qr_prefix = "/api/xspace/mobile/login-qr-sessions/"
+    if path.startswith(login_qr_prefix):
+        return True
     prefix = "/api/xspace/mobile/pairing-sessions/"
     if path.startswith(prefix):
         suffix = path.rstrip("/").rsplit("/", 1)[-1]
@@ -249,11 +258,25 @@ def _is_xspace_mobile_csrf_allowlisted(path: str) -> bool:
     """
     if path == "/api/xspace/mobile/session-handoff":
         return True
+    login_qr_prefix = "/api/xspace/mobile/login-qr-sessions/"
+    if path.startswith(login_qr_prefix):
+        suffix = path.rstrip("/").rsplit("/", 1)[-1]
+        return suffix in _MOBILE_LOGIN_QR_PUBLIC_POST_SUFFIXES
     prefix = "/api/xspace/mobile/pairing-sessions/"
     if path.startswith(prefix):
         suffix = path.rstrip("/").rsplit("/", 1)[-1]
         return suffix in _MOBILE_PAIRING_PUBLIC_POST_SUFFIXES
     return False
+
+
+def _is_xspace_runtime_auth_allowlisted(path: str) -> bool:
+    """判断 XSpace 宿主启动初始化路径是否免登录。
+
+    关键输入：HTTP path。
+    关键输出：native 宿主 init 入口放行 Web cookie 鉴权；CSRF header 仍由
+    :class:`CSRFMiddleware` 校验。
+    """
+    return path == "/api/xspace/runtime/init"
 
 
 class AuthMiddleware(BaseHTTPMiddleware):

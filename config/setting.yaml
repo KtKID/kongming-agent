@@ -1,3 +1,5 @@
+config_schema_version: v0.5  # 配置结构版本；当前版本为 v0.5。
+
 # kongming-agent 统一配置
 #
 # 单一配置文件，覆盖所有模块的全部可配置项。
@@ -46,10 +48,7 @@ model:
   # Host → provider 路由表（按协议分组）。effective_provider 4 级判定的第 2 级，
   # 用于 path 启发式无强信号但 host 已知的场景（如裸 host ``https://api.openai.com``）。
   #
-  # 内置 8 host 默认（无需在此重写）：
-  #   openai_compatible: api.openai.com / open.bigmodel.cn / api.deepseek.com /
-  #                      api.moonshot.cn / api.minimaxi.com / localhost / 127.0.0.1
-  #   anthropic:         api.anthropic.com
+  # 内置常见 host 默认（无需在此重写）；仅在新增自定义 host 时写 provider_routing。
   #
   # 用户在此**新增 host 时与默认表合并**（不替换；list extend + 去重）。例如：
   # provider_routing:
@@ -148,7 +147,6 @@ scheduler:
   default_max_turns: 90
   approval:
     allow_write_file_create_in_cwd: true
-
 tool:
   shell:
     enabled: true
@@ -296,7 +294,8 @@ evolution:
 #
 # 主决策模型：HardBlock → SilentAllow → ExplicitConsent。
 # 用户配置 **追加** 默认规则，不替换；安全基线不可被降级。
-# 默认规则见 src/safety/default_rules.py（11 hard_deny + 6 approval_required + 16 sensitive_paths）。
+# runtime 内置安全基线见 src/safety/approval/default_rules.py；智能审批默认阻断规则见
+# src/safety/auto_approval/default_rules.yaml。用户配置追加默认规则，不替换默认规则。
 #
 # v0.1.4 boundary_kind 恒为 host：boundary_scope 仅接受 "any" / "host"，写 "sandbox" 会被拒。
 # 详见 docs/safety-scope-v0.1.4/04-data-and-state.md。
@@ -549,9 +548,14 @@ web:
   # uvicorn bind IP：仅本机用 127.0.0.1；需外网访问改 0.0.0.0 + 防火墙
   host: "0.0.0.0"
   port: 60000
+  host_environment: browser
+  # 移动配对和外部客户端使用的公开访问地址；留空时按请求 origin 生成。
+  public_origin:
 
   # 跳过登录鉴权（仅本地开发！）；上线必须 false 并设强密码
   dev_mode: false
+  # 首次部署时使用的明文初始密码；长期登录凭据会落到 password store。
+  initial_password:
 
   # 浏览器 Origin 白名单；空列表 = 拒绝所有跨域；本机调试可填 ["http://localhost:5173"]
   cors_origins: []
@@ -567,6 +571,50 @@ web:
 
   # 单次审批等待上限（超时默认拒绝，默认 60s，下限 10s）
   pending_approval_timeout_seconds: 60
+  # 前端 WebSocket 前台 ping 间隔，单位毫秒；默认 30 秒。
+  ws_heartbeat_interval_ms: 30000
+  # 浏览器标签页进入后台后的 ping 间隔，单位毫秒；默认 60 秒。
+  ws_heartbeat_background_interval_ms: 60000
+  # 单次 pong 等待超时，单位毫秒；默认 10 秒。
+  ws_heartbeat_timeout_ms: 10000
+  # 连续丢失 pong 的最大次数；达到后判定连接失活。
+  ws_heartbeat_max_missed: 3
+
+  # 前后端通信全量日志配置，默认关闭；用于排查 Web 运行链路。
+  full_log:
+    # 是否启用前后端通信全量日志；默认关闭。
+    enabled: false
+    # 全量日志写入路径；.kongming/* 会派生到 kongming_home。
+    path: .kongming/logs/full_log.jsonl
+    # 是否按自然日切分全量日志文件。
+    rotate_daily: true
+    # 是否记录 HTTP 请求和响应 body；默认关闭以降低敏感信息风险。
+    include_http_body: false
+    # 全量日志异步队列容量；队列满时丢弃最旧记录。
+    queue_size: 10000
+
+  # Deep Research 来源工具配置；Web 运行时按工具名自动探测搜索和读取能力。
+  deep_research_source_provider:
+    # 是否启用 Web Deep Research 来源工具自动装配。
+    enabled: true
+    # 写入 Deep Research artifact 的来源 provider 名称。
+    provider_name: web_user_tool_research_source
+    # 显式指定搜索工具名；留空时按候选列表自动探测。
+    search_tool_name:
+    # 显式指定读取工具名；留空时按候选列表自动探测。
+    fetch_tool_name:
+    # 自动探测搜索工具名列表，按顺序匹配。
+    search_tool_names:
+    - deep_research_search
+    - web_search
+    - search_web
+    - browser_search
+    # 自动探测读取工具名列表，按顺序匹配。
+    fetch_tool_names:
+    - deep_research_fetch
+    - web_fetch
+    - fetch_url
+    - browser_fetch
 
   # LLM preset 列表；浏览器创建 thread 时下拉选其一。
   # v0.1.5 留空，由 web-app-shell 任务实际填默认 preset。
@@ -575,7 +623,7 @@ web:
     display_name: "智谱 GLM-5.1"
     base_url: https://open.bigmodel.cn/api/coding/paas/v4
     model: glm-5.1
-    api_key_env: KONGMING_MODEL_API_KEY
+    api_key_env: GLM_API_KEY
     reasoning_effort: high
   - id: minimax-m3
     display_name: "MiniMax M3"

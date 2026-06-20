@@ -112,6 +112,13 @@ _GROUPS: list[dict[str, str]] = [
 
 
 _FIELD_METAS: list[FieldMeta] = [
+    FieldMeta(
+        path="config_schema_version",
+        type="string",
+        editable=False,
+        desc="配置结构版本，由配置迁移器维护。只读字段。",
+        group="runtime",
+    ),
     # =======================================================================
     # group: model
     # =======================================================================
@@ -635,10 +642,27 @@ _FIELD_METAS: list[FieldMeta] = [
         group="host_observ",
     ),
     FieldMeta(
+        path="web.server_origin",
+        type="string",
+        editable=True,
+        desc="扫码登录和移动端 handoff 使用的服务器 origin；公网填 https://域名，局域网填 http://私网IP:端口。需重启生效。",
+        restart_required=True,
+        group="host_observ",
+    ),
+    FieldMeta(
         path="web.public_origin",
         type="string",
         editable=True,
-        desc="移动配对二维码和 handoff 使用的公开 origin；局域网扫码填 http://局域网IP:端口。需重启生效。",
+        desc="兼容旧字段：移动配对二维码和 handoff 使用的公开 origin；新功能优先使用 web.server_origin。需重启生效。",
+        restart_required=True,
+        group="host_observ",
+    ),
+    FieldMeta(
+        path="web.host_environment",
+        type="enum",
+        editable=False,
+        enum=["browser", "xspace"],
+        desc="Web sidecar 宿主环境。普通浏览器为 browser；XSpace 运行态由启动流程设置。",
         restart_required=True,
         group="host_observ",
     ),

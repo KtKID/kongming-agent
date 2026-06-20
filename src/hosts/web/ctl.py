@@ -179,8 +179,10 @@ def _resolve_config_path(home: Path) -> Path:
     if env_config and env_config.strip():
         return Path(env_config).expanduser().resolve()
 
-    home_config = home / "config" / "setting.yaml"
-    if home_config.exists():
+    from infrastructure.config.paths import find_existing_kongming_home_config
+
+    home_config = find_existing_kongming_home_config(home)
+    if home_config is not None:
         os.environ["KONGMING_CONFIG"] = str(home_config)
         return home_config
 

@@ -69,11 +69,11 @@ def test_repository_initializes_schema(tmp_path: Path) -> None:
     """验证 repository 初始化四张表和 schema 版本。
 
     关键输入：临时 SQLite 路径。
-    关键输出：schema version 为 1。
+    关键输出：schema version 为 2。
     """
     repo = MobilePairingRepository(tmp_path / "mobile_pairing.db")
 
-    assert repo.schema_version() == 1
+    assert repo.schema_version() == 2
 
 
 def test_repository_persists_records_across_restart(tmp_path: Path) -> None:

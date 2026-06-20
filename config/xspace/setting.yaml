@@ -1,3 +1,5 @@
+config_schema_version: v0.5  # 配置结构版本；当前版本为 v0.5。
+
 # XSpace 打包用 Kongming Web runtime 默认配置。
 #
 # 用途：
@@ -8,7 +10,11 @@
 #   1. 本文件覆盖 `infrastructure.config.models.Config` 的全部 leaf 字段。
 #   2. 新增 Config 字段后，必须在本文件补默认值，配置契约测试会强制提醒。
 #   3. 密钥、token、密码、个人路径不写入安装包；使用空值、环境变量名或 app data 注入。
-#   4. x-space 启动 sidecar 时用 `--config <resource>/kongming/config/setting.yaml` 显式传入本文件的复制件。
+#   4. x-space 启动时先把本文件复制/合并到 `<kongming_home>/setting.yaml`，再用
+#      `--config <kongming_home>/setting.yaml` 拉起 sidecar，ready 后调用
+#      `POST /api/xspace/runtime/init` 标记 XSpace 运行态。
+#   5. safety.* 空数组只表示 XSpace 无额外追加策略；内置安全基线来自
+#      `src/safety/approval/default_rules.py` 和 `src/safety/auto_approval/default_rules.yaml`。
 
 model:
   # provider 留空时按 base_url 自动推断协议；x-space 设置页可覆盖。
@@ -163,8 +169,12 @@ web:
   host: 127.0.0.1
   # x-space 可传 --port 0 动态分配；固定默认值保留给资源配置和显式端口模式。
   port: 60000
-  # 局域网扫码时填 http://局域网IP:端口；留空时按浏览器请求 origin 生成。
+  # 二维码扫码登录使用的服务器 origin；公网填 https://域名，局域网填 http://局域网IP:端口。
+  server_origin:
+  # 兼容旧移动配对字段；新扫码登录优先使用 server_origin。
   public_origin:
+  # 持久配置默认保持 browser；XSpace 运行态由 `POST /api/xspace/runtime/init` 覆盖。
+  host_environment: browser
   dev_mode: false
   initial_password:
   cors_origins: []
