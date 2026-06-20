@@ -83,6 +83,87 @@ async def test_tool_writes_current_session_with_llm_source(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_tool_derives_progress_key_from_workflow_step_id(tmp_path: Path) -> None:
+    tool = build_task_progress_tool_from_config(_cfg(tmp_path / "sessions"))
+
+    result = await tool.execute(
+        {
+            "tasks": [
+                {
+                    "workflow_id": "wf-20260619T032911-c05b897f",
+                    "step_id": "step1_survey",
+                    "desc": "梳理 workflow 入口",
+                    "status": "in_progress",
+                }
+            ]
+        },
+        _ctx(),
+    )
+
+    assert result.ok is True
+    assert result.data is not None
+    task = result.data["tasks"][0]
+    assert task["id"] == "wf-20260619T032911-c05b897f:step1_survey"
+    assert task["orchestration_task_id"] == "wf-20260619T032911-c05b897f:step1_survey"
+    assert task["workflow_id"] == "wf-20260619T032911-c05b897f"
+    assert task["task_id"] == "step1_survey"
+    assert task["task_run_id"] == "step1_survey"
+    assert task["display_order"] == 0
+
+
+@pytest.mark.asyncio
+async def test_tool_rejects_duplicate_derived_progress_keys(tmp_path: Path) -> None:
+    tool = build_task_progress_tool_from_config(_cfg(tmp_path / "sessions"))
+
+    result = await tool.execute(
+        {
+            "tasks": [
+                {
+                    "workflow_id": "wf-20260619T032911-c05b897f",
+                    "step_id": "step1_survey",
+                    "desc": "x",
+                },
+                {
+                    "workflow_id": "wf-20260619T032911-c05b897f",
+                    "step_id": "step1_survey",
+                    "desc": "y",
+                },
+            ]
+        },
+        _ctx(),
+    )
+
+    assert result.ok is False
+    assert "derives duplicate progress key" in (result.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_tool_heals_legacy_workflow_key_without_workflow_id(tmp_path: Path) -> None:
+    tool = build_task_progress_tool_from_config(_cfg(tmp_path / "sessions"))
+
+    result = await tool.execute(
+        {
+            "tasks": [
+                {
+                    "orchestration_task_id": "wf-20260619T032911-c05b897f",
+                    "task_id": "step1_survey",
+                    "task_run_id": "wf-20260619T032911-c05b897f::step1_survey::1",
+                    "desc": "梳理 workflow 入口",
+                }
+            ]
+        },
+        _ctx(),
+    )
+
+    assert result.ok is True
+    assert result.data is not None
+    assert (
+        result.data["tasks"][0]["orchestration_task_id"]
+        == "wf-20260619T032911-c05b897f:step1_survey"
+    )
+
+
+@pytest.mark.asyncio
 async def test_tool_rejects_session_id_argument(tmp_path: Path) -> None:
     tool = build_task_progress_tool_from_config(_cfg(tmp_path / "sessions"))
 
@@ -175,16 +256,16 @@ async def test_tool_rejects_unknown_task_field(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_tool_requires_orchestration_task_id(tmp_path: Path) -> None:
+async def test_tool_requires_step_id_or_task_id(tmp_path: Path) -> None:
     tool = build_task_progress_tool_from_config(_cfg(tmp_path / "sessions"))
 
     result = await tool.execute(
-        {"tasks": [{"task_id": "task-1", "task_run_id": "run-1", "desc": "x"}]},
+        {"tasks": [{"desc": "x"}]},
         _ctx(),
     )
 
     assert result.ok is False
-    assert "orchestration_task_id must be a non-empty string" in (result.error_message or "")
+    assert "step_id must be a non-empty string" in (result.error_message or "")
 
 
 @pytest.mark.asyncio
