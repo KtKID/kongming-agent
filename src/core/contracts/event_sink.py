@@ -88,6 +88,11 @@ EventKind = Literal[
     # Token 用量（每轮 LLM 返回后 emit）：
     # payload={"prompt_tokens": int, "completion_tokens": int, "total_tokens": int}
     "usage",
+    # 用户选择工具事件（user-choice-tool-v0.1）：
+    # - choice.requested：present_choices 工具校验参数后发出。
+    #   payload={"request_id": str, "title": str, "description": str,
+    #            "questions": list[dict]}，WSEventSink 翻译成 choice.request。
+    "choice.requested",
 ]
 
 

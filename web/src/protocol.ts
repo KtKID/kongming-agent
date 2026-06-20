@@ -967,6 +967,20 @@ export interface InterruptFrame {
   run_id?: string | null;
 }
 
+export interface ChoiceAnswerDTO {
+  question_id: string;
+  option_id: string;
+  option_label: string;
+  custom_text?: string | null;
+  value?: Record<string, unknown> | null;
+}
+
+export interface ChoiceSubmitFrame {
+  frame_type: "choice.submit";
+  request_id: string;
+  answers: ChoiceAnswerDTO[];
+}
+
 // ============================================================================
 // ===== S2C 帧（后端 → 浏览器，15 个；对应 Python ws_frames.py）=====
 //
@@ -1013,6 +1027,31 @@ export interface ApprovalRequestFrame {
   policy_hint?: string;
   /** elevated 审批时的确认令牌（8 hex），用户需输入后才能点同意 */
   confirm_token?: string;
+}
+
+export interface ChoiceOptionDTO {
+  id: string;
+  label: string;
+  description: string;
+  value?: Record<string, unknown> | null;
+}
+
+export interface ChoiceQuestionDTO {
+  id: string;
+  title: string;
+  description?: string | null;
+  options: ChoiceOptionDTO[];
+}
+
+export interface ChoiceRequestFrame {
+  frame_type: "choice.request";
+  timestamp_ms: number;
+  request_id: string;
+  title: string;
+  description: string;
+  questions: ChoiceQuestionDTO[];
+  turn: number;
+  run_id?: string;
 }
 
 /**
@@ -1205,7 +1244,8 @@ export type WSFrameC2S =
   | UserInputFrame
   | ApprovalAckFrame
   | PingFrame
-  | InterruptFrame;
+  | InterruptFrame
+  | ChoiceSubmitFrame;
 
 /** S2C 帧 union（后端 → 浏览器）。 */
 export type WSFrameS2C =
@@ -1224,7 +1264,8 @@ export type WSFrameS2C =
   | TurnEndFrame
   | PongFrame
   | CellEvictedFrame
-  | RunInterruptedFrame;
+  | RunInterruptedFrame
+  | ChoiceRequestFrame;
 
 // ============================================================================
 // ===== 类型守卫示例（Type Guards）=====

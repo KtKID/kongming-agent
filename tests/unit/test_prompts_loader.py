@@ -155,6 +155,21 @@ async def test_tools_template_mentions_workflow_tools(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_tools_template_mentions_present_choices(tmp_path: Path) -> None:
+    """TOOLS 模板应提示 present_choices 的使用场景和参数写法。"""
+    await materialize_and_load_prompts(tmp_path)
+
+    tools_text = read_section_text(tmp_path / "prompts", "TOOLS.md")
+
+    assert "present_choices" in tools_text
+    assert "title" in tools_text
+    assert "description" in tools_text
+    assert "questions" in tools_text
+    assert "__custom__" in tools_text
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_user_md_html_comments_are_stripped(tmp_path: Path) -> None:
     """返回值里不含 HTML 注释字样（因为 USER.md 默认包含注释块）。"""
     result = await materialize_and_load_prompts(tmp_path)

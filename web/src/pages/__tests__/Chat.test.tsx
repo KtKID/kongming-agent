@@ -621,6 +621,59 @@ describe("ChatPage generic NetworkManager channel", () => {
     });
   });
 
+  it("choice.request mounts ChoicePanel and confirms via generic ChannelHandle", async () => {
+    const user = userEvent.setup();
+    const t = makeThread({ cwd: "/tmp/project-a" });
+    useThreadsStore.setState({ threads: [t] });
+
+    renderChat(t.id);
+    await waitFor(() =>
+      expect(networkMock.openChannel).toHaveBeenCalledWith("generic", t.id),
+    );
+    networkMock.handle.send.mockClear();
+
+    networkMock.emitMessage({
+      frame_type: "choice.request",
+      timestamp_ms: 1_700_000_000_000,
+      request_id: "call-1",
+      title: "选择方案",
+      description: "请选择下一步。",
+      turn: 1,
+      run_id: "run-1",
+      questions: [
+        {
+          id: "scope",
+          title: "范围",
+          options: [
+            {
+              id: "minimal",
+              label: "最小实现",
+              description: "先打通主链路。",
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(await screen.findByTestId("choice-panel")).toBeInTheDocument();
+    await user.click(screen.getByTestId("choice-option-minimal"));
+    await user.click(screen.getByTestId("choice-confirm"));
+
+    expect(networkMock.handle.send).toHaveBeenCalledWith({
+      frame_type: "choice.submit",
+      request_id: "call-1",
+      answers: [
+        {
+          question_id: "scope",
+          option_id: "minimal",
+          option_label: "最小实现",
+          custom_text: null,
+          value: null,
+        },
+      ],
+    });
+  });
+
   it("run.interrupted keeps the migrated stop toast behavior", async () => {
     const t = makeThread({ cwd: "/tmp/project-a" });
     useThreadsStore.setState({ threads: [t] });

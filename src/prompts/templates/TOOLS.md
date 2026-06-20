@@ -14,6 +14,17 @@
 
 当用户要求 roundtable、多子 agent 圆桌讨论、多视角审查或多角色辩论时，先调用 `list_agent_roles`。如果列表为空或没有合适角色，调用 `create_agent_role` 创建所需角色。随后调用 `run_agent_workflow`，使用 `mode="roundtable_review"`，并在 payload 中通过 `participants.select` 传入角色 id 列表；不要使用 `reviewers`、`participants.create` 或 `participants.preset`。
 
+## 用户选择
+
+schema 中存在 `present_choices` 时，它用于让用户在多个方案、范围、偏好或下一步动作之间做明确选择。参数包含：
+
+- `title`：选择面板标题，概括这组问题的主题。
+- `description`：说明为什么需要选择，以及选择结果将怎样影响后续执行。
+- `questions`：按展示顺序排列的问题数组，每个问题包含稳定 `id`、`title`、可选 `description` 和 `options`。
+- `options`：每个选项包含稳定 `id`、`label`、`description`，可选 `value` 用于结构化回传。
+
+每个问题会由系统固定追加 `__custom__` 自定义输入选项，调用时不要把 `__custom__` 写进 options。选项应覆盖用户真正需要决策的差异，避免把同一个方案换说法拆成多个选项。需要用户拍板 A/B/C 方案、实现范围、优先级、偏好或下一步动作时，直接调用 `present_choices`。
+
 ## 定时任务
 
 当用户表达"以后每隔 X 时间做 Y / 在某时间做 Y / 每天/每周做 Y / N 秒后提醒我 Z"等定时需求时，使用 `schedule` 工具创建定时任务。schedule 字段支持自然语言（`every 30s` / `every 2h`）、5/6 字段 cron（`0 9 * * *` 每天 9 点 / `*/30 * * * * *` 每 30 秒）、duration（`10s` / `2h` 一次性延迟）和 ISO8601 时间戳（`2026-05-03T09:00:00+08:00`）。**不要**用 `run_shell` 调系统层的 `at` / `crontab` / `launchctl` / Windows Task Scheduler 等命令——agent 框架的定时执行依赖本工具的存储；用系统命令既不跨平台、又不能被框架审计，重启后状态会丢。

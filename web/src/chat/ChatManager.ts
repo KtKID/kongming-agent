@@ -22,6 +22,7 @@ import type {
   SendRequest,
   HistoryLoadRequest,
   InterruptRequest,
+  ChoiceSubmitRequest,
   SessionStatusRequest,
   SessionStatus,
   RawFrameEnvelope,
@@ -126,6 +127,16 @@ export class ChatManager implements ChatManagerApi {
     for (const event of events) {
       this.deps.timelineFor(event.threadId).applyEvent(event);
     }
+  }
+
+  async submitChoice(request: ChoiceSubmitRequest): Promise<void> {
+    logChat("send", "submitChoice", { provider: request.provider, request });
+    const handle = this.deps.resolveHandle(request.provider, request.threadId);
+    const provider = this.provider(request.provider);
+    if (typeof provider.submitChoice !== "function") {
+      throw new Error(`[ChatManager] provider does not support choice submit: ${request.provider}`);
+    }
+    await provider.submitChoice(handle, request);
   }
 
   async interrupt(request: InterruptRequest): Promise<void> {
