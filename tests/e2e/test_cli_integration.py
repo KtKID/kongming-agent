@@ -509,7 +509,12 @@ async def test_cli_run_persists_instruction_metadata_to_file_manifest(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["instruction_sources"] == expected_origins
     assert manifest["instruction_text_hash"] == expected_hash
-    assert not system_prompt_path.exists()
+    assert system_prompt_path.exists(), "CLI file backend 应写出 system_prompt.json"
+    system_prompt = json.loads(system_prompt_path.read_text(encoding="utf-8"))
+    assert system_prompt["record_type"] == "system_prompt"
+    assert system_prompt["instruction_sources"] == expected_origins
+    assert system_prompt["instruction_text_hash"] == expected_hash
+    assert system_prompt["content"] == expected_instructions
 
 
 async def test_cli_run_lists_existing_file_sessions_before_runtime_start(

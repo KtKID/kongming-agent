@@ -12,6 +12,7 @@ Mock NativeRuntime.build and verify:
 
 from __future__ import annotations
 
+import hashlib
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -148,7 +149,10 @@ def mock_deps():
         patch("tools.register_schedule_tool_if_enabled") as mock_register_schedule,
         patch("tools.register_evolution_write_tool_if_enabled") as mock_register_evolution,
     ):
-        mock_asm.return_value = ("test instructions", ["prompts", "env", "runtime"])
+        mock_asm.return_value = (
+            "# runtime\nruntime context\n\n# agent_spec\ntest instructions",
+            ["runtime", "agent_spec"],
+        )
         mock_skills.return_value = []
         mock_runtime_instance = MagicMock()
         MockRuntime.build.return_value = mock_runtime_instance
@@ -394,12 +398,71 @@ class TestInstructionsCaching:
 
         factory = _make_runtime_factory(test_cfg)
 
-        # Call factory twice — instructions should only be assembled once
         await factory("thread-1", "test-local", mock_adapter, [])
         await factory("thread-2", "test-local", mock_adapter, [])
 
-        mock_deps["assemble_instructions"].assert_called_once()
+        assert mock_deps["assemble_instructions"].call_count == 2
         assert mock_deps["NativeRuntime"].build.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_runtime_instructions_use_base_sources_without_workflow_catalog(
+        self, test_cfg, mock_adapter, mock_deps
+    ):
+        from hosts.web.run import _make_runtime_factory
+
+        factory = _make_runtime_factory(test_cfg)
+        await factory("thread-1", "test-local", mock_adapter, [])
+
+        _args, kwargs = mock_deps["NativeRuntime"].build.call_args
+        instructions = kwargs["instructions"]
+        assert "# workflow_catalog" not in instructions
+        assert "describe_agent_workflow_strategy" not in instructions
+        assert "run_agent_workflow" not in instructions
+        assert "# runtime\nruntime context" in instructions
+        assert "# agent_spec\ntest instructions" in instructions
+
+        cache_key = getattr(factory, "_instructions_cache_key")
+        base_instructions = "# runtime\nruntime context\n\n# agent_spec\ntest instructions"
+        assert cache_key == "sha256:" + hashlib.sha256(base_instructions.encode()).hexdigest()
+
+    @pytest.mark.asyncio
+    async def test_stable_base_instruction_hash_keeps_shared_assets_cached(
+        self, test_cfg, mock_adapter, mock_deps
+    ):
+        from hosts.web.run import _make_runtime_factory
+
+        factory = _make_runtime_factory(test_cfg)
+        await factory("thread-1", "test-local", mock_adapter, [])
+        await factory("thread-2", "test-local", mock_adapter, [])
+
+        assert mock_deps["assemble_instructions"].call_count == 2
+        _args, kwargs = mock_deps["NativeRuntime"].build.call_args
+        assert "# runtime\nruntime context" in kwargs["instructions"]
+        assert "# agent_spec\ntest instructions" in kwargs["instructions"]
+        assert "# workflow_catalog" not in kwargs["instructions"]
+
+    @pytest.mark.asyncio
+    async def test_base_instructions_hash_change_refreshes_cache(
+        self, test_cfg, mock_adapter, mock_deps
+    ):
+        from hosts.web.run import _make_runtime_factory
+
+        mock_deps["assemble_instructions"].side_effect = [
+            ("# runtime\nbase-one", ["runtime"]),
+            ("# runtime\nbase-two", ["runtime"]),
+            ("# runtime\nbase-two", ["runtime"]),
+        ]
+        factory = _make_runtime_factory(test_cfg)
+        await factory("thread-1", "test-local", mock_adapter, [])
+        await factory("thread-2", "test-local", mock_adapter, [])
+
+        assert mock_deps["assemble_instructions"].call_count == 3
+        assert getattr(factory, "_instructions_cache_key") == (
+            "sha256:" + hashlib.sha256(b"# runtime\nbase-two").hexdigest()
+        )
+        _args, kwargs = mock_deps["NativeRuntime"].build.call_args
+        assert "# runtime\nbase-two" in kwargs["instructions"]
+        assert "# workflow_catalog" not in kwargs["instructions"]
 
 
 class TestSchedulerRuntimeFactory:
@@ -426,7 +489,8 @@ class TestSchedulerRuntimeFactory:
         _, kwargs = mock_bridge.call_args
         assert kwargs["tools"] is mock_deps["registry"]
         assert kwargs["enabled_tool_names"] == ["read_file", "shell"]
-        assert kwargs["instructions"] == "test instructions"
+        assert "# workflow_catalog" not in kwargs["instructions"]
+        assert "# agent_spec\ntest instructions" in kwargs["instructions"]
 
 
 class TestEventSinks:
@@ -439,18 +503,25 @@ class TestEventSinks:
 
         factory = _make_runtime_factory(test_cfg)
         mock_sink = MagicMock()
+        test_cfg.session = test_cfg.session.model_copy(
+            update={"file_store_path": ".kongming/custom-sessions"}
+        )
 
         await factory("thread-1", "test-local", mock_adapter, [mock_sink])
 
         # Sinks list 包含调用方传入的 mock_sink + factory 自己装配的 JsonlTraceSink
-        # （按 thread_id 拆文件，文件名形如 trace.thread-1.jsonl）
+        # （按 thread_id 拆目录，落到对应 session 目录内的 trace.jsonl）
         call_kwargs = mock_deps["NativeRuntime"].build.call_args
         passed_sinks = call_kwargs[1]["event_sinks"]
         assert mock_sink in passed_sinks
         jsonl_sinks = [s for s in passed_sinks if isinstance(s, JsonlTraceSink)]
         assert len(jsonl_sinks) == 1
-        # 验证按 thread_id 拆文件
-        assert "thread-1" in str(jsonl_sinks[0].output_path)
+        # 验证 trace 进入 thread 的 session 目录
+        assert jsonl_sinks[0].output_path.parts[-3:] == (
+            "custom-sessions",
+            "thread-1",
+            "trace.jsonl",
+        )
 
     @pytest.mark.asyncio
     async def test_jsonl_sink_path_per_thread_isolation(self, test_cfg, mock_adapter, mock_deps):
@@ -469,7 +540,7 @@ class TestEventSinks:
         path_b = next(s for s in sinks_b if isinstance(s, JsonlTraceSink)).output_path
 
         assert path_a != path_b
-        assert "thread-aaa111bbb222" in str(path_a)
-        assert "thread-ccc333ddd444" in str(path_b)
-        # 父目录一致（拆文件不拆目录）
-        assert path_a.parent == path_b.parent
+        assert path_a.parts[-3:] == ("sessions", "thread-aaa111bbb222", "trace.jsonl")
+        assert path_b.parts[-3:] == ("sessions", "thread-ccc333ddd444", "trace.jsonl")
+        # 父目录按 thread 隔离
+        assert path_a.parent != path_b.parent

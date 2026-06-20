@@ -67,6 +67,34 @@ async def test_assemble_instructions_appends_skill_listing(
 
 
 @pytest.mark.asyncio
+async def test_assemble_instructions_keeps_dynamic_sources_without_workflow_catalog(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """初始 system prompt 只包含基础指令、动态来源和 skills。"""
+    monkeypatch.setattr(cli_main, "get_kongming_home", lambda: tmp_path)
+    monkeypatch.setenv("KONGMING_EXTRA_INSTRUCTIONS", "env instruction")
+    extra_file = tmp_path / "rules.md"
+    extra_file.write_text("file instruction", encoding="utf-8")
+    cfg = _build_cfg()
+
+    rendered, origins, memory_store = await cli_main._assemble_instructions(
+        cfg,
+        instructions_files=[extra_file],
+        skill_listing="- demo: skill instruction",
+    )
+
+    assert "workflow_catalog" not in origins
+    assert "file:rules.md" in origins
+    assert "env:KONGMING_EXTRA_INSTRUCTIONS" in origins
+    assert "skills" in origins
+    assert "# workflow_catalog" not in rendered
+    assert rendered.index("# file:rules.md") < rendered.index("# skills")
+    assert rendered.index("# env:KONGMING_EXTRA_INSTRUCTIONS") < rendered.index("# skills")
+    assert rendered.index("# file:rules.md") < rendered.index("# env:KONGMING_EXTRA_INSTRUCTIONS")
+    assert memory_store is None
+
+
+@pytest.mark.asyncio
 async def test_assemble_instructions_skips_empty_skill_listing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

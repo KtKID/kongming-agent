@@ -748,6 +748,8 @@ def _build_manager_and_inbox_sink(*, app: Any) -> Any:
     manager = get_approval_manager(
         rules=ApprovalRules(policy=policy),
     )
+    if app is not None:
+        app.state.approval_manager = manager
     # 幂等：只在首次装配时注入 InboxEventSink；按 sink 类型判定
     has_inbox_sink = any(isinstance(s, InboxEventSink) for s in manager._event_sinks)
     if not has_inbox_sink:
@@ -857,25 +859,44 @@ def _make_runtime_factory(cfg: object) -> object:
     _agent_role_manager_cache: list[Any | None] = [None]
     _instructions_cache: list[str | None] = [None]
     _origins_cache: list[list[str] | None] = [None]
+    _instructions_cache_key: list[str | None] = [None]
     _scheduler_runtime_factory_cache: list[object | None] = [None]
     _mcp_runtime_registration_cache: list[McpRuntimeRegistrationManager | None] = [None]
     _cache_lock = asyncio.Lock()
 
+    def _prompt_hash(text: str) -> str:
+        return f"sha256:{hashlib.sha256(text.encode()).hexdigest()}"
+
+    async def _load_base_instructions_with_hash(
+        *,
+        sitian_root: Path | None,
+    ) -> tuple[str, list[str], str]:
+        rendered, origins = await assemble_instructions(
+            kongming_home=home,
+            sitian_root=sitian_root,
+        )
+        return _prompt_hash(rendered), origins, rendered
+
     async def _ensure_shared_assets(sinks: object) -> None:
+        sitian_raw = os.environ.get("SITIAN_PROMPT_ROOT", "").strip()
+        sitian_root = Path(sitian_raw).expanduser().resolve() if sitian_raw else None
         if _instructions_cache[0] is not None:
-            return
-
-        async with _cache_lock:
-            if _instructions_cache[0] is not None:
-                return
-
-            sitian_raw = os.environ.get("SITIAN_PROMPT_ROOT", "").strip()
-            sitian_root = Path(sitian_raw).expanduser().resolve() if sitian_raw else None
-
-            rendered, origins = await assemble_instructions(
-                kongming_home=home,
+            candidate_hash, _, _ = await _load_base_instructions_with_hash(
                 sitian_root=sitian_root,
             )
+            if _instructions_cache_key[0] == candidate_hash:
+                factory._instructions_cache_key = candidate_hash  # type: ignore[attr-defined]
+                return
+
+        async with _cache_lock:
+            candidate_hash, origins, rendered = await _load_base_instructions_with_hash(
+                sitian_root=sitian_root,
+            )
+            if _instructions_cache[0] is not None and _instructions_cache_key[0] == candidate_hash:
+                factory._instructions_cache_key = candidate_hash  # type: ignore[attr-defined]
+                return
+            _instructions_cache_key[0] = candidate_hash
+            factory._instructions_cache_key = candidate_hash  # type: ignore[attr-defined]
             sink_list = list(sinks) if sinks else []  # type: ignore[call-overload]
             skill_specs_list = await load_skill_specs(
                 home,
@@ -978,10 +999,11 @@ def _make_runtime_factory(cfg: object) -> object:
             raise ValueError(f"unknown preset_id: {preset_id!r}")
 
         if isinstance(sinks, list):
-            trace_path = resolve_kongming_path(real_cfg.trace.output_path, kongming_home=home)
-            stem = trace_path.stem
-            suffix = trace_path.suffix
-            per_thread_path = trace_path.with_name(f"{stem}.{thread_id}{suffix}")
+            session_root = resolve_kongming_path(
+                real_cfg.session.file_store_path,
+                kongming_home=home,
+            )
+            per_thread_path = session_root / thread_id / "trace.jsonl"
             sinks.append(
                 JsonlTraceSink(
                     per_thread_path,
@@ -1059,6 +1081,7 @@ def _make_runtime_factory(cfg: object) -> object:
             instruction_text_hash=f"sha256:{hashlib.sha256(instructions.encode()).hexdigest()}",
             created_at=time.time(),
             cwd=default_cwd,
+            instruction_text=instructions,
         )
 
         def session_factory(sid: str) -> Any:

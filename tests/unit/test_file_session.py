@@ -20,6 +20,7 @@ def _bootstrap(**overrides) -> SessionBootstrap:
         model_name="test-model",
         instruction_sources=["test-source"],
         instruction_text_hash="sha256:abc123",
+        instruction_text="# system\nYou are test.",
         created_at=1000000.0,
         cwd="/test",
         app_version="0.1.1",
@@ -95,8 +96,30 @@ class TestTC2FirstAppendMaterialize:
         await fs.append(Message.user("hello"))
         assert os.path.isfile(os.path.join(store_path, "test-session", "test-session.jsonl"))
 
-    async def test_system_prompt_snapshot_file_is_not_created(self, store_path: str) -> None:
+    async def test_system_prompt_snapshot_file_is_created(self, store_path: str) -> None:
         bootstrap = _bootstrap()
+        fs = _make_session(store_path=store_path, bootstrap=bootstrap)
+        await fs.append(Message.user("hello"))
+        path = os.path.join(store_path, "test-session", "system_prompt.json")
+        assert os.path.exists(path)
+        with open(path) as f:
+            snapshot = json.load(f)
+        assert snapshot == {
+            "schema_version": "0.1.2",
+            "record_type": "system_prompt",
+            "session_id": "test-session",
+            "model_name": "test-model",
+            "created_at": 1000000.0,
+            "instruction_sources": ["test-source"],
+            "instruction_text_hash": "sha256:abc123",
+            "cwd": "/test",
+            "content": "# system\nYou are test.",
+        }
+
+    async def test_system_prompt_snapshot_file_is_skipped_without_text(
+        self, store_path: str
+    ) -> None:
+        bootstrap = _bootstrap(instruction_text=None)
         fs = _make_session(store_path=store_path, bootstrap=bootstrap)
         await fs.append(Message.user("hello"))
         path = os.path.join(store_path, "test-session", "system_prompt.json")
@@ -121,24 +144,24 @@ class TestTC2FirstAppendMaterialize:
         await fs.append(Message.user("hello"))
         assert fs._last_message_id is not None
 
-    async def test_audit_event_appended_and_skipped_by_history(self, store_path: str) -> None:
+    async def test_legacy_audit_event_record_is_skipped_by_history(self, store_path: str) -> None:
         fs = _make_session(store_path=store_path)
         await fs.append(Message.user("hello"))
-        await fs.append_audit_event(
-            kind="llm.request",
-            run_id="run-test-session-1",
-            turn=1,
-            payload={
-                "request": {
-                    "messages": [
-                        {"role": "system", "content": "SYS"},
-                        {"role": "user", "content": "hello"},
-                    ]
-                }
-            },
-        )
 
         jsonl_path = os.path.join(store_path, "test-session", "test-session.jsonl")
+        legacy_record = {
+            "schema_version": "0.1.2",
+            "record_type": "audit_event",
+            "session_id": "test-session",
+            "model_name": "test-model",
+            "created_at": 1000001.0,
+            "kind": "llm.request",
+            "run_id": "run-test-session-1",
+            "turn": 1,
+            "payload": {"request": {"messages": [{"role": "system", "content": "SYS"}]}},
+        }
+        with open(jsonl_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(legacy_record, ensure_ascii=False) + "\n")
         with open(jsonl_path) as f:
             records = [json.loads(line) for line in f]
         assert [record["record_type"] for record in records] == ["message", "audit_event"]

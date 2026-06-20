@@ -584,13 +584,6 @@ class Runner:
                 "tool_count": len(llm_request.tools),
                 "original_message_count": len(history),
             }
-            await self._append_session_audit_event(
-                session=session,
-                kind="llm.request",
-                run_id=state.run_id,
-                turn=state.turn,
-                payload=request_payload,
-            )
             await self._emit(
                 Event(
                     kind="llm.request",
@@ -1328,34 +1321,6 @@ class Runner:
                 },
             )
         )
-
-    async def _append_session_audit_event(
-        self,
-        *,
-        session: Session,
-        kind: str,
-        run_id: str,
-        turn: int,
-        payload: dict[str, Any],
-    ) -> None:
-        append_audit_event = getattr(session, "append_audit_event", None)
-        if not callable(append_audit_event):
-            return
-        try:
-            await append_audit_event(kind=kind, run_id=run_id, turn=turn, payload=payload)
-        except Exception as exc:  # pragma: no cover - 防御式
-            await self._emit(
-                Event(
-                    kind="error",
-                    run_id=run_id,
-                    turn=turn,
-                    payload={
-                        "source": "session_audit",
-                        "type": type(exc).__name__,
-                        "message": str(exc),
-                    },
-                )
-            )
 
     # ------------------------------------------------------------------
     # EventSink fan-out

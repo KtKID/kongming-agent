@@ -7,6 +7,7 @@
 
     <store_path>/<session_id>/
       manifest.json
+      system_prompt.json
       <session_id>.jsonl
 
 设计决策（v0.1.2）：
@@ -59,6 +60,7 @@ class FileSession:
 
         self._session_dir = self._store_path / session_id
         self._manifest_path = self._session_dir / "manifest.json"
+        self._system_prompt_path = self._session_dir / "system_prompt.json"
         self._messages_path = self._session_dir / f"{session_id}.jsonl"
 
         self._materialized: bool = False
@@ -102,35 +104,6 @@ class FileSession:
             os.fsync(f.fileno())
 
         self._last_message_id = message_id
-
-    async def append_audit_event(
-        self,
-        *,
-        kind: str,
-        run_id: str,
-        turn: int | None,
-        payload: dict[str, Any],
-    ) -> None:
-        """追加一条审计事件。审计事件落盘，但不参与 history 回放。"""
-        if not self._materialized:
-            self._materialize()
-
-        record: dict[str, Any] = {
-            "schema_version": _SCHEMA_VERSION,
-            "record_type": "audit_event",
-            "session_id": self.session_id,
-            "model_name": self._bootstrap.model_name,
-            "created_at": time.time(),
-            "kind": kind,
-            "run_id": run_id,
-            "turn": turn,
-            "payload": payload,
-        }
-        line = json.dumps(record, ensure_ascii=False) + "\n"
-        with open(self._messages_path, "a", encoding="utf-8") as f:
-            f.write(line)
-            f.flush()
-            os.fsync(f.fileno())
 
     async def history(self) -> list[Message]:
         """读取所有历史消息。未 materialize 时返回空列表。"""
@@ -193,6 +166,7 @@ class FileSession:
         """创建目录、原子写 manifest、准备 jsonl 文件。"""
         self._session_dir.mkdir(parents=True, exist_ok=True)
         self._write_manifest()
+        self._write_system_prompt_snapshot()
 
         # 创建空 jsonl（如果不存在）
         if not self._messages_path.exists():
@@ -227,6 +201,30 @@ class FileSession:
             os.fsync(f.fileno())
         os.replace(tmp_path, self._manifest_path)
 
+    def _write_system_prompt_snapshot(self) -> None:
+        """把最终 system prompt 写入 thread 级快照文件。"""
+        if self._bootstrap.instruction_text is None:
+            return
+
+        snapshot: dict[str, Any] = {
+            "schema_version": _SCHEMA_VERSION,
+            "record_type": "system_prompt",
+            "session_id": self.session_id,
+            "model_name": self._bootstrap.model_name,
+            "created_at": self._bootstrap.created_at,
+            "instruction_sources": self._bootstrap.instruction_sources,
+            "instruction_text_hash": self._bootstrap.instruction_text_hash,
+            "cwd": self._bootstrap.cwd,
+            "content": self._bootstrap.instruction_text,
+        }
+
+        tmp_path = self._system_prompt_path.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, self._system_prompt_path)
+
     def _recover(self) -> None:
         """从磁盘恢复 session 状态。"""
         # 恢复 bootstrap（从 manifest 读取，但保留传入的 bootstrap 以保持一致性）
@@ -245,6 +243,7 @@ class FileSession:
                 ),
                 created_at=manifest.get("created_at", self._bootstrap.created_at),
                 cwd=manifest.get("cwd", self._bootstrap.cwd),
+                instruction_text=self._bootstrap.instruction_text,
                 app_version=manifest.get("app_version", self._bootstrap.app_version),
             )
             # 旧 manifest 无 run_count 字段时兜底为 0；用户已声明旧 session 全删，

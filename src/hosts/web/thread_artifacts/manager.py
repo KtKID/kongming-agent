@@ -145,7 +145,13 @@ class ThreadArtifactManager:
         return (self.session_root / thread_id).resolve()
 
     def _preferred_paths(self, thread_id: str) -> list[str]:
-        paths = ["manifest.json", f"{thread_id}.jsonl", "trace.jsonl", "task_progress.json"]
+        paths = [
+            "manifest.json",
+            "system_prompt.json",
+            f"{thread_id}.jsonl",
+            "trace.jsonl",
+            "task_progress.json",
+        ]
         workflow_dir = self._thread_dir(thread_id) / "agent-workflows"
         if workflow_dir.exists():
             paths.append("agent-workflows")
