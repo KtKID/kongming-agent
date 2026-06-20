@@ -313,9 +313,9 @@ class FileSession:
                         continue
             self._last_message_id = last_id
 
-        self._materialized = True
         if not self._system_prompt_path.exists():
             self._write_system_prompt_snapshot()
+        self._materialized = True
 
     # ------------------------------------------------------------------
     # validate

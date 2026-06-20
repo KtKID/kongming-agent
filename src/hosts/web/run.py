@@ -917,10 +917,6 @@ def _make_runtime_factory(cfg: object) -> object:
         insert_at = 1 if base_sources and base_sources[0].origin == "runtime" else 0
         return [*base_sources[:insert_at], workflow_source, *base_sources[insert_at:]]
 
-    def _publish_workflow_prompt_cache_key(key: Any) -> None:
-        _workflow_prompt_cache_key[0] = key
-        factory._workflow_prompt_cache_key = key  # type: ignore[attr-defined]
-
     async def _ensure_shared_assets(sinks: object) -> None:
         from application.agent_workflows.prompt_catalog import (
             build_default_workflow_prompt_listing,
@@ -940,7 +936,6 @@ def _make_runtime_factory(cfg: object) -> object:
                 _workflow_prompt_cache_key[0],
                 workflow_cache_key,
             ):
-                _publish_workflow_prompt_cache_key(_workflow_prompt_cache_key[0])
                 return
 
             sink_list = list(sinks) if sinks else []  # type: ignore[call-overload]
@@ -1037,7 +1032,7 @@ def _make_runtime_factory(cfg: object) -> object:
             _origins_cache[0] = origins
             _scheduler_runtime_factory_cache[0] = _scheduler_runtime_factory
             _mcp_runtime_registration_cache[0] = mcp_runtime_registration
-            _publish_workflow_prompt_cache_key(workflow_cache_key)
+            _workflow_prompt_cache_key[0] = workflow_cache_key
 
     async def factory(
         thread_id: str,
@@ -1077,6 +1072,7 @@ def _make_runtime_factory(cfg: object) -> object:
         preset_cfg = real_cfg.model_copy(update={"model": preset_model})
 
         await _ensure_shared_assets(sinks)
+        factory._workflow_prompt_cache_key = _workflow_prompt_cache_key[0]  # type: ignore[attr-defined]
         factory._scheduler_runtime_factory = _scheduler_runtime_factory_cache[0]  # type: ignore[attr-defined]
         factory._mcp_runtime_registration = _mcp_runtime_registration_cache[0]  # type: ignore[attr-defined]
         instructions = _instructions_cache[0]
