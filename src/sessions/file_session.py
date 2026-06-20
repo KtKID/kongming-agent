@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -29,7 +30,6 @@ import time
 import uuid
 from contextlib import suppress
 from pathlib import Path
-from threading import RLock
 from typing import Any
 
 from core.message import Message
@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 _SCHEMA_VERSION = "0.1.2"
 _SESSION_DIR_MODE = 0o700
 _SYSTEM_PROMPT_FILE_MODE = 0o600
+_GROUP_OTHER_MODE = stat.S_IRWXG | stat.S_IRWXO
 
 
 class FileSession:
@@ -71,7 +72,7 @@ class FileSession:
         self._messages_path = self._session_dir / f"{session_id}.jsonl"
 
         self._materialized: bool = False
-        self._materialize_lock = RLock()
+        self._materialize_lock = asyncio.Lock()
         self._last_message_id: str | None = None
         # run_count 在 manifest.json 中持久化；advance_run_index 时 +1 + 写盘
         self._run_count: int = 0
@@ -86,7 +87,7 @@ class FileSession:
 
     async def append(self, message: Message, *, usage: dict[str, Any] | None = None) -> None:
         """追加一条消息。首次调用触发 materialize。"""
-        with self._materialize_lock:
+        async with self._materialize_lock:
             if not self._materialized:
                 self._materialize()
 
@@ -116,7 +117,7 @@ class FileSession:
 
     async def history(self) -> list[Message]:
         """读取所有历史消息。未 materialize 时返回空列表。"""
-        with self._materialize_lock:
+        async with self._materialize_lock:
             if not self._materialized:
                 return []
 
@@ -143,7 +144,7 @@ class FileSession:
 
     async def clear(self) -> None:
         """清空 session 文件，重置为未 materialize 状态。"""
-        with self._materialize_lock:
+        async with self._materialize_lock:
             if self._session_dir.is_dir():
                 for child in self._session_dir.iterdir():
                     child.unlink()
@@ -163,7 +164,7 @@ class FileSession:
         若当前未 materialize（极罕见，理论上 runner 总是先 append 再 advance），
         先 _materialize 把目录和空 jsonl 准备好，再写 manifest。
         """
-        with self._materialize_lock:
+        async with self._materialize_lock:
             if not self._materialized:
                 self._materialize()
             self._run_count += 1
@@ -175,20 +176,19 @@ class FileSession:
     # ------------------------------------------------------------------
 
     def _materialize(self) -> None:
-        """创建目录、原子写 manifest、准备 jsonl 文件。"""
-        with self._materialize_lock:
-            if self._materialized:
-                return
-            self._session_dir.mkdir(parents=True, exist_ok=True, mode=_SESSION_DIR_MODE)
-            os.chmod(self._session_dir, _SESSION_DIR_MODE)
-            self._write_manifest()
-            self._write_system_prompt_snapshot()
+        """创建目录、原子写 manifest、准备 jsonl 文件；调用方需持有 async 锁。"""
+        if self._materialized:
+            return
+        self._session_dir.mkdir(parents=True, exist_ok=True, mode=_SESSION_DIR_MODE)
+        os.chmod(self._session_dir, _SESSION_DIR_MODE)
+        self._write_manifest()
+        self._write_system_prompt_snapshot()
 
-            # 创建空 jsonl（如果不存在）
-            if not self._messages_path.exists():
-                self._messages_path.touch()
+        # 创建空 jsonl（如果不存在）
+        if not self._messages_path.exists():
+            self._messages_path.touch()
 
-            self._materialized = True
+        self._materialized = True
 
     def _write_manifest(self) -> None:
         """原子写 manifest.json：先写 ``.tmp`` 再 rename，含 fsync。
@@ -251,9 +251,7 @@ class FileSession:
                 os.fsync(f.fileno())
             os.replace(tmp_path, self._system_prompt_path)
             actual_mode = stat.S_IMODE(self._system_prompt_path.stat().st_mode)
-            if actual_mode & 0o077:
-                with suppress(OSError):
-                    self._system_prompt_path.unlink()
+            if actual_mode & _GROUP_OTHER_MODE:
                 raise PermissionError(
                     f"system_prompt.json must not be group/world accessible: {oct(actual_mode)}"
                 )
