@@ -59,6 +59,7 @@ CSRF_HEADER_NAME = "X-Requested-With"
 CSRF_HEADER_VALUE = "XMLHttpRequest"
 CSRF_PROTECTED_METHODS = frozenset({"POST", "PATCH", "DELETE", "PUT"})
 _MOBILE_PAIRING_PUBLIC_POST_SUFFIXES = frozenset({"claim", "exchange"})
+_MOBILE_LOGIN_QR_PUBLIC_POST_SUFFIXES = frozenset({"claim", "exchange"})
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +238,11 @@ def _is_xspace_mobile_auth_allowlisted(path: str) -> bool:
         return True
     if path == "/api/xspace/mobile/session-handoff":
         return True
+    if path == "/api/xspace/mobile/login-qr-sessions":
+        return True
+    login_qr_prefix = "/api/xspace/mobile/login-qr-sessions/"
+    if path.startswith(login_qr_prefix):
+        return True
     prefix = "/api/xspace/mobile/pairing-sessions/"
     if path.startswith(prefix):
         suffix = path.rstrip("/").rsplit("/", 1)[-1]
@@ -252,6 +258,10 @@ def _is_xspace_mobile_csrf_allowlisted(path: str) -> bool:
     """
     if path == "/api/xspace/mobile/session-handoff":
         return True
+    login_qr_prefix = "/api/xspace/mobile/login-qr-sessions/"
+    if path.startswith(login_qr_prefix):
+        suffix = path.rstrip("/").rsplit("/", 1)[-1]
+        return suffix in _MOBILE_LOGIN_QR_PUBLIC_POST_SUFFIXES
     prefix = "/api/xspace/mobile/pairing-sessions/"
     if path.startswith(prefix):
         suffix = path.rstrip("/").rsplit("/", 1)[-1]

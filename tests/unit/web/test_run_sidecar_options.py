@@ -55,7 +55,7 @@ def test_resolve_runtime_options_cli_wins(tmp_path: Path, monkeypatch) -> None:
     """CLI 参数优先于环境变量，并写回 home / dist env。"""
     monkeypatch.setenv("KONGMING_WEB_HOST", "0.0.0.0")
     monkeypatch.setenv("KONGMING_WEB_PORT", "8080")
-    monkeypatch.setenv("KONGMING_WEB_PUBLIC_ORIGIN", "http://10.0.0.10:8080")
+    monkeypatch.setenv("KONGMING_WEB_SERVER_ORIGIN", "http://10.0.0.10:8080")
     monkeypatch.setenv("KONGMING_WEB_HOST_ENVIRONMENT", "xspace")
     monkeypatch.setenv("KONGMING_HOME", str(tmp_path / "env-home"))
     monkeypatch.setenv("KONGMING_CONFIG", str(tmp_path / "env.yaml"))
@@ -76,7 +76,7 @@ def test_resolve_runtime_options_cli_wins(tmp_path: Path, monkeypatch) -> None:
             str(config),
             "--dist-dir",
             str(dist),
-            "--public-origin",
+            "--server-origin",
             "http://192.168.31.23:57567/",
             "--host-environment",
             "browser",
@@ -86,6 +86,7 @@ def test_resolve_runtime_options_cli_wins(tmp_path: Path, monkeypatch) -> None:
 
     assert options.host == "127.0.0.1"
     assert options.port == 0
+    assert options.server_origin == "http://192.168.31.23:57567"
     assert options.public_origin == "http://192.168.31.23:57567"
     assert options.home == home.resolve()
     assert options.config_path == config.resolve()
@@ -152,6 +153,27 @@ def test_resolve_runtime_options_uses_host_environment_env(
 
     assert options.host_environment == "xspace"
     assert os.environ["KONGMING_WEB_HOST_ENVIRONMENT"] == "xspace"
+
+
+def test_resolve_runtime_options_supports_public_origin_alias(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """旧 --public-origin alias 回填 server_origin。"""
+    monkeypatch.delenv("KONGMING_CONFIG", raising=False)
+    home = tmp_path / "home"
+
+    options = _resolve_runtime_options(
+        [
+            "--home",
+            str(home),
+            "--public-origin",
+            "https://kongming.example.com/",
+        ]
+    )
+
+    assert options.server_origin == "https://kongming.example.com"
+    assert options.public_origin == "https://kongming.example.com"
 
 
 def test_load_config_runtime_host_environment_defaults_to_browser(
@@ -231,11 +253,12 @@ def test_override_web_bind_config_sets_actual_host_port() -> None:
         _cfg(),
         host="127.0.0.1",
         port=49152,
-        public_origin="http://192.168.31.23:49152",
+        server_origin="http://192.168.31.23:49152",
         host_environment="xspace",
     )
     assert cfg.web.host == "127.0.0.1"
     assert cfg.web.port == 49152
+    assert cfg.web.server_origin == "http://192.168.31.23:49152"
     assert cfg.web.public_origin == "http://192.168.31.23:49152"
     assert cfg.web.host_environment == "xspace"
 
@@ -247,11 +270,12 @@ def test_ready_payload_schema(tmp_path: Path) -> None:
         port=60000,
         home=tmp_path,
         dist_dir=tmp_path / "dist",
-        public_origin="http://192.168.31.23:60000",
+        server_origin="http://192.168.31.23:60000",
     )
 
     assert payload["type"] == "kongming_web_ready"
     assert payload["base_url"] == "http://127.0.0.1:60000"
+    assert payload["server_origin"] == "http://192.168.31.23:60000"
     assert payload["public_origin"] == "http://192.168.31.23:60000"
     assert payload["health_url"] == "http://127.0.0.1:60000/health"
     assert payload["server_json"] == str(tmp_path / "web" / "server.json")
@@ -267,7 +291,7 @@ def test_write_ready_payload_writes_file_and_stdout(tmp_path: Path, capsys) -> N
         port=60000,
         home=tmp_path,
         dist_dir=tmp_path / "dist",
-        public_origin="http://192.168.31.23:60000",
+        server_origin="http://192.168.31.23:60000",
         print_ready_json=True,
     )
 
@@ -276,6 +300,7 @@ def test_write_ready_payload_writes_file_and_stdout(tmp_path: Path, capsys) -> N
     from_file = json.loads(server_json.read_text(encoding="utf-8"))
     from_stdout = json.loads(capsys.readouterr().out)
     assert from_file["type"] == "kongming_web_ready"
+    assert from_file["server_origin"] == "http://192.168.31.23:60000"
     assert from_file["public_origin"] == "http://192.168.31.23:60000"
     assert from_stdout["server_json"] == str(server_json)
 

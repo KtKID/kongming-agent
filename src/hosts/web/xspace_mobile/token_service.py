@@ -271,6 +271,66 @@ class MobileDeviceTokenService:
             ),
         )
 
+    def issue_login_qr_exchange_tokens(
+        self,
+        *,
+        login_qr_id: str,
+        claim_id: str,
+        device: MobileDeviceDescriptor,
+        scopes: list[str],
+        user_id: str,
+        ttl_seconds: int = _HANDOFF_TTL_SECONDS,
+        now: datetime | None = None,
+    ) -> tuple[DeviceTokenIssueResult, HandoffIssueResult]:
+        """为登录二维码 exchange 原子签发 device token 和 handoff token。
+
+        关键输入：login_qr/claim、设备描述、scope、用户 ID、TTL 和当前时间。
+        关键输出：明文 token DTO；数据库写入由 repository 单事务完成。
+        """
+        device = _require_device(device)
+        _require_positive_ttl(ttl_seconds)
+        now = now or _utc_now()
+        device_token = _opaque_token(_DEVICE_TOKEN_PREFIX)
+        handoff_token = _opaque_token(_HANDOFF_TOKEN_PREFIX)
+        handoff_id = f"ho_{secrets.token_urlsafe(18)}"
+        expires_at = now + timedelta(seconds=ttl_seconds)
+        device_record = MobileDeviceRecord(
+            device_id=device.device_id,
+            label=device.label,
+            platform=device.platform,
+            app_version=device.app_version,
+            scopes=list(scopes),
+            token_hash=hash_token(device_token),
+            created_at=now,
+            last_seen_at=now,
+            revoked_at=None,
+        )
+        handoff_record = HandoffTokenRecord(
+            handoff_id=handoff_id,
+            token_hash=hash_token(handoff_token),
+            device_id=device.device_id,
+            scopes=list(scopes),
+            user_id=user_id,
+            expires_at=expires_at,
+            consumed_at=None,
+            created_at=now,
+        )
+        stored_device, stored_handoff = self._repository.complete_login_qr_exchange(
+            login_qr_id=login_qr_id,
+            claim_id=claim_id,
+            device=device_record,
+            handoff=handoff_record,
+            now=now,
+        )
+        return (
+            DeviceTokenIssueResult(device_token=device_token, device=stored_device),
+            HandoffIssueResult(
+                handoff_token=handoff_token,
+                handoff_id=stored_handoff.handoff_id,
+                expires_at=stored_handoff.expires_at,
+            ),
+        )
+
     def issue_handoff_for_device_token(
         self,
         device_token: str,

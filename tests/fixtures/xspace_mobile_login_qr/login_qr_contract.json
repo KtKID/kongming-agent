@@ -1,0 +1,129 @@
+{
+  "login_qr_session": {
+    "login_qr_id": "lq_example",
+    "purpose": "login",
+    "protocol_version": "1",
+    "origin_mode": "public_https",
+    "server_origin": "https://kongming.example.com",
+    "origin_scheme": "https",
+    "origin_host": "kongming.example.com",
+    "origin_port": null,
+    "nonce_hash": "92f2b7a4b5f0cf72f4999eb41e9fd20c73ee5c2e78e5a6f95d672e71f07b0f4d",
+    "browser_token_hash": "62f3a503c0b0af91f48c26fa369b116d5b6f85e2d45d07eac2d35ef9bfd1f743",
+    "requested_scopes": [
+      "webview",
+      "thread.read",
+      "approval.resolve"
+    ],
+    "status": "pending_confirm",
+    "claim_id": "cl_example",
+    "authorization_method": null,
+    "authorized_user_id": null,
+    "expires_at": "2026-06-19T10:01:00+00:00",
+    "created_at": "2026-06-19T10:00:00+00:00",
+    "claimed_at": "2026-06-19T10:00:08+00:00",
+    "confirmed_at": null,
+    "exchanged_at": null
+  },
+  "login_qr_claim": {
+    "claim_id": "cl_example",
+    "login_qr_id": "lq_example",
+    "device_id": "android-pixel-9",
+    "label": "Pixel 9",
+    "platform": "android",
+    "app_version": "1.0.0",
+    "capabilities": {
+      "webview": true,
+      "camera_scan": true,
+      "secure_storage": true
+    },
+    "status": "pending_confirm",
+    "created_at": "2026-06-19T10:00:08+00:00"
+  },
+  "recommended_qr_payload": "xspace://login-kongming?server=https%3A%2F%2Fkongming.example.com&origin_mode=public_https&login_qr_id=lq_example&nonce=nonce_example&v=1&purpose=login",
+  "compatible_qr_payload": "xspace://pair-kongming?server=https%3A%2F%2Fkongming.example.com&origin_mode=public_https&login_qr_id=lq_example&nonce=nonce_example&v=1&purpose=login",
+  "copy_url": "https://kongming.example.com/-/xspace/mobile/login?server=https%3A%2F%2Fkongming.example.com&origin_mode=public_https&login_qr_id=lq_example&nonce=nonce_example&v=1&purpose=login",
+  "claim_request": {
+    "protocol_version": "1",
+    "nonce": "nonce_example",
+    "device": {
+      "device_id": "android-pixel-9",
+      "label": "Pixel 9",
+      "platform": "android",
+      "app_version": "1.0.0"
+    },
+    "capabilities": {
+      "webview": true,
+      "camera_scan": true,
+      "secure_storage": true
+    }
+  },
+  "claim_response": {
+    "login_qr_id": "lq_example",
+    "claim_id": "cl_example",
+    "status": "pending_confirm",
+    "poll_after_ms": 1000
+  },
+  "confirm_request": {
+    "browser_token": "kgm_lqt_example",
+    "claim_id": "cl_example",
+    "password": "example-password"
+  },
+  "confirm_response": {
+    "status": "confirmed",
+    "poll_after_ms": 1000
+  },
+  "exchange_response": {
+    "status": "approved",
+    "server_origin": {
+      "mode": "public_https",
+      "origin": "https://kongming.example.com",
+      "scheme": "https",
+      "host": "kongming.example.com",
+      "port": null
+    },
+    "server": "https://kongming.example.com",
+    "device_token": "kgm_dt_example",
+    "token_type": "Bearer",
+    "scopes": [
+      "webview",
+      "thread.read",
+      "approval.resolve"
+    ],
+    "device_id": "android-pixel-9",
+    "instance": {
+      "alias": "Kongming",
+      "url": "https://kongming.example.com"
+    },
+    "web_session_url": "https://kongming.example.com/-/xspace/mobile/session/consume?handoff_token=kgm_ht_example"
+  },
+  "error_responses": {
+    "login_qr_expired": {
+      "status": 410,
+      "body": {
+        "error": {
+          "code": "login_qr_expired",
+          "message": "login qr expired: lq_example",
+          "retryable": false
+        }
+      }
+    },
+    "browser_token_mismatch": {
+      "status": 403,
+      "body": {
+        "error": {
+          "code": "browser_token_mismatch",
+          "message": "browser token mismatch: lq_example",
+          "retryable": false
+        }
+      }
+    },
+    "approval_pending": {
+      "status": 202,
+      "body": {
+        "status": "pending_approval",
+        "poll_after_ms": 1000
+      }
+    }
+  }
+}

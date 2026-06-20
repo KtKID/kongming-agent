@@ -20,8 +20,20 @@ PUBLIC_ERROR_CODE_BY_INTERNAL_CODE: dict[str, str] = {
 }
 
 HTTP_STATUS_BY_PUBLIC_ERROR_CODE: dict[str, int] = {
+    "server_origin_required": 400,
+    "server_origin_invalid_scheme": 400,
+    "server_origin_loopback": 400,
+    "server_origin_not_lan_ip": 400,
+    "server_origin_public_host_invalid": 400,
     "unsupported_protocol": 400,
     "invalid_pairing_payload": 400,
+    "invalid_credentials": 401,
+    "rate_limited": 429,
+    "login_qr_not_found": 404,
+    "login_qr_expired": 410,
+    "browser_token_mismatch": 403,
+    "login_qr_already_claimed": 409,
+    "login_qr_already_exchanged": 409,
     "pairing_not_found": 404,
     "pairing_expired": 410,
     "nonce_mismatch": 403,
@@ -137,6 +149,40 @@ def claim_not_found(pairing_id: str, claim_id: str) -> MobilePairingError:
     )
 
 
+def login_qr_not_found(login_qr_id: str) -> MobilePairingError:
+    """构造登录二维码会话缺失错误。"""
+    return MobilePairingError("login_qr_not_found", f"login qr not found: {login_qr_id}")
+
+
+def login_qr_expired(login_qr_id: str) -> MobilePairingError:
+    """构造登录二维码过期错误。"""
+    return MobilePairingError("login_qr_expired", f"login qr expired: {login_qr_id}")
+
+
+def browser_token_mismatch(login_qr_id: str) -> MobilePairingError:
+    """构造浏览器私密 token 校验失败错误。"""
+    return MobilePairingError(
+        "browser_token_mismatch",
+        f"browser token mismatch: {login_qr_id}",
+    )
+
+
+def login_qr_already_claimed(login_qr_id: str) -> MobilePairingError:
+    """构造登录二维码已被 claim 错误。"""
+    return MobilePairingError(
+        "login_qr_already_claimed",
+        f"login qr already claimed: {login_qr_id}",
+    )
+
+
+def login_qr_already_exchanged(login_qr_id: str) -> MobilePairingError:
+    """构造登录二维码已完成 exchange 错误。"""
+    return MobilePairingError(
+        "login_qr_already_exchanged",
+        f"login qr already exchanged: {login_qr_id}",
+    )
+
+
 def invalid_request(message: str) -> MobilePairingError:
     """构造请求参数错误。
 
@@ -144,6 +190,54 @@ def invalid_request(message: str) -> MobilePairingError:
     关键输出：``invalid_request`` 错误。
     """
     return MobilePairingError("invalid_request", message)
+
+
+def invalid_credentials() -> MobilePairingError:
+    """构造密码确认失败错误。"""
+    return MobilePairingError("invalid_credentials", "invalid credentials")
+
+
+def rate_limited(retry_after_seconds: int) -> MobilePairingError:
+    """构造登录限流错误。"""
+    return MobilePairingError(
+        "rate_limited",
+        f"too many failed login attempts; retry after {retry_after_seconds}s",
+        retryable=True,
+    )
+
+
+def server_origin_required() -> MobilePairingError:
+    """构造 server origin 缺失错误。"""
+    return MobilePairingError("server_origin_required", "web.server_origin is required")
+
+
+def server_origin_invalid_scheme(scheme: str) -> MobilePairingError:
+    """构造 server origin scheme 不支持错误。"""
+    return MobilePairingError(
+        "server_origin_invalid_scheme",
+        f"server origin scheme is not supported: {scheme}",
+    )
+
+
+def server_origin_loopback(host: str) -> MobilePairingError:
+    """构造 server origin 指向本机或不可扫地址错误。"""
+    return MobilePairingError("server_origin_loopback", f"server origin is local: {host}")
+
+
+def server_origin_not_lan_ip(host: str) -> MobilePairingError:
+    """构造 HTTP origin 不是 RFC1918 私网 IP 错误。"""
+    return MobilePairingError(
+        "server_origin_not_lan_ip",
+        f"http server origin must be an RFC1918 LAN IP: {host}",
+    )
+
+
+def server_origin_public_host_invalid(host: str) -> MobilePairingError:
+    """构造 HTTPS 公网模式 host 非域名错误。"""
+    return MobilePairingError(
+        "server_origin_public_host_invalid",
+        f"https server origin must use a public DNS host: {host}",
+    )
 
 
 def pairing_expired(pairing_id: str) -> MobilePairingError:
@@ -240,12 +334,18 @@ __all__ = [
     "MobilePairingError",
     "approval_denied",
     "approval_pending",
+    "browser_token_mismatch",
     "claim_not_found",
     "device_revoked",
     "handoff_consumed",
     "handoff_expired",
+    "invalid_credentials",
     "invalid_request",
     "invalid_token",
+    "login_qr_already_claimed",
+    "login_qr_already_exchanged",
+    "login_qr_expired",
+    "login_qr_not_found",
     "mobile_pairing_error_body",
     "mobile_pairing_error_response",
     "mobile_pairing_http_status",
@@ -254,5 +354,11 @@ __all__ = [
     "pairing_already_claimed",
     "pairing_expired",
     "pairing_not_found",
+    "rate_limited",
+    "server_origin_invalid_scheme",
+    "server_origin_loopback",
+    "server_origin_not_lan_ip",
+    "server_origin_public_host_invalid",
+    "server_origin_required",
     "unsupported_protocol",
 ]
