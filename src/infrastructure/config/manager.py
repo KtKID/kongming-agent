@@ -114,10 +114,10 @@ class ConfigManager:
 
         Args:
             yaml_path: ``setting.yaml`` 绝对路径。
-            env_path: ``.env`` 绝对路径。默认使用 ``setting.yaml`` 上两级目录下的 `.env`。
+            env_path: ``.env`` 绝对路径。默认按 ``setting.yaml`` 布局推导。
         """
         self._yaml_path = yaml_path
-        self._env_path = env_path or yaml_path.parent.parent / ".env"
+        self._env_path = env_path or _default_env_path(yaml_path)
 
     def read_schema(self) -> SchemaResponse:
         """返回字段元数据 + group 显示顺序。"""
@@ -265,6 +265,13 @@ def _flatten_dict(data: dict[str, Any], prefix: str = "") -> list[tuple[str, Any
         else:
             out.append((path, v))
     return out
+
+
+def _default_env_path(yaml_path: Path) -> Path:
+    """按配置文件布局推导默认 `.env` 路径。"""
+    if yaml_path.parent.name == "config":
+        return yaml_path.parent.parent / ".env"
+    return yaml_path.parent / ".env"
 
 
 def _yaml_explicit_paths(yaml_path: Path) -> set[str]:

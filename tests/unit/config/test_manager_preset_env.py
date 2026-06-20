@@ -211,6 +211,38 @@ def test_write_env_values_updates_file_and_process(yaml_path: Path, tmp_path: Pa
     assert not list(tmp_path.glob(".env.tmp.*"))
 
 
+def test_default_env_path_for_config_dir_layout(
+    yaml_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    manager = ConfigManager(yaml_path=yaml_path)
+
+    result = manager.write_env_values({"MINIMAX_API_KEY": "secret"})
+
+    assert result.path == str(tmp_path / ".env")
+    assert "MINIMAX_API_KEY=secret" in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert not (tmp_path / "config" / ".env").exists()
+
+
+def test_default_env_path_for_single_file_layout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    yaml_path = tmp_path / ".kongming" / "setting.yaml"
+    yaml_path.parent.mkdir()
+    yaml_path.write_text(_YAML, encoding="utf-8")
+    manager = ConfigManager(yaml_path=yaml_path)
+
+    result = manager.write_env_values({"MINIMAX_API_KEY": "secret"})
+
+    assert result.path == str(tmp_path / ".kongming" / ".env")
+    assert "MINIMAX_API_KEY=secret" in (tmp_path / ".kongming" / ".env").read_text(encoding="utf-8")
+    assert not (tmp_path / ".env").exists()
+
+
 def test_write_env_values_rejects_invalid_name_without_touching_file(
     yaml_path: Path,
     tmp_path: Path,

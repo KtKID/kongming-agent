@@ -127,6 +127,27 @@ def test_select_unit_tests_includes_web_module_fallback(tmp_path: Path) -> None:
     assert "tests/unit/web/test_unrelated.py" in selected
 
 
+def test_select_unit_tests_caps_large_module_fallback(tmp_path: Path, capsys: Any) -> None:
+    _touch(tmp_path / "tests/unit/test_arch_contracts.py")
+    _touch(tmp_path / "tests/unit/test_config_loader.py")
+    _touch(tmp_path / "tests/unit/test_runtime_home_static_guards.py")
+    for index in range(pre_push.MAX_PRE_PUSH_TEST_FILES + 10):
+        _touch(tmp_path / "tests/unit/web" / f"test_unrelated_{index}.py")
+
+    selected = pre_push.select_unit_tests(
+        tmp_path,
+        ["src/hosts/web/unmapped_feature.py"],
+    )
+
+    output = capsys.readouterr().out
+    assert "using bounded set" in output
+    assert selected == [
+        "tests/unit/test_arch_contracts.py",
+        "tests/unit/test_config_loader.py",
+        "tests/unit/test_runtime_home_static_guards.py",
+    ]
+
+
 def test_select_unit_tests_keeps_auto_approval_changes_narrow(tmp_path: Path) -> None:
     _touch(tmp_path / "tests/unit/test_arch_contracts.py")
     _touch(tmp_path / "tests/unit/test_config_loader.py")
