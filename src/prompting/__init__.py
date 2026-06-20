@@ -13,6 +13,7 @@ from prompting.instructions.instruction_loader import (
     InstructionLoader,
     InstructionSource,
     assemble_instructions,
+    load_instruction_sources,
 )
 from prompting.instructions.prompts_loader import TEMPLATE_FILENAMES, materialize_and_load_prompts
 from prompting.skills.skill_loader import SkillSpec, format_skill_listing, load_skill_specs
@@ -31,6 +32,7 @@ __all__ = [
     "build_runtime_context_text",
     "build_sitian_context_text",
     "format_skill_listing",
+    "load_instruction_sources",
     "load_skill_specs",
     "materialize_and_load_prompts",
 ]

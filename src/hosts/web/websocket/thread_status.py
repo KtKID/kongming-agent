@@ -65,9 +65,26 @@ _EVENT_KIND_TO_PHASE: dict[str, Phase] = {
     "content.delta": "responding",
     "reasoning.delta": "thinking",
     "tool.call.start": "tool_calling",
+    "run.cancelled": "idle",
     "turn.end": "complete",
     "error": "error",
 }
+
+# Runner 结束态 → thread-status phase。completed 已常由 turn.end 投影为
+# complete；这里保留 run.end 兜底，让所有 terminal status 都有单一收口。
+_RUN_END_STATUS_TO_PHASE: dict[str, Phase] = {
+    "completed": "complete",
+    "cancelled": "idle",
+    "failed": "error",
+}
+
+
+def _phase_from_event(kind: str, payload: Any) -> Phase | None:
+    """把 Runner Event 映射为 thread-status phase。"""
+    if kind == "run.end":
+        status = payload.get("status") if isinstance(payload, dict) else None
+        return _RUN_END_STATUS_TO_PHASE.get(status) if isinstance(status, str) else None
+    return _EVENT_KIND_TO_PHASE.get(kind)
 
 
 class ThreadStatusBroadcaster:
@@ -190,7 +207,8 @@ class ThreadStatusEventSink:
         if not isinstance(kind, str):
             return
 
-        phase = _EVENT_KIND_TO_PHASE.get(kind)
+        payload = getattr(event, "payload", None) or {}
+        phase = _phase_from_event(kind, payload)
         if phase is None or phase == self._last_phase:
             return
         self._last_phase = phase
@@ -201,7 +219,6 @@ class ThreadStatusEventSink:
             "phase": phase,
         }
         if phase == "tool_calling":
-            payload = getattr(event, "payload", None) or {}
             tool_name = payload.get("tool_name")
             if isinstance(tool_name, str) and tool_name:
                 frame["toolName"] = tool_name

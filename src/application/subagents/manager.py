@@ -7,13 +7,18 @@ selected by the caller.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
+from application.subagents.lifecycle import (
+    SubAgentLifecycleRegistry,
+    get_default_subagent_lifecycle_registry,
+)
 from application.subagents.permissions import (
     SubAgentApprovalProvider,
     SubAgentCreationRecord,
@@ -33,6 +38,7 @@ if TYPE_CHECKING:
     from runtime_assembly.native_runtime import NativeRuntime
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9_-]+")
+_SubAgentFinishedStatus = Literal["completed", "failed", "cancelled"]
 
 
 @dataclass(frozen=True)
@@ -66,63 +72,119 @@ class SubAgentRun:
 class SubAgentManager:
     """Runs isolated child agents through the shared Runner boundary."""
 
-    def __init__(self, parent_runtime: NativeRuntime) -> None:
+    def __init__(
+        self,
+        parent_runtime: NativeRuntime,
+        *,
+        lifecycle_registry: SubAgentLifecycleRegistry | None = None,
+    ) -> None:
         self._runtime = parent_runtime
+        self._lifecycle_registry = lifecycle_registry or get_default_subagent_lifecycle_registry()
 
     async def run_task(
         self,
         *,
-        workflow_id: str,
+        workflow_id: str | None = None,
         parent_session_id: str,
         task: SubAgentTask,
         audit_writer: WorkflowAuditWriter | None = None,
+        source: str = "workflow",
     ) -> SubAgentRun:
         """Run one child task in a fresh session."""
+        resolved_workflow_id = workflow_id or source or "subagent"
+        task_run_id = _task_run_id(task)
         session_id = self._build_child_session_id(
-            workflow_id=workflow_id,
+            workflow_id=resolved_workflow_id,
             parent_session_id=parent_session_id,
-            task_id=_task_run_id(task),
+            task_id=task_run_id,
         )
-        session = self._runtime.session_factory(session_id)
-        agent_spec = self._build_child_agent_spec(task)
-        enabled_tools = self._resolve_enabled_tools(task)
-        approval = self._runtime.approval
-        lifecycle_hooks = []
-        if task.permission is not None:
-            if audit_writer is None:
-                raise ValueError("scoped subagent task requires audit writer")
-            validate_scoped_tool_names(task.tool_names)
-            grant = self._create_grant(
-                workflow_id=workflow_id,
+        self._lifecycle_registry.record_started(
+            thread_id=parent_session_id,
+            source=source,
+            workflow_id=resolved_workflow_id,
+            task_id=task.task_id,
+            task_run_id=task_run_id,
+            task_name=task.task_name,
+            session_id=session_id,
+        )
+        try:
+            session = self._runtime.session_factory(session_id)
+            agent_spec = self._build_child_agent_spec(task)
+            enabled_tools = self._resolve_enabled_tools(task)
+            approval = self._runtime.approval
+            lifecycle_hooks = []
+            if task.permission is not None:
+                if audit_writer is None:
+                    raise ValueError("scoped subagent task requires audit writer")
+                validate_scoped_tool_names(task.tool_names)
+                grant = self._create_grant(
+                    workflow_id=resolved_workflow_id,
+                    parent_session_id=parent_session_id,
+                    session_id=session_id,
+                    task=task,
+                )
+                creation_record = self._create_creation_record(
+                    grant=grant,
+                    task=task,
+                    audit_writer=audit_writer,
+                )
+                audit_writer.write_subagent_creation(creation_record)
+                enabled_tools = wrap_scoped_file_tools(enabled_tools, grant)
+                approval = SubAgentApprovalProvider(
+                    grant=grant,
+                    audit_writer=audit_writer,
+                    upstream=self._runtime.approval,
+                )
+                lifecycle_hooks.append(
+                    SubAgentToolAuditHook(grant=grant, audit_writer=audit_writer)
+                )
+            result = await self._runtime.runner.run(
+                self._build_dispatch_prompt(task),
+                session=session,
+                agent_spec=agent_spec,
+                llm=self._runtime.llm,
+                tools=self._runtime.tools,
+                approval=approval,
+                max_turns=min(_task_max_turns(task), self._runtime.config.runner.max_turns),
+                enabled_tools=enabled_tools,
+                lifecycle_hooks=lifecycle_hooks,
+            )
+        except asyncio.CancelledError as exc:
+            self._record_finished(
+                workflow_id=resolved_workflow_id,
                 parent_session_id=parent_session_id,
+                source=source,
+                task=task,
+                task_run_id=task_run_id,
                 session_id=session_id,
+                status="cancelled",
+                error_message=str(exc) or "cancelled",
+            )
+            raise
+        except Exception as exc:
+            self._record_finished(
+                workflow_id=resolved_workflow_id,
+                parent_session_id=parent_session_id,
+                source=source,
                 task=task,
+                task_run_id=task_run_id,
+                session_id=session_id,
+                status="failed",
+                error_message=str(exc) or type(exc).__name__,
             )
-            creation_record = self._create_creation_record(
-                grant=grant,
-                task=task,
-                audit_writer=audit_writer,
-            )
-            audit_writer.write_subagent_creation(creation_record)
-            enabled_tools = wrap_scoped_file_tools(enabled_tools, grant)
-            approval = SubAgentApprovalProvider(
-                grant=grant,
-                audit_writer=audit_writer,
-                upstream=self._runtime.approval,
-            )
-            lifecycle_hooks.append(SubAgentToolAuditHook(grant=grant, audit_writer=audit_writer))
-        result = await self._runtime.runner.run(
-            self._build_dispatch_prompt(task),
-            session=session,
-            agent_spec=agent_spec,
-            llm=self._runtime.llm,
-            tools=self._runtime.tools,
-            approval=approval,
-            max_turns=min(_task_max_turns(task), self._runtime.config.runner.max_turns),
-            enabled_tools=enabled_tools,
-            lifecycle_hooks=lifecycle_hooks,
+            raise
+        run = self._to_run(task=task, session_id=session_id, result=result)
+        self._record_finished(
+            workflow_id=resolved_workflow_id,
+            parent_session_id=parent_session_id,
+            source=source,
+            task=task,
+            task_run_id=task_run_id,
+            session_id=session_id,
+            status=_finished_status(run.status),
+            error_message=run.error_message,
         )
-        return self._to_run(task=task, session_id=session_id, result=result)
+        return run
 
     def _build_child_agent_spec(self, task: SubAgentTask) -> AgentSpec:
         return AgentSpec(
@@ -246,6 +308,30 @@ class SubAgentManager:
             usage=_usage_from_result_metadata(result.metadata),
         )
 
+    def _record_finished(
+        self,
+        *,
+        workflow_id: str | None,
+        parent_session_id: str,
+        source: str,
+        task: SubAgentTask,
+        task_run_id: str,
+        session_id: str,
+        status: _SubAgentFinishedStatus,
+        error_message: str | None,
+    ) -> None:
+        self._lifecycle_registry.record_finished(
+            thread_id=parent_session_id,
+            source=source,
+            workflow_id=workflow_id,
+            task_id=task.task_id,
+            task_run_id=task_run_id,
+            task_name=task.task_name,
+            session_id=session_id,
+            status=status,
+            error_message=error_message,
+        )
+
     def _build_child_session_id(
         self,
         *,
@@ -286,6 +372,12 @@ def _task_max_turns(task: SubAgentTask) -> int:
     if isinstance(raw, int) and raw > 0:
         return raw
     return 3
+
+
+def _finished_status(status: str) -> _SubAgentFinishedStatus:
+    if status in {"completed", "failed", "cancelled"}:
+        return cast(_SubAgentFinishedStatus, status)
+    return "failed"
 
 
 def _usage_from_result_metadata(metadata: dict[str, object]) -> dict[str, int]:

@@ -218,7 +218,9 @@ class FileSession:
             "content": self._bootstrap.instruction_text,
         }
 
-        tmp_path = self._system_prompt_path.with_suffix(".tmp")
+        tmp_path = self._system_prompt_path.with_name(
+            f"{self._system_prompt_path.name}.{uuid.uuid4().hex}.tmp"
+        )
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(snapshot, f, ensure_ascii=False, indent=2)
             f.flush()

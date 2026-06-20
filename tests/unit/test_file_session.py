@@ -115,6 +115,8 @@ class TestTC2FirstAppendMaterialize:
             "cwd": "/test",
             "content": "# system\nYou are test.",
         }
+        session_dir = Path(store_path) / "test-session"
+        assert list(session_dir.glob("system_prompt.json.*.tmp")) == []
 
     async def test_system_prompt_snapshot_file_is_skipped_without_text(
         self, store_path: str

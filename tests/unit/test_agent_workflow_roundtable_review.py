@@ -371,6 +371,7 @@ def test_agent_workflow_manager_registers_roundtable_review(tmp_path: Path) -> N
         "map_reduce",
         "parallel",
         "roundtable_review",
+        "task_flow",
     ]
     description = manager.describe_workflow_strategy("roundtable_review")
     assert description.runnable is True

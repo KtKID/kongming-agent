@@ -237,7 +237,11 @@ async def test_llm_request_local_trace_drops_messages_and_tool_schema(tmp_path):
                             "input_schema": {"type": "object", "properties": {"path": {}}},
                         }
                     ],
-                    "metadata": {"thread_id": "thread-1"},
+                    "metadata": {
+                        "thread_id": "thread-1",
+                        "Authorization": "Bearer secret",
+                        "headers": {"x-api-key": "secret"},
+                    },
                     "reasoning_effort": "high",
                     "temperature": None,
                     "max_tokens": None,

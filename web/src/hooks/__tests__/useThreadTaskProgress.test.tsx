@@ -99,6 +99,38 @@ describe("useThreadTaskProgress", () => {
     expect(viewModel.items[0].aria_label).toBe("已完成：梳理接口合同");
   });
 
+  it("derives stable item keys from legacy workflow-shaped snapshots", () => {
+    const snapshot = makeSnapshot("thread-1", [
+      {
+        id: "wf-20260619T032911-c05b897f",
+        orchestration_task_id: "wf-20260619T032911-c05b897f",
+        workflow_id: null,
+        task_id: "step1_survey",
+        task_run_id: "wf-20260619T032911-c05b897f::step1_survey::1",
+        desc: "梳理 workflow 入口",
+        status: "in_progress",
+        display_order: 0,
+      },
+      {
+        id: "wf-20260619T032911-c05b897f",
+        orchestration_task_id: "wf-20260619T032911-c05b897f",
+        workflow_id: null,
+        task_id: "step2_design",
+        task_run_id: "wf-20260619T032911-c05b897f::step2_design::1",
+        desc: "设计执行规则",
+        status: "pending",
+        display_order: 1,
+      },
+    ]);
+
+    const viewModel = toThreadTaskProgressViewModel(snapshot);
+
+    expect(viewModel.items.map((item) => item.key)).toEqual([
+      "wf-20260619T032911-c05b897f:step1_survey",
+      "wf-20260619T032911-c05b897f:step2_design",
+    ]);
+  });
+
   it("caps rendered items and long desc text", () => {
     const longDesc = "x".repeat(1200);
     const snapshot = makeSnapshot(

@@ -2,23 +2,35 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ThreadTaskProgressPopover } from "@/components/ThreadTaskProgressPopover";
+import { useThreadSubAgents } from "@/hooks/useThreadSubAgents";
 import { useThreadTaskProgress } from "@/hooks/useThreadTaskProgress";
 import { useThreadWorkflowHistory } from "@/hooks/useThreadWorkflowHistory";
 import type {
+  ThreadSubAgentDisplayItem,
   ThreadTaskProgressSnapshot,
   ThreadTaskProgressViewModel,
 } from "@/protocol";
 
-vi.mock("@/hooks/useThreadTaskProgress", () => ({
-  useThreadTaskProgress: vi.fn(),
-}));
+vi.mock("@/hooks/useThreadTaskProgress", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/hooks/useThreadTaskProgress")>();
+  return {
+    ...actual,
+    useThreadTaskProgress: vi.fn(),
+  };
+});
 
 vi.mock("@/hooks/useThreadWorkflowHistory", () => ({
   useThreadWorkflowHistory: vi.fn(),
 }));
 
+vi.mock("@/hooks/useThreadSubAgents", () => ({
+  useThreadSubAgents: vi.fn(),
+}));
+
 const mockUseThreadTaskProgress = vi.mocked(useThreadTaskProgress);
 const mockUseThreadWorkflowHistory = vi.mocked(useThreadWorkflowHistory);
+const mockUseThreadSubAgents = vi.mocked(useThreadSubAgents);
 
 const viewModel: ThreadTaskProgressViewModel = {
   title: "进度",
@@ -152,10 +164,30 @@ function makeWorkflowViewModel(
   };
 }
 
+function makeSubAgent(
+  overrides: Partial<ThreadSubAgentDisplayItem>,
+): ThreadSubAgentDisplayItem {
+  const name = overrides.name ?? "子智能体任务";
+  const statusLabel = overrides.status_label ?? "运行中";
+  return {
+    key: overrides.key ?? name,
+    name,
+    status: overrides.status ?? "running",
+    status_label: statusLabel,
+    icon_variant: overrides.icon_variant ?? "running",
+    is_active: overrides.is_active ?? true,
+    source_label: overrides.source_label,
+    started_at_ms: overrides.started_at_ms ?? 1781190000000,
+    updated_at_ms: overrides.updated_at_ms ?? 1781190001000,
+    aria_label: overrides.aria_label ?? `${statusLabel}：${name}`,
+  };
+}
+
 describe("ThreadTaskProgressPopover", () => {
   beforeEach(() => {
     mockUseThreadTaskProgress.mockReset();
     mockUseThreadWorkflowHistory.mockReset();
+    mockUseThreadSubAgents.mockReset();
     mockUseThreadTaskProgress.mockReturnValue({
       snapshot,
       viewModel,
@@ -164,6 +196,12 @@ describe("ThreadTaskProgressPopover", () => {
       refresh: vi.fn(),
     });
     mockUseThreadWorkflowHistory.mockReturnValue({
+      items: [],
+      isLoading: false,
+      error: null,
+      refresh: vi.fn(),
+    });
+    mockUseThreadSubAgents.mockReturnValue({
       items: [],
       isLoading: false,
       error: null,
@@ -182,7 +220,10 @@ describe("ThreadTaskProgressPopover", () => {
     expect(dialog).not.toHaveClass("fixed");
     expect(screen.getByText("环境信息")).toBeInTheDocument();
     expect(screen.getByText("长任务")).toBeInTheDocument();
+    expect(screen.getByText("子智能体")).toBeInTheDocument();
     expect(screen.getByText("历史任务")).toBeInTheDocument();
+    expect(screen.getByText("暂无子智能体")).toBeInTheDocument();
+    expect(dialog.textContent).toMatch(/长任务[\s\S]*子智能体[\s\S]*历史任务/);
     expect(screen.getByText("1/3 已完成")).toBeInTheDocument();
     expect(
       screen.getByRole("listitem", { name: "已完成：梳理接口合同" }),
@@ -242,11 +283,80 @@ describe("ThreadTaskProgressPopover", () => {
     expect(
       screen.getByText("当前 thread 还没有可展示的 checklist。"),
     ).toBeInTheDocument();
+    expect(screen.getByText("暂无子智能体")).toBeInTheDocument();
+  });
+
+  it("renders subagents with status icons and source labels", async () => {
+    mockUseThreadSubAgents.mockReturnValue({
+      items: [
+        makeSubAgent({
+          key: "agent-running",
+          name: "调研后端合同",
+          status: "running",
+          status_label: "运行中",
+          icon_variant: "running",
+          is_active: true,
+          source_label: "chat",
+          aria_label: "运行中：调研后端合同",
+        }),
+        makeSubAgent({
+          key: "agent-completed",
+          name: "汇总 workflow 事件",
+          status: "completed",
+          status_label: "已完成",
+          icon_variant: "success",
+          is_active: false,
+          source_label: "wf-review",
+          aria_label: "已完成：汇总 workflow 事件",
+        }),
+        makeSubAgent({
+          key: "agent-failed",
+          name: "验证异常路径",
+          status: "failed",
+          status_label: "失败",
+          icon_variant: "error",
+          is_active: false,
+          source_label: "wf-review",
+          aria_label: "失败：验证异常路径",
+        }),
+      ],
+      isLoading: false,
+      error: null,
+      refresh: vi.fn(),
+    });
+
+    render(<ThreadTaskProgressPopover threadId="thread-1" />);
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "当前 thread 任务进度",
+    });
+    expect(dialog.textContent).toMatch(/长任务[\s\S]*子智能体[\s\S]*历史任务/);
+    expect(
+      screen.getByRole("listitem", { name: "运行中：调研后端合同" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("listitem", { name: "已完成：汇总 workflow 事件" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("listitem", { name: "失败：验证异常路径" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("chat")).toBeInTheDocument();
+    expect(screen.getAllByText("wf-review")).toHaveLength(2);
+    expect(
+      document.querySelector('[data-subagent-result="running"]'),
+    ).toBeInTheDocument();
+    expect(
+      document.querySelector('[data-subagent-result="success"]'),
+    ).toBeInTheDocument();
+    expect(
+      document.querySelector('[data-subagent-result="error"]'),
+    ).toBeInTheDocument();
   });
 
   it("shows an error state and refresh action", async () => {
     const refresh = vi.fn();
     const refreshHistory = vi.fn();
+    const refreshSubAgents = vi.fn();
     mockUseThreadTaskProgress.mockReturnValue({
       snapshot: null,
       viewModel: { ...viewModel, items: [] },
@@ -260,6 +370,12 @@ describe("ThreadTaskProgressPopover", () => {
       error: null,
       refresh: refreshHistory,
     });
+    mockUseThreadSubAgents.mockReturnValue({
+      items: [],
+      isLoading: false,
+      error: null,
+      refresh: refreshSubAgents,
+    });
 
     render(<ThreadTaskProgressPopover threadId="thread-1" />);
 
@@ -272,6 +388,7 @@ describe("ThreadTaskProgressPopover", () => {
     await userEvent.click(screen.getByRole("button", { name: "刷新任务进度" }));
 
     expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refreshSubAgents).toHaveBeenCalledTimes(1);
     expect(refreshHistory).toHaveBeenCalledTimes(1);
   });
 
@@ -279,6 +396,35 @@ describe("ThreadTaskProgressPopover", () => {
     render(<ThreadTaskProgressPopover />);
 
     expect(screen.getByRole("button", { name: "进度" })).toBeDisabled();
+  });
+
+  it("supports a custom rail trigger and panel placement classes", async () => {
+    render(
+      <ThreadTaskProgressPopover
+        threadId="thread-1"
+        trigger={({ open, disabled, onClick }) => (
+          <button
+            type="button"
+            data-open={open ? "true" : "false"}
+            disabled={disabled}
+            onClick={onClick}
+          >
+            rail progress
+          </button>
+        )}
+        panelClassName="left-[calc(100%+0.75rem)] right-auto top-0"
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "rail progress" });
+    expect(trigger).toHaveAttribute("data-open", "false");
+
+    await userEvent.click(trigger);
+
+    expect(trigger).toHaveAttribute("data-open", "true");
+    expect(
+      screen.getByRole("dialog", { name: "当前 thread 任务进度" }),
+    ).toHaveClass("left-[calc(100%+0.75rem)]", "right-auto", "top-0");
   });
 
   it("keeps polling while the popover is closed", () => {
@@ -289,6 +435,9 @@ describe("ThreadTaskProgressPopover", () => {
     });
     expect(mockUseThreadWorkflowHistory).toHaveBeenLastCalledWith("thread-1", {
       enabled: false,
+    });
+    expect(mockUseThreadSubAgents).toHaveBeenLastCalledWith("thread-1", {
+      enabled: true,
     });
     expect(
       screen.queryByRole("dialog", { name: "当前 thread 任务进度" }),
@@ -493,6 +642,81 @@ describe("ThreadTaskProgressPopover", () => {
     expect(screen.getByText("旧 workflow")).toBeInTheDocument();
   });
 
+  it("filters current workflow history from legacy progress keys", async () => {
+    const currentSnapshot: ThreadTaskProgressSnapshot = {
+      ...snapshot,
+      source: "llm",
+      tasks: [
+        {
+          id: "wf-current",
+          orchestration_task_id: "wf-current",
+          workflow_id: null,
+          task_id: "step1_survey",
+          task_run_id: "wf-current::step1_survey::1",
+          desc: "梳理 workflow 入口",
+          status: "in_progress",
+          display_order: 0,
+        },
+      ],
+      counts: { pending: 0, in_progress: 1, completed: 0, total: 1 },
+    };
+    mockUseThreadTaskProgress.mockReturnValue({
+      snapshot: currentSnapshot,
+      viewModel: {
+        ...viewModel,
+        items: [
+          {
+            key: "wf-current:step1_survey",
+            orchestration_task_id: "wf-current",
+            task_id: "step1_survey",
+            desc: "梳理 workflow 入口",
+            status: "in_progress",
+            status_label: "进行中",
+            icon_variant: "active_ring",
+            order: 0,
+            aria_label: "进行中：梳理 workflow 入口",
+          },
+        ],
+      },
+      isLoading: false,
+      error: null,
+      refresh: vi.fn(),
+    });
+    mockUseThreadWorkflowHistory.mockReturnValue({
+      items: [
+        {
+          workflow_id: "wf-current",
+          title: "当前 workflow",
+          status: "running",
+          status_label: "进行中",
+          started_at: null,
+          finished_at: null,
+        },
+        {
+          workflow_id: "wf-old",
+          title: "旧 workflow",
+          status: "completed",
+          status_label: "已完成",
+          started_at: null,
+          finished_at: null,
+        },
+      ],
+      isLoading: false,
+      error: null,
+      refresh: vi.fn(),
+    });
+
+    render(<ThreadTaskProgressPopover threadId="thread-1" />);
+
+    await userEvent.click(screen.getByRole("button", { name: "进度" }));
+
+    expect(screen.getByTitle("当前 workflow · 0/1 已完成")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("listitem", { name: "进行中：当前 workflow" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("旧 workflow")).toBeInTheDocument();
+  });
+
   it("opens automatically when workflow progress appears", async () => {
     mockUseThreadTaskProgress.mockReturnValue({
       snapshot: null,
@@ -527,6 +751,58 @@ describe("ThreadTaskProgressPopover", () => {
     });
     expect(
       screen.getByRole("listitem", { name: "进行中：hi-1" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens automatically when an active subagent appears", async () => {
+    mockUseThreadTaskProgress.mockReturnValue({
+      snapshot: null,
+      viewModel: { ...viewModel, items: [] },
+      isLoading: false,
+      error: null,
+      refresh: vi.fn(),
+    });
+    mockUseThreadSubAgents.mockReturnValue({
+      items: [],
+      isLoading: false,
+      error: null,
+      refresh: vi.fn(),
+    });
+    const { rerender } = render(
+      <ThreadTaskProgressPopover threadId="thread-1" />,
+    );
+
+    expect(
+      screen.queryByRole("dialog", { name: "当前 thread 任务进度" }),
+    ).not.toBeInTheDocument();
+
+    mockUseThreadSubAgents.mockReturnValue({
+      items: [
+        makeSubAgent({
+          key: "agent-running",
+          name: "普通 chat 子任务",
+          status: "running",
+          status_label: "运行中",
+          icon_variant: "running",
+          is_active: true,
+          source_label: "chat",
+          aria_label: "运行中：普通 chat 子任务",
+        }),
+      ],
+      isLoading: false,
+      error: null,
+      refresh: vi.fn(),
+    });
+
+    rerender(<ThreadTaskProgressPopover threadId="thread-1" />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("dialog", { name: "当前 thread 任务进度" }),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.getByRole("listitem", { name: "运行中：普通 chat 子任务" }),
     ).toBeInTheDocument();
   });
 

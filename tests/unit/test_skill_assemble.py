@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import hosts.cli.main as cli_main
+from application.agent_workflows.prompt_catalog import WorkflowPromptListingRender
 from infrastructure.config.models import (
     ApprovalConfig,
     Config,
@@ -67,30 +68,38 @@ async def test_assemble_instructions_appends_skill_listing(
 
 
 @pytest.mark.asyncio
-async def test_assemble_instructions_keeps_dynamic_sources_without_workflow_catalog(
+async def test_assemble_instructions_places_workflow_listing_before_dynamic_sources(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """初始 system prompt 只包含基础指令、动态来源和 skills。"""
+    """workflow listing 早于文件/env/skills，输入为三类动态来源，输出文本顺序断言。"""
     monkeypatch.setattr(cli_main, "get_kongming_home", lambda: tmp_path)
     monkeypatch.setenv("KONGMING_EXTRA_INSTRUCTIONS", "env instruction")
     extra_file = tmp_path / "rules.md"
     extra_file.write_text("file instruction", encoding="utf-8")
     cfg = _build_cfg()
+    workflow_listing = WorkflowPromptListingRender(
+        text="# workflow catalog\nworkflow instruction",
+        origin="workflow_catalog",
+        template_version="test-template",
+        listing_hash="test-hash",
+    )
 
     rendered, origins, memory_store = await cli_main._assemble_instructions(
         cfg,
         instructions_files=[extra_file],
         skill_listing="- demo: skill instruction",
+        workflow_listing=workflow_listing,
     )
 
-    assert "workflow_catalog" not in origins
+    assert "workflow_catalog" in origins
     assert "file:rules.md" in origins
     assert "env:KONGMING_EXTRA_INSTRUCTIONS" in origins
     assert "skills" in origins
-    assert "# workflow_catalog" not in rendered
-    assert rendered.index("# file:rules.md") < rendered.index("# skills")
-    assert rendered.index("# env:KONGMING_EXTRA_INSTRUCTIONS") < rendered.index("# skills")
-    assert rendered.index("# file:rules.md") < rendered.index("# env:KONGMING_EXTRA_INSTRUCTIONS")
+    assert rendered.index("# workflow_catalog") < rendered.index("# file:rules.md")
+    assert rendered.index("# workflow_catalog") < rendered.index(
+        "# env:KONGMING_EXTRA_INSTRUCTIONS"
+    )
+    assert rendered.index("# workflow_catalog") < rendered.index("# skills")
     assert memory_store is None
 
 

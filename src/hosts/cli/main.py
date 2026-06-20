@@ -35,6 +35,10 @@ import click
 
 from application.agent_roles import AgentRoleManager
 from application.agent_workflows.manager import AgentWorkflowManager
+from application.agent_workflows.prompt_catalog import (
+    WorkflowPromptListingRender,
+    build_default_workflow_prompt_listing,
+)
 from application.agent_workflows.strategies.roundtable_review.presets import (
     code_review_role_presets,
 )
@@ -53,7 +57,7 @@ from infrastructure.config import (
 from infrastructure.config.errors import ConfigLoadError, ConfigValidationError
 from infrastructure.tracing import JsonlTraceSink, PromptDebugDumpSink
 from memory import MemoryStore
-from prompting import assemble_instructions
+from prompting import InstructionSource, assemble_instructions
 from prompting.skills.skill_loader import SkillSpec, format_skill_listing, load_skill_specs
 from runtime_assembly.native_runtime import NativeRuntime
 from sessions import (
@@ -775,6 +779,7 @@ async def _assemble_instructions(
     instructions_files: list[Path],
     *,
     skill_listing: str = "",
+    workflow_listing: WorkflowPromptListingRender | None = None,
 ) -> tuple[str, list[str], MemoryStore | None]:
     """用 InstructionLoader 合成最终 system prompt 文本。
 
@@ -793,11 +798,23 @@ async def _assemble_instructions(
     """
     kongming_home = get_kongming_home()
     sitian_root = _resolve_sitian_prompt_root(cfg)
+    workflow_render = workflow_listing or build_default_workflow_prompt_listing()
+    pre_file_sources = (
+        [
+            InstructionSource(
+                origin=workflow_render.origin,
+                content=workflow_render.text,
+            )
+        ]
+        if workflow_render.text
+        else []
+    )
 
     # 公共指令装配：prompts 物化 + InstructionLoader + runtime context
     rendered, origins = await assemble_instructions(
         kongming_home=kongming_home,
         extra_files=instructions_files,
+        pre_file_sources=pre_file_sources,
         sitian_root=sitian_root,
     )
 

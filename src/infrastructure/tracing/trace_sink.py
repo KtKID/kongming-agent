@@ -50,6 +50,21 @@ if TYPE_CHECKING:
 _STREAM_DELTA_KINDS: frozenset[str] = frozenset({"content.delta", "reasoning.delta"})
 """流式增量事件 kind 集合，受 ``delta_sampling`` 策略约束。"""
 
+_SAFE_REQUEST_METADATA_KEYS: frozenset[str] = frozenset(
+    {
+        "agent_name",
+        "backend_kind",
+        "model",
+        "preset_id",
+        "provider",
+        "run_id",
+        "session_id",
+        "thread_id",
+        "user_id",
+    }
+)
+"""允许写入本地 trace 的 request metadata 字段。"""
+
 
 class JsonlTraceSink:
     """Write every :class:`~core.contracts.Event` as one JSON line.
@@ -308,14 +323,25 @@ def _summarize_llm_request_payload(request: dict[str, Any]) -> dict[str, Any]:
         "message_roles": message_roles,
         "tool_count": tool_count,
         "tool_names": tool_names,
-        "metadata": dict(request.get("metadata", {}))
-        if isinstance(request.get("metadata"), dict)
-        else {},
+        "metadata": _safe_request_metadata(request.get("metadata")),
         "reasoning_effort": request.get("reasoning_effort"),
         "temperature": request.get("temperature"),
         "max_tokens": request.get("max_tokens"),
         "timeout_seconds": request.get("timeout_seconds"),
     }
+
+
+def _safe_request_metadata(raw: Any) -> dict[str, str | int | float | bool | None]:
+    """保留 request metadata 白名单字段，输入为任意对象，输出安全标量字典。"""
+    if not isinstance(raw, dict):
+        return {}
+    safe: dict[str, str | int | float | bool | None] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or key not in _SAFE_REQUEST_METADATA_KEYS:
+            continue
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            safe[key] = value
+    return safe
 
 
 def _summarize_llm_response_payload(response: dict[str, Any]) -> dict[str, Any]:

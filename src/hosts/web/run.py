@@ -748,8 +748,6 @@ def _build_manager_and_inbox_sink(*, app: Any) -> Any:
     manager = get_approval_manager(
         rules=ApprovalRules(policy=policy),
     )
-    if app is not None:
-        app.state.approval_manager = manager
     # 幂等：只在首次装配时注入 InboxEventSink；按 sink 类型判定
     has_inbox_sink = any(isinstance(s, InboxEventSink) for s in manager._event_sinks)
     if not has_inbox_sink:
@@ -831,7 +829,6 @@ def _make_runtime_factory(cfg: object) -> object:
     from infrastructure.config.models import Config, LLMPresetConfig
     from infrastructure.config.paths import get_kongming_home
     from infrastructure.tracing import JsonlTraceSink
-    from prompting.instructions.instruction_loader import assemble_instructions
     from prompting.skills.skill_loader import format_skill_listing, load_skill_specs
     from runtime_assembly.native_runtime import NativeRuntime
     from safety.approval.manager import make_manager_prompt_fn
@@ -859,7 +856,8 @@ def _make_runtime_factory(cfg: object) -> object:
     _agent_role_manager_cache: list[Any | None] = [None]
     _instructions_cache: list[str | None] = [None]
     _origins_cache: list[list[str] | None] = [None]
-    _instructions_cache_key: list[str | None] = [None]
+    _workflow_prompt_cache_key: list[object | None] = [None]
+    _skill_listing_cache_key: list[str | None] = [None]
     _scheduler_runtime_factory_cache: list[object | None] = [None]
     _mcp_runtime_registration_cache: list[McpRuntimeRegistrationManager | None] = [None]
     _cache_lock = asyncio.Lock()
@@ -867,36 +865,74 @@ def _make_runtime_factory(cfg: object) -> object:
     def _prompt_hash(text: str) -> str:
         return f"sha256:{hashlib.sha256(text.encode()).hexdigest()}"
 
-    async def _load_base_instructions_with_hash(
+    def _workflow_prompt_cache_matches(cache_key: object | None, candidate: object) -> bool:
+        return (
+            cache_key is not None
+            and getattr(cache_key, "base_instructions_hash", None)
+            == getattr(candidate, "base_instructions_hash", None)
+            and getattr(cache_key, "workflow_template_version", None)
+            == getattr(candidate, "workflow_template_version", None)
+            and getattr(cache_key, "workflow_listing_hash", None)
+            == getattr(candidate, "workflow_listing_hash", None)
+        )
+
+    async def _build_workflow_prompt_cache_candidate(
         *,
+        workflow_render: Any,
         sitian_root: Path | None,
-    ) -> tuple[str, list[str], str]:
-        rendered, origins = await assemble_instructions(
+    ) -> tuple[object, list[Any]]:
+        from application.agent_workflows.prompt_catalog import (
+            build_workflow_prompt_cache_key,
+        )
+        from prompting.instructions.instruction_loader import (
+            InstructionLoader,
+            load_instruction_sources,
+        )
+
+        base_sources = await load_instruction_sources(
             kongming_home=home,
             sitian_root=sitian_root,
         )
-        return _prompt_hash(rendered), origins, rendered
+        base_rendered = InstructionLoader.render(base_sources)
+        return (
+            build_workflow_prompt_cache_key(
+                base_instructions_hash=_prompt_hash(base_rendered),
+                render=workflow_render,
+            ),
+            base_sources,
+        )
+
+    def _insert_workflow_prompt_source(
+        *,
+        base_sources: list[Any],
+        workflow_render: Any,
+    ) -> list[Any]:
+        from prompting.instructions.instruction_loader import InstructionSource
+
+        if not getattr(workflow_render, "text", "").strip():
+            return [*base_sources]
+        workflow_source = InstructionSource(
+            origin=workflow_render.origin,
+            content=workflow_render.text,
+        )
+        insert_at = 1 if base_sources and base_sources[0].origin == "runtime" else 0
+        return [*base_sources[:insert_at], workflow_source, *base_sources[insert_at:]]
 
     async def _ensure_shared_assets(sinks: object) -> None:
+        from application.agent_workflows.prompt_catalog import (
+            build_default_workflow_prompt_listing,
+        )
+        from prompting.instructions.instruction_loader import InstructionLoader
+
         sitian_raw = os.environ.get("SITIAN_PROMPT_ROOT", "").strip()
         sitian_root = Path(sitian_raw).expanduser().resolve() if sitian_raw else None
-        if _instructions_cache[0] is not None:
-            candidate_hash, _, _ = await _load_base_instructions_with_hash(
-                sitian_root=sitian_root,
-            )
-            if _instructions_cache_key[0] == candidate_hash:
-                factory._instructions_cache_key = candidate_hash  # type: ignore[attr-defined]
-                return
 
         async with _cache_lock:
-            candidate_hash, origins, rendered = await _load_base_instructions_with_hash(
+            workflow_render = build_default_workflow_prompt_listing()
+            workflow_cache_key, base_sources = await _build_workflow_prompt_cache_candidate(
+                workflow_render=workflow_render,
                 sitian_root=sitian_root,
             )
-            if _instructions_cache[0] is not None and _instructions_cache_key[0] == candidate_hash:
-                factory._instructions_cache_key = candidate_hash  # type: ignore[attr-defined]
-                return
-            _instructions_cache_key[0] = candidate_hash
-            factory._instructions_cache_key = candidate_hash  # type: ignore[attr-defined]
             sink_list = list(sinks) if sinks else []  # type: ignore[call-overload]
             skill_specs_list = await load_skill_specs(
                 home,
@@ -904,6 +940,27 @@ def _make_runtime_factory(cfg: object) -> object:
                 event_sinks=sink_list,
             )
             listing = format_skill_listing(skill_specs_list)
+            skill_listing_cache_key = _prompt_hash(listing)
+            if (
+                _instructions_cache[0] is not None
+                and _workflow_prompt_cache_matches(
+                    _workflow_prompt_cache_key[0],
+                    workflow_cache_key,
+                )
+                and _skill_listing_cache_key[0] == skill_listing_cache_key
+            ):
+                factory._workflow_prompt_cache_key = _workflow_prompt_cache_key[0]  # type: ignore[attr-defined]
+                return
+
+            sources = _insert_workflow_prompt_source(
+                base_sources=base_sources,
+                workflow_render=workflow_render,
+            )
+            rendered = InstructionLoader.render(sources)
+            origins = [source.origin for source in sources]
+            _workflow_prompt_cache_key[0] = workflow_cache_key
+            _skill_listing_cache_key[0] = skill_listing_cache_key
+            factory._workflow_prompt_cache_key = _workflow_prompt_cache_key[0]  # type: ignore[attr-defined]
             if listing:
                 rendered = rendered + f"\n\n# skills\n{listing}"
                 origins = [*origins, "skills"]
@@ -999,11 +1056,10 @@ def _make_runtime_factory(cfg: object) -> object:
             raise ValueError(f"unknown preset_id: {preset_id!r}")
 
         if isinstance(sinks, list):
-            session_root = resolve_kongming_path(
-                real_cfg.session.file_store_path,
-                kongming_home=home,
-            )
-            per_thread_path = session_root / thread_id / "trace.jsonl"
+            trace_path = resolve_kongming_path(real_cfg.trace.output_path, kongming_home=home)
+            stem = trace_path.stem
+            suffix = trace_path.suffix
+            per_thread_path = trace_path.with_name(f"{stem}.{thread_id}{suffix}")
             sinks.append(
                 JsonlTraceSink(
                     per_thread_path,
@@ -1081,7 +1137,6 @@ def _make_runtime_factory(cfg: object) -> object:
             instruction_text_hash=f"sha256:{hashlib.sha256(instructions.encode()).hexdigest()}",
             created_at=time.time(),
             cwd=default_cwd,
-            instruction_text=instructions,
         )
 
         def session_factory(sid: str) -> Any:
