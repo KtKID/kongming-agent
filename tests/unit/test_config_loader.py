@@ -172,6 +172,7 @@ def test_load_config_calls_load_dotenv_by_default(
 
     monkeypatch.delenv("KONGMING_SKIP_DOTENV", raising=False)
     monkeypatch.setattr("dotenv.load_dotenv", fake_load_dotenv)
+    monkeypatch.setattr("dotenv.dotenv_values", lambda *args, **kwargs: {})
 
     load_config(LOCAL_YAML)
 

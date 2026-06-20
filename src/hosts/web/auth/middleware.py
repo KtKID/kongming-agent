@@ -18,9 +18,9 @@
   SignatureExpired / 缺字段，统一交给上层"未登录"路径处理。
 - AuthMiddleware **不**校验 WS / 静态 path —— WS 走 ws.py 自身的 cookie 验证；
   静态 path 走 static.py 的 SPA fallback；这里只挡 ``/api/*``。
-- CSRFMiddleware **不**豁免任何 mutating path：包括 ``/api/auth/login``——
-  浏览器统一在 axios interceptor 加 X-Requested-With。CSRF 在 401 之前执行
-  顺序：CSRF → Auth → router（先注册的最外层）。
+- CSRFMiddleware 默认要求 mutating path 带 ``X-Requested-With``；XSpace Android
+  claim / exchange / session-handoff 走协议级 nonce 或 Bearer token，使用精确白名单。
+  CSRF 在 401 之前执行顺序：CSRF → Auth → router（先注册的最外层）。
 """
 
 from __future__ import annotations
@@ -58,6 +58,8 @@ SESSION_SALT = "kongming.web.session.v1"
 CSRF_HEADER_NAME = "X-Requested-With"
 CSRF_HEADER_VALUE = "XMLHttpRequest"
 CSRF_PROTECTED_METHODS = frozenset({"POST", "PATCH", "DELETE", "PUT"})
+_MOBILE_PAIRING_PUBLIC_POST_SUFFIXES = frozenset({"claim", "exchange"})
+_MOBILE_LOGIN_QR_PUBLIC_POST_SUFFIXES = frozenset({"claim", "exchange"})
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +200,7 @@ def _is_path_allowlisted(path: str, *, allow_docs: bool) -> bool:
     - ``/api/auth/logout``：哪怕 cookie 已过期也允许 client 显式登出（清 cookie）
     - ``/health`` / ``/api/health``：启动 / 重启探测端点；lifespan 未完成 /
       cookie 失效时也要能拿 200
+    - ``/api/xspace/runtime/init``：XSpace native 宿主在 WebView 加载前写入运行态
     - 静态 / SPA 路径：``/``、``/assets/...``、``/index.html`` 等所有非 ``/api/`` 非 ``/ws/`` 的
     - WS 路径：HTTP middleware 不处理 WS upgrade 路径，但 starlette 仍会送进来 GET 请求；
       这里挡掉 ``/ws/`` 让 WS endpoint 自己鉴权
@@ -212,6 +215,10 @@ def _is_path_allowlisted(path: str, *, allow_docs: bool) -> bool:
     if path in ("/health", "/api/health"):
         # 启动 / 重启探测端点：宿主在 lifespan 完成前 / cookie 失效场景下都要能拿 200
         return True
+    if _is_xspace_mobile_auth_allowlisted(path):
+        return True
+    if _is_xspace_runtime_auth_allowlisted(path):
+        return True
     if _is_avatar_api_allowlisted(path):
         return True
     if path.startswith("/ws/"):
@@ -221,6 +228,57 @@ def _is_path_allowlisted(path: str, *, allow_docs: bool) -> bool:
         # 静态 / SPA fallback
         return True
     return bool(allow_docs and path in ("/docs", "/redoc", "/openapi.json"))
+
+
+def _is_xspace_mobile_auth_allowlisted(path: str) -> bool:
+    """判断 XSpace mobile 匿名协议路径。
+
+    关键输入：HTTP path。
+    关键输出：claim、exchange、session-handoff、capabilities 放行 Web cookie 鉴权。
+    """
+    if path == "/api/xspace/mobile/capabilities":
+        return True
+    if path == "/api/xspace/mobile/session-handoff":
+        return True
+    if path == "/api/xspace/mobile/login-qr-sessions":
+        return True
+    login_qr_prefix = "/api/xspace/mobile/login-qr-sessions/"
+    if path.startswith(login_qr_prefix):
+        return True
+    prefix = "/api/xspace/mobile/pairing-sessions/"
+    if path.startswith(prefix):
+        suffix = path.rstrip("/").rsplit("/", 1)[-1]
+        return suffix in _MOBILE_PAIRING_PUBLIC_POST_SUFFIXES
+    return False
+
+
+def _is_xspace_mobile_csrf_allowlisted(path: str) -> bool:
+    """判断 XSpace Android 可直连的 mutating 协议路径。
+
+    关键输入：HTTP path。
+    关键输出：Android claim、exchange、Bearer session-handoff 免浏览器 CSRF header。
+    """
+    if path == "/api/xspace/mobile/session-handoff":
+        return True
+    login_qr_prefix = "/api/xspace/mobile/login-qr-sessions/"
+    if path.startswith(login_qr_prefix):
+        suffix = path.rstrip("/").rsplit("/", 1)[-1]
+        return suffix in _MOBILE_LOGIN_QR_PUBLIC_POST_SUFFIXES
+    prefix = "/api/xspace/mobile/pairing-sessions/"
+    if path.startswith(prefix):
+        suffix = path.rstrip("/").rsplit("/", 1)[-1]
+        return suffix in _MOBILE_PAIRING_PUBLIC_POST_SUFFIXES
+    return False
+
+
+def _is_xspace_runtime_auth_allowlisted(path: str) -> bool:
+    """判断 XSpace 宿主启动初始化路径是否免登录。
+
+    关键输入：HTTP path。
+    关键输出：native 宿主 init 入口放行 Web cookie 鉴权；CSRF header 仍由
+    :class:`CSRFMiddleware` 校验。
+    """
+    return path == "/api/xspace/runtime/init"
 
 
 def _is_avatar_api_allowlisted(path: str) -> bool:
@@ -297,7 +355,11 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         method = request.method.upper()
-        if method in CSRF_PROTECTED_METHODS and not _is_avatar_api_allowlisted(request.url.path):
+        if (
+            method in CSRF_PROTECTED_METHODS
+            and not _is_xspace_mobile_csrf_allowlisted(request.url.path)
+            and not _is_avatar_api_allowlisted(request.url.path)
+        ):
             header_val = request.headers.get(CSRF_HEADER_NAME)
             if header_val != CSRF_HEADER_VALUE:
                 return JSONResponse(

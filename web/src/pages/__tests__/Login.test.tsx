@@ -9,6 +9,10 @@ import { ApiError, RateLimitedError } from "@/lib/api";
 
 const loginMock = vi.fn();
 
+vi.mock("@/features/login-qr/LoginQrPanel", () => ({
+  LoginQrPanel: () => <div data-testid="login-qr-panel" />,
+}));
+
 beforeEach(() => {
   loginMock.mockReset();
   vi.clearAllMocks();
@@ -70,6 +74,15 @@ describe("LoginPage", () => {
       </MemoryRouter>,
     );
     expect(screen.getByRole("button", { name: /登录/ })).toBeDisabled();
+  });
+
+  it("登录页挂载扫码登录面板", () => {
+    render(
+      <MemoryRouter>
+        <LoginPage />
+      </MemoryRouter>,
+    );
+    expect(screen.getByTestId("login-qr-panel")).toBeInTheDocument();
   });
 
   it("登录页显示忘记密码按钮并可打开原始重置弹窗", async () => {

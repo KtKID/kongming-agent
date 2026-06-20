@@ -216,7 +216,7 @@ def round_trip_update(
 
         # 6) pydantic 校验
         try:
-            load_config(tmp_path, load_env_file=load_env_file)
+            load_config(tmp_path, load_env_file=load_env_file, migrate=False)
         except ConfigValidationError as exc:
             errors = _translate_validation_errors(exc)
             raise ValidationFailedError(errors) from exc

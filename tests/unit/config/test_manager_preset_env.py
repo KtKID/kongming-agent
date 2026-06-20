@@ -17,7 +17,7 @@ import pytest
 from infrastructure.config.env_writer import EnvWriterError
 from infrastructure.config.manager import ConfigManager
 from infrastructure.config.models import LLMPresetConfig
-from infrastructure.config.writer import ConflictError, ValidationFailedError
+from infrastructure.config.writer import ConflictError, PatchItem, ValidationFailedError
 
 _YAML = """\
 model:
@@ -241,6 +241,106 @@ def test_default_env_path_for_single_file_layout(
     assert result.path == str(tmp_path / ".kongming" / ".env")
     assert "MINIMAX_API_KEY=secret" in (tmp_path / ".kongming" / ".env").read_text(encoding="utf-8")
     assert not (tmp_path / ".env").exists()
+
+
+def test_read_raw_migrates_legacy_yaml_before_returning_content(tmp_path: Path) -> None:
+    """ConfigManager raw 视图返回迁移后的真实 YAML，且不创建无关 section。"""
+    yaml_path = tmp_path / "setting.yaml"
+    yaml_path.write_text(
+        """\
+# legacy raw
+model:
+  name: local
+  base_url: http://127.0.0.1:1234/v1
+""",
+        encoding="utf-8",
+    )
+    manager = ConfigManager(yaml_path=yaml_path, env_path=tmp_path / ".env")
+
+    raw = manager.read_raw()
+
+    assert raw.content.splitlines()[0].startswith("config_schema_version: v0.5")
+    assert "配置结构版本；当前版本为 v0.5。" in raw.content
+    assert "# legacy raw" in raw.content
+    assert "web:" not in raw.content
+    assert "provider_routing:" not in raw.content
+
+
+def test_read_raw_migrates_existing_web_section_with_comments(tmp_path: Path) -> None:
+    """已有 web 段的旧配置会补 Web 新增字段和中文注释。"""
+    yaml_path = tmp_path / "setting.yaml"
+    yaml_path.write_text(
+        """\
+model:
+  name: local
+  base_url: http://127.0.0.1:1234/v1
+web:
+  enabled: true
+""",
+        encoding="utf-8",
+    )
+    manager = ConfigManager(yaml_path=yaml_path, env_path=tmp_path / ".env")
+
+    raw = manager.read_raw()
+
+    assert raw.content.splitlines()[0].startswith("config_schema_version: v0.5")
+    assert "ws_heartbeat_interval_ms: 30000" in raw.content
+    assert "前端 WebSocket 前台 ping 间隔" in raw.content
+    assert "Deep Research 来源工具配置" in raw.content
+    assert "api.moonshot.cn" not in raw.content
+
+
+def test_read_effective_keeps_env_source_after_migration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """迁移补齐 YAML 后，env 覆盖字段仍标记为 env 来源。"""
+    yaml_path = tmp_path / "setting.yaml"
+    yaml_path.write_text(
+        """\
+model:
+  name: local
+  base_url: http://127.0.0.1:1234/v1
+web:
+  dashboard_poll_interval_seconds: 5
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KONGMING_WEB_DASHBOARD_POLL_INTERVAL_SECONDS", "7")
+    manager = ConfigManager(yaml_path=yaml_path, env_path=tmp_path / ".env")
+
+    effective = manager.read_effective()
+
+    assert effective.values["config_schema_version"] == "v0.5"
+    assert effective.sources["config_schema_version"] == "yaml"
+    assert effective.values["web.dashboard_poll_interval_seconds"] == 7
+    assert effective.sources["web.dashboard_poll_interval_seconds"] == "env"
+
+
+def test_save_patch_after_migration_returns_restart_required_fields(tmp_path: Path) -> None:
+    """保存旧配置前先迁移，保存后仍计算 restart_required 字段。"""
+    yaml_path = tmp_path / "setting.yaml"
+    yaml_path.write_text(
+        """\
+model:
+  name: local
+  base_url: http://127.0.0.1:1234/v1
+web:
+  enabled: true
+""",
+        encoding="utf-8",
+    )
+    manager = ConfigManager(yaml_path=yaml_path, env_path=tmp_path / ".env")
+    raw = manager.read_raw()
+
+    result = manager.save_patch(
+        [PatchItem(path="web.ws_heartbeat_interval_ms", value=45000)],
+        expected_mtime=raw.mtime,
+    )
+
+    assert result.ok is True
+    assert result.restart_required_fields == ["web.ws_heartbeat_interval_ms"]
+    assert "ws_heartbeat_interval_ms: 45000" in yaml_path.read_text(encoding="utf-8")
 
 
 def test_write_env_values_rejects_invalid_name_without_touching_file(

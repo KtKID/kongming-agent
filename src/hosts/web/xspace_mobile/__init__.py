@@ -11,12 +11,22 @@ from __future__ import annotations
 from hosts.web.xspace_mobile.errors import (
     MobilePairingError,
 )
+from hosts.web.xspace_mobile.login_qr_auth_service import LoginQrAuthService
+from hosts.web.xspace_mobile.login_qr_manager import LoginQrManager
 from hosts.web.xspace_mobile.manager import MobilePairingManager
 from hosts.web.xspace_mobile.models import (
     DeviceTokenIssueResult,
     HandoffIssueResult,
     HandoffLoginContext,
     HandoffTokenRecord,
+    LoginQrClaimRecord,
+    LoginQrClaimResult,
+    LoginQrClaimStatus,
+    LoginQrConfirmResult,
+    LoginQrExchangeResult,
+    LoginQrSessionCreateResult,
+    LoginQrSessionRecord,
+    LoginQrSessionStatus,
     MobileDeviceDescriptor,
     MobileDeviceRecord,
     PairingApprovalResult,
@@ -29,6 +39,7 @@ from hosts.web.xspace_mobile.models import (
     PairingSessionStatus,
 )
 from hosts.web.xspace_mobile.repository import MobilePairingRepository
+from hosts.web.xspace_mobile.server_origin import LoginQrOriginView, ServerOriginConfig
 from hosts.web.xspace_mobile.token_service import MobileDeviceTokenService
 
 __all__ = [
@@ -36,6 +47,17 @@ __all__ = [
     "HandoffIssueResult",
     "HandoffLoginContext",
     "HandoffTokenRecord",
+    "LoginQrClaimRecord",
+    "LoginQrClaimResult",
+    "LoginQrClaimStatus",
+    "LoginQrAuthService",
+    "LoginQrConfirmResult",
+    "LoginQrExchangeResult",
+    "LoginQrManager",
+    "LoginQrOriginView",
+    "LoginQrSessionCreateResult",
+    "LoginQrSessionRecord",
+    "LoginQrSessionStatus",
     "MobileDeviceDescriptor",
     "MobileDeviceRecord",
     "MobileDeviceTokenService",
@@ -50,4 +72,5 @@ __all__ = [
     "PairingSessionCreateResult",
     "PairingSessionRecord",
     "PairingSessionStatus",
+    "ServerOriginConfig",
 ]

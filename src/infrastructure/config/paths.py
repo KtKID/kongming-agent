@@ -7,6 +7,7 @@
 ``get_kongming_home`` 是 ``.kongming`` 运行数据根的唯一入口。
 ``resolve_kongming_path`` 负责把配置中的 ``.kongming/*`` 派生到
 ``kongming_home``，避免运行数据路径继续按进程 cwd 分叉。
+``find_existing_kongming_home_config`` 负责统一查找用户级 setting.yaml。
 """
 
 from __future__ import annotations
@@ -30,6 +31,46 @@ def get_kongming_home() -> Path:
     if env_val and env_val.strip():
         return Path(env_val).expanduser().resolve()
     return (Path.home() / _KONGMING_DIRNAME).resolve()
+
+
+def default_kongming_home_config_path(kongming_home: Path | None = None) -> Path:
+    """返回用户级主配置默认写入路径。
+
+    当前用户级可写配置使用 ``<kongming_home>/setting.yaml``。历史上部分 Web
+    控制入口还读过 ``<kongming_home>/config/setting.yaml``，读取时继续兼容，
+    新建和 XSpace seed 统一落到根部 ``setting.yaml``。
+    """
+    home = kongming_home.resolve() if kongming_home is not None else get_kongming_home()
+    return home / "setting.yaml"
+
+
+def kongming_home_config_candidates(kongming_home: Path | None = None) -> tuple[Path, ...]:
+    """返回用户级 setting.yaml 的兼容候选路径。
+
+    顺序代表优先级：
+    1. ``<kongming_home>/setting.yaml``：当前用户级主配置路径；
+    2. ``<kongming_home>/config/setting.yaml``：早期 Web 控制入口兼容路径。
+    """
+    home = kongming_home.resolve() if kongming_home is not None else get_kongming_home()
+    return (
+        home / "setting.yaml",
+        home / "config" / "setting.yaml",
+    )
+
+
+def find_existing_kongming_home_config(kongming_home: Path | None = None) -> Path | None:
+    """查找已存在的用户级配置文件。
+
+    Args:
+        kongming_home: 显式运行时 home；为空时使用 :func:`get_kongming_home`。
+
+    Returns:
+        找到时返回配置路径；没有用户级配置时返回 ``None``。
+    """
+    for candidate in kongming_home_config_candidates(kongming_home):
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def resolve_kongming_path(path: str | Path, *, kongming_home: Path | None = None) -> Path:
@@ -56,4 +97,10 @@ def resolve_kongming_path(path: str | Path, *, kongming_home: Path | None = None
     return expanded.resolve()
 
 
-__all__ = ["get_kongming_home", "resolve_kongming_path"]
+__all__ = [
+    "default_kongming_home_config_path",
+    "find_existing_kongming_home_config",
+    "get_kongming_home",
+    "kongming_home_config_candidates",
+    "resolve_kongming_path",
+]

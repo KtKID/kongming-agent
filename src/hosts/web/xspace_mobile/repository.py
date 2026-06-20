@@ -19,6 +19,10 @@ from hosts.web.xspace_mobile import errors
 from hosts.web.xspace_mobile.models import (
     HandoffLoginContext,
     HandoffTokenRecord,
+    LoginQrClaimRecord,
+    LoginQrClaimStatus,
+    LoginQrSessionRecord,
+    LoginQrSessionStatus,
     MobileDeviceRecord,
     PairingClaimRecord,
     PairingClaimStatus,
@@ -26,7 +30,7 @@ from hosts.web.xspace_mobile.models import (
     PairingSessionStatus,
 )
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 def _utc_now() -> datetime:
@@ -122,6 +126,59 @@ def _claim_from_row(row: sqlite3.Row) -> PairingClaimRecord:
         app_version=str(row["app_version"]),
         capabilities=dict(_json_load(row["capabilities"], {})),
         status=PairingClaimStatus(str(row["status"])),
+        created_at=_from_iso(row["created_at"]) or _utc_now(),
+    )
+
+
+def _login_qr_session_from_row(row: sqlite3.Row) -> LoginQrSessionRecord:
+    """把 login_qr_sessions 行转换为 DTO。
+
+    关键输入：SQLite row。
+    关键输出：``LoginQrSessionRecord``。
+    """
+    return LoginQrSessionRecord(
+        login_qr_id=str(row["login_qr_id"]),
+        purpose="login",
+        protocol_version=str(row["protocol_version"]),
+        origin_mode=str(row["origin_mode"]),  # type: ignore[arg-type]
+        server_origin=str(row["server_origin"]),
+        origin_scheme=str(row["origin_scheme"]),  # type: ignore[arg-type]
+        origin_host=str(row["origin_host"]),
+        origin_port=int(row["origin_port"]) if row["origin_port"] is not None else None,
+        nonce_hash=str(row["nonce_hash"]),
+        browser_token_hash=str(row["browser_token_hash"]),
+        requested_scopes=list(_json_load(row["requested_scopes"], [])),
+        status=LoginQrSessionStatus(str(row["status"])),
+        claim_id=str(row["claim_id"]) if row["claim_id"] is not None else None,
+        authorization_method=str(row["authorization_method"])
+        if row["authorization_method"] is not None
+        else None,  # type: ignore[arg-type]
+        authorized_user_id=str(row["authorized_user_id"])
+        if row["authorized_user_id"] is not None
+        else None,
+        expires_at=_from_iso(row["expires_at"]) or _utc_now(),
+        created_at=_from_iso(row["created_at"]) or _utc_now(),
+        claimed_at=_from_iso(row["claimed_at"]),
+        confirmed_at=_from_iso(row["confirmed_at"]),
+        exchanged_at=_from_iso(row["exchanged_at"]),
+    )
+
+
+def _login_qr_claim_from_row(row: sqlite3.Row) -> LoginQrClaimRecord:
+    """把 login_qr_claims 行转换为 DTO。
+
+    关键输入：SQLite row。
+    关键输出：``LoginQrClaimRecord``。
+    """
+    return LoginQrClaimRecord(
+        claim_id=str(row["claim_id"]),
+        login_qr_id=str(row["login_qr_id"]),
+        device_id=str(row["device_id"]),
+        label=str(row["label"]),
+        platform="android",
+        app_version=str(row["app_version"]),
+        capabilities=dict(_json_load(row["capabilities"], {})),
+        status=LoginQrClaimStatus(str(row["status"])),
         created_at=_from_iso(row["created_at"]) or _utc_now(),
     )
 
@@ -326,6 +383,45 @@ class MobilePairingRepository:
                     ON mobile_devices(token_hash);
                 CREATE INDEX IF NOT EXISTS idx_handoff_tokens_token_hash
                     ON handoff_tokens(token_hash);
+
+                CREATE TABLE IF NOT EXISTS login_qr_sessions (
+                    login_qr_id TEXT PRIMARY KEY,
+                    purpose TEXT NOT NULL,
+                    protocol_version TEXT NOT NULL,
+                    origin_mode TEXT NOT NULL,
+                    server_origin TEXT NOT NULL,
+                    origin_scheme TEXT NOT NULL,
+                    origin_host TEXT NOT NULL,
+                    origin_port INTEGER,
+                    nonce_hash TEXT NOT NULL,
+                    browser_token_hash TEXT NOT NULL,
+                    requested_scopes TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    claim_id TEXT UNIQUE,
+                    authorization_method TEXT,
+                    authorized_user_id TEXT,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    claimed_at TEXT,
+                    confirmed_at TEXT,
+                    exchanged_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS login_qr_claims (
+                    claim_id TEXT PRIMARY KEY,
+                    login_qr_id TEXT NOT NULL UNIQUE,
+                    device_id TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    platform TEXT NOT NULL,
+                    app_version TEXT NOT NULL,
+                    capabilities TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(login_qr_id) REFERENCES login_qr_sessions(login_qr_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_login_qr_sessions_browser_token_hash
+                    ON login_qr_sessions(browser_token_hash);
                 """
             )
             conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
@@ -370,6 +466,48 @@ class MobilePairingRepository:
             )
         return record
 
+    def create_login_qr_session(self, record: LoginQrSessionRecord) -> LoginQrSessionRecord:
+        """插入登录二维码会话。
+
+        关键输入：完整 ``LoginQrSessionRecord``。
+        关键输出：同一 record；数据库新增 pending_scan 登录二维码会话。
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO login_qr_sessions (
+                    login_qr_id, purpose, protocol_version, origin_mode, server_origin,
+                    origin_scheme, origin_host, origin_port, nonce_hash, browser_token_hash,
+                    requested_scopes, status, claim_id, authorization_method,
+                    authorized_user_id, expires_at, created_at, claimed_at,
+                    confirmed_at, exchanged_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.login_qr_id,
+                    record.purpose,
+                    record.protocol_version,
+                    record.origin_mode,
+                    record.server_origin,
+                    record.origin_scheme,
+                    record.origin_host,
+                    record.origin_port,
+                    record.nonce_hash,
+                    record.browser_token_hash,
+                    _json_dump(record.requested_scopes),
+                    record.status.value,
+                    record.claim_id,
+                    record.authorization_method,
+                    record.authorized_user_id,
+                    _to_iso(record.expires_at),
+                    _to_iso(record.created_at),
+                    _to_iso(record.claimed_at),
+                    _to_iso(record.confirmed_at),
+                    _to_iso(record.exchanged_at),
+                ),
+            )
+        return record
+
     def get_pairing_session(self, pairing_id: str) -> PairingSessionRecord | None:
         """读取配对会话。
 
@@ -382,6 +520,19 @@ class MobilePairingRepository:
                 (pairing_id,),
             ).fetchone()
         return _session_from_row(row) if row else None
+
+    def get_login_qr_session(self, login_qr_id: str) -> LoginQrSessionRecord | None:
+        """读取登录二维码会话。
+
+        关键输入：``login_qr_id``。
+        关键输出：会话记录或 ``None``。
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM login_qr_sessions WHERE login_qr_id = ?",
+                (login_qr_id,),
+            ).fetchone()
+        return _login_qr_session_from_row(row) if row else None
 
     def get_claim(self, claim_id: str) -> PairingClaimRecord | None:
         """读取 claim。
@@ -396,6 +547,19 @@ class MobilePairingRepository:
             ).fetchone()
         return _claim_from_row(row) if row else None
 
+    def get_login_qr_claim(self, claim_id: str) -> LoginQrClaimRecord | None:
+        """读取登录二维码 claim。
+
+        关键输入：``claim_id``。
+        关键输出：claim 记录或 ``None``。
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM login_qr_claims WHERE claim_id = ?",
+                (claim_id,),
+            ).fetchone()
+        return _login_qr_claim_from_row(row) if row else None
+
     def get_claim_for_pairing(self, pairing_id: str) -> PairingClaimRecord | None:
         """按 pairing 读取 claim。
 
@@ -408,6 +572,19 @@ class MobilePairingRepository:
                 (pairing_id,),
             ).fetchone()
         return _claim_from_row(row) if row else None
+
+    def get_login_qr_claim_for_session(self, login_qr_id: str) -> LoginQrClaimRecord | None:
+        """按登录二维码会话读取 claim。
+
+        关键输入：``login_qr_id``。
+        关键输出：claim 记录或 ``None``。
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM login_qr_claims WHERE login_qr_id = ?",
+                (login_qr_id,),
+            ).fetchone()
+        return _login_qr_claim_from_row(row) if row else None
 
     def claim_if_open(
         self,
@@ -462,6 +639,72 @@ class MobilePairingRepository:
             conn.execute(
                 "UPDATE pairing_sessions SET status = ? WHERE pairing_id = ?",
                 (PairingSessionStatus.PENDING_APPROVAL.value, claim.pairing_id),
+            )
+            conn.commit()
+        return claim
+
+    def claim_login_qr_if_open(
+        self,
+        claim: LoginQrClaimRecord,
+        *,
+        now: datetime | None = None,
+    ) -> LoginQrClaimRecord:
+        """原子 claim 一个 pending_scan 登录二维码会话。
+
+        关键输入：待插入 claim 和当前时间。
+        关键输出：成功插入的 claim；失败时抛稳定错误。
+        """
+        now = now or _utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM login_qr_sessions WHERE login_qr_id = ?",
+                (claim.login_qr_id,),
+            ).fetchone()
+            if row is None:
+                raise errors.login_qr_not_found(claim.login_qr_id)
+            session = _login_qr_session_from_row(row)
+            if session.expires_at <= now:
+                conn.execute(
+                    "UPDATE login_qr_sessions SET status = ? WHERE login_qr_id = ?",
+                    (LoginQrSessionStatus.EXPIRED.value, claim.login_qr_id),
+                )
+                conn.commit()
+                raise errors.login_qr_expired(claim.login_qr_id)
+            if session.status != LoginQrSessionStatus.PENDING_SCAN:
+                raise errors.login_qr_already_claimed(claim.login_qr_id)
+
+            conn.execute(
+                """
+                INSERT INTO login_qr_claims (
+                    claim_id, login_qr_id, device_id, label, platform, app_version,
+                    capabilities, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    claim.claim_id,
+                    claim.login_qr_id,
+                    claim.device_id,
+                    claim.label,
+                    claim.platform,
+                    claim.app_version,
+                    _json_dump(claim.capabilities),
+                    claim.status.value,
+                    _to_iso(claim.created_at),
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE login_qr_sessions
+                   SET status = ?, claim_id = ?, claimed_at = ?
+                 WHERE login_qr_id = ?
+                """,
+                (
+                    LoginQrSessionStatus.PENDING_CONFIRM.value,
+                    claim.claim_id,
+                    _to_iso(now),
+                    claim.login_qr_id,
+                ),
             )
             conn.commit()
         return claim
@@ -547,6 +790,92 @@ class MobilePairingRepository:
             conn.commit()
         return updated_session, updated_claim
 
+    def confirm_login_qr(
+        self,
+        login_qr_id: str,
+        claim_id: str,
+        *,
+        authorization_method: str,
+        authorized_user_id: str,
+        now: datetime | None = None,
+    ) -> tuple[LoginQrSessionRecord, LoginQrClaimRecord]:
+        """原子确认登录二维码 claim。
+
+        关键输入：登录二维码 ID、claim ID、授权方式、授权用户和当前时间。
+        关键输出：更新后的 session 与 claim。
+        """
+        now = now or _utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            session_row = conn.execute(
+                "SELECT * FROM login_qr_sessions WHERE login_qr_id = ?",
+                (login_qr_id,),
+            ).fetchone()
+            if session_row is None:
+                raise errors.login_qr_not_found(login_qr_id)
+            session = _login_qr_session_from_row(session_row)
+            if session.expires_at <= now:
+                conn.execute(
+                    "UPDATE login_qr_sessions SET status = ? WHERE login_qr_id = ?",
+                    (LoginQrSessionStatus.EXPIRED.value, login_qr_id),
+                )
+                conn.commit()
+                raise errors.login_qr_expired(login_qr_id)
+            if session.status == LoginQrSessionStatus.CANCELLED:
+                raise errors.approval_denied(login_qr_id)
+            if session.status == LoginQrSessionStatus.EXCHANGED:
+                raise errors.login_qr_already_exchanged(login_qr_id)
+            if session.status != LoginQrSessionStatus.PENDING_CONFIRM:
+                raise errors.approval_pending(login_qr_id)
+
+            claim_row = conn.execute(
+                "SELECT * FROM login_qr_claims WHERE login_qr_id = ? AND claim_id = ?",
+                (login_qr_id, claim_id),
+            ).fetchone()
+            if claim_row is None:
+                raise errors.claim_not_found(login_qr_id, claim_id)
+            claim = _login_qr_claim_from_row(claim_row)
+            if claim.status == LoginQrClaimStatus.EXCHANGED:
+                raise errors.login_qr_already_exchanged(login_qr_id)
+            if claim.status == LoginQrClaimStatus.DENIED:
+                raise errors.approval_denied(login_qr_id)
+            if claim.status != LoginQrClaimStatus.PENDING_CONFIRM:
+                raise errors.login_qr_already_claimed(login_qr_id)
+
+            conn.execute(
+                """
+                UPDATE login_qr_sessions
+                   SET status = ?, authorization_method = ?, authorized_user_id = ?,
+                       confirmed_at = ?
+                 WHERE login_qr_id = ?
+                """,
+                (
+                    LoginQrSessionStatus.CONFIRMED.value,
+                    authorization_method,
+                    authorized_user_id,
+                    _to_iso(now),
+                    login_qr_id,
+                ),
+            )
+            conn.execute(
+                "UPDATE login_qr_claims SET status = ? WHERE claim_id = ?",
+                (LoginQrClaimStatus.APPROVED.value, claim_id),
+            )
+            updated_session = _login_qr_session_from_row(
+                conn.execute(
+                    "SELECT * FROM login_qr_sessions WHERE login_qr_id = ?",
+                    (login_qr_id,),
+                ).fetchone()
+            )
+            updated_claim = _login_qr_claim_from_row(
+                conn.execute(
+                    "SELECT * FROM login_qr_claims WHERE claim_id = ?",
+                    (claim_id,),
+                ).fetchone()
+            )
+            conn.commit()
+        return updated_session, updated_claim
+
     def mark_pairing_expired(self, pairing_id: str) -> PairingSessionRecord:
         """把非终态 pairing 持久化为 expired。
 
@@ -576,6 +905,74 @@ class MobilePairingRepository:
                     (pairing_id,),
                 ).fetchone()
                 session = _session_from_row(row)
+            conn.commit()
+        return session
+
+    def mark_login_qr_expired(self, login_qr_id: str) -> LoginQrSessionRecord:
+        """把非终态登录二维码会话持久化为 expired。
+
+        关键输入：登录二维码 ID。
+        关键输出：更新后的 session；终态 session 保持原状态。
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM login_qr_sessions WHERE login_qr_id = ?",
+                (login_qr_id,),
+            ).fetchone()
+            if row is None:
+                raise errors.login_qr_not_found(login_qr_id)
+            session = _login_qr_session_from_row(row)
+            if session.status not in {
+                LoginQrSessionStatus.CANCELLED,
+                LoginQrSessionStatus.EXCHANGED,
+                LoginQrSessionStatus.EXPIRED,
+            }:
+                conn.execute(
+                    "UPDATE login_qr_sessions SET status = ? WHERE login_qr_id = ?",
+                    (LoginQrSessionStatus.EXPIRED.value, login_qr_id),
+                )
+                row = conn.execute(
+                    "SELECT * FROM login_qr_sessions WHERE login_qr_id = ?",
+                    (login_qr_id,),
+                ).fetchone()
+                session = _login_qr_session_from_row(row)
+            conn.commit()
+        return session
+
+    def cancel_login_qr(self, login_qr_id: str) -> LoginQrSessionRecord:
+        """取消未完成的登录二维码会话。
+
+        关键输入：登录二维码 ID。
+        关键输出：取消后的 session；已 exchange 的 session 返回重复 exchange 错误。
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM login_qr_sessions WHERE login_qr_id = ?",
+                (login_qr_id,),
+            ).fetchone()
+            if row is None:
+                raise errors.login_qr_not_found(login_qr_id)
+            session = _login_qr_session_from_row(row)
+            if session.status == LoginQrSessionStatus.EXCHANGED:
+                raise errors.login_qr_already_exchanged(login_qr_id)
+            if session.status != LoginQrSessionStatus.CANCELLED:
+                conn.execute(
+                    "UPDATE login_qr_sessions SET status = ? WHERE login_qr_id = ?",
+                    (LoginQrSessionStatus.CANCELLED.value, login_qr_id),
+                )
+                claim_id = session.claim_id
+                if claim_id is not None:
+                    conn.execute(
+                        "UPDATE login_qr_claims SET status = ? WHERE claim_id = ?",
+                        (LoginQrClaimStatus.DENIED.value, claim_id),
+                    )
+                row = conn.execute(
+                    "SELECT * FROM login_qr_sessions WHERE login_qr_id = ?",
+                    (login_qr_id,),
+                ).fetchone()
+                session = _login_qr_session_from_row(row)
             conn.commit()
         return session
 
@@ -684,6 +1081,105 @@ class MobilePairingRepository:
             )
             if cursor.rowcount != 1:
                 raise errors.approval_pending(pairing_id)
+
+            stored_device = _device_from_row(
+                conn.execute(
+                    "SELECT * FROM mobile_devices WHERE device_id = ?",
+                    (device.device_id,),
+                ).fetchone()
+            )
+            stored_handoff = _handoff_from_row(
+                conn.execute(
+                    "SELECT * FROM handoff_tokens WHERE handoff_id = ?",
+                    (handoff.handoff_id,),
+                ).fetchone()
+            )
+            conn.commit()
+        return stored_device, stored_handoff
+
+    def complete_login_qr_exchange(
+        self,
+        *,
+        login_qr_id: str,
+        claim_id: str,
+        device: MobileDeviceRecord,
+        handoff: HandoffTokenRecord,
+        now: datetime | None = None,
+    ) -> tuple[MobileDeviceRecord, HandoffTokenRecord]:
+        """原子完成登录二维码 exchange 并写入 token 相关记录。
+
+        关键输入：登录二维码 ID、claim ID、设备 record、handoff record 和当前时间。
+        关键输出：同一事务内写入后的 device/handoff 记录。
+        """
+        now = now or _utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            session_row = conn.execute(
+                "SELECT * FROM login_qr_sessions WHERE login_qr_id = ?",
+                (login_qr_id,),
+            ).fetchone()
+            if session_row is None:
+                raise errors.login_qr_not_found(login_qr_id)
+            session = _login_qr_session_from_row(session_row)
+            if session.expires_at <= now:
+                conn.execute(
+                    "UPDATE login_qr_sessions SET status = ? WHERE login_qr_id = ?",
+                    (LoginQrSessionStatus.EXPIRED.value, login_qr_id),
+                )
+                conn.commit()
+                raise errors.login_qr_expired(login_qr_id)
+            if session.status == LoginQrSessionStatus.EXCHANGED:
+                raise errors.login_qr_already_exchanged(login_qr_id)
+            if session.status == LoginQrSessionStatus.CANCELLED:
+                raise errors.approval_denied(login_qr_id)
+            if session.status != LoginQrSessionStatus.CONFIRMED:
+                raise errors.approval_pending(login_qr_id)
+
+            claim_row = conn.execute(
+                """
+                SELECT *
+                  FROM login_qr_claims
+                 WHERE login_qr_id = ? AND claim_id = ?
+                """,
+                (login_qr_id, claim_id),
+            ).fetchone()
+            if claim_row is None:
+                raise errors.claim_not_found(login_qr_id, claim_id)
+            claim = _login_qr_claim_from_row(claim_row)
+            if claim.device_id != device.device_id:
+                raise errors.claim_not_found(login_qr_id, claim_id)
+            if claim.status == LoginQrClaimStatus.EXCHANGED:
+                raise errors.login_qr_already_exchanged(login_qr_id)
+            if claim.status == LoginQrClaimStatus.DENIED:
+                raise errors.approval_denied(login_qr_id)
+            if claim.status != LoginQrClaimStatus.APPROVED:
+                raise errors.approval_pending(login_qr_id)
+
+            _upsert_device(conn, device)
+            _insert_handoff_token(conn, handoff)
+            conn.execute(
+                """
+                UPDATE login_qr_sessions
+                   SET status = ?, exchanged_at = ?
+                 WHERE login_qr_id = ?
+                """,
+                (LoginQrSessionStatus.EXCHANGED.value, _to_iso(now), login_qr_id),
+            )
+            cursor = conn.execute(
+                """
+                UPDATE login_qr_claims
+                   SET status = ?
+                 WHERE login_qr_id = ? AND claim_id = ? AND status = ?
+                """,
+                (
+                    LoginQrClaimStatus.EXCHANGED.value,
+                    login_qr_id,
+                    claim_id,
+                    LoginQrClaimStatus.APPROVED.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise errors.approval_pending(login_qr_id)
 
             stored_device = _device_from_row(
                 conn.execute(

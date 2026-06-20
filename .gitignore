@@ -13,6 +13,7 @@ plugins/
 .serena/
 .xcodeatlas/
 .kongming/
+*.yaml.lock
 
 # Python
 __pycache__/

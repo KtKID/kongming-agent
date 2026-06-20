@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
@@ -20,9 +20,18 @@ if TYPE_CHECKING:
 router = APIRouter(prefix="/api/config", tags=["config"])
 
 
+class ClientCapabilitiesDTO(BaseModel):
+    """下发给前端的宿主能力集合。"""
+
+    xspace_host: bool
+    native_file_dialog: bool
+
+
 class ClientConfigDTO(BaseModel):
     """下发给前端的客户端配置。"""
 
+    host_environment: Literal["browser", "xspace"]
+    capabilities: ClientCapabilitiesDTO
     ws_heartbeat_interval_ms: int
     ws_heartbeat_background_interval_ms: int
     ws_heartbeat_timeout_ms: int
@@ -36,7 +45,13 @@ async def get_client_config(request: Request) -> ClientConfigDTO:
     """返回前端所需的心跳等运行参数。"""
     cfg: Config = request.app.state.config
     web = cfg.web
+    xspace_host = web.host_environment == "xspace"
     return ClientConfigDTO(
+        host_environment=web.host_environment,
+        capabilities=ClientCapabilitiesDTO(
+            xspace_host=xspace_host,
+            native_file_dialog=xspace_host,
+        ),
         ws_heartbeat_interval_ms=web.ws_heartbeat_interval_ms,
         ws_heartbeat_background_interval_ms=web.ws_heartbeat_background_interval_ms,
         ws_heartbeat_timeout_ms=web.ws_heartbeat_timeout_ms,
