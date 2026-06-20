@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, Outlet, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { Workflow } from "lucide-react";
 import { ApprovalDialog, type ApprovalAckSocket } from "@/components/ApprovalDialog";
@@ -34,7 +34,7 @@ import type { RawFrameEnvelope } from "@/chat/types";
 import { ChoiceManager, type ChoiceState } from "@/modules/choice/ChoiceManager";
 import { ChoicePanel } from "@/modules/choice/ChoicePanel";
 import { networkManager } from "@/network";
-import type { ChannelHandle, ChannelKind, SocketState } from "@/network";
+import type { ChannelHandle, SocketState } from "@/network";
 import type {
   CardScope,
   ChoiceRequestFrame,
@@ -775,6 +775,7 @@ export function ChatPage() {
         {!threadId || isClaudeCode || isCodex ? null : (
           <ApprovalDialog socket={approvalSocket} />
         )}
+        <Outlet />
       </div>
     </div>
   );
@@ -783,7 +784,7 @@ export function ChatPage() {
 function WorkflowViewerEntryLink({
   threadId,
   className,
-  label = "Workflow Viewer",
+  label = "任务详情",
 }: {
   threadId: string;
   className?: string;
@@ -791,7 +792,7 @@ function WorkflowViewerEntryLink({
 }) {
   return (
     <Link
-      to={`/chat/${threadId}/agent-workflows`}
+      to={`/chat/${threadId}/task-detail`}
       className={cn(
         "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-primary/25 bg-primary/10 px-2.5 py-1.5 text-xs font-medium text-foreground shadow-sm transition-colors hover:bg-primary/15",
         className,

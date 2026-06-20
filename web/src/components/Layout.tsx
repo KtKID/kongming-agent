@@ -53,7 +53,6 @@ export function Layout() {
   const activeThreadTitle = current?.name ?? (activeThreadId ? "Current thread" : undefined);
   const onManagePage = location.pathname.startsWith("/manage");
   const title = onManagePage ? "运行管理" : activeThreadTitle ?? "kongming-agent";
-
   const manageButton = onManagePage ? (
     <Link
       to="/chat"
@@ -83,7 +82,7 @@ export function Layout() {
 
   const workflowButton = activeThreadId ? (
     <NavLink
-      to={`/chat/${activeThreadId}/agent-workflows`}
+      to={`/chat/${activeThreadId}/task-detail`}
       className={({ isActive }) =>
         cn(
           "inline-flex h-7 items-center rounded-md border px-2.5 py-1.5 text-xs font-medium shadow-sm transition-colors",
@@ -95,7 +94,7 @@ export function Layout() {
     >
       <span className="inline-flex items-center gap-1.5">
         <Workflow className="h-3.5 w-3.5" />
-        Workflow
+        任务详情
       </span>
     </NavLink>
   ) : null;

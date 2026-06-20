@@ -191,9 +191,9 @@ describe("Layout", () => {
     );
 
     expect(screen.getByText("Claude Thread")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Workflow" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "任务详情" })).toHaveAttribute(
       "href",
-      "/chat/thread-abcdef123456/agent-workflows",
+      "/chat/thread-abcdef123456/task-detail",
     );
     expect(screen.getAllByTestId("connection-indicator")).toHaveLength(2);
     expect(screen.getByText("4ms")).toBeInTheDocument();
@@ -248,12 +248,12 @@ describe("Layout", () => {
   it("shows workflow entry from route thread id before thread metadata loads", () => {
     render(
       <MemoryRouter
-        initialEntries={["/chat/thread-route-only/agent-workflows"]}
+        initialEntries={["/chat/thread-route-only/task-detail"]}
       >
         <Routes>
           <Route element={<Layout />}>
             <Route
-              path="/chat/:thread_id/agent-workflows"
+              path="/chat/:thread_id/task-detail"
               element={<div data-testid="workflow-page" />}
             />
           </Route>
@@ -262,9 +262,9 @@ describe("Layout", () => {
     );
 
     expect(screen.getByText("Current thread")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Workflow" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "任务详情" })).toHaveAttribute(
       "href",
-      "/chat/thread-route-only/agent-workflows",
+      "/chat/thread-route-only/task-detail",
     );
     expect(screen.getByTestId("workflow-page")).toBeInTheDocument();
   });
@@ -369,7 +369,7 @@ describe("Layout", () => {
     expect(screen.getByText("Git")).toBeInTheDocument();
     expect(screen.getByText("Shell")).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "进度" })).toBeInTheDocument();
-    expect(screen.getByText("Workflow")).toBeInTheDocument();
+    expect(screen.getByText("任务详情")).toBeInTheDocument();
     expect(screen.getByText("定时任务")).toBeInTheDocument();
     expect(screen.getByText("司天报告")).toBeInTheDocument();
     expect(screen.getByText("复制线程 ID")).toBeInTheDocument();

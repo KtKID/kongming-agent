@@ -8,7 +8,7 @@ import { NotFoundPage } from "@/pages/NotFound";
 import { RuntimeStatusPage } from "@/modules/dashboard";
 import { ConfigPage } from "@/modules/dashboard/config";
 import { ModelProvidersPage } from "@/modules/model-providers";
-import { WorkflowRunViewerPage } from "@/modules/agent-workflow-viewer";
+import { TaskDetailOverlayPage } from "@/modules/task-detail";
 
 /**
  * v0.1.5 路由表（manage-config-tab #19 后）：
@@ -33,14 +33,24 @@ export const router = createBrowserRouter([
         children: [
           { index: true, element: <Navigate to="/chat" replace /> },
           { path: "chat", element: <ChatPage /> },
-          { path: "chat/:thread_id", element: <ChatPage /> },
           {
-            path: "chat/:thread_id/agent-workflows",
-            element: <WorkflowRunViewerPage />,
-          },
-          {
-            path: "chat/:thread_id/agent-workflows/:workflow_id",
-            element: <WorkflowRunViewerPage />,
+            path: "chat/:thread_id",
+            element: <ChatPage />,
+            children: [
+              { path: "task-detail", element: <TaskDetailOverlayPage /> },
+              {
+                path: "task-detail/files/:artifact_id",
+                element: <TaskDetailOverlayPage />,
+              },
+              {
+                path: "agent-workflows",
+                element: <TaskDetailOverlayPage />,
+              },
+              {
+                path: "agent-workflows/:workflow_id",
+                element: <TaskDetailOverlayPage />,
+              },
+            ],
           },
           {
             path: "manage",

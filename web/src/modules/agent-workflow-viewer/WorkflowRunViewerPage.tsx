@@ -43,6 +43,27 @@ export function WorkflowRunViewerPage(): ReactNode {
     workflow_id?: string;
   }>();
   const navigate = useNavigate();
+  return (
+    <WorkflowViewerEmbed
+      threadId={threadId}
+      workflowId={workflowId}
+      onSelectWorkflow={(id) => navigate(`/chat/${threadId}/agent-workflows/${id}`)}
+      showStandaloneHeader
+    />
+  );
+}
+
+export function WorkflowViewerEmbed({
+  threadId,
+  workflowId,
+  onSelectWorkflow,
+  showStandaloneHeader = true,
+}: {
+  threadId?: string;
+  workflowId?: string;
+  onSelectWorkflow: (workflowId: string) => void;
+  showStandaloneHeader?: boolean;
+}): ReactNode {
   const [selectedTaskRunId, setSelectedTaskRunId] = useState<string | null>(null);
   const list = useAgentWorkflowViewerStore((s) => s.list);
   const detail = useAgentWorkflowViewerStore((s) => s.detail);
@@ -134,7 +155,7 @@ export function WorkflowRunViewerPage(): ReactNode {
 
   const openWorkflow = (id: string) => {
     clearArtifact();
-    navigate(`/chat/${threadId}/agent-workflows/${id}`);
+    onSelectWorkflow(id);
   };
 
   const refresh = () => {
@@ -148,6 +169,7 @@ export function WorkflowRunViewerPage(): ReactNode {
       className="flex h-full min-h-0 flex-col px-3 pt-3"
       data-testid="workflow-viewer-page"
     >
+      {showStandaloneHeader ? (
       <section className="obsidian-panel-soft mb-3 flex shrink-0 flex-wrap items-center gap-3 rounded-2xl px-4 py-3">
         <Link
           to={`/chat/${threadId}`}
@@ -181,6 +203,7 @@ export function WorkflowRunViewerPage(): ReactNode {
           刷新
         </Button>
       </section>
+      ) : null}
 
       {error ? (
         <div className="mb-3 rounded-xl border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">

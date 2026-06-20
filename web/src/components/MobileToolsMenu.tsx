@@ -132,13 +132,13 @@ export function MobileToolsMenu({
             disabled={!threadId}
             onClick={() => {
               if (!threadId) return;
-              navigate(`/chat/${threadId}/agent-workflows`);
+              navigate(`/chat/${threadId}/task-detail`);
               setOpen(false);
             }}
             className="rounded-md"
           >
             <Workflow className="h-4 w-4" />
-            Workflow
+            任务详情
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem
