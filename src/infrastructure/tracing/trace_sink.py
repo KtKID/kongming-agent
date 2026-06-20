@@ -185,10 +185,12 @@ class JsonlTraceSink:
         - 优先 :func:`dataclasses.asdict` 把 Event 及其嵌套 dataclass 展开；
           如果传入的 event 不是 dataclass（比如测试用自定义对象），
           退化到读取公共字段。
+        - 本地 trace 写盘前会裁剪 ``llm.request`` / ``llm.response`` 中的正文
+          和 schema；完整 provider 调试数据由 PromptDebugDumpSink / raw dump 承担。
         - :func:`json.dumps` 走 ``ensure_ascii=False`` 保留中文；
           非默认可序列化的值通过 :func:`_json_default` 降级。
         """
-        payload = _event_to_dict(event)
+        payload = _sanitize_local_trace_event(_event_to_dict(event))
         return json.dumps(payload, ensure_ascii=False, default=_json_default)
 
 
@@ -243,6 +245,114 @@ def _event_to_dict(event: Any) -> dict[str, Any]:
         "turn": getattr(event, "turn", None),
         "payload": getattr(event, "payload", {}),
         "timestamp_ms": getattr(event, "timestamp_ms", None),
+    }
+
+
+def _sanitize_local_trace_event(event: dict[str, Any]) -> dict[str, Any]:
+    """裁剪本地 trace 事件，避免默认 JSONL 落完整 prompt、正文和 tool schema。"""
+    kind = event.get("kind")
+    payload = event.get("payload")
+    if kind == "llm.request" and isinstance(payload, dict):
+        request = payload.get("request")
+        if isinstance(request, dict):
+            event = dict(event)
+            event["payload"] = {
+                **payload,
+                "request": _summarize_llm_request_payload(request),
+            }
+    elif kind == "llm.response" and isinstance(payload, dict):
+        response = payload.get("response")
+        if isinstance(response, dict):
+            event = dict(event)
+            event["payload"] = {
+                **payload,
+                "response": _summarize_llm_response_payload(response),
+            }
+    return event
+
+
+def _summarize_llm_request_payload(request: dict[str, Any]) -> dict[str, Any]:
+    """把 provider request 压成本地 trace 摘要，保留索引字段。"""
+    messages = request.get("messages")
+    tools = request.get("tools")
+
+    if isinstance(messages, list):
+        message_roles = [
+            item.get("role", "")
+            for item in messages
+            if isinstance(item, dict) and isinstance(item.get("role"), str)
+        ]
+        message_count: int | None = len(messages)
+    else:
+        raw_roles = request.get("message_roles")
+        message_roles = list(raw_roles) if isinstance(raw_roles, list) else []
+        raw_count = request.get("message_count")
+        message_count = raw_count if isinstance(raw_count, int) else None
+
+    if isinstance(tools, list):
+        tool_names = [
+            item.get("name", "")
+            for item in tools
+            if isinstance(item, dict) and isinstance(item.get("name"), str)
+        ]
+        tool_count: int | None = len(tools)
+    else:
+        raw_names = request.get("tool_names")
+        tool_names = list(raw_names) if isinstance(raw_names, list) else []
+        raw_count = request.get("tool_count")
+        tool_count = raw_count if isinstance(raw_count, int) else None
+
+    return {
+        "model": request.get("model"),
+        "message_count": message_count,
+        "message_roles": message_roles,
+        "tool_count": tool_count,
+        "tool_names": tool_names,
+        "metadata": dict(request.get("metadata", {}))
+        if isinstance(request.get("metadata"), dict)
+        else {},
+        "reasoning_effort": request.get("reasoning_effort"),
+        "temperature": request.get("temperature"),
+        "max_tokens": request.get("max_tokens"),
+        "timeout_seconds": request.get("timeout_seconds"),
+    }
+
+
+def _summarize_llm_response_payload(response: dict[str, Any]) -> dict[str, Any]:
+    """把 provider response 压成本地 trace 摘要，保留 usage 和 provider metadata。"""
+    message = response.get("message")
+    message_summary: dict[str, Any] = {}
+    if isinstance(message, dict):
+        content = message.get("content")
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            tool_names = [
+                item.get("tool_name", "")
+                for item in tool_calls
+                if isinstance(item, dict) and isinstance(item.get("tool_name"), str)
+            ]
+            tool_call_count = len(tool_calls)
+        else:
+            raw_names = message.get("tool_names")
+            tool_names = list(raw_names) if isinstance(raw_names, list) else []
+            raw_count = message.get("tool_call_count")
+            tool_call_count = raw_count if isinstance(raw_count, int) else 0
+        message_summary = {
+            "role": message.get("role"),
+            "content_chars": len(content)
+            if isinstance(content, str)
+            else int(message.get("content_chars", 0) or 0),
+            "tool_call_count": tool_call_count,
+            "tool_names": tool_names,
+        }
+
+    return {
+        "finish_reason": response.get("finish_reason"),
+        "message": message_summary,
+        "usage": dict(response.get("usage", {})) if isinstance(response.get("usage"), dict) else {},
+        "provider_metadata": dict(response.get("provider_metadata", {}))
+        if isinstance(response.get("provider_metadata"), dict)
+        else {},
     }
 
 

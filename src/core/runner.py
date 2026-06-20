@@ -66,14 +66,14 @@ class _RunInstructionSource:
     content: str
 
 
-def _llm_request_to_trace_payload(request: LLMRequest) -> dict[str, Any]:
-    """把真实 ``LLMRequest`` 按同名字段序列化为 trace payload。"""
+def _llm_request_to_event_payload(request: LLMRequest) -> dict[str, Any]:
+    """把真实 ``LLMRequest`` 按同名字段序列化为事件 payload。"""
 
     return request.to_audit_dict()
 
 
-def _llm_response_to_trace_payload(response: LLMResponse) -> dict[str, Any]:
-    """把真实 ``LLMResponse`` 按同名字段序列化为 trace payload。"""
+def _llm_response_to_event_payload(response: LLMResponse) -> dict[str, Any]:
+    """把真实 ``LLMResponse`` 按同名字段序列化为事件 payload。"""
 
     return response.to_audit_dict()
 
@@ -578,7 +578,7 @@ class Runner:
                 reasoning_effort=agent_spec.reasoning_effort,
             )
             request_payload = {
-                "request": _llm_request_to_trace_payload(llm_request),
+                "request": _llm_request_to_event_payload(llm_request),
                 "model": llm_request.model,
                 "message_count": len(llm_request.messages),
                 "tool_count": len(llm_request.tools),
@@ -624,19 +624,12 @@ class Runner:
             state.record(assistant_message)
 
             response_payload = {
-                "response": _llm_response_to_trace_payload(response),
+                "response": _llm_response_to_event_payload(response),
                 "finish_reason": response.finish_reason,
                 "has_tool_calls": bool(assistant_message.tool_calls),
                 "usage": dict(response.usage),
                 "provider_metadata": dict(response.provider_metadata),
             }
-            await self._append_session_audit_event(
-                session=session,
-                kind="llm.response",
-                run_id=state.run_id,
-                turn=state.turn,
-                payload=response_payload,
-            )
             await self._emit(
                 Event(
                     kind="llm.response",

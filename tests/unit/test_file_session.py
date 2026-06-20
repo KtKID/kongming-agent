@@ -95,6 +95,13 @@ class TestTC2FirstAppendMaterialize:
         await fs.append(Message.user("hello"))
         assert os.path.isfile(os.path.join(store_path, "test-session", "test-session.jsonl"))
 
+    async def test_system_prompt_snapshot_file_is_not_created(self, store_path: str) -> None:
+        bootstrap = _bootstrap()
+        fs = _make_session(store_path=store_path, bootstrap=bootstrap)
+        await fs.append(Message.user("hello"))
+        path = os.path.join(store_path, "test-session", "system_prompt.json")
+        assert not os.path.exists(path)
+
     async def test_materialized_true(self, store_path: str) -> None:
         fs = _make_session(store_path=store_path)
         await fs.append(Message.user("hello"))
@@ -113,6 +120,35 @@ class TestTC2FirstAppendMaterialize:
         fs = _make_session(store_path=store_path)
         await fs.append(Message.user("hello"))
         assert fs._last_message_id is not None
+
+    async def test_audit_event_appended_and_skipped_by_history(self, store_path: str) -> None:
+        fs = _make_session(store_path=store_path)
+        await fs.append(Message.user("hello"))
+        await fs.append_audit_event(
+            kind="llm.request",
+            run_id="run-test-session-1",
+            turn=1,
+            payload={
+                "request": {
+                    "messages": [
+                        {"role": "system", "content": "SYS"},
+                        {"role": "user", "content": "hello"},
+                    ]
+                }
+            },
+        )
+
+        jsonl_path = os.path.join(store_path, "test-session", "test-session.jsonl")
+        with open(jsonl_path) as f:
+            records = [json.loads(line) for line in f]
+        assert [record["record_type"] for record in records] == ["message", "audit_event"]
+        assert records[1]["kind"] == "llm.request"
+        assert records[1]["payload"]["request"]["messages"][0]["role"] == "system"
+
+        history = await fs.history()
+        assert len(history) == 1
+        assert history[0].role == "user"
+        assert history[0].content == "hello"
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +205,7 @@ class TestTC3ManifestFields:
 class TestTC4RecordFields:
     ENVELOPE_FIELDS: ClassVar[set[str]] = {
         "schema_version",
+        "record_type",
         "session_id",
         "model_name",
         "message_id",

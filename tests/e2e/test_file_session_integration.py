@@ -188,6 +188,7 @@ class TestTC13AssistantUsagePersisted:
             record for record in records if record.get("record_type", "message") == "message"
         ]
         audit_records = [record for record in records if record.get("record_type") == "audit_event"]
+        assert all(record["record_type"] == "message" for record in message_records)
         assistant_record = message_records[-1]
         assert assistant_record["message"]["role"] == "assistant"
         assert assistant_record["usage"] == {
@@ -195,5 +196,12 @@ class TestTC13AssistantUsagePersisted:
             "completion_tokens": 7,
             "total_tokens": 19,
         }
-        assert any(record["kind"] == "llm.request" for record in audit_records)
-        assert any(record["kind"] == "llm.response" for record in audit_records)
+        request_records = [record for record in audit_records if record["kind"] == "llm.request"]
+        assert len(request_records) == 1
+        request_payload = request_records[0]["payload"]
+        assert request_payload["model"] == "test-model"
+        assert request_payload["message_count"] == 2
+        assert request_payload["request"]["messages"][0]["role"] == "system"
+        assert request_payload["request"]["messages"][0]["content"] == "SYS"
+        assert request_payload["request"]["messages"][1]["role"] == "user"
+        assert request_payload["request"]["messages"][1]["content"] == "hello"

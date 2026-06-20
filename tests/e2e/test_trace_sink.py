@@ -119,7 +119,7 @@ async def test_trace_sink_captures_tool_call_events(
 
 
 @pytest.mark.e2e
-async def test_file_session_audit_records_full_llm_request(
+async def test_trace_records_llm_request_summary(
     stub_llm: StubLLMProvider,
     recording_approval: RecordingApproval,
     tmp_path: Path,
@@ -175,37 +175,7 @@ async def test_file_session_audit_records_full_llm_request(
 
     session_path = tmp_path / "sessions" / "audit-session" / "audit-session.jsonl"
     records = _read_jsonl_events(session_path)
-    request_audit_rows = [
-        row
-        for row in records
-        if row.get("record_type") == "audit_event" and row.get("kind") == "llm.request"
-    ]
-    response_audit_rows = [
-        row
-        for row in records
-        if row.get("record_type") == "audit_event" and row.get("kind") == "llm.response"
-    ]
     message_rows = [row for row in records if row.get("record_type", "message") == "message"]
-
-    assert len(request_audit_rows) == 2
-    assert len(response_audit_rows) == 2
-    first_request = request_audit_rows[0]["payload"]["request"]
-    assert first_request["model"] == "stub-model"
-    assert first_request["reasoning_effort"] == "high"
-    assert first_request["messages"][0]["role"] == "system"
-    assert first_request["messages"][0]["content"] == "Follow audit rules."
-    assert first_request["messages"][1]["role"] == "user"
-    assert first_request["messages"][1]["content"] == "read audit file"
-    assert first_request["tools"][0]["name"] == "read_file"
-    assert first_request["tools"][0]["input_schema"]["required"] == ["path"]
-
-    first_response = response_audit_rows[0]["payload"]["response"]
-    assert first_response["finish_reason"] == "tool_calls"
-    assert first_response["message"]["tool_calls"][0]["call_id"] == "audit-call"
-    assert first_response["message"]["tool_calls"][0]["tool_name"] == "read_file"
-    second_response = response_audit_rows[1]["payload"]["response"]
-    assert second_response["finish_reason"] == "stop"
-    assert second_response["message"]["content"] == "done"
 
     assert any(row["message"]["role"] == "assistant" for row in message_rows)
     assert any(
@@ -223,5 +193,14 @@ async def test_file_session_audit_records_full_llm_request(
     trace_events = _read_jsonl_events(trace_path)
     trace_request = next(row for row in trace_events if row["kind"] == "llm.request")
     trace_response = next(row for row in trace_events if row["kind"] == "llm.response")
-    assert trace_request["payload"]["request"] == first_request
-    assert trace_response["payload"]["response"] == first_response
+    first_trace_request = trace_request["payload"]["request"]
+    assert first_trace_request["model"] == "stub-model"
+    assert first_trace_request["reasoning_effort"] == "high"
+    assert first_trace_request["message_roles"] == ["system", "user"]
+    assert first_trace_request["tool_names"] == ["read_file"]
+    assert "messages" not in first_trace_request
+    assert "tools" not in first_trace_request
+    first_trace_response = trace_response["payload"]["response"]
+    assert first_trace_response["finish_reason"] == "tool_calls"
+    assert first_trace_response["message"]["tool_call_count"] == 1
+    assert first_trace_response["message"]["tool_names"] == ["read_file"]

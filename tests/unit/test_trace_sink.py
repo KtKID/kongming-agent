@@ -212,6 +212,108 @@ async def test_emit_payload_with_path_and_datetime(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_llm_request_local_trace_drops_messages_and_tool_schema(tmp_path):
+    """本地 trace 落盘裁剪 request 正文和工具 schema。"""
+    from core.contracts import Event
+
+    path = tmp_path / "trace.jsonl"
+    sink = JsonlTraceSink(path)
+    await sink.emit(
+        Event(
+            kind="llm.request",
+            run_id="r",
+            turn=1,
+            payload={
+                "request": {
+                    "model": "stub-model",
+                    "messages": [
+                        {"role": "system", "content": "secret system"},
+                        {"role": "user", "content": "secret user"},
+                    ],
+                    "tools": [
+                        {
+                            "name": "read_file",
+                            "description": "read file",
+                            "input_schema": {"type": "object", "properties": {"path": {}}},
+                        }
+                    ],
+                    "metadata": {"thread_id": "thread-1"},
+                    "reasoning_effort": "high",
+                    "temperature": None,
+                    "max_tokens": None,
+                    "timeout_seconds": None,
+                },
+                "model": "stub-model",
+                "message_count": 2,
+                "tool_count": 1,
+                "original_message_count": 1,
+            },
+        )
+    )
+
+    line = _read_jsonl(path)[0]
+    request = line["payload"]["request"]
+    assert request["model"] == "stub-model"
+    assert request["message_count"] == 2
+    assert request["message_roles"] == ["system", "user"]
+    assert request["tool_count"] == 1
+    assert request["tool_names"] == ["read_file"]
+    assert request["metadata"] == {"thread_id": "thread-1"}
+    assert "messages" not in request
+    assert "tools" not in request
+
+
+@pytest.mark.asyncio
+async def test_llm_response_local_trace_drops_content_and_tool_arguments(tmp_path):
+    """本地 trace 落盘裁剪 response 正文和工具参数。"""
+    from core.contracts import Event
+
+    path = tmp_path / "trace.jsonl"
+    sink = JsonlTraceSink(path)
+    await sink.emit(
+        Event(
+            kind="llm.response",
+            run_id="r",
+            turn=1,
+            payload={
+                "response": {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": "secret answer",
+                        "tool_calls": [
+                            {
+                                "call_id": "call-1",
+                                "tool_name": "read_file",
+                                "arguments": {"path": "/secret"},
+                            }
+                        ],
+                    },
+                    "usage": {"total_tokens": 12},
+                    "provider_metadata": {"cache_read_input_tokens": 5},
+                },
+                "finish_reason": "tool_calls",
+                "has_tool_calls": True,
+                "usage": {"total_tokens": 12},
+                "provider_metadata": {"cache_read_input_tokens": 5},
+            },
+        )
+    )
+
+    line = _read_jsonl(path)[0]
+    response = line["payload"]["response"]
+    assert response["finish_reason"] == "tool_calls"
+    assert response["message"]["role"] == "assistant"
+    assert response["message"]["content_chars"] == 13
+    assert response["message"]["tool_call_count"] == 1
+    assert response["message"]["tool_names"] == ["read_file"]
+    assert response["usage"] == {"total_tokens": 12}
+    assert response["provider_metadata"] == {"cache_read_input_tokens": 5}
+    assert "content" not in response["message"]
+    assert "tool_calls" not in response["message"]
+
+
+@pytest.mark.asyncio
 async def test_auto_flush_false_still_writes(tmp_path):
     from core.contracts import Event
 
