@@ -21,14 +21,82 @@ from tests.unit.test_web_app_lifespan import _seed_password
 from tests.unit.test_web_routers_threads import CSRF_HEADERS, FakeTM, _make_cfg
 
 
-def _authed_client(tmp_path: Path, cfg: Config | None = None) -> TestClient:
+class _RouterFakeBridge:
+    """Router 测试 bridge，记录 run_once 入参。"""
+
+    def __init__(self) -> None:
+        """初始化调用记录。"""
+        self.calls: list[dict[str, object]] = []
+
+    async def run_once(
+        self,
+        text: str,
+        *,
+        reasoning_effort: str | None = None,
+        attachments: list[dict[str, object]] | None = None,
+    ) -> None:
+        """记录 Avatar REST chat 触发的 run_once。"""
+        self.calls.append(
+            {
+                "text": text,
+                "reasoning_effort": reasoning_effort,
+                "attachments": attachments,
+            }
+        )
+
+
+class _RouterFakeCell:
+    """Router 测试 cell，提供 bridge/current_run_task/touch。"""
+
+    def __init__(self, thread_id: str) -> None:
+        """初始化 fake cell。"""
+        self.thread_id = thread_id
+        self.bridge = _RouterFakeBridge()
+        self.current_run_task = None
+        self.touch_count = 0
+
+    def touch(self) -> None:
+        """记录 cell 活跃刷新。"""
+        self.touch_count += 1
+
+
+class _AvatarChatFakeTM(FakeTM):
+    """支持 Avatar REST chat 的 FakeThreadManager。"""
+
+    def __init__(self) -> None:
+        """初始化 fake cells 和刷新记录。"""
+        super().__init__()
+        self.cells: dict[str, _RouterFakeCell] = {}
+        self.refresh_calls: list[str] = []
+
+    async def boot_or_attach(self, thread_id: str) -> _RouterFakeCell:
+        """返回或创建 fake cell。"""
+        if thread_id not in self._threads:
+            raise KeyError(thread_id)
+        cell = self.cells.get(thread_id)
+        if cell is None:
+            cell = _RouterFakeCell(thread_id)
+            self.cells[thread_id] = cell
+        return cell
+
+    async def ensure_cell_runtime_preset_current(self, thread_id: str) -> bool:
+        """记录 runtime refresh 并返回成功。"""
+        self.refresh_calls.append(thread_id)
+        return True
+
+
+def _authed_client(
+    tmp_path: Path,
+    cfg: Config | None = None,
+    thread_manager: FakeTM | None = None,
+) -> TestClient:
     """创建已登录 Web TestClient。
 
     关键输入：pytest 临时目录和可选 Config。
     关键输出：带 Web session cookie 的 TestClient。
     """
     _seed_password(tmp_path, "pwd")
-    app = create_app(cfg or _make_cfg(), FakeTM(), home_dir=tmp_path)
+    app = create_app(cfg or _make_cfg(), thread_manager or FakeTM(), home_dir=tmp_path)
     client = TestClient(app)
     client.__enter__()
     response = client.post(
@@ -218,9 +286,10 @@ def test_avatar_batch_ack_returns_per_item_errors(tmp_path: Path) -> None:
         authed.__exit__(None, None, None)
 
 
-def test_avatar_chat_returns_capability_disabled(tmp_path: Path) -> None:
-    """验证 chat scope 通过后返回 v1 disabled capability 错误。"""
-    authed = _authed_client(tmp_path)
+def test_avatar_capabilities_and_chat_accepted(tmp_path: Path) -> None:
+    """验证 capabilities 和 REST chat accepted 合同。"""
+    fake_tm = _AvatarChatFakeTM()
+    authed = _authed_client(tmp_path, thread_manager=fake_tm)
     anonymous = _anonymous_client(authed.app)
     try:
         chat_token = _issue_device_token(
@@ -244,15 +313,74 @@ def test_avatar_chat_returns_capability_disabled(tmp_path: Path) -> None:
             headers={"Authorization": f"Bearer {read_token}"},
         )
         assert readable_capabilities.status_code == 200
-        assert readable_capabilities.json()["avatarChat"] is False
+        capabilities_body = readable_capabilities.json()
+        assert capabilities_body["avatarChat"] is True
+        assert capabilities_body["avatarRealtimeChat"] is True
+        assert capabilities_body["chatTransports"] == {
+            "websocket": "/ws/avatar/v1/threads/{threadId}",
+            "rest": "/api/avatar/v1/chat",
+        }
+        assert capabilities_body["messageRegistry"] is True
 
         response = anonymous.post(
             "/api/avatar/v1/chat",
-            json={"text": "hello avatar"},
+            json={
+                "threadId": None,
+                "presetId": "local-default",
+                "cwd": "/tmp/avatar",
+                "message": {
+                    "text": "hello avatar",
+                    "reasoningEffort": "medium",
+                    "attachments": None,
+                    "metadata": {"surface": "pytest"},
+                },
+                "client": {
+                    "deviceId": "xspace-desktop-main",
+                    "clientMessageId": "client-msg-1",
+                    "capabilities": {"realtime": True},
+                },
+            },
             headers={"Authorization": f"Bearer {chat_token}"},
         )
-        assert response.status_code == 501
-        assert response.json()["error"]["code"] == "avatar_capability_disabled"
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["accepted"] is True
+        assert body["transport"] == "websocket"
+        assert body["websocketUrl"] == f"/ws/avatar/v1/threads/{body['threadId']}"
+        assert body["runId"].startswith(f"avatar-{body['threadId']}-")
+        assert body["serverTime"]
+
+        import time
+
+        time.sleep(0.1)
+        assert fake_tm.cells[body["threadId"]].bridge.calls == [
+            {
+                "text": "hello avatar",
+                "reasoning_effort": "medium",
+                "attachments": None,
+            }
+        ]
+
+        existing = anonymous.post(
+            "/api/avatar/v1/chat",
+            json={
+                "threadId": body["threadId"],
+                "presetId": None,
+                "cwd": None,
+                "message": {
+                    "text": "continue avatar",
+                    "reasoningEffort": "low",
+                    "attachments": None,
+                },
+                "client": {
+                    "deviceId": "xspace-desktop-main",
+                    "clientMessageId": "client-msg-2",
+                },
+            },
+            headers={"Authorization": f"Bearer {chat_token}"},
+        )
+        assert existing.status_code == 200, existing.text
+        assert existing.json()["threadId"] == body["threadId"]
     finally:
         anonymous.close()
         authed.__exit__(None, None, None)

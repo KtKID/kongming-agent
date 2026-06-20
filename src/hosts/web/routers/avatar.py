@@ -10,7 +10,7 @@ camelCase wire 响应的转换。
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,6 +27,7 @@ from hosts.web.avatar import (
     AvatarAckRequest,
     AvatarAckStatus,
     AvatarCapabilities,
+    AvatarChatAccepted,
     AvatarChatRequest,
     AvatarManager,
     AvatarMessageAction,
@@ -37,6 +38,7 @@ from hosts.web.avatar import (
     AvatarMessageStatus,
 )
 from hosts.web.avatar import errors as avatar_errors
+from hosts.web.protocol.rest_models import UserInputAttachment
 from hosts.web.xspace_mobile import errors as mobile_errors
 from hosts.web.xspace_mobile.models import MobileDeviceRecord
 from hosts.web.xspace_mobile.token_service import MobileDeviceTokenService
@@ -98,15 +100,40 @@ class AckAvatarMessagesRequest(BaseModel):
     at: datetime | None = None
 
 
+class AvatarRestChatMessageBody(BaseModel):
+    """Avatar REST chat message DTO。"""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    text: str = Field(min_length=1, max_length=8000)
+    reasoning_effort: Literal["low", "medium", "high"] | None = Field(
+        default=None,
+        alias="reasoningEffort",
+    )
+    attachments: list[UserInputAttachment] | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class AvatarRestChatClientBody(BaseModel):
+    """Avatar REST chat client DTO。"""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    device_id: str | None = Field(default=None, alias="deviceId", max_length=256)
+    client_message_id: str = Field(alias="clientMessageId", min_length=1, max_length=256)
+    capabilities: dict[str, bool] = Field(default_factory=dict)
+
+
 class AvatarChatRequestBody(BaseModel):
     """Avatar chat REST 请求 DTO。"""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    text: str = Field(min_length=1, max_length=8000)
     thread_id: str | None = Field(default=None, alias="threadId", max_length=256)
-    device_id: str | None = Field(default=None, alias="deviceId", max_length=256)
-    capabilities: dict[str, bool] = Field(default_factory=dict)
+    preset_id: str | None = Field(default=None, alias="presetId", max_length=256)
+    cwd: str | None = None
+    message: AvatarRestChatMessageBody
+    client: AvatarRestChatClientBody
 
 
 def _manager(request: Request) -> AvatarManager:
@@ -243,7 +270,21 @@ def _capabilities_to_wire(capabilities: AvatarCapabilities) -> dict[str, Any]:
         "restAck": capabilities.rest_ack,
         "wsNotifications": capabilities.ws_notifications,
         "avatarChat": capabilities.avatar_chat,
+        "avatarRealtimeChat": capabilities.avatar_realtime_chat,
+        "chatTransports": capabilities.chat_transports,
         "requiredScopes": capabilities.required_scopes,
+    }
+
+
+def _accepted_to_wire(accepted: AvatarChatAccepted) -> dict[str, Any]:
+    """把 AvatarChatAccepted 转换为 camelCase wire DTO。"""
+    return {
+        "accepted": accepted.accepted,
+        "threadId": accepted.thread_id,
+        "runId": accepted.run_id,
+        "transport": accepted.transport,
+        "websocketUrl": accepted.websocket_url,
+        "serverTime": accepted.server_time.isoformat(),
     }
 
 
@@ -394,25 +435,30 @@ async def post_avatar_chat(
     payload: AvatarChatRequestBody,
     request: Request,
 ) -> JSONResponse:
-    """Avatar chat v1 disabled endpoint。"""
+    """Avatar chat REST accepted endpoint。"""
     try:
         device = _authorize(
             request,
             scopes=_CHAT_SCOPES,
             require_csrf_for_cookie=True,
         )
-        device_id = payload.device_id or (device.device_id if device is not None else None)
-        _manager(request).chat(
+        device_id = payload.client.device_id or (device.device_id if device is not None else None)
+        accepted = await _manager(request).chat(
             AvatarChatRequest(
-                text=payload.text,
+                text=payload.message.text,
                 thread_id=payload.thread_id,
+                preset_id=payload.preset_id,
+                cwd=payload.cwd or "",
+                reasoning_effort=payload.message.reasoning_effort,
+                attachments=payload.message.attachments,
+                client_message_id=payload.client.client_message_id,
                 device_id=device_id,
-                capabilities=payload.capabilities,
+                capabilities=payload.client.capabilities,
             )
         )
     except avatar_errors.AvatarMessageError as exc:
         return _error_response(exc)
-    return JSONResponse(content={"status": "ok"})
+    return JSONResponse(content=_accepted_to_wire(accepted))
 
 
 __all__ = ["router"]

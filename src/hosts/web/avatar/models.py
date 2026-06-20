@@ -15,6 +15,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from hosts.web.protocol.rest_models import UserInputAttachment
+
 
 class AvatarMessageLevel(StrEnum):
     """Avatar 消息严重程度。
@@ -223,7 +225,14 @@ class AvatarCapabilities(BaseModel):
     rest_list: bool = True
     rest_ack: bool = True
     ws_notifications: bool = False
-    avatar_chat: bool = False
+    avatar_chat: bool = True
+    avatar_realtime_chat: bool = True
+    chat_transports: dict[str, str] = Field(
+        default_factory=lambda: {
+            "websocket": "/ws/avatar/v1/threads/{threadId}",
+            "rest": "/api/avatar/v1/chat",
+        }
+    )
     required_scopes: dict[str, list[str]] = Field(
         default_factory=lambda: {
             "list": ["avatar.read", "thread.read"],
@@ -236,8 +245,8 @@ class AvatarCapabilities(BaseModel):
 class AvatarChatRequest(BaseModel):
     """Avatar 反向对话请求。
 
-    职责：预留 XSpace Avatar 向 Kongming 单独 LLM 通道发消息的输入合同。
-    关键输入：文本、可选 thread、设备和客户端能力。
+    职责：承载 XSpace Avatar 通过 REST 进入 generic_chat thread 的输入合同。
+    关键输入：文本、可选 thread、preset/cwd、reasoning effort、附件和客户端能力。
     关键输出：AssistantManager 可处理的 chat 请求。
     """
 
@@ -245,8 +254,31 @@ class AvatarChatRequest(BaseModel):
 
     text: str = Field(min_length=1, max_length=8000)
     thread_id: str | None = Field(default=None, max_length=256)
+    preset_id: str | None = Field(default=None, max_length=256)
+    cwd: str = ""
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    attachments: list[UserInputAttachment] | None = None
+    client_message_id: str | None = Field(default=None, max_length=256)
     device_id: str | None = Field(default=None, max_length=256)
     capabilities: dict[str, bool] = Field(default_factory=dict)
+
+
+class AvatarChatAccepted(BaseModel):
+    """Avatar chat accepted 响应。
+
+    职责：表示 REST 消息已进入普通 generic_chat run 队列。
+    关键输入：AssistantManager 创建或校验后的 thread/run/transport 信息。
+    关键输出：Router 可转成 XSpace wire DTO 的 accepted 响应。
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    accepted: bool = True
+    thread_id: str
+    run_id: str
+    transport: Literal["websocket", "rest"] = "websocket"
+    websocket_url: str
+    server_time: datetime
 
 
 __all__ = [
@@ -256,6 +288,7 @@ __all__ = [
     "AvatarAckRequest",
     "AvatarAckStatus",
     "AvatarCapabilities",
+    "AvatarChatAccepted",
     "AvatarChatRequest",
     "AvatarMessageAction",
     "AvatarMessageInput",

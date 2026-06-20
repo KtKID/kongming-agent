@@ -2,7 +2,7 @@
 
 本脚本验证 AvatarManager 门户，作用是固定跨模块入口对 Repository 和
 AssistantManager 的编排语义。关键流程是用真实临时 SQLite Repository 构造
-Manager，覆盖注册、拉取、批量 ack 和 v1 chat disabled capability。
+Manager，覆盖注册、拉取、批量 ack 和 Avatar chat accepted。
 """
 
 from __future__ import annotations
@@ -21,17 +21,127 @@ from hosts.web.avatar import (
     AvatarMessageListQuery,
     AvatarMessageStatus,
 )
+from hosts.web.avatar.assistant_manager import AvatarAssistantManager
 from hosts.web.avatar.errors import AvatarMessageError
 from hosts.web.avatar.repository import AvatarMessageRepository
+from hosts.web.threads.metadata import ThreadMetadata
 
 
-def _manager(tmp_path: Path) -> AvatarManager:
+class _FakeBridge:
+    """测试 bridge，记录 Avatar chat 是否进入 run_once。"""
+
+    def __init__(self) -> None:
+        """初始化调用记录。"""
+        self.calls: list[dict[str, object]] = []
+
+    async def run_once(
+        self,
+        text: str,
+        *,
+        reasoning_effort: str | None = None,
+        attachments: list[dict[str, object]] | None = None,
+    ) -> None:
+        """记录 run_once 入参。
+
+        关键输入：文本、reasoning effort 和附件。
+        关键输出：调用记录追加一条。
+        """
+        self.calls.append(
+            {
+                "text": text,
+                "reasoning_effort": reasoning_effort,
+                "attachments": attachments,
+            }
+        )
+
+
+class _FakeCell:
+    """测试 cell，提供 AvatarAssistantManager 需要的最小字段。"""
+
+    def __init__(self, thread_id: str) -> None:
+        """初始化 fake cell。
+
+        关键输入：thread_id。
+        关键输出：带 fake bridge 的 cell。
+        """
+        self.thread_id = thread_id
+        self.bridge = _FakeBridge()
+        self.current_run_task = None
+        self.touch_count = 0
+
+    def touch(self) -> None:
+        """记录 cell 活跃刷新。"""
+        self.touch_count += 1
+
+
+class _FakeThreadManager:
+    """测试 ThreadManager，提供 create/list/boot/refresh 入口。"""
+
+    def __init__(self) -> None:
+        """初始化 thread 和 cell 存储。"""
+        self.threads: dict[str, ThreadMetadata] = {}
+        self.cells: dict[str, _FakeCell] = {}
+        self.refresh_calls: list[str] = []
+
+    async def create_thread(
+        self,
+        name: str,
+        preset_id: str = "",
+        *,
+        backend_kind: str = "generic_chat",
+        cwd: str = "",
+    ) -> ThreadMetadata:
+        """创建 fake generic_chat thread metadata。
+
+        关键输入：name、preset_id、backend_kind 和 cwd。
+        关键输出：ThreadMetadata。
+        """
+        thread_id = f"thread-{'a' * 11}{len(self.threads)}"
+        metadata = ThreadMetadata(
+            id=thread_id,
+            name=name,
+            preset_id=preset_id,
+            backend_kind=backend_kind,  # type: ignore[arg-type]
+            cwd=cwd,
+            created_at=1.0,
+            updated_at=2.0,
+            message_count=0,
+        )
+        self.threads[thread_id] = metadata
+        return metadata
+
+    def list_threads(self) -> list[ThreadMetadata]:
+        """返回当前 fake thread 列表。"""
+        return list(self.threads.values())
+
+    async def boot_or_attach(self, thread_id: str) -> _FakeCell:
+        """返回或创建 fake cell。
+
+        关键输入：thread_id。
+        关键输出：_FakeCell。
+        """
+        if thread_id not in self.threads:
+            raise KeyError(thread_id)
+        cell = self.cells.get(thread_id)
+        if cell is None:
+            cell = _FakeCell(thread_id)
+            self.cells[thread_id] = cell
+        return cell
+
+    async def ensure_cell_runtime_preset_current(self, thread_id: str) -> bool:
+        """记录 runtime refresh 调用并返回成功。"""
+        self.refresh_calls.append(thread_id)
+        return True
+
+
+def _manager(tmp_path: Path, thread_manager: _FakeThreadManager | None = None) -> AvatarManager:
     """创建使用临时 SQLite 的 AvatarManager。
 
     关键输入：pytest 临时目录。
     关键输出：可执行真实 repository 路径的 Manager。
     """
-    return AvatarManager(AvatarMessageRepository(tmp_path / "avatar.db"))
+    assistant = AvatarAssistantManager(thread_manager) if thread_manager is not None else None
+    return AvatarManager(AvatarMessageRepository(tmp_path / "avatar.db"), assistant)
 
 
 def _input(title: str = "Task update") -> AvatarMessageInput:
@@ -81,15 +191,47 @@ def test_batch_ack_reports_missing_message_without_blocking(tmp_path: Path) -> N
     assert result.results[1].error == "avatar_message_not_found"
 
 
-def test_avatar_chat_capability_is_disabled_in_v1(tmp_path: Path) -> None:
-    """验证 v1 capabilities 和 chat disabled 语义稳定。"""
-    manager = _manager(tmp_path)
+@pytest.mark.asyncio
+async def test_avatar_chat_creates_generic_thread_and_starts_run(tmp_path: Path) -> None:
+    """验证 Avatar chat 首发会创建 generic_chat thread 并启动 run_once。"""
+    fake_tm = _FakeThreadManager()
+    manager = _manager(tmp_path, fake_tm)
 
     capabilities = manager.capabilities()
     assert capabilities.message_registry is True
-    assert capabilities.avatar_chat is False
+    assert capabilities.avatar_chat is True
+    assert capabilities.avatar_realtime_chat is True
     assert capabilities.required_scopes["chat"] == ["avatar.chat"]
 
+    accepted = await manager.chat(
+        AvatarChatRequest(
+            text="hello from avatar",
+            preset_id="local-default",
+            cwd="/tmp/avatar",
+            reasoning_effort="medium",
+        )
+    )
+    assert accepted.accepted is True
+    assert accepted.thread_id in fake_tm.threads
+    assert accepted.websocket_url == f"/ws/avatar/v1/threads/{accepted.thread_id}"
+    assert accepted.transport == "websocket"
+
+    await fake_tm.cells[accepted.thread_id].current_run_task
+    assert fake_tm.refresh_calls == [accepted.thread_id]
+    assert fake_tm.cells[accepted.thread_id].bridge.calls == [
+        {
+            "text": "hello from avatar",
+            "reasoning_effort": "medium",
+            "attachments": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_avatar_chat_rejects_missing_preset(tmp_path: Path) -> None:
+    """验证首发创建缺 preset 时返回稳定错误。"""
+    manager = _manager(tmp_path, _FakeThreadManager())
+
     with pytest.raises(AvatarMessageError) as exc:
-        manager.chat(AvatarChatRequest(text="hello from avatar"))
-    assert exc.value.code == "avatar_capability_disabled"
+        await manager.chat(AvatarChatRequest(text="hello from avatar"))
+    assert exc.value.code == "avatar_preset_required"
