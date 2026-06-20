@@ -6,7 +6,7 @@
  * 本文件是 Python 侧 `src/web/protocol/` 三个模块的 TS 1:1 复刻：
  *
  * - Python `src/web/protocol/_base.py`        → 本文件「公共枚举」段
- * - Python `src/web/protocol/rest_models.py`  → 本文件「REST DTO」段（8 个）
+ * - Python `src/web/protocol/rest_models.py`  → 本文件「REST DTO」段
  * - Python `src/web/protocol/ws_frames.py`    → 本文件「C2S 帧」+「S2C 帧」+「Unions」三段（18 帧 + 2 union）
  *
  * 字段名 / 类型 / 必选与 Python 侧严格对应；可选字段（Python `X | None = None`）
@@ -119,7 +119,7 @@ export type SystemNoticeStatus =
 export type SystemNoticeIcon = "running" | "success" | "warning" | "error";
 
 // ============================================================================
-// ===== REST DTO（对应 Python src/web/protocol/rest_models.py，共 8 个）=====
+// ===== REST DTO（对应 Python src/web/protocol/rest_models.py）=====
 // ============================================================================
 
 /**
@@ -357,6 +357,46 @@ export interface ThreadTaskProgressViewModel {
   variant: "compact_checklist";
   items: ThreadTaskProgressDisplayItem[];
   empty: { title: string; desc?: string };
+}
+
+export type ThreadSubAgentStatus = string;
+
+export interface ThreadSubAgentDTO {
+  id?: string | null;
+  task_name?: string | null;
+  name?: string | null;
+  status: ThreadSubAgentStatus;
+  source?: string | null;
+  workflow_id?: string | null;
+  started_at_ms?: number | null;
+  updated_at_ms?: number | null;
+}
+
+export interface ThreadSubAgentListDTO {
+  subagents: ThreadSubAgentDTO[];
+}
+
+export type ThreadSubAgentListResponse =
+  | ThreadSubAgentDTO[]
+  | ThreadSubAgentListDTO;
+
+export type ThreadSubAgentIconVariant =
+  | "running"
+  | "success"
+  | "error"
+  | "pending";
+
+export interface ThreadSubAgentDisplayItem {
+  key: string;
+  name: string;
+  status: ThreadSubAgentStatus;
+  status_label: string;
+  icon_variant: ThreadSubAgentIconVariant;
+  is_active: boolean;
+  source_label?: string;
+  started_at_ms?: number | null;
+  updated_at_ms?: number | null;
+  aria_label: string;
 }
 
 /**

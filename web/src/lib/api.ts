@@ -7,6 +7,8 @@ import type {
   EvolutionDecisionRequest,
   EvolutionDecisionResponse,
   EvolutionReviewDTO,
+  ThreadSubAgentDTO,
+  ThreadSubAgentListResponse,
   ThreadTaskProgressSnapshot,
 } from "@/protocol";
 
@@ -157,6 +159,15 @@ export const apiGetThreadTaskProgress = (threadId: string) =>
   apiGet<ThreadTaskProgressSnapshot>(
     `/api/threads/${encodeURIComponent(threadId)}/task-progress`,
   );
+
+export const apiGetThreadSubAgents = async (
+  threadId: string,
+): Promise<ThreadSubAgentDTO[]> => {
+  const response = await apiGet<ThreadSubAgentListResponse>(
+    `/api/threads/${encodeURIComponent(threadId)}/subagents`,
+  );
+  return Array.isArray(response) ? response : response.subagents;
+};
 
 function normalizeEvolutionDecision(
   decision: EvolutionDecisionItemDTO,
