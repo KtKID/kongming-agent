@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from core.agent_spec import AgentSpec
@@ -384,11 +385,12 @@ class NativeRuntime:
         if reasoning_effort is not None:
             saved = self._config.model.reasoning_effort
             self._config.model.reasoning_effort = reasoning_effort  # type: ignore[assignment]
+            run_spec = replace(self._agent_spec, reasoning_effort=reasoning_effort)
             try:
                 result = await self._runner.run(
                     user_input,
                     session=session,
-                    agent_spec=self._agent_spec,
+                    agent_spec=run_spec,
                     llm=self._llm,
                     tools=self._tools,
                     approval=self._approval,
@@ -431,10 +433,11 @@ class NativeRuntime:
         if reasoning_effort is not None:
             saved = self._config.model.reasoning_effort
             self._config.model.reasoning_effort = reasoning_effort  # type: ignore[assignment]
+            run_spec = replace(self._agent_spec, reasoning_effort=reasoning_effort)
             try:
                 result = await self._runner.continue_from_last_user_message(
                     session=session,
-                    agent_spec=self._agent_spec,
+                    agent_spec=run_spec,
                     llm=self._llm,
                     tools=self._tools,
                     approval=self._approval,

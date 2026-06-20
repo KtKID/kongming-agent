@@ -12,9 +12,11 @@ from pathlib import Path
 import pytest
 
 from core import AgentSpec, InMemorySession, Runner
-from core.contracts import LLMRequest, LLMResponse
+from core.contracts import LLMRequest, LLMResponse, ToolContext, ToolResult
 from core.message import Message
 from infrastructure.tracing import JsonlTraceSink
+from prompting.assembly.input_assembler import InputAssembler
+from prompting.instructions.instruction_loader import InstructionSource
 from tests.e2e.conftest import RecordingApproval
 
 # ---------------------------------------------------------------------------
@@ -42,6 +44,21 @@ class StubLLMWithMetadata:
             message=Message(role="assistant", content=""),
             finish_reason="stop",
         )
+
+
+class EchoTool:
+    """用于验证 llm.request 记录完整 tool schema 的测试工具。"""
+
+    name = "echo"
+    description = "Echo the provided text."
+    input_schema = {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+    }
+
+    async def execute(self, args: dict, ctx: ToolContext) -> ToolResult:
+        return ToolResult(ok=True, content=str(args.get("text", "")))
 
 
 # ---------------------------------------------------------------------------
@@ -110,8 +127,83 @@ async def test_provider_metadata_lands_in_trace_jsonl(
     payload = first_resp["payload"]
 
     assert "provider_metadata" in payload, f"provider_metadata missing from payload: {payload}"
+    assert payload["response"]["provider_metadata"] == metadata
+    assert payload["response"]["message"]["role"] == "assistant"
+    assert payload["response"]["message"]["content"] == "done"
     pm = payload["provider_metadata"]
 
     assert pm["cache_read_input_tokens"] == 50
     assert pm["id"] == "msg_test_123"
     assert pm["model"] == "claude-test"
+
+
+@pytest.mark.e2e
+async def test_llm_request_lands_in_trace_jsonl_with_assembled_messages(
+    recording_approval: RecordingApproval,
+    tmp_path: Path,
+) -> None:
+    """llm.request 事件应记录 Runner 传给 provider 的完整 LLMRequest。"""
+
+    llm = StubLLMWithMetadata(metadata={})
+    trace_path = tmp_path / "request_trace.jsonl"
+    sink = JsonlTraceSink(trace_path)
+    runner = Runner(
+        event_sinks=[sink],
+        input_assembler=InputAssembler(),
+        instruction_sources=[
+            InstructionSource(
+                origin="runtime",
+                content="完整 assembly 后 system prompt",
+            )
+        ],
+    )
+    session = InMemorySession("request-1")
+    spec = AgentSpec(
+        name="t",
+        instructions="",
+        default_model="stub-model",
+        tool_names=("echo",),
+        max_turns=2,
+    )
+
+    result = await runner.run(
+        "hello",
+        session=session,
+        agent_spec=spec,
+        llm=llm,
+        tools={"echo": EchoTool()},
+        approval=recording_approval,
+    )
+
+    assert result.status == "completed"
+    events = _read_jsonl_events(trace_path)
+    llm_request_events = [e for e in events if e["kind"] == "llm.request"]
+    assert llm_request_events, (
+        f"no llm.request event found, got kinds: {[e['kind'] for e in events]}"
+    )
+
+    payload = llm_request_events[0]["payload"]
+    request = payload["request"]
+
+    assert request["model"] == "stub-model"
+    assert request["metadata"] == {"thread_id": "request-1"}
+    assert request["temperature"] is None
+    assert request["max_tokens"] is None
+    assert request["timeout_seconds"] is None
+
+    assert request["messages"][0]["role"] == "system"
+    assert request["messages"][0]["content"] == "# runtime\n完整 assembly 后 system prompt"
+    assert request["messages"][1]["role"] == "user"
+    assert request["messages"][1]["content"] == "hello"
+
+    assert request["tools"] == [
+        {
+            "name": "echo",
+            "description": "Echo the provided text.",
+            "input_schema": EchoTool.input_schema,
+        }
+    ]
+
+    assert payload["model"] == request["model"]
+    assert payload["message_count"] == len(request["messages"])
+    assert payload["tool_count"] == len(request["tools"])

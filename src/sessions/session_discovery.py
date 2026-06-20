@@ -136,11 +136,14 @@ def _read_file_session_summary(session_dir: Path) -> SessionSummary | None:
             except json.JSONDecodeError:
                 continue
 
-            message_count += 1
             created_at = record.get("created_at")
             if isinstance(created_at, (int, float)):
                 last_timestamp = float(created_at)
 
+            if record.get("record_type", "message") != "message":
+                continue
+
+            message_count += 1
             preview, role = _record_preview(record)
             if role == "user" and preview:
                 last_preview = preview

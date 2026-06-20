@@ -84,6 +84,7 @@ class FileSession:
 
         record: dict[str, Any] = {
             "schema_version": _SCHEMA_VERSION,
+            "record_type": "message",
             "session_id": self.session_id,
             "model_name": self._bootstrap.model_name,
             "message_id": message_id,
@@ -102,6 +103,35 @@ class FileSession:
 
         self._last_message_id = message_id
 
+    async def append_audit_event(
+        self,
+        *,
+        kind: str,
+        run_id: str,
+        turn: int | None,
+        payload: dict[str, Any],
+    ) -> None:
+        """追加一条审计事件。审计事件落盘，但不参与 history 回放。"""
+        if not self._materialized:
+            self._materialize()
+
+        record: dict[str, Any] = {
+            "schema_version": _SCHEMA_VERSION,
+            "record_type": "audit_event",
+            "session_id": self.session_id,
+            "model_name": self._bootstrap.model_name,
+            "created_at": time.time(),
+            "kind": kind,
+            "run_id": run_id,
+            "turn": turn,
+            "payload": payload,
+        }
+        line = json.dumps(record, ensure_ascii=False) + "\n"
+        with open(self._messages_path, "a", encoding="utf-8") as f:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
+
     async def history(self) -> list[Message]:
         """读取所有历史消息。未 materialize 时返回空列表。"""
         if not self._materialized:
@@ -115,6 +145,8 @@ class FileSession:
                     continue
                 try:
                     record = json.loads(line)
+                    if record.get("record_type", "message") != "message":
+                        continue
                     messages.append(_message_from_dict(record["message"]))
                 except (json.JSONDecodeError, KeyError, TypeError):
                     logger.warning(
@@ -233,6 +265,8 @@ class FileSession:
                         continue
                     try:
                         record = json.loads(line)
+                        if record.get("record_type", "message") != "message":
+                            continue
                         last_id = record.get("message_id")
                     except (json.JSONDecodeError, KeyError):
                         continue
@@ -262,6 +296,8 @@ class FileSession:
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     errors.append(f"行 {line_no}: JSON 解析失败")
+                    continue
+                if record.get("record_type", "message") != "message":
                     continue
 
                 msg_id = record.get("message_id")
