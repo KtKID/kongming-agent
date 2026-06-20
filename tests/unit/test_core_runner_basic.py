@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from core import AgentSpec, InMemorySession, Runner, ToolCall
@@ -16,6 +18,7 @@ from core.contracts import (
     ApprovalDecision,
     ApprovalRequest,
     AssembledInput,
+    Event,
     LLMRequest,
     LLMResponse,
 )
@@ -78,6 +81,11 @@ class _CaptureAssembler:
         )
 
 
+class _FailingSink:
+    async def emit(self, event: Event) -> None:
+        raise RuntimeError(f"sink failed for {event.kind}")
+
+
 @pytest.mark.unit
 async def test_runner_happy_path_single_turn() -> None:
     llm = _StubLLM([("hello", None)])
@@ -99,6 +107,28 @@ async def test_runner_happy_path_single_turn() -> None:
     assert result.final_message.content == "hello"
     assert result.turn_count == 1
     assert result.error is None
+
+
+@pytest.mark.unit
+async def test_runner_emit_logs_missing_llm_audit_sink(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runner = Runner()
+
+    with caplog.at_level(logging.WARNING, logger="core.runner"):
+        await runner._emit(Event(kind="llm.request", run_id="run-1", turn=1))
+
+    assert "llm audit event has no EventSink" in caplog.text
+
+
+@pytest.mark.unit
+async def test_runner_emit_logs_sink_failure(caplog: pytest.LogCaptureFixture) -> None:
+    runner = Runner(event_sinks=[_FailingSink()])
+
+    with caplog.at_level(logging.ERROR, logger="core.runner"):
+        await runner._emit(Event(kind="llm.response", run_id="run-1", turn=1))
+
+    assert "event sink failed" in caplog.text
 
 
 @pytest.mark.unit

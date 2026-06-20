@@ -39,6 +39,7 @@ def _seed_thread(tmp_path: Path) -> tuple[Config, str]:
     thread_id = "thread-aaaaaaaaaaaa"
     root = Path(cfg.session.file_store_path) / thread_id
     _write_json(root / "manifest.json", {"session_id": thread_id, "run_count": 2})
+    _write_json(root / "system_prompt.json", {"record_type": "system_prompt", "content": "SYS"})
     _write_jsonl(
         root / f"{thread_id}.jsonl",
         [
@@ -69,13 +70,13 @@ def test_manager_lists_preferred_thread_artifacts(tmp_path: Path) -> None:
 
     assert [item.path for item in listing.files[:5]] == [
         "manifest.json",
+        "system_prompt.json",
         f"{thread_id}.jsonl",
         "trace.jsonl",
         "task_progress.json",
-        "agent-workflows",
     ]
-    assert listing.files[1].kind == "jsonl"
-    assert listing.files[1].record_count == 2
+    assert listing.files[2].kind == "jsonl"
+    assert listing.files[2].record_count == 2
 
 
 def test_manager_reads_json_jsonl_and_directory(tmp_path: Path) -> None:
@@ -85,6 +86,10 @@ def test_manager_reads_json_jsonl_and_directory(tmp_path: Path) -> None:
     manifest = manager.read_artifact(
         thread_id=thread_id,
         artifact_id=encode_artifact_id("manifest.json"),
+    )
+    system_prompt = manager.read_artifact(
+        thread_id=thread_id,
+        artifact_id=encode_artifact_id("system_prompt.json"),
     )
     history = manager.read_artifact(
         thread_id=thread_id,
@@ -100,6 +105,9 @@ def test_manager_reads_json_jsonl_and_directory(tmp_path: Path) -> None:
     )
 
     assert manifest.content["session_id"] == thread_id
+    assert "content" not in system_prompt.content
+    assert system_prompt.content["content_redacted"] is True
+    assert system_prompt.content["content_chars"] == 3
     assert history.content[0]["message"]["content"].startswith("# 标题")
     assert trace.content[1]["__parse_error__"] is True
     assert trace.diagnostics[0].code == "thread_artifact.read_failed"

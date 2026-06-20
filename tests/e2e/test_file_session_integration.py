@@ -24,6 +24,7 @@ def _bootstrap(**overrides) -> SessionBootstrap:
         model_name="test-model",
         instruction_sources=["test-source"],
         instruction_text_hash="sha256:abc123",
+        instruction_text="# system\nYou are test.",
         created_at=1000000.0,
         cwd="/test",
         app_version="0.1.1",
@@ -187,7 +188,17 @@ class TestTC13AssistantUsagePersisted:
         message_records = [
             record for record in records if record.get("record_type", "message") == "message"
         ]
-        audit_records = [record for record in records if record.get("record_type") == "audit_event"]
+        assert all(record["record_type"] == "message" for record in message_records)
+        assert [record.get("record_type") for record in records] == [
+            "message",
+            "message",
+            "message",
+        ]
+        assert [record["message"]["role"] for record in records] == [
+            "system",
+            "user",
+            "assistant",
+        ]
         assistant_record = message_records[-1]
         assert assistant_record["message"]["role"] == "assistant"
         assert assistant_record["usage"] == {
@@ -195,5 +206,7 @@ class TestTC13AssistantUsagePersisted:
             "completion_tokens": 7,
             "total_tokens": 19,
         }
-        assert any(record["kind"] == "llm.request" for record in audit_records)
-        assert any(record["kind"] == "llm.response" for record in audit_records)
+        system_prompt_path = Path(store_path) / "usage-test" / "system_prompt.json"
+        system_prompt = json.loads(system_prompt_path.read_text(encoding="utf-8"))
+        assert system_prompt["record_type"] == "system_prompt"
+        assert system_prompt["content"] == "# system\nYou are test."

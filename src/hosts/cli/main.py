@@ -621,6 +621,7 @@ async def _run(
         instruction_text_hash=f"sha256:{hashlib.sha256(instructions.encode()).hexdigest()}",
         created_at=time.time(),
         cwd=str(Path.cwd()),
+        instruction_text=instructions,
         app_version=None,
     )
 
@@ -793,7 +794,7 @@ async def _assemble_instructions(
     - 本地长期记忆的加载由 ``cfg.evolution.memory`` 控制：
         - ``enabled=False`` 时完全跳过（返回 memory_store=None）
         - ``inject_prompt=False`` 时仍加载活态 entries 供 memory tool 使用，
-          但不 append ``InstructionSource(origin="memory")``
+          但不追加 memory prompt 段
     """
     kongming_home = get_kongming_home()
     sitian_root = _resolve_sitian_prompt_root(cfg)

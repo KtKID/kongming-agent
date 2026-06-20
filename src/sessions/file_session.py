@@ -7,6 +7,7 @@
 
     <store_path>/<session_id>/
       manifest.json
+      system_prompt.json
       <session_id>.jsonl
 
 设计决策（v0.1.2）：
@@ -14,15 +15,20 @@
 - 无 pending_buffer：未 materialize 时 ``history()`` 返回空列表
 - 消息链：``message_id`` (UUIDv4) + ``parent_message_id``，无 seq 字段
 - 每条 append 后 flush + fsync
+- ``system_prompt.json`` 会持久化完整组装后的 system prompt，供本地审计
+  和问题复盘使用；该文件应按 session 数据同等级别保护。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import stat
 import time
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +42,9 @@ from sessions.session_store import _message_from_dict, _message_to_dict
 logger = logging.getLogger(__name__)
 
 _SCHEMA_VERSION = "0.1.2"
+_SESSION_DIR_MODE = 0o700
+_SYSTEM_PROMPT_FILE_MODE = 0o600
+_GROUP_OTHER_MODE = stat.S_IRWXG | stat.S_IRWXO
 
 
 class FileSession:
@@ -59,9 +68,11 @@ class FileSession:
 
         self._session_dir = self._store_path / session_id
         self._manifest_path = self._session_dir / "manifest.json"
+        self._system_prompt_path = self._session_dir / "system_prompt.json"
         self._messages_path = self._session_dir / f"{session_id}.jsonl"
 
         self._materialized: bool = False
+        self._materialize_lock = asyncio.Lock()
         self._last_message_id: str | None = None
         # run_count 在 manifest.json 中持久化；advance_run_index 时 +1 + 写盘
         self._run_count: int = 0
@@ -76,98 +87,72 @@ class FileSession:
 
     async def append(self, message: Message, *, usage: dict[str, Any] | None = None) -> None:
         """追加一条消息。首次调用触发 materialize。"""
-        if not self._materialized:
-            self._materialize()
+        async with self._materialize_lock:
+            if not self._materialized:
+                self._materialize()
 
-        message_id = str(uuid.uuid4())
-        parent_message_id = self._last_message_id
+            message_id = str(uuid.uuid4())
+            parent_message_id = self._last_message_id
 
-        record: dict[str, Any] = {
-            "schema_version": _SCHEMA_VERSION,
-            "record_type": "message",
-            "session_id": self.session_id,
-            "model_name": self._bootstrap.model_name,
-            "message_id": message_id,
-            "parent_message_id": parent_message_id,
-            "created_at": time.time(),
-            "message": _message_to_dict(message),
-        }
-        if usage is not None:
-            record["usage"] = dict(usage)
+            record: dict[str, Any] = {
+                "schema_version": _SCHEMA_VERSION,
+                "record_type": "message",
+                "session_id": self.session_id,
+                "model_name": self._bootstrap.model_name,
+                "message_id": message_id,
+                "parent_message_id": parent_message_id,
+                "created_at": time.time(),
+                "message": _message_to_dict(message),
+            }
+            if usage is not None:
+                record["usage"] = dict(usage)
 
-        line = json.dumps(record, ensure_ascii=False) + "\n"
-        with open(self._messages_path, "a", encoding="utf-8") as f:
-            f.write(line)
-            f.flush()
-            os.fsync(f.fileno())
+            line = json.dumps(record, ensure_ascii=False) + "\n"
+            with open(self._messages_path, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
 
-        self._last_message_id = message_id
-
-    async def append_audit_event(
-        self,
-        *,
-        kind: str,
-        run_id: str,
-        turn: int | None,
-        payload: dict[str, Any],
-    ) -> None:
-        """追加一条审计事件。审计事件落盘，但不参与 history 回放。"""
-        if not self._materialized:
-            self._materialize()
-
-        record: dict[str, Any] = {
-            "schema_version": _SCHEMA_VERSION,
-            "record_type": "audit_event",
-            "session_id": self.session_id,
-            "model_name": self._bootstrap.model_name,
-            "created_at": time.time(),
-            "kind": kind,
-            "run_id": run_id,
-            "turn": turn,
-            "payload": payload,
-        }
-        line = json.dumps(record, ensure_ascii=False) + "\n"
-        with open(self._messages_path, "a", encoding="utf-8") as f:
-            f.write(line)
-            f.flush()
-            os.fsync(f.fileno())
+            self._last_message_id = message_id
 
     async def history(self) -> list[Message]:
         """读取所有历史消息。未 materialize 时返回空列表。"""
-        if not self._materialized:
-            return []
+        async with self._materialize_lock:
+            if not self._materialized:
+                return []
 
-        messages: list[Message] = []
-        with open(self._messages_path, encoding="utf-8") as f:
-            for line_no, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                    if record.get("record_type", "message") != "message":
+            messages: list[Message] = []
+            with open(self._messages_path, encoding="utf-8") as f:
+                for line_no, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line:
                         continue
-                    messages.append(_message_from_dict(record["message"]))
-                except (json.JSONDecodeError, KeyError, TypeError):
-                    logger.warning(
-                        "session %s: 跳过损坏行 #%d in %s",
-                        self.session_id,
-                        line_no,
-                        self._messages_path,
-                    )
+                    try:
+                        record = json.loads(line)
+                        if record.get("record_type", "message") != "message":
+                            continue
+                        messages.append(_message_from_dict(record["message"]))
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        logger.warning(
+                            "session %s: 跳过损坏行 #%d in %s",
+                            self.session_id,
+                            line_no,
+                            self._messages_path,
+                        )
 
         return messages
 
     async def clear(self) -> None:
         """清空 session 文件，重置为未 materialize 状态。"""
-        if self._session_dir.is_dir():
-            for child in self._session_dir.iterdir():
-                child.unlink()
-            self._session_dir.rmdir()
+        async with self._materialize_lock:
+            if self._session_dir.is_dir():
+                for child in self._session_dir.iterdir():
+                    child.unlink()
+                self._session_dir.rmdir()
 
-        self._materialized = False
-        self._last_message_id = None
-        self._run_count = 0
+            self._materialized = False
+            self._last_message_id = None
+            self._run_count = 0
 
     async def advance_run_index(self) -> int:
         """递增 run_count 并立即写回 manifest.json，返回新值。
@@ -179,20 +164,25 @@ class FileSession:
         若当前未 materialize（极罕见，理论上 runner 总是先 append 再 advance），
         先 _materialize 把目录和空 jsonl 准备好，再写 manifest。
         """
-        if not self._materialized:
-            self._materialize()
-        self._run_count += 1
-        self._write_manifest()
-        return self._run_count
+        async with self._materialize_lock:
+            if not self._materialized:
+                self._materialize()
+            self._run_count += 1
+            self._write_manifest()
+            return self._run_count
 
     # ------------------------------------------------------------------
     # materialize / recover
     # ------------------------------------------------------------------
 
     def _materialize(self) -> None:
-        """创建目录、原子写 manifest、准备 jsonl 文件。"""
-        self._session_dir.mkdir(parents=True, exist_ok=True)
+        """创建目录、原子写 manifest、准备 jsonl 文件；调用方需持有 async 锁。"""
+        if self._materialized:
+            return
+        self._session_dir.mkdir(parents=True, exist_ok=True, mode=_SESSION_DIR_MODE)
+        os.chmod(self._session_dir, _SESSION_DIR_MODE)
         self._write_manifest()
+        self._write_system_prompt_snapshot()
 
         # 创建空 jsonl（如果不存在）
         if not self._messages_path.exists():
@@ -226,6 +216,56 @@ class FileSession:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, self._manifest_path)
+        _fsync_directory(self._session_dir)
+
+    def _write_system_prompt_snapshot(self) -> None:
+        """把最终 system prompt 写入 thread 级快照文件。"""
+        if self._bootstrap.instruction_text is None:
+            return
+
+        snapshot: dict[str, Any] = {
+            "schema_version": _SCHEMA_VERSION,
+            "record_type": "system_prompt",
+            "session_id": self.session_id,
+            "model_name": self._bootstrap.model_name,
+            "created_at": self._bootstrap.created_at,
+            "instruction_sources": self._bootstrap.instruction_sources,
+            "instruction_text_hash": self._bootstrap.instruction_text_hash,
+            "cwd": self._bootstrap.cwd,
+            "app_version": self._bootstrap.app_version,
+            "content": self._bootstrap.instruction_text,
+        }
+
+        tmp_path = self._system_prompt_path.with_name(
+            f"{self._system_prompt_path.name}.{uuid.uuid4().hex}.tmp"
+        )
+        fd = os.open(
+            tmp_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            _SYSTEM_PROMPT_FILE_MODE,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                fd = -1
+                json.dump(snapshot, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self._system_prompt_path)
+            os.chmod(self._system_prompt_path, _SYSTEM_PROMPT_FILE_MODE)
+            _fsync_directory(self._session_dir)
+            actual_mode = stat.S_IMODE(self._system_prompt_path.stat().st_mode)
+            if actual_mode & _GROUP_OTHER_MODE:
+                raise PermissionError(
+                    f"system_prompt.json must not be group/world accessible: {oct(actual_mode)}"
+                )
+        except BaseException:
+            if fd >= 0:
+                with suppress(OSError):
+                    os.close(fd)
+            # 只清理失败写入留下的临时文件；权限校验失败本身会继续抛出。
+            with suppress(OSError):
+                tmp_path.unlink()
+            raise
 
     def _recover(self) -> None:
         """从磁盘恢复 session 状态。"""
@@ -245,6 +285,7 @@ class FileSession:
                 ),
                 created_at=manifest.get("created_at", self._bootstrap.created_at),
                 cwd=manifest.get("cwd", self._bootstrap.cwd),
+                instruction_text=self._bootstrap.instruction_text,
                 app_version=manifest.get("app_version", self._bootstrap.app_version),
             )
             # 旧 manifest 无 run_count 字段时兜底为 0；用户已声明旧 session 全删，
@@ -272,6 +313,8 @@ class FileSession:
                         continue
             self._last_message_id = last_id
 
+        if not self._system_prompt_path.exists():
+            self._write_system_prompt_snapshot()
         self._materialized = True
 
     # ------------------------------------------------------------------
@@ -337,3 +380,15 @@ class ValidationResult:
         if self.valid:
             return "ValidationResult(valid=True)"
         return f"ValidationResult(valid=False, errors={self.errors!r})"
+
+
+def _fsync_directory(path: Path) -> None:
+    """同步目录项，确保 atomic replace 后文件名持久化。"""
+    try:
+        dir_fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)

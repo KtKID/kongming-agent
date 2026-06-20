@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -57,6 +58,8 @@ from core.message import Message, ToolCall
 from core.result import Result
 from core.run_state import RunState
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class _RunInstructionSource:
@@ -66,14 +69,14 @@ class _RunInstructionSource:
     content: str
 
 
-def _llm_request_to_trace_payload(request: LLMRequest) -> dict[str, Any]:
-    """把真实 ``LLMRequest`` 按同名字段序列化为 trace payload。"""
+def _llm_request_to_event_payload(request: LLMRequest) -> dict[str, Any]:
+    """把真实 ``LLMRequest`` 按同名字段序列化为事件 payload。"""
 
     return request.to_audit_dict()
 
 
-def _llm_response_to_trace_payload(response: LLMResponse) -> dict[str, Any]:
-    """把真实 ``LLMResponse`` 按同名字段序列化为 trace payload。"""
+def _llm_response_to_event_payload(response: LLMResponse) -> dict[str, Any]:
+    """把真实 ``LLMResponse`` 按同名字段序列化为事件 payload。"""
 
     return response.to_audit_dict()
 
@@ -578,19 +581,12 @@ class Runner:
                 reasoning_effort=agent_spec.reasoning_effort,
             )
             request_payload = {
-                "request": _llm_request_to_trace_payload(llm_request),
+                "request": _llm_request_to_event_payload(llm_request),
                 "model": llm_request.model,
                 "message_count": len(llm_request.messages),
                 "tool_count": len(llm_request.tools),
                 "original_message_count": len(history),
             }
-            await self._append_session_audit_event(
-                session=session,
-                kind="llm.request",
-                run_id=state.run_id,
-                turn=state.turn,
-                payload=request_payload,
-            )
             await self._emit(
                 Event(
                     kind="llm.request",
@@ -624,19 +620,12 @@ class Runner:
             state.record(assistant_message)
 
             response_payload = {
-                "response": _llm_response_to_trace_payload(response),
+                "response": _llm_response_to_event_payload(response),
                 "finish_reason": response.finish_reason,
                 "has_tool_calls": bool(assistant_message.tool_calls),
                 "usage": dict(response.usage),
                 "provider_metadata": dict(response.provider_metadata),
             }
-            await self._append_session_audit_event(
-                session=session,
-                kind="llm.response",
-                run_id=state.run_id,
-                turn=state.turn,
-                payload=response_payload,
-            )
             await self._emit(
                 Event(
                     kind="llm.response",
@@ -1336,46 +1325,32 @@ class Runner:
             )
         )
 
-    async def _append_session_audit_event(
-        self,
-        *,
-        session: Session,
-        kind: str,
-        run_id: str,
-        turn: int,
-        payload: dict[str, Any],
-    ) -> None:
-        append_audit_event = getattr(session, "append_audit_event", None)
-        if not callable(append_audit_event):
-            return
-        try:
-            await append_audit_event(kind=kind, run_id=run_id, turn=turn, payload=payload)
-        except Exception as exc:  # pragma: no cover - 防御式
-            await self._emit(
-                Event(
-                    kind="error",
-                    run_id=run_id,
-                    turn=turn,
-                    payload={
-                        "source": "session_audit",
-                        "type": type(exc).__name__,
-                        "message": str(exc),
-                    },
-                )
-            )
-
     # ------------------------------------------------------------------
     # EventSink fan-out
     # ------------------------------------------------------------------
 
     async def _emit(self, event: Event) -> None:
         """把事件 fan-out 到所有 sink。sink 异常被吞掉以免污染主链路。"""
+        if not self._event_sinks and event.kind in {"llm.request", "llm.response"}:
+            logger.warning(
+                "llm audit event has no EventSink: kind=%s run_id=%s turn=%s",
+                event.kind,
+                event.run_id,
+                event.turn,
+            )
+            return
         for sink in self._event_sinks:
             try:
                 await sink.emit(event)
             except Exception:
-                # 观测层不允许影响主链路；这里静默忽略，
-                # 未来可以把"sink 自己的错误"落到降级日志。
+                # 观测层故障记录到降级日志，主链路继续执行。
+                logger.exception(
+                    "event sink failed: kind=%s run_id=%s turn=%s sink=%s",
+                    event.kind,
+                    event.run_id,
+                    event.turn,
+                    type(sink).__name__,
+                )
                 continue
 
     # ------------------------------------------------------------------

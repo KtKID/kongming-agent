@@ -47,7 +47,7 @@ class StubLLMWithMetadata:
 
 
 class EchoTool:
-    """用于验证 llm.request 记录完整 tool schema 的测试工具。"""
+    """用于验证 llm.request 记录工具摘要的测试工具。"""
 
     name = "echo"
     description = "Echo the provided text."
@@ -83,7 +83,9 @@ async def test_provider_metadata_lands_in_trace_jsonl(
 ) -> None:
     """provider_metadata 从 LLMResponse 经 Runner 落盘到 JSONL 的 llm.response 事件。"""
     metadata = {
+        "Authorization": "Bearer secret",
         "cache_read_input_tokens": 50,
+        "headers": {"x-api-key": "secret"},
         "id": "msg_test_123",
         "model": "claude-test",
     }
@@ -127,22 +129,24 @@ async def test_provider_metadata_lands_in_trace_jsonl(
     payload = first_resp["payload"]
 
     assert "provider_metadata" in payload, f"provider_metadata missing from payload: {payload}"
-    assert payload["response"]["provider_metadata"] == metadata
     assert payload["response"]["message"]["role"] == "assistant"
-    assert payload["response"]["message"]["content"] == "done"
+    assert payload["response"]["message"]["content_chars"] == 4
     pm = payload["provider_metadata"]
 
     assert pm["cache_read_input_tokens"] == 50
     assert pm["id"] == "msg_test_123"
     assert pm["model"] == "claude-test"
+    assert "Authorization" not in pm
+    assert "headers" not in pm
+    assert payload["response"]["provider_metadata"] == pm
 
 
 @pytest.mark.e2e
-async def test_llm_request_lands_in_trace_jsonl_with_assembled_messages(
+async def test_llm_request_lands_in_trace_jsonl_with_assembled_summary(
     recording_approval: RecordingApproval,
     tmp_path: Path,
 ) -> None:
-    """llm.request 事件应记录 Runner 传给 provider 的完整 LLMRequest。"""
+    """llm.request 事件记录摘要，保留索引字段并剔除正文和 schema。"""
 
     llm = StubLLMWithMetadata(metadata={})
     trace_path = tmp_path / "request_trace.jsonl"
@@ -191,19 +195,11 @@ async def test_llm_request_lands_in_trace_jsonl_with_assembled_messages(
     assert request["max_tokens"] is None
     assert request["timeout_seconds"] is None
 
-    assert request["messages"][0]["role"] == "system"
-    assert request["messages"][0]["content"] == "# runtime\n完整 assembly 后 system prompt"
-    assert request["messages"][1]["role"] == "user"
-    assert request["messages"][1]["content"] == "hello"
-
-    assert request["tools"] == [
-        {
-            "name": "echo",
-            "description": "Echo the provided text.",
-            "input_schema": EchoTool.input_schema,
-        }
-    ]
+    assert request["message_roles"] == ["system", "user"]
+    assert request["tool_names"] == ["echo"]
+    assert "messages" not in request
+    assert "tools" not in request
 
     assert payload["model"] == request["model"]
-    assert payload["message_count"] == len(request["messages"])
-    assert payload["tool_count"] == len(request["tools"])
+    assert payload["message_count"] == request["message_count"]
+    assert payload["tool_count"] == request["tool_count"]

@@ -925,17 +925,6 @@ def _make_runtime_factory(cfg: object) -> object:
 
         sitian_raw = os.environ.get("SITIAN_PROMPT_ROOT", "").strip()
         sitian_root = Path(sitian_raw).expanduser().resolve() if sitian_raw else None
-        if _instructions_cache[0] is not None:
-            workflow_render = build_default_workflow_prompt_listing()
-            workflow_cache_key, _base_sources = await _build_workflow_prompt_cache_candidate(
-                workflow_render=workflow_render,
-                sitian_root=sitian_root,
-            )
-            if _workflow_prompt_cache_matches(
-                _workflow_prompt_cache_key[0],
-                workflow_cache_key,
-            ):
-                return
 
         async with _cache_lock:
             workflow_render = build_default_workflow_prompt_listing()
@@ -949,14 +938,6 @@ def _make_runtime_factory(cfg: object) -> object:
             ):
                 return
 
-            sources = _insert_workflow_prompt_source(
-                base_sources=base_sources,
-                workflow_render=workflow_render,
-            )
-            rendered = InstructionLoader.render(sources)
-            origins = [source.origin for source in sources]
-            _workflow_prompt_cache_key[0] = workflow_cache_key
-            factory._workflow_prompt_cache_key = _workflow_prompt_cache_key[0]  # type: ignore[attr-defined]
             sink_list = list(sinks) if sinks else []  # type: ignore[call-overload]
             skill_specs_list = await load_skill_specs(
                 home,
@@ -964,6 +945,12 @@ def _make_runtime_factory(cfg: object) -> object:
                 event_sinks=sink_list,
             )
             listing = format_skill_listing(skill_specs_list)
+            sources = _insert_workflow_prompt_source(
+                base_sources=base_sources,
+                workflow_render=workflow_render,
+            )
+            rendered = InstructionLoader.render(sources)
+            origins = [source.origin for source in sources]
             if listing:
                 rendered = rendered + f"\n\n# skills\n{listing}"
                 origins = [*origins, "skills"]
@@ -1045,6 +1032,7 @@ def _make_runtime_factory(cfg: object) -> object:
             _origins_cache[0] = origins
             _scheduler_runtime_factory_cache[0] = _scheduler_runtime_factory
             _mcp_runtime_registration_cache[0] = mcp_runtime_registration
+            _workflow_prompt_cache_key[0] = workflow_cache_key
 
     async def factory(
         thread_id: str,
@@ -1084,6 +1072,7 @@ def _make_runtime_factory(cfg: object) -> object:
         preset_cfg = real_cfg.model_copy(update={"model": preset_model})
 
         await _ensure_shared_assets(sinks)
+        factory._workflow_prompt_cache_key = _workflow_prompt_cache_key[0]  # type: ignore[attr-defined]
         factory._scheduler_runtime_factory = _scheduler_runtime_factory_cache[0]  # type: ignore[attr-defined]
         factory._mcp_runtime_registration = _mcp_runtime_registration_cache[0]  # type: ignore[attr-defined]
         instructions = _instructions_cache[0]
@@ -1140,6 +1129,7 @@ def _make_runtime_factory(cfg: object) -> object:
             instruction_text_hash=f"sha256:{hashlib.sha256(instructions.encode()).hexdigest()}",
             created_at=time.time(),
             cwd=default_cwd,
+            instruction_text=instructions,
         )
 
         def session_factory(sid: str) -> Any:

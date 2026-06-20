@@ -283,6 +283,7 @@ async def test_prompt_complete_flow_uses_production_assembly_and_dumps_json(
 ):
     """完整 prompt 流程调用生产组装链路，并落盘最终请求 JSON。"""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KONGMING_HOME", str(tmp_path / ".kongming"))
     monkeypatch.setenv("KONGMING_EXTRA_INSTRUCTIONS", "ENV-RULE: prefer concise answers.")
 
     extra_file = tmp_path / "rules.md"
@@ -502,11 +503,18 @@ async def test_cli_run_persists_instruction_metadata_to_file_manifest(
     )
     expected_hash = f"sha256:{hashlib.sha256(expected_instructions.encode()).hexdigest()}"
     manifest_path = tmp_path / "file-sessions" / "cli-meta" / "manifest.json"
+    system_prompt_path = tmp_path / "file-sessions" / "cli-meta" / "system_prompt.json"
 
     assert manifest_path.exists(), "CLI file backend 应写出 manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["instruction_sources"] == expected_origins
     assert manifest["instruction_text_hash"] == expected_hash
+    assert system_prompt_path.exists(), "CLI file backend 应写出 system_prompt.json"
+    system_prompt = json.loads(system_prompt_path.read_text(encoding="utf-8"))
+    assert system_prompt["record_type"] == "system_prompt"
+    assert system_prompt["instruction_sources"] == expected_origins
+    assert system_prompt["instruction_text_hash"] == expected_hash
+    assert system_prompt["content"] == expected_instructions
 
 
 async def test_cli_run_lists_existing_file_sessions_before_runtime_start(

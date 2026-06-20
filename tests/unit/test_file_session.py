@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 from typing import ClassVar
 
@@ -20,6 +21,7 @@ def _bootstrap(**overrides) -> SessionBootstrap:
         model_name="test-model",
         instruction_sources=["test-source"],
         instruction_text_hash="sha256:abc123",
+        instruction_text="# system\nYou are test.",
         created_at=1000000.0,
         cwd="/test",
         app_version="0.1.1",
@@ -95,6 +97,39 @@ class TestTC2FirstAppendMaterialize:
         await fs.append(Message.user("hello"))
         assert os.path.isfile(os.path.join(store_path, "test-session", "test-session.jsonl"))
 
+    async def test_system_prompt_snapshot_file_is_created(self, store_path: str) -> None:
+        bootstrap = _bootstrap()
+        fs = _make_session(store_path=store_path, bootstrap=bootstrap)
+        await fs.append(Message.user("hello"))
+        path = os.path.join(store_path, "test-session", "system_prompt.json")
+        assert os.path.exists(path)
+        with open(path) as f:
+            snapshot = json.load(f)
+        assert snapshot == {
+            "schema_version": "0.1.2",
+            "record_type": "system_prompt",
+            "session_id": "test-session",
+            "model_name": "test-model",
+            "created_at": 1000000.0,
+            "instruction_sources": ["test-source"],
+            "instruction_text_hash": "sha256:abc123",
+            "cwd": "/test",
+            "app_version": "0.1.1",
+            "content": "# system\nYou are test.",
+        }
+        session_dir = Path(store_path) / "test-session"
+        assert list(session_dir.glob("system_prompt.json.*.tmp")) == []
+        assert stat.S_IMODE(Path(path).stat().st_mode) == 0o600
+
+    async def test_system_prompt_snapshot_file_is_skipped_without_text(
+        self, store_path: str
+    ) -> None:
+        bootstrap = _bootstrap(instruction_text=None)
+        fs = _make_session(store_path=store_path, bootstrap=bootstrap)
+        await fs.append(Message.user("hello"))
+        path = os.path.join(store_path, "test-session", "system_prompt.json")
+        assert not os.path.exists(path)
+
     async def test_materialized_true(self, store_path: str) -> None:
         fs = _make_session(store_path=store_path)
         await fs.append(Message.user("hello"))
@@ -113,6 +148,35 @@ class TestTC2FirstAppendMaterialize:
         fs = _make_session(store_path=store_path)
         await fs.append(Message.user("hello"))
         assert fs._last_message_id is not None
+
+    async def test_legacy_audit_event_record_is_skipped_by_history(self, store_path: str) -> None:
+        fs = _make_session(store_path=store_path)
+        await fs.append(Message.user("hello"))
+
+        jsonl_path = os.path.join(store_path, "test-session", "test-session.jsonl")
+        legacy_record = {
+            "schema_version": "0.1.2",
+            "record_type": "audit_event",
+            "session_id": "test-session",
+            "model_name": "test-model",
+            "created_at": 1000001.0,
+            "kind": "llm.request",
+            "run_id": "run-test-session-1",
+            "turn": 1,
+            "payload": {"request": {"messages": [{"role": "system", "content": "SYS"}]}},
+        }
+        with open(jsonl_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(legacy_record, ensure_ascii=False) + "\n")
+        with open(jsonl_path) as f:
+            records = [json.loads(line) for line in f]
+        assert [record["record_type"] for record in records] == ["message", "audit_event"]
+        assert records[1]["kind"] == "llm.request"
+        assert records[1]["payload"]["request"]["messages"][0]["role"] == "system"
+
+        history = await fs.history()
+        assert len(history) == 1
+        assert history[0].role == "user"
+        assert history[0].content == "hello"
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +233,7 @@ class TestTC3ManifestFields:
 class TestTC4RecordFields:
     ENVELOPE_FIELDS: ClassVar[set[str]] = {
         "schema_version",
+        "record_type",
         "session_id",
         "model_name",
         "message_id",
@@ -448,6 +513,20 @@ class TestAdvanceRunIndex:
         # 第二次实例（同 session_id + store_path）：应从 2 继续到 3
         fs2 = _make_session(store_path=store_path)
         assert await fs2.advance_run_index() == 3
+
+    async def test_recover_backfills_missing_system_prompt_snapshot(self, store_path: str) -> None:
+        fs1 = _make_session(store_path=store_path)
+        await fs1.append(Message.user("seed"))
+
+        snapshot_path = Path(store_path) / "test-session" / "system_prompt.json"
+        snapshot_path.unlink()
+
+        _make_session(store_path=store_path)
+
+        with open(snapshot_path) as f:
+            snapshot = json.load(f)
+        assert snapshot["record_type"] == "system_prompt"
+        assert snapshot["content"] == "# system\nYou are test."
 
     async def test_legacy_manifest_without_run_count_falls_back_to_zero(
         self, store_path: str
