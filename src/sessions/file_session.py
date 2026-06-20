@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import time
 import uuid
 from contextlib import suppress
@@ -41,6 +42,8 @@ from sessions.session_store import _message_from_dict, _message_to_dict
 logger = logging.getLogger(__name__)
 
 _SCHEMA_VERSION = "0.1.2"
+_SESSION_DIR_MODE = 0o700
+_SYSTEM_PROMPT_FILE_MODE = 0o600
 
 
 class FileSession:
@@ -83,56 +86,58 @@ class FileSession:
 
     async def append(self, message: Message, *, usage: dict[str, Any] | None = None) -> None:
         """追加一条消息。首次调用触发 materialize。"""
-        if not self._materialized:
-            self._materialize()
+        with self._materialize_lock:
+            if not self._materialized:
+                self._materialize()
 
-        message_id = str(uuid.uuid4())
-        parent_message_id = self._last_message_id
+            message_id = str(uuid.uuid4())
+            parent_message_id = self._last_message_id
 
-        record: dict[str, Any] = {
-            "schema_version": _SCHEMA_VERSION,
-            "record_type": "message",
-            "session_id": self.session_id,
-            "model_name": self._bootstrap.model_name,
-            "message_id": message_id,
-            "parent_message_id": parent_message_id,
-            "created_at": time.time(),
-            "message": _message_to_dict(message),
-        }
-        if usage is not None:
-            record["usage"] = dict(usage)
+            record: dict[str, Any] = {
+                "schema_version": _SCHEMA_VERSION,
+                "record_type": "message",
+                "session_id": self.session_id,
+                "model_name": self._bootstrap.model_name,
+                "message_id": message_id,
+                "parent_message_id": parent_message_id,
+                "created_at": time.time(),
+                "message": _message_to_dict(message),
+            }
+            if usage is not None:
+                record["usage"] = dict(usage)
 
-        line = json.dumps(record, ensure_ascii=False) + "\n"
-        with open(self._messages_path, "a", encoding="utf-8") as f:
-            f.write(line)
-            f.flush()
-            os.fsync(f.fileno())
+            line = json.dumps(record, ensure_ascii=False) + "\n"
+            with open(self._messages_path, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
 
-        self._last_message_id = message_id
+            self._last_message_id = message_id
 
     async def history(self) -> list[Message]:
         """读取所有历史消息。未 materialize 时返回空列表。"""
-        if not self._materialized:
-            return []
+        with self._materialize_lock:
+            if not self._materialized:
+                return []
 
-        messages: list[Message] = []
-        with open(self._messages_path, encoding="utf-8") as f:
-            for line_no, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                    if record.get("record_type", "message") != "message":
+            messages: list[Message] = []
+            with open(self._messages_path, encoding="utf-8") as f:
+                for line_no, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line:
                         continue
-                    messages.append(_message_from_dict(record["message"]))
-                except (json.JSONDecodeError, KeyError, TypeError):
-                    logger.warning(
-                        "session %s: 跳过损坏行 #%d in %s",
-                        self.session_id,
-                        line_no,
-                        self._messages_path,
-                    )
+                    try:
+                        record = json.loads(line)
+                        if record.get("record_type", "message") != "message":
+                            continue
+                        messages.append(_message_from_dict(record["message"]))
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        logger.warning(
+                            "session %s: 跳过损坏行 #%d in %s",
+                            self.session_id,
+                            line_no,
+                            self._messages_path,
+                        )
 
         return messages
 
@@ -158,11 +163,12 @@ class FileSession:
         若当前未 materialize（极罕见，理论上 runner 总是先 append 再 advance），
         先 _materialize 把目录和空 jsonl 准备好，再写 manifest。
         """
-        if not self._materialized:
-            self._materialize()
-        self._run_count += 1
-        self._write_manifest()
-        return self._run_count
+        with self._materialize_lock:
+            if not self._materialized:
+                self._materialize()
+            self._run_count += 1
+            self._write_manifest()
+            return self._run_count
 
     # ------------------------------------------------------------------
     # materialize / recover
@@ -173,7 +179,8 @@ class FileSession:
         with self._materialize_lock:
             if self._materialized:
                 return
-            self._session_dir.mkdir(parents=True, exist_ok=True)
+            self._session_dir.mkdir(parents=True, exist_ok=True, mode=_SESSION_DIR_MODE)
+            os.chmod(self._session_dir, _SESSION_DIR_MODE)
             self._write_manifest()
             self._write_system_prompt_snapshot()
 
@@ -231,13 +238,32 @@ class FileSession:
         tmp_path = self._system_prompt_path.with_name(
             f"{self._system_prompt_path.name}.{uuid.uuid4().hex}.tmp"
         )
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(snapshot, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, self._system_prompt_path)
-        with suppress(OSError):
-            os.chmod(self._system_prompt_path, 0o600)
+        fd = os.open(
+            tmp_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            _SYSTEM_PROMPT_FILE_MODE,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                fd = -1
+                json.dump(snapshot, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self._system_prompt_path)
+            actual_mode = stat.S_IMODE(self._system_prompt_path.stat().st_mode)
+            if actual_mode & 0o077:
+                with suppress(OSError):
+                    self._system_prompt_path.unlink()
+                raise PermissionError(
+                    f"system_prompt.json must not be group/world accessible: {oct(actual_mode)}"
+                )
+        except Exception:
+            if fd >= 0:
+                os.close(fd)
+            # 只清理失败写入留下的临时文件；权限校验失败本身会继续抛出。
+            with suppress(OSError):
+                tmp_path.unlink()
+            raise
 
     def _recover(self) -> None:
         """从磁盘恢复 session 状态。"""

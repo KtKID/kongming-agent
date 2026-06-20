@@ -360,6 +360,55 @@ async def test_llm_response_local_trace_drops_content_and_tool_arguments(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_llm_response_local_trace_reuses_safe_content_chars(tmp_path):
+    """二次裁剪的 response 摘要只复用安全整数 content_chars。"""
+    from core.contracts import Event
+
+    path = tmp_path / "trace.jsonl"
+    sink = JsonlTraceSink(path)
+    await sink.emit(
+        Event(
+            kind="llm.response",
+            run_id="r",
+            turn=1,
+            payload={
+                "response": {
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content_chars": 7,
+                        "tool_call_count": False,
+                    },
+                    "provider_metadata": {},
+                }
+            },
+        )
+    )
+    await sink.emit(
+        Event(
+            kind="llm.response",
+            run_id="r",
+            turn=2,
+            payload={
+                "response": {
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content_chars": False,
+                        "tool_call_count": False,
+                    },
+                    "provider_metadata": {},
+                }
+            },
+        )
+    )
+
+    first, second = _read_jsonl(path)
+    assert first["payload"]["response"]["message"]["content_chars"] == 7
+    assert second["payload"]["response"]["message"]["content_chars"] == 0
+
+
+@pytest.mark.asyncio
 async def test_auto_flush_false_still_writes(tmp_path):
     from core.contracts import Event
 

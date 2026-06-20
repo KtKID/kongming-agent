@@ -363,6 +363,15 @@ def _safe_scalar(raw: Any) -> str | int | float | bool | None:
     return None
 
 
+def _safe_int(raw: Any) -> int:
+    """保留 JSON trace 安全整数，输入为任意对象，输出 int 或 0。"""
+    if isinstance(raw, bool):
+        return 0
+    if isinstance(raw, int):
+        return raw
+    return 0
+
+
 def _safe_request_metadata(raw: Any) -> dict[str, str | int | float | bool | None]:
     """保留 request metadata 白名单字段，输入为任意对象，输出安全标量字典。"""
     return _safe_metadata(raw, _SAFE_REQUEST_METADATA_KEYS)
@@ -412,7 +421,7 @@ def _summarize_llm_response_payload(response: dict[str, Any]) -> dict[str, Any]:
             "role": message.get("role"),
             "content_chars": len(content)
             if isinstance(content, str)
-            else int(message.get("content_chars", 0) or 0),
+            else _safe_int(message.get("content_chars")),
             "tool_call_count": tool_call_count,
             "tool_names": tool_names,
         }

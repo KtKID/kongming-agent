@@ -952,8 +952,6 @@ def _make_runtime_factory(cfg: object) -> object:
             )
             rendered = InstructionLoader.render(sources)
             origins = [source.origin for source in sources]
-            _workflow_prompt_cache_key[0] = workflow_cache_key
-            factory._workflow_prompt_cache_key = _workflow_prompt_cache_key[0]  # type: ignore[attr-defined]
             if listing:
                 rendered = rendered + f"\n\n# skills\n{listing}"
                 origins = [*origins, "skills"]
@@ -1035,6 +1033,8 @@ def _make_runtime_factory(cfg: object) -> object:
             _origins_cache[0] = origins
             _scheduler_runtime_factory_cache[0] = _scheduler_runtime_factory
             _mcp_runtime_registration_cache[0] = mcp_runtime_registration
+            _workflow_prompt_cache_key[0] = workflow_cache_key
+            factory._workflow_prompt_cache_key = _workflow_prompt_cache_key[0]  # type: ignore[attr-defined]
 
     async def factory(
         thread_id: str,
