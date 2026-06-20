@@ -857,7 +857,6 @@ def _make_runtime_factory(cfg: object) -> object:
     _instructions_cache: list[str | None] = [None]
     _origins_cache: list[list[str] | None] = [None]
     _workflow_prompt_cache_key: list[object | None] = [None]
-    _skill_listing_cache_key: list[str | None] = [None]
     _scheduler_runtime_factory_cache: list[object | None] = [None]
     _mcp_runtime_registration_cache: list[McpRuntimeRegistrationManager | None] = [None]
     _cache_lock = asyncio.Lock()
@@ -933,6 +932,13 @@ def _make_runtime_factory(cfg: object) -> object:
                 workflow_render=workflow_render,
                 sitian_root=sitian_root,
             )
+            if _instructions_cache[0] is not None and _workflow_prompt_cache_matches(
+                _workflow_prompt_cache_key[0],
+                workflow_cache_key,
+            ):
+                factory._workflow_prompt_cache_key = _workflow_prompt_cache_key[0]  # type: ignore[attr-defined]
+                return
+
             sink_list = list(sinks) if sinks else []  # type: ignore[call-overload]
             skill_specs_list = await load_skill_specs(
                 home,
@@ -940,18 +946,6 @@ def _make_runtime_factory(cfg: object) -> object:
                 event_sinks=sink_list,
             )
             listing = format_skill_listing(skill_specs_list)
-            skill_listing_cache_key = _prompt_hash(listing)
-            if (
-                _instructions_cache[0] is not None
-                and _workflow_prompt_cache_matches(
-                    _workflow_prompt_cache_key[0],
-                    workflow_cache_key,
-                )
-                and _skill_listing_cache_key[0] == skill_listing_cache_key
-            ):
-                factory._workflow_prompt_cache_key = _workflow_prompt_cache_key[0]  # type: ignore[attr-defined]
-                return
-
             sources = _insert_workflow_prompt_source(
                 base_sources=base_sources,
                 workflow_render=workflow_render,
@@ -959,7 +953,6 @@ def _make_runtime_factory(cfg: object) -> object:
             rendered = InstructionLoader.render(sources)
             origins = [source.origin for source in sources]
             _workflow_prompt_cache_key[0] = workflow_cache_key
-            _skill_listing_cache_key[0] = skill_listing_cache_key
             factory._workflow_prompt_cache_key = _workflow_prompt_cache_key[0]  # type: ignore[attr-defined]
             if listing:
                 rendered = rendered + f"\n\n# skills\n{listing}"

@@ -242,10 +242,10 @@ async def test_llm_request_local_trace_drops_messages_and_tool_schema(tmp_path):
                         "Authorization": "Bearer secret",
                         "headers": {"x-api-key": "secret"},
                     },
-                    "reasoning_effort": "high",
-                    "temperature": None,
+                    "reasoning_effort": {"secret": "high"},
+                    "temperature": 0.2,
                     "max_tokens": None,
-                    "timeout_seconds": None,
+                    "timeout_seconds": {"bad": True},
                 },
                 "model": "stub-model",
                 "message_count": 2,
@@ -263,6 +263,9 @@ async def test_llm_request_local_trace_drops_messages_and_tool_schema(tmp_path):
     assert request["tool_count"] == 1
     assert request["tool_names"] == ["read_file"]
     assert request["metadata"] == {"thread_id": "thread-1"}
+    assert request["reasoning_effort"] is None
+    assert request["temperature"] == 0.2
+    assert request["timeout_seconds"] is None
     assert "messages" not in request
     assert "tools" not in request
 

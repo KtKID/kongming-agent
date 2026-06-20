@@ -331,11 +331,18 @@ def _summarize_llm_request_payload(request: dict[str, Any]) -> dict[str, Any]:
         "tool_count": tool_count,
         "tool_names": tool_names,
         "metadata": _safe_request_metadata(request.get("metadata")),
-        "reasoning_effort": request.get("reasoning_effort"),
-        "temperature": request.get("temperature"),
-        "max_tokens": request.get("max_tokens"),
-        "timeout_seconds": request.get("timeout_seconds"),
+        "reasoning_effort": _safe_scalar(request.get("reasoning_effort")),
+        "temperature": _safe_scalar(request.get("temperature")),
+        "max_tokens": _safe_scalar(request.get("max_tokens")),
+        "timeout_seconds": _safe_scalar(request.get("timeout_seconds")),
     }
+
+
+def _safe_scalar(raw: Any) -> str | int | float | bool | None:
+    """保留 JSON trace 安全标量，输入为任意对象，输出标量或 None。"""
+    if isinstance(raw, (str, int, float, bool)) or raw is None:
+        return raw
+    return None
 
 
 def _safe_request_metadata(raw: Any) -> dict[str, str | int | float | bool | None]:

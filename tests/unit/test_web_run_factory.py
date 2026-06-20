@@ -411,6 +411,7 @@ class TestInstructionsCaching:
 
         mock_deps["assemble_instructions"].assert_not_called()
         assert mock_deps["load_instruction_sources"].call_count == 2
+        assert mock_deps["load_skill_specs"].call_count == 1
         assert mock_deps["NativeRuntime"].build.call_count == 2
 
     @pytest.mark.asyncio
@@ -468,6 +469,7 @@ class TestInstructionsCaching:
 
         assert mock_deps["assemble_instructions"].call_count == 0
         assert mock_deps["load_instruction_sources"].call_count == 3
+        assert mock_deps["load_skill_specs"].call_count == 2
         _args, kwargs = mock_deps["NativeRuntime"].build.call_args
         assert "# workflow_catalog\n# workflow catalog\nsecond" in kwargs["instructions"]
         cache_key = getattr(factory, "_workflow_prompt_cache_key")
@@ -504,6 +506,7 @@ class TestInstructionsCaching:
 
         mock_deps["assemble_instructions"].assert_not_called()
         assert mock_deps["load_instruction_sources"].call_count == 2
+        assert mock_deps["load_skill_specs"].call_count == 2
         cache_key = getattr(factory, "_workflow_prompt_cache_key")
         assert cache_key.base_instructions_hash == (
             "sha256:" + hashlib.sha256(b"# runtime\nbase-two").hexdigest()
