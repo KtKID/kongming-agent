@@ -148,13 +148,65 @@ __all__ = [
     "InstructionLoader",
     "InstructionSource",
     "assemble_instructions",
+    "load_instruction_sources",
 ]
+
+
+async def load_instruction_sources(
+    *,
+    kongming_home: Path,
+    extra_files: Sequence[str | Path] = (),
+    pre_file_sources: Sequence[InstructionSource] = (),
+    cwd: Path | None = None,
+    sitian_root: Path | None = None,
+) -> list[InstructionSource]:
+    """Load ordered instruction sources from prompts + extra files + env + runtime context text.
+
+    Shared by CLI and web host. Extracts the core instruction assembly logic
+    (prompts materialization, InstructionLoader, runtime context injection)
+    without host-specific concerns like memory loading.
+
+    Args:
+        kongming_home: Path to the ``.kongming/`` directory.
+        extra_files: Additional instruction file paths (e.g. from CLI ``--instructions-file``).
+        pre_file_sources: Instruction sources injected after runtime context and before
+            materialized prompts, extra files, env, and optional context sources.
+        cwd: Working directory for runtime context text. Defaults to ``Path.cwd()``.
+        sitian_root: Optional sitian project root. When set, appends sitian context
+            (core-flow, suggestions, etc.) as an ``"sitian"`` origin instruction source.
+
+    Returns:
+        Ordered instruction sources ready for rendering.
+    """
+    from prompting.assembly.runtime_context import build_runtime_context_text
+    from prompting.instructions.prompts_loader import materialize_and_load_prompts
+
+    base = await materialize_and_load_prompts(kongming_home)
+
+    loader = InstructionLoader(extra_files=extra_files, include_env=True)
+    runtime_text = build_runtime_context_text(
+        cwd=cwd or Path.cwd(),
+        kongming_home=kongming_home,
+    )
+    sources = [InstructionSource(origin="runtime", content=runtime_text)]
+    sources.extend(source for source in pre_file_sources if source.content.strip())
+    sources.extend(await loader.load(agent_instructions=base))
+
+    if sitian_root is not None:
+        from prompting.context_sources.sitian_context import build_sitian_context_text
+
+        sitian_text = build_sitian_context_text(sitian_root)
+        if sitian_text:
+            sources.append(InstructionSource(origin="sitian", content=sitian_text))
+
+    return sources
 
 
 async def assemble_instructions(
     *,
     kongming_home: Path,
     extra_files: Sequence[str | Path] = (),
+    pre_file_sources: Sequence[InstructionSource] = (),
     cwd: Path | None = None,
     sitian_root: Path | None = None,
 ) -> tuple[str, list[str]]:
@@ -167,6 +219,8 @@ async def assemble_instructions(
     Args:
         kongming_home: Path to the ``.kongming/`` directory.
         extra_files: Additional instruction file paths (e.g. from CLI ``--instructions-file``).
+        pre_file_sources: Instruction sources injected after runtime context and before
+            materialized prompts, extra files, env, and optional context sources.
         cwd: Working directory for runtime context text. Defaults to ``Path.cwd()``.
         sitian_root: Optional sitian project root. When set, appends sitian context
             (core-flow, suggestions, etc.) as an ``"sitian"`` origin instruction source.
@@ -174,27 +228,14 @@ async def assemble_instructions(
     Returns:
         ``(rendered_text, origins)`` — merged system prompt text and origin label list.
     """
-    from prompting.assembly.runtime_context import build_runtime_context_text
-    from prompting.instructions.prompts_loader import materialize_and_load_prompts
-
-    base = await materialize_and_load_prompts(kongming_home)
-
     loader = InstructionLoader(extra_files=extra_files, include_env=True)
-    sources = list(await loader.load(agent_instructions=base))
-
-    runtime_text = build_runtime_context_text(
-        cwd=cwd or Path.cwd(),
+    sources = await load_instruction_sources(
         kongming_home=kongming_home,
+        extra_files=extra_files,
+        pre_file_sources=pre_file_sources,
+        cwd=cwd,
+        sitian_root=sitian_root,
     )
-    sources.insert(0, InstructionSource(origin="runtime", content=runtime_text))
-
-    if sitian_root is not None:
-        from prompting.context_sources.sitian_context import build_sitian_context_text
-
-        sitian_text = build_sitian_context_text(sitian_root)
-        if sitian_text:
-            sources.append(InstructionSource(origin="sitian", content=sitian_text))
-
     rendered = loader.render(sources)
     origins = [s.origin for s in sources]
     return rendered, origins

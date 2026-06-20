@@ -11,9 +11,14 @@ import type {
   ThreadTaskProgressViewModel,
 } from "@/protocol";
 
-vi.mock("@/hooks/useThreadTaskProgress", () => ({
-  useThreadTaskProgress: vi.fn(),
-}));
+vi.mock("@/hooks/useThreadTaskProgress", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/hooks/useThreadTaskProgress")>();
+  return {
+    ...actual,
+    useThreadTaskProgress: vi.fn(),
+  };
+});
 
 vi.mock("@/hooks/useThreadWorkflowHistory", () => ({
   useThreadWorkflowHistory: vi.fn(),
@@ -631,6 +636,81 @@ describe("ThreadTaskProgressPopover", () => {
     await userEvent.click(screen.getByRole("button", { name: "进度" }));
 
     expect(screen.getByTitle("当前 workflow · 1/1 已完成")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("listitem", { name: "进行中：当前 workflow" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("旧 workflow")).toBeInTheDocument();
+  });
+
+  it("filters current workflow history from legacy progress keys", async () => {
+    const currentSnapshot: ThreadTaskProgressSnapshot = {
+      ...snapshot,
+      source: "llm",
+      tasks: [
+        {
+          id: "wf-current",
+          orchestration_task_id: "wf-current",
+          workflow_id: null,
+          task_id: "step1_survey",
+          task_run_id: "wf-current::step1_survey::1",
+          desc: "梳理 workflow 入口",
+          status: "in_progress",
+          display_order: 0,
+        },
+      ],
+      counts: { pending: 0, in_progress: 1, completed: 0, total: 1 },
+    };
+    mockUseThreadTaskProgress.mockReturnValue({
+      snapshot: currentSnapshot,
+      viewModel: {
+        ...viewModel,
+        items: [
+          {
+            key: "wf-current:step1_survey",
+            orchestration_task_id: "wf-current",
+            task_id: "step1_survey",
+            desc: "梳理 workflow 入口",
+            status: "in_progress",
+            status_label: "进行中",
+            icon_variant: "active_ring",
+            order: 0,
+            aria_label: "进行中：梳理 workflow 入口",
+          },
+        ],
+      },
+      isLoading: false,
+      error: null,
+      refresh: vi.fn(),
+    });
+    mockUseThreadWorkflowHistory.mockReturnValue({
+      items: [
+        {
+          workflow_id: "wf-current",
+          title: "当前 workflow",
+          status: "running",
+          status_label: "进行中",
+          started_at: null,
+          finished_at: null,
+        },
+        {
+          workflow_id: "wf-old",
+          title: "旧 workflow",
+          status: "completed",
+          status_label: "已完成",
+          started_at: null,
+          finished_at: null,
+        },
+      ],
+      isLoading: false,
+      error: null,
+      refresh: vi.fn(),
+    });
+
+    render(<ThreadTaskProgressPopover threadId="thread-1" />);
+
+    await userEvent.click(screen.getByRole("button", { name: "进度" }));
+
+    expect(screen.getByTitle("当前 workflow · 0/1 已完成")).toBeInTheDocument();
     expect(
       screen.queryByRole("listitem", { name: "进行中：当前 workflow" }),
     ).not.toBeInTheDocument();

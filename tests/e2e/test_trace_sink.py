@@ -9,6 +9,8 @@ import pytest
 
 from core import AgentSpec, InMemorySession, Runner, ToolCall
 from infrastructure.tracing import JsonlTraceSink
+from sessions.file_session import FileSession
+from sessions.session_bootstrap import SessionBootstrap
 from tests.e2e.conftest import MemoryEventSink, RecordingApproval, StubLLMProvider
 from tools import ReadFileTool
 
@@ -114,3 +116,112 @@ async def test_trace_sink_captures_tool_call_events(
     assert tool_end[0]["payload"]["ok"] is True
     assert tool_end[0]["payload"]["call_id"] == "t1"
     assert tool_end[0]["payload"]["tool_name"] == "read_file"
+
+
+@pytest.mark.e2e
+async def test_file_session_audit_records_full_llm_request(
+    stub_llm: StubLLMProvider,
+    recording_approval: RecordingApproval,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "audit.txt"
+    target.write_text("audit payload", encoding="utf-8")
+
+    stub_llm.script(
+        tool_calls=[
+            ToolCall(
+                call_id="audit-call",
+                tool_name="read_file",
+                arguments={"path": str(target)},
+            )
+        ],
+    )
+    stub_llm.script(content="done")
+
+    trace_path = tmp_path / "audit-trace.jsonl"
+    session = FileSession(
+        "audit-session",
+        SessionBootstrap(
+            agent_name="audit-agent",
+            model_name="stub-model",
+            instruction_sources=[],
+            instruction_text_hash="sha256:audit",
+            created_at=1.0,
+            cwd=str(tmp_path),
+            app_version="test",
+        ),
+        str(tmp_path / "sessions"),
+    )
+    runner = Runner(event_sinks=[JsonlTraceSink(trace_path)])
+    spec = AgentSpec(
+        name="audit-agent",
+        instructions="Follow audit rules.",
+        default_model="stub-model",
+        tool_names=("read_file",),
+        max_turns=5,
+        reasoning_effort="high",
+    )
+
+    result = await runner.run(
+        "read audit file",
+        session=session,
+        agent_spec=spec,
+        llm=stub_llm,
+        tools={"read_file": ReadFileTool()},
+        approval=recording_approval,
+    )
+
+    assert result.status == "completed"
+
+    session_path = tmp_path / "sessions" / "audit-session" / "audit-session.jsonl"
+    records = _read_jsonl_events(session_path)
+    request_audit_rows = [
+        row
+        for row in records
+        if row.get("record_type") == "audit_event" and row.get("kind") == "llm.request"
+    ]
+    response_audit_rows = [
+        row
+        for row in records
+        if row.get("record_type") == "audit_event" and row.get("kind") == "llm.response"
+    ]
+    message_rows = [row for row in records if row.get("record_type", "message") == "message"]
+
+    assert len(request_audit_rows) == 2
+    assert len(response_audit_rows) == 2
+    first_request = request_audit_rows[0]["payload"]["request"]
+    assert first_request["model"] == "stub-model"
+    assert first_request["reasoning_effort"] == "high"
+    assert first_request["messages"][0]["role"] == "system"
+    assert first_request["messages"][0]["content"] == "Follow audit rules."
+    assert first_request["messages"][1]["role"] == "user"
+    assert first_request["messages"][1]["content"] == "read audit file"
+    assert first_request["tools"][0]["name"] == "read_file"
+    assert first_request["tools"][0]["input_schema"]["required"] == ["path"]
+
+    first_response = response_audit_rows[0]["payload"]["response"]
+    assert first_response["finish_reason"] == "tool_calls"
+    assert first_response["message"]["tool_calls"][0]["call_id"] == "audit-call"
+    assert first_response["message"]["tool_calls"][0]["tool_name"] == "read_file"
+    second_response = response_audit_rows[1]["payload"]["response"]
+    assert second_response["finish_reason"] == "stop"
+    assert second_response["message"]["content"] == "done"
+
+    assert any(row["message"]["role"] == "assistant" for row in message_rows)
+    assert any(
+        row["message"]["role"] == "tool" and row["message"]["content"] == "audit payload"
+        for row in message_rows
+    )
+    assert [message.role for message in await session.history()] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+
+    trace_events = _read_jsonl_events(trace_path)
+    trace_request = next(row for row in trace_events if row["kind"] == "llm.request")
+    trace_response = next(row for row in trace_events if row["kind"] == "llm.response")
+    assert trace_request["payload"]["request"] == first_request
+    assert trace_response["payload"]["response"] == first_response

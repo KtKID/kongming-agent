@@ -359,10 +359,14 @@ export interface ThreadTaskProgressViewModel {
   empty: { title: string; desc?: string };
 }
 
-export type ThreadSubAgentStatus = string;
+export type ThreadSubAgentStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface ThreadSubAgentDTO {
-  id?: string | null;
+  id: string;
   task_name?: string | null;
   name?: string | null;
   status: ThreadSubAgentStatus;
@@ -373,12 +377,12 @@ export interface ThreadSubAgentDTO {
 }
 
 export interface ThreadSubAgentListDTO {
+  schema_version: 1;
+  thread_id: string;
   subagents: ThreadSubAgentDTO[];
 }
 
-export type ThreadSubAgentListResponse =
-  | ThreadSubAgentDTO[]
-  | ThreadSubAgentListDTO;
+export type ThreadSubAgentListResponse = ThreadSubAgentListDTO;
 
 export type ThreadSubAgentIconVariant =
   | "running"

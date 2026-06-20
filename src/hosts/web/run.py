@@ -829,7 +829,6 @@ def _make_runtime_factory(cfg: object) -> object:
     from infrastructure.config.models import Config, LLMPresetConfig
     from infrastructure.config.paths import get_kongming_home
     from infrastructure.tracing import JsonlTraceSink
-    from prompting.instructions.instruction_loader import assemble_instructions
     from prompting.skills.skill_loader import format_skill_listing, load_skill_specs
     from runtime_assembly.native_runtime import NativeRuntime
     from safety.approval.manager import make_manager_prompt_fn
@@ -857,25 +856,107 @@ def _make_runtime_factory(cfg: object) -> object:
     _agent_role_manager_cache: list[Any | None] = [None]
     _instructions_cache: list[str | None] = [None]
     _origins_cache: list[list[str] | None] = [None]
+    _workflow_prompt_cache_key: list[object | None] = [None]
     _scheduler_runtime_factory_cache: list[object | None] = [None]
     _mcp_runtime_registration_cache: list[McpRuntimeRegistrationManager | None] = [None]
     _cache_lock = asyncio.Lock()
 
+    def _prompt_hash(text: str) -> str:
+        return f"sha256:{hashlib.sha256(text.encode()).hexdigest()}"
+
+    def _workflow_prompt_cache_matches(cache_key: object | None, candidate: object) -> bool:
+        return (
+            cache_key is not None
+            and getattr(cache_key, "base_instructions_hash", None)
+            == getattr(candidate, "base_instructions_hash", None)
+            and getattr(cache_key, "workflow_template_version", None)
+            == getattr(candidate, "workflow_template_version", None)
+            and getattr(cache_key, "workflow_listing_hash", None)
+            == getattr(candidate, "workflow_listing_hash", None)
+        )
+
+    async def _build_workflow_prompt_cache_candidate(
+        *,
+        workflow_render: Any,
+        sitian_root: Path | None,
+    ) -> tuple[object, list[Any]]:
+        from application.agent_workflows.prompt_catalog import (
+            build_workflow_prompt_cache_key,
+        )
+        from prompting.instructions.instruction_loader import (
+            InstructionLoader,
+            load_instruction_sources,
+        )
+
+        base_sources = await load_instruction_sources(
+            kongming_home=home,
+            sitian_root=sitian_root,
+        )
+        base_rendered = InstructionLoader.render(base_sources)
+        return (
+            build_workflow_prompt_cache_key(
+                base_instructions_hash=_prompt_hash(base_rendered),
+                render=workflow_render,
+            ),
+            base_sources,
+        )
+
+    def _insert_workflow_prompt_source(
+        *,
+        base_sources: list[Any],
+        workflow_render: Any,
+    ) -> list[Any]:
+        from prompting.instructions.instruction_loader import InstructionSource
+
+        if not getattr(workflow_render, "text", "").strip():
+            return [*base_sources]
+        workflow_source = InstructionSource(
+            origin=workflow_render.origin,
+            content=workflow_render.text,
+        )
+        insert_at = 1 if base_sources and base_sources[0].origin == "runtime" else 0
+        return [*base_sources[:insert_at], workflow_source, *base_sources[insert_at:]]
+
     async def _ensure_shared_assets(sinks: object) -> None:
+        from application.agent_workflows.prompt_catalog import (
+            build_default_workflow_prompt_listing,
+        )
+        from prompting.instructions.instruction_loader import InstructionLoader
+
+        sitian_raw = os.environ.get("SITIAN_PROMPT_ROOT", "").strip()
+        sitian_root = Path(sitian_raw).expanduser().resolve() if sitian_raw else None
         if _instructions_cache[0] is not None:
-            return
-
-        async with _cache_lock:
-            if _instructions_cache[0] is not None:
-                return
-
-            sitian_raw = os.environ.get("SITIAN_PROMPT_ROOT", "").strip()
-            sitian_root = Path(sitian_raw).expanduser().resolve() if sitian_raw else None
-
-            rendered, origins = await assemble_instructions(
-                kongming_home=home,
+            workflow_render = build_default_workflow_prompt_listing()
+            workflow_cache_key, _base_sources = await _build_workflow_prompt_cache_candidate(
+                workflow_render=workflow_render,
                 sitian_root=sitian_root,
             )
+            if _workflow_prompt_cache_matches(
+                _workflow_prompt_cache_key[0],
+                workflow_cache_key,
+            ):
+                return
+
+        async with _cache_lock:
+            workflow_render = build_default_workflow_prompt_listing()
+            workflow_cache_key, base_sources = await _build_workflow_prompt_cache_candidate(
+                workflow_render=workflow_render,
+                sitian_root=sitian_root,
+            )
+            if _instructions_cache[0] is not None and _workflow_prompt_cache_matches(
+                _workflow_prompt_cache_key[0],
+                workflow_cache_key,
+            ):
+                return
+
+            sources = _insert_workflow_prompt_source(
+                base_sources=base_sources,
+                workflow_render=workflow_render,
+            )
+            rendered = InstructionLoader.render(sources)
+            origins = [source.origin for source in sources]
+            _workflow_prompt_cache_key[0] = workflow_cache_key
+            factory._workflow_prompt_cache_key = _workflow_prompt_cache_key[0]  # type: ignore[attr-defined]
             sink_list = list(sinks) if sinks else []  # type: ignore[call-overload]
             skill_specs_list = await load_skill_specs(
                 home,

@@ -18,7 +18,11 @@ import {
   XCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useThreadTaskProgress } from "@/hooks/useThreadTaskProgress";
+import {
+  getThreadTaskProgressItemKey,
+  getThreadTaskProgressWorkflowId,
+  useThreadTaskProgress,
+} from "@/hooks/useThreadTaskProgress";
 import { useThreadSubAgents } from "@/hooks/useThreadSubAgents";
 import {
   type ThreadWorkflowHistoryItem,
@@ -84,7 +88,7 @@ export function ThreadTaskProgressPopover({
   const subAgentSignature = threadSubAgentsSignature(subAgentItems);
   const hasActiveSubAgents = subAgentItems.some((item) => item.is_active);
   const currentWorkflowIdList = (snapshot?.tasks ?? [])
-    .map((item) => item.workflow_id)
+    .map((item) => getThreadTaskProgressWorkflowId(item))
     .filter((workflowId): workflowId is string => Boolean(workflowId));
   const currentWorkflowIds = new Set(currentWorkflowIdList);
   const currentWorkflowTitle =
@@ -503,6 +507,7 @@ function taskProgressSignature(snapshot: ThreadTaskProgressSnapshot): string {
     .map((item) =>
       [
         item.orchestration_task_id,
+        getThreadTaskProgressItemKey(item),
         item.status,
         item.source_status ?? "",
         item.display_order,

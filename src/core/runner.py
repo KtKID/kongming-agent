@@ -66,6 +66,18 @@ class _RunInstructionSource:
     content: str
 
 
+def _llm_request_to_trace_payload(request: LLMRequest) -> dict[str, Any]:
+    """把真实 ``LLMRequest`` 按同名字段序列化为 trace payload。"""
+
+    return request.to_audit_dict()
+
+
+def _llm_response_to_trace_payload(response: LLMResponse) -> dict[str, Any]:
+    """把真实 ``LLMResponse`` 按同名字段序列化为 trace payload。"""
+
+    return response.to_audit_dict()
+
+
 class Runner:
     """唯一 run loop。
 
@@ -563,18 +575,28 @@ class Runner:
                 messages=tuple(prepared_messages),
                 tools=tuple(resolved_tools),
                 metadata={"thread_id": session.session_id},
+                reasoning_effort=agent_spec.reasoning_effort,
+            )
+            request_payload = {
+                "request": _llm_request_to_trace_payload(llm_request),
+                "model": llm_request.model,
+                "message_count": len(llm_request.messages),
+                "tool_count": len(llm_request.tools),
+                "original_message_count": len(history),
+            }
+            await self._append_session_audit_event(
+                session=session,
+                kind="llm.request",
+                run_id=state.run_id,
+                turn=state.turn,
+                payload=request_payload,
             )
             await self._emit(
                 Event(
                     kind="llm.request",
                     run_id=state.run_id,
                     turn=state.turn,
-                    payload={
-                        "model": llm_request.model,
-                        "message_count": len(llm_request.messages),
-                        "tool_count": len(llm_request.tools),
-                        "original_message_count": len(history),
-                    },
+                    payload=request_payload,
                 )
             )
 
@@ -601,17 +623,26 @@ class Runner:
             await session.append(assistant_message, usage=assistant_usage)
             state.record(assistant_message)
 
+            response_payload = {
+                "response": _llm_response_to_trace_payload(response),
+                "finish_reason": response.finish_reason,
+                "has_tool_calls": bool(assistant_message.tool_calls),
+                "usage": dict(response.usage),
+                "provider_metadata": dict(response.provider_metadata),
+            }
+            await self._append_session_audit_event(
+                session=session,
+                kind="llm.response",
+                run_id=state.run_id,
+                turn=state.turn,
+                payload=response_payload,
+            )
             await self._emit(
                 Event(
                     kind="llm.response",
                     run_id=state.run_id,
                     turn=state.turn,
-                    payload={
-                        "finish_reason": response.finish_reason,
-                        "has_tool_calls": bool(assistant_message.tool_calls),
-                        "usage": dict(response.usage),
-                        "provider_metadata": dict(response.provider_metadata),
-                    },
+                    payload=response_payload,
                 )
             )
 
@@ -1304,6 +1335,34 @@ class Runner:
                 },
             )
         )
+
+    async def _append_session_audit_event(
+        self,
+        *,
+        session: Session,
+        kind: str,
+        run_id: str,
+        turn: int,
+        payload: dict[str, Any],
+    ) -> None:
+        append_audit_event = getattr(session, "append_audit_event", None)
+        if not callable(append_audit_event):
+            return
+        try:
+            await append_audit_event(kind=kind, run_id=run_id, turn=turn, payload=payload)
+        except Exception as exc:  # pragma: no cover - 防御式
+            await self._emit(
+                Event(
+                    kind="error",
+                    run_id=run_id,
+                    turn=turn,
+                    payload={
+                        "source": "session_audit",
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                )
+            )
 
     # ------------------------------------------------------------------
     # EventSink fan-out

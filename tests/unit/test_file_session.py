@@ -174,6 +174,7 @@ class TestTC4RecordFields:
         "message_id",
         "parent_message_id",
         "created_at",
+        "record_type",
         "message",
     }
     MESSAGE_FIELDS: ClassVar[set[str]] = {

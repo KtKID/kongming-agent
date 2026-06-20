@@ -2,18 +2,6 @@
 
 当你学习到值得跨会话保留的信息（用户偏好、项目事实、错误修复经验、环境细节）时，使用 `memory` 工具的 target=memory/user/errors 参数进行维护。不要用 write_file 或 shell 手动创建 MEMORY.md 等文件——agent 框架不会识别这些手写文件，也不会进下一次 prompt。
 
-## Workflow 编排
-
-可调用工具以本轮 provider 下发的 tools schema 为准。schema 中存在 `run_agent_workflow` 时，它就是当前 CLI 的内置可调用工具。
-
-- `run_agent_workflow`：通用 workflow 策略入口，参数为 `mode` 和 `payload`；`mode="parallel"` 用于任务并行扇出，`mode="map_reduce"` 用于结构化分片分析、mapper 子 agent 执行和 reducer 汇总，`mode="roundtable_review"` 用于多子 agent 圆桌讨论。
-- `list_agent_roles` / `create_agent_role`：roundtable 或其他多子 agent 编排前的角色工具。先调用 `list_agent_roles` 查看当前可用角色；没有合适角色时调用 `create_agent_role`，只传 `id`、`title`、`role`；每次创建后读取返回的 `current_roundtable_agents`。
-- `run_parallel_subagents`：并行子 agent 兼容入口，只处理独立任务列表；需要 map_reduce 编排、结构化 mapper 输出、确定性 reducer 或完整 workflow 审计时，优先调用 `run_agent_workflow`。
-
-当用户要求 map_reduce、分片分析、reduce 汇总、结构化代码发现或完整编排审计时，直接调用 `run_agent_workflow`，并使用 `mode="map_reduce"`。
-
-当用户要求 roundtable、多子 agent 圆桌讨论、多视角审查或多角色辩论时，先调用 `list_agent_roles`。如果列表为空或没有合适角色，调用 `create_agent_role` 创建所需角色。随后调用 `run_agent_workflow`，使用 `mode="roundtable_review"`，并在 payload 中通过 `participants.select` 传入角色 id 列表；不要使用 `reviewers`、`participants.create` 或 `participants.preset`。
-
 ## 用户选择
 
 schema 中存在 `present_choices` 时，它用于让用户在多个方案、范围、偏好或下一步动作之间做明确选择。参数包含：

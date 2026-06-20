@@ -8,6 +8,8 @@ import type {
   ThreadTaskProgressViewModel,
 } from "@/protocol";
 
+type ThreadTaskProgressTask = ThreadTaskProgressSnapshot["tasks"][number];
+
 const STATUS_META: Record<
   ThreadTaskProgressStatus,
   {
@@ -21,6 +23,35 @@ const STATUS_META: Record<
 };
 const MAX_PROGRESS_ITEMS = 128;
 const MAX_PROGRESS_DESC_LENGTH = 1000;
+const WORKFLOW_KEY_PREFIX = "wf-";
+
+export function getThreadTaskProgressWorkflowId(
+  item: ThreadTaskProgressTask,
+): string | null {
+  const workflowId = item.workflow_id?.trim();
+  if (workflowId) return workflowId;
+
+  const orchestrationTaskId = item.orchestration_task_id.trim();
+  if (orchestrationTaskId.startsWith(WORKFLOW_KEY_PREFIX)) {
+    return orchestrationTaskId.split(":", 1)[0] || null;
+  }
+
+  const taskRunId = item.task_run_id.trim();
+  if (taskRunId.startsWith(WORKFLOW_KEY_PREFIX)) {
+    return taskRunId.split("::", 1)[0] || null;
+  }
+
+  return null;
+}
+
+export function getThreadTaskProgressItemKey(
+  item: ThreadTaskProgressTask,
+): string {
+  const workflowId = getThreadTaskProgressWorkflowId(item);
+  const stepId = item.task_id.trim();
+  if (workflowId && stepId) return `${workflowId}:${stepId}`;
+  return item.orchestration_task_id.trim() || item.id;
+}
 
 export function toThreadTaskProgressViewModel(
   snapshot?: ThreadTaskProgressSnapshot | null,
@@ -32,7 +63,7 @@ export function toThreadTaskProgressViewModel(
       const meta = STATUS_META[item.status];
       const desc = item.desc.slice(0, MAX_PROGRESS_DESC_LENGTH);
       return {
-        key: item.orchestration_task_id,
+        key: getThreadTaskProgressItemKey(item),
         orchestration_task_id: item.orchestration_task_id,
         task_id: item.task_id,
         desc,

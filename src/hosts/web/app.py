@@ -656,6 +656,7 @@ def create_app(
     from hosts.web.routers.server_info import router as server_info_router
     from hosts.web.routers.sitian import router as sitian_router
     from hosts.web.routers.slash_candidates import router as slash_candidates_router
+    from hosts.web.routers.thread_artifacts import router as thread_artifacts_router
     from hosts.web.routers.thread_subagents import router as thread_subagents_router
     from hosts.web.routers.thread_task_progress import router as thread_task_progress_router
     from hosts.web.routers.threads import router as threads_router
@@ -671,6 +672,7 @@ def create_app(
     app.include_router(threads_router)
     app.include_router(thread_task_progress_router)
     app.include_router(thread_subagents_router)
+    app.include_router(thread_artifacts_router)
     app.include_router(agent_workflows_router)
     app.include_router(presets_router)
     app.include_router(model_providers_router)

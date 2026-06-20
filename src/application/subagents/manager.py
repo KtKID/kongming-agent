@@ -101,7 +101,7 @@ class SubAgentManager:
         self._lifecycle_registry.record_started(
             thread_id=parent_session_id,
             source=source,
-            workflow_id=workflow_id,
+            workflow_id=resolved_workflow_id,
             task_id=task.task_id,
             task_run_id=task_run_id,
             task_name=task.task_name,
@@ -151,7 +151,7 @@ class SubAgentManager:
             )
         except asyncio.CancelledError as exc:
             self._record_finished(
-                workflow_id=workflow_id,
+                workflow_id=resolved_workflow_id,
                 parent_session_id=parent_session_id,
                 source=source,
                 task=task,
@@ -163,7 +163,7 @@ class SubAgentManager:
             raise
         except Exception as exc:
             self._record_finished(
-                workflow_id=workflow_id,
+                workflow_id=resolved_workflow_id,
                 parent_session_id=parent_session_id,
                 source=source,
                 task=task,
@@ -175,7 +175,7 @@ class SubAgentManager:
             raise
         run = self._to_run(task=task, session_id=session_id, result=result)
         self._record_finished(
-            workflow_id=workflow_id,
+            workflow_id=resolved_workflow_id,
             parent_session_id=parent_session_id,
             source=source,
             task=task,

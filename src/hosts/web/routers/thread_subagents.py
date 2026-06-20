@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from hosts.web.threads.types import ThreadManagerProtocol
 
 router = APIRouter(prefix="/api/threads", tags=["thread-subagents"])
+_MAX_ERROR_MESSAGE_LENGTH = 2000
 
 
 class _SubAgentLifecycleRecord(Protocol):
@@ -117,11 +118,16 @@ def _validate_thread_id(thread_id: str) -> None:
 
 
 async def _require_thread(request: Request, thread_id: str) -> None:
-    """确认 thread 存在，输入为 Request 和 thread id，输出为空或抛 404。"""
+    """确认登录态和 thread 存在，输入为 Request 和 thread id，输出为空或抛异常。"""
     _validate_thread_id(thread_id)
+    if getattr(request.state, "session_payload", None) is None:
+        raise InvalidRequestError(
+            "authenticated session payload is missing",
+            status_code=500,
+        )
     tm: ThreadManagerProtocol = request.app.state.thread_manager
-    metas = await asyncio.to_thread(tm.list_threads)
-    if not any(meta.id == thread_id for meta in metas):
+    meta = await asyncio.to_thread(tm.get_thread, thread_id)
+    if meta is None:
         raise ThreadNotFoundError(f"thread not found: {thread_id}")
 
 
@@ -150,6 +156,7 @@ def _record_id(record: _SubAgentLifecycleRecord) -> str:
 
 def _iso_to_epoch_ms(value: str) -> int:
     """转换 ISO 时间，输入为 ISO 8601 字符串，输出为 epoch 毫秒。"""
+    # 兼容少量历史或外部来源的 Z 后缀，当前 _now_iso 生成 +00:00。
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
@@ -165,6 +172,9 @@ def _optional_iso_to_epoch_ms(value: str | None) -> int | None:
 
 def _item_payload(record: _SubAgentLifecycleRecord) -> ThreadSubAgentItemPayload:
     """转换 REST item，输入为生命周期记录，输出为前端消费 DTO。"""
+    error_message = record.error_message
+    if error_message is not None:
+        error_message = error_message[:_MAX_ERROR_MESSAGE_LENGTH]
     return ThreadSubAgentItemPayload(
         id=_record_id(record),
         thread_id=record.thread_id,
@@ -178,7 +188,7 @@ def _item_payload(record: _SubAgentLifecycleRecord) -> ThreadSubAgentItemPayload
         started_at=record.started_at,
         updated_at=record.updated_at,
         finished_at=record.finished_at,
-        error_message=record.error_message,
+        error_message=error_message,
         started_at_ms=_iso_to_epoch_ms(record.started_at),
         updated_at_ms=_iso_to_epoch_ms(record.updated_at),
         finished_at_ms=_optional_iso_to_epoch_ms(record.finished_at),

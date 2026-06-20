@@ -143,6 +143,17 @@ class SubAgentLifecycleStore:
         with self._lock:
             bucket = self._records_by_thread.setdefault(thread_id, {})
             existing = bucket.get(key)
+            if existing is None:
+                logger.warning(
+                    "subagent lifecycle finished before start: thread_id=%s source=%s "
+                    "workflow_id=%s task_run_id=%s session_id=%s status=%s",
+                    thread_id,
+                    source,
+                    workflow_id,
+                    task_run_id,
+                    session_id,
+                    status,
+                )
             started_at = existing.started_at if existing is not None else now
             record = SubAgentLifecycleRecord(
                 thread_id=thread_id,
@@ -179,7 +190,11 @@ class SubAgentLifecycleStore:
         bucket = self._records_by_thread.get(thread_id)
         if bucket is None or len(bucket) <= self._max_records_per_thread:
             return
-        ordered = sorted(bucket.values(), key=lambda item: item.updated_at, reverse=True)
+        ordered = sorted(
+            bucket.values(),
+            key=lambda item: (item.status == "running", item.updated_at),
+            reverse=True,
+        )
         keep = {_record_key(record) for record in ordered[: self._max_records_per_thread]}
         self._records_by_thread[thread_id] = {
             key: record for key, record in bucket.items() if key in keep

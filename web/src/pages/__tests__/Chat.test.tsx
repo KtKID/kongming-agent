@@ -544,9 +544,9 @@ describe("ChatPage workflow viewer entry", () => {
       "data-thread-id",
       t.id,
     );
-    expect(screen.getByRole("link", { name: "Workflow Viewer" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "任务详情" })).toHaveAttribute(
       "href",
-      `/chat/${t.id}/agent-workflows`,
+      `/chat/${t.id}/task-detail`,
     );
   });
 });
@@ -790,9 +790,9 @@ describe("ChatPage compact workspace dock", () => {
       "data-thread-id",
       t.id,
     );
-    expect(screen.getByRole("link", { name: "Workflow Viewer" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "任务详情" })).toHaveAttribute(
       "href",
-      `/chat/${t.id}/agent-workflows`,
+      `/chat/${t.id}/task-detail`,
     );
   });
 });
@@ -872,9 +872,9 @@ describe("ChatPage workspace dock layout", () => {
       "chat",
     );
     expect(screen.getByTestId("dock-chat-context")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Workflow" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "任务详情" })).toHaveAttribute(
       "href",
-      `/chat/${t.id}/agent-workflows`,
+      `/chat/${t.id}/task-detail`,
     );
     await waitFor(() =>
       expect(screen.getByTestId("dock-auto-approval-status")).toHaveTextContent(

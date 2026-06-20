@@ -32,6 +32,7 @@ from tools.agent_role_tool import AgentRoleManagerLike, build_agent_role_tools
 from tools.agent_workflow_tool import (
     AgentWorkflowHandle,
     build_agent_workflow_tool,
+    build_describe_agent_workflow_strategy_tool,
     build_run_agent_workflow_tool,
 )
 from tools.builtin.file_tool import (
@@ -224,6 +225,7 @@ def register_agent_workflow_tool(
     handle: AgentWorkflowHandle,
 ) -> None:
     """Register the agent workflow tool with a late-bound manager handle."""
+    registry.register(cast(Tool, build_describe_agent_workflow_strategy_tool(handle)))
     registry.register(cast(Tool, build_run_agent_workflow_tool(handle)))
     registry.register(cast(Tool, build_agent_workflow_tool(handle)))
 
@@ -272,6 +274,7 @@ __all__ = [
     "WriteFileTool",
     "build_default_approval",
     "build_default_registry",
+    "build_describe_agent_workflow_strategy_tool",
     "build_file_tools",
     "build_shell_tool",
     "register_evolution_write_tool_if_enabled",

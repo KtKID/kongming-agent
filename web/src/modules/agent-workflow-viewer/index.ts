@@ -1,4 +1,4 @@
-export { WorkflowRunViewerPage } from "./WorkflowRunViewerPage";
+export { WorkflowRunViewerPage, WorkflowViewerEmbed } from "./WorkflowRunViewerPage";
 export { useAgentWorkflowViewerStore } from "./store";
 export type {
   ConversationDTO,
