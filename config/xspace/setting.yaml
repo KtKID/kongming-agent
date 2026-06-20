@@ -7,8 +7,9 @@ config_schema_version: v0.5  # 配置结构版本；当前版本为 v0.5。
 #   它描述桌面产品默认行为，和仓库根 `config/setting.yaml` 的本地开发默认值分离。
 #
 # 维护规则：
-#   1. 本文件覆盖 `infrastructure.config.models.Config` 的全部 leaf 字段。
-#   2. 新增 Config 字段后，必须在本文件补默认值，配置契约测试会强制提醒。
+#   1. 新增 Config 字段先写入仓库根 `config/setting.yaml`。
+#   2. 本文件与 `config/xspace/sync-policy.yaml` 共同覆盖全部 Config leaf 字段；
+#      XSpace 需要显式产品默认值时写入本文件，只属于主配置的字段写 main-only 决策。
 #   3. 密钥、token、密码、个人路径不写入安装包；使用空值、环境变量名或 app data 注入。
 #   4. x-space 启动时先把本文件复制/合并到 `<kongming_home>/setting.yaml`，再用
 #      `--config <kongming_home>/setting.yaml` 拉起 sidecar，ready 后调用
@@ -79,7 +80,6 @@ tool:
 mcp:
   # 桌面包默认不主动启动第三方 MCP server；用户或产品配置可按需开启。
   enabled: false
-  servers: []
 
 web_search:
   # 保持通用 web_search 能力开启；没有底层搜索工具时只产生可诊断的缺失状态。
@@ -170,7 +170,7 @@ web:
   # x-space 可传 --port 0 动态分配；固定默认值保留给资源配置和显式端口模式。
   port: 60000
   # 二维码扫码登录使用的服务器 origin；公网填 https://域名，局域网填 http://局域网IP:端口。
-  server_origin:
+  server_origin: https://kongming.ktkid.fun:12306
   # 兼容旧移动配对字段；新扫码登录优先使用 server_origin。
   public_origin:
   # 持久配置默认保持 browser；XSpace 运行态由 `POST /api/xspace/runtime/init` 覆盖。
