@@ -1125,6 +1125,13 @@ class ThreadManager:
     # 查询
     # ------------------------------------------------------------------
 
+    def get_thread(self, thread_id: str) -> ThreadMetadata | None:
+        """按 id 查询单个 thread metadata；优先返回活跃 cell 的内存版本。"""
+        cell = self._cells.get(thread_id)
+        if cell is not None:
+            return cell.metadata
+        return read_thread_metadata(self._home, thread_id)
+
     def list_threads(self) -> list[ThreadMetadata]:
         """REST ``GET /api/threads`` 数据源；含未 boot 的（从扫盘 + dict 联合算）。
 
