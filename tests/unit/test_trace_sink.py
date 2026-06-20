@@ -268,6 +268,35 @@ async def test_llm_request_local_trace_drops_messages_and_tool_schema(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_llm_request_sanitize_false_keeps_full_payload(tmp_path):
+    """debug 场景可关闭本地 trace 裁剪，保留完整 request payload。"""
+    from core.contracts import Event
+
+    path = tmp_path / "trace.jsonl"
+    sink = JsonlTraceSink(path, sanitize=False)
+    await sink.emit(
+        Event(
+            kind="llm.request",
+            run_id="r",
+            turn=1,
+            payload={
+                "request": {
+                    "model": "stub-model",
+                    "messages": [{"role": "user", "content": "full user text"}],
+                    "tools": [{"name": "read_file", "input_schema": {"type": "object"}}],
+                    "metadata": {"Authorization": "Bearer secret"},
+                }
+            },
+        )
+    )
+
+    request = _read_jsonl(path)[0]["payload"]["request"]
+    assert request["messages"][0]["content"] == "full user text"
+    assert request["tools"][0]["input_schema"] == {"type": "object"}
+    assert request["metadata"] == {"Authorization": "Bearer secret"}
+
+
+@pytest.mark.asyncio
 async def test_llm_response_local_trace_drops_content_and_tool_arguments(tmp_path):
     """本地 trace 落盘裁剪 response 正文和工具参数。"""
     from core.contracts import Event

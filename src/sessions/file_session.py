@@ -15,6 +15,8 @@
 - 无 pending_buffer：未 materialize 时 ``history()`` 返回空列表
 - 消息链：``message_id`` (UUIDv4) + ``parent_message_id``，无 seq 字段
 - 每条 append 后 flush + fsync
+- ``system_prompt.json`` 会持久化完整组装后的 system prompt，供本地审计
+  和问题复盘使用；该文件应按 session 数据同等级别保护。
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ import os
 import time
 import uuid
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from core.message import Message
@@ -64,6 +67,7 @@ class FileSession:
         self._messages_path = self._session_dir / f"{session_id}.jsonl"
 
         self._materialized: bool = False
+        self._materialize_lock = RLock()
         self._last_message_id: str | None = None
         # run_count 在 manifest.json 中持久化；advance_run_index 时 +1 + 写盘
         self._run_count: int = 0
@@ -133,14 +137,15 @@ class FileSession:
 
     async def clear(self) -> None:
         """清空 session 文件，重置为未 materialize 状态。"""
-        if self._session_dir.is_dir():
-            for child in self._session_dir.iterdir():
-                child.unlink()
-            self._session_dir.rmdir()
+        with self._materialize_lock:
+            if self._session_dir.is_dir():
+                for child in self._session_dir.iterdir():
+                    child.unlink()
+                self._session_dir.rmdir()
 
-        self._materialized = False
-        self._last_message_id = None
-        self._run_count = 0
+            self._materialized = False
+            self._last_message_id = None
+            self._run_count = 0
 
     async def advance_run_index(self) -> int:
         """递增 run_count 并立即写回 manifest.json，返回新值。
@@ -164,15 +169,18 @@ class FileSession:
 
     def _materialize(self) -> None:
         """创建目录、原子写 manifest、准备 jsonl 文件。"""
-        self._session_dir.mkdir(parents=True, exist_ok=True)
-        self._write_manifest()
-        self._write_system_prompt_snapshot()
+        with self._materialize_lock:
+            if self._materialized:
+                return
+            self._session_dir.mkdir(parents=True, exist_ok=True)
+            self._write_manifest()
+            self._write_system_prompt_snapshot()
 
-        # 创建空 jsonl（如果不存在）
-        if not self._messages_path.exists():
-            self._messages_path.touch()
+            # 创建空 jsonl（如果不存在）
+            if not self._messages_path.exists():
+                self._messages_path.touch()
 
-        self._materialized = True
+            self._materialized = True
 
     def _write_manifest(self) -> None:
         """原子写 manifest.json：先写 ``.tmp`` 再 rename，含 fsync。
@@ -215,6 +223,7 @@ class FileSession:
             "instruction_sources": self._bootstrap.instruction_sources,
             "instruction_text_hash": self._bootstrap.instruction_text_hash,
             "cwd": self._bootstrap.cwd,
+            "app_version": self._bootstrap.app_version,
             "content": self._bootstrap.instruction_text,
         }
 

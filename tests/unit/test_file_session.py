@@ -113,6 +113,7 @@ class TestTC2FirstAppendMaterialize:
             "instruction_sources": ["test-source"],
             "instruction_text_hash": "sha256:abc123",
             "cwd": "/test",
+            "app_version": "0.1.1",
             "content": "# system\nYou are test.",
         }
         session_dir = Path(store_path) / "test-session"

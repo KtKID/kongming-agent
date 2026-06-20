@@ -86,6 +86,9 @@ class JsonlTraceSink:
             ``"full"`` 全写（仅 debug）。``EventSink`` Protocol 形状不变。
         periodic_batch_size: ``delta_sampling="periodic"`` 时的采样批大小，
             必须 ``> 0``。
+        sanitize: 是否裁剪 ``llm.request`` / ``llm.response`` 中的正文、tool
+            schema 和非白名单 metadata。默认开启；需要完整 provider 调试数据时
+            显式传 ``sanitize=False``。
     """
 
     def __init__(
@@ -95,6 +98,7 @@ class JsonlTraceSink:
         auto_flush: bool = True,
         delta_sampling: str = "none",
         periodic_batch_size: int = 20,
+        sanitize: bool = True,
     ) -> None:
         if delta_sampling not in ("none", "periodic", "full"):
             raise ValueError(
@@ -106,6 +110,7 @@ class JsonlTraceSink:
         self._auto_flush = auto_flush
         self._delta_sampling = delta_sampling
         self._periodic_batch_size = periodic_batch_size
+        self._sanitize = sanitize
         # 串行化文件写入，避免多协程交错写出半行 JSON。
         self._lock = asyncio.Lock()
         # lazy init：父目录与空文件在首次 emit 时创建，
@@ -205,7 +210,9 @@ class JsonlTraceSink:
         - :func:`json.dumps` 走 ``ensure_ascii=False`` 保留中文；
           非默认可序列化的值通过 :func:`_json_default` 降级。
         """
-        payload = _sanitize_local_trace_event(_event_to_dict(event))
+        payload = _event_to_dict(event)
+        if self._sanitize:
+            payload = _sanitize_local_trace_event(payload)
         return json.dumps(payload, ensure_ascii=False, default=_json_default)
 
 
