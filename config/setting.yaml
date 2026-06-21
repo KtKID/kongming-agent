@@ -570,8 +570,6 @@ web:
   port: 60000
   # 二维码扫码登录使用的服务器 origin；公网填 https://域名，局域网填 http://局域网IP:端口。
   server_origin: https://kongming.ktkid.fun:12306
-  # 兼容旧移动配对字段；新扫码登录优先使用 server_origin。
-  public_origin:
   host_environment: browser
 
   # 跳过登录鉴权（仅本地开发！）；上线必须 false 并设强密码

@@ -117,9 +117,7 @@ def test_xspace_runtime_config_profile_policy_template_lists_pending_decisions()
         issue.path == "mcp.servers" and issue.code == "target-missing-decision-required"
         for issue in review.issues
     )
-    assert not any(
-        issue.path in {"web.server_origin", "web.public_origin"} for issue in review.issues
-    )
+    assert not any(issue.path == "web.server_origin" for issue in review.issues)
 
 
 def test_xspace_runtime_data_paths_resolve_under_kongming_home(tmp_path: Path) -> None:
