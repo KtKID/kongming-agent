@@ -138,7 +138,7 @@ def test_read_schema_returns_all_fields_and_groups(manager: ConfigManager) -> No
     """
     resp: SchemaResponse = manager.read_schema()
     assert len(resp.fields) == len(_schema.list_field_metas())
-    assert len(resp.groups) == 5
+    assert resp.groups == _schema.list_groups()
     # 类型断言：response 的 fields 是 schema.FieldMeta 实例（透传，不复制）
     assert all(isinstance(f, _schema.FieldMeta) for f in resp.fields)
     # groups 形态：每条 {"id": ..., "label": ...}

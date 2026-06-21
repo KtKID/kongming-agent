@@ -6,7 +6,7 @@
  *
  * - 启动加载：根据 `loadStatus === "idle"` 触发一次 `store.load()`
  *   （schema + effective + raw 三个 fetch 并发，store 内部处理错误归一化）
- * - 顶部横向 5 个 group tab：用 `NavLink` 同步 URL（`/manage/config/:section`）
+ * - 顶部横向 group tab：用 `NavLink` 同步 URL（`/manage/config/:section`）
  *   - 视觉与 `pages/Manage.tsx` 左侧竖 tab 同款 token（`bg-primary/12` /
  *     `text-foreground` 选中，`hover:bg-secondary` 悬停）
  * - 中间区域：按 `:section` 渲染对应 Section 组件
@@ -15,16 +15,14 @@
  * ## section 兜底重定向
  *
  * - 无 `:section` → 重定向到 `/manage/config/model`
- * - `:section` 不在 SECTION_RENDERERS keys → 同上
+ * - `:section` 不在后端 schema.groups 中 → 同上
  * - 重定向用 `Navigate replace`，避免污染浏览器历史
  *
  * ## SafetySection 签名不一致
  *
  * SafetySection 一期不接受 `fields` prop（safety 字段全部是 list/dict，
- * 全量只读由 SafetyRulesView 接管），其它 4 个 section 都按 `{ fields }` 接收。
- * 这里用一个**判别式分支**而不是把它们硬塞到同一个 `ComponentType` union——
- * 后者会让 TypeScript 推不出能调用的统一签名，被迫 `as any` 才能渲染。
- * 判别式分支保留每个 section 的真实签名，类型上更直白。
+ * 全量只读由 SafetyRulesView 接管），其它专用 section 都按 `{ fields }` 接收。
+ * 未专门实现的后端 group 走 GenericConfigSection 兜底。
  *
  * ## 数据流不直连 fetch
  *
@@ -38,6 +36,7 @@ import { Navigate, NavLink, useParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
 
 import { SaveRestartBar } from "./components/SaveRestartBar";
+import { GenericConfigSection } from "./sections/GenericConfigSection";
 import { HostObservSection } from "./sections/HostObservSection";
 import { ModelSection } from "./sections/ModelSection";
 import { RuntimeSection } from "./sections/RuntimeSection";
@@ -46,26 +45,10 @@ import { ToolApprovalSection } from "./sections/ToolApprovalSection";
 import { useConfigStore } from "./store";
 import type { FieldMeta } from "./types";
 
-/** 5 个合法 section id；与后端 schema.groups[].id 严格对齐。 */
-const SECTION_IDS = [
-  "model",
-  "runtime",
-  "tool_approval",
-  "safety",
-  "host_observ",
-] as const;
-
-type SectionId = (typeof SECTION_IDS)[number];
-
-function isSectionId(value: string | undefined): value is SectionId {
-  return typeof value === "string" && (SECTION_IDS as readonly string[]).includes(value);
-}
-
 /**
- * 渲染指定 section。SafetySection 不接受 fields，单独分支；其余 4 个签名一致，
- * 共用一个分支。switch 表达式让 TypeScript 能为每个分支检查参数类型。
+ * 渲染指定 section。已实现专用 UI 的 group 走专用组件，其它后端 group 走通用组件。
  */
-function renderSection(section: SectionId, fields: FieldMeta[]): ReactNode {
+function renderSection(section: string, label: string, fields: FieldMeta[]): ReactNode {
   switch (section) {
     case "model":
       return <ModelSection fields={fields} />;
@@ -77,6 +60,10 @@ function renderSection(section: SectionId, fields: FieldMeta[]): ReactNode {
       return <HostObservSection fields={fields} />;
     case "safety":
       return <SafetySection />;
+    default:
+      return (
+        <GenericConfigSection groupId={section} label={label} fields={fields} />
+      );
   }
 }
 
@@ -94,8 +81,8 @@ export function ConfigPage(): ReactNode {
     }
   }, [loadStatus, load]);
 
-  // section 兜底：无参数或非法值 → 重定向 model
-  if (!isSectionId(section)) {
+  // 无 section 时先落到 model；加载完成后再按后端 groups 校验动态 section
+  if (!section) {
     return <Navigate to="/manage/config/model" replace />;
   }
 
@@ -123,7 +110,14 @@ export function ConfigPage(): ReactNode {
 
   if (!schema) return null;
 
+  const group = schema.groups.find((g) => g.id === section);
+  if (schema.groups.length > 0 && !group) {
+    const fallback = schema.groups[0]?.id ?? "model";
+    return <Navigate to={`/manage/config/${fallback}`} replace />;
+  }
+
   const fields = schema.fields.filter((f) => f.group === section);
+  const sectionLabel = group?.label ?? section;
 
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="config-page">
@@ -157,7 +151,7 @@ export function ConfigPage(): ReactNode {
 
       {/* 当前 section —— 独立滚动区，避免和 sticky bar 干扰 */}
       <div className="min-h-0 flex-1 overflow-y-auto pb-4">
-        {renderSection(section, fields)}
+        {renderSection(section, sectionLabel, fields)}
       </div>
 
       {/* 底部固定操作栏（SaveRestartBar 内部已 sticky） */}

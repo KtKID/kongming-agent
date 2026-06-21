@@ -1,8 +1,9 @@
 """manage 配置页字段元数据真源。
 
 本文件是 manage 配置页面的**字段元数据真源**：枚举 ``config/setting.yaml`` 全部
-18 个顶层模块（model / runner / session / trace / logging / host / approval /
-tool / mcp / web_search / compactor / retry / cli / evolution / stream / safety / scheduler / web）
+20 个顶层模块（model / runner / session / trace / logging / host / approval /
+tool / mcp / web_search / compactor / retry / cli / evolution / stream / safety /
+scheduler / web / workflow / sitian）
 下的所有 leaf 字段，每字段产出 :class:`FieldMeta`（路径 / 类型 / 是否可编辑 /
 枚举 / 描述 / 是否需要重启 / 所属 section group / 数值上下限）。
 
@@ -16,11 +17,10 @@ tool / mcp / web_search / compactor / retry / cli / evolution / stream / safety 
 
 **漂移防护**：
 
-- 18 个顶层模块若新增字段、改名、调类型，必须**同步**修改本文件——否则 manage
+- 20 个顶层模块若新增字段、改名、调类型，必须**同步**修改本文件——否则 manage
   UI 与真实 yaml 不一致；
-- ``sitian`` / ``workflow`` 两顶层模块**不在本期范围**（一期 stage 1 只覆盖 5
-  个 group），等后续 stage 再加。task #9 会写 pytest 检测漂移，覆盖范围一致性
-  会在那里被强制断言。
+- pytest 漂移测试会对比 pydantic ``Config`` 扁平 leaf path 与本文件 ``_FIELD_METAS``，
+  覆盖范围一致性由测试强制断言。
 
 **editable 默认策略**（README 已定）：
 
@@ -77,7 +77,7 @@ class FieldMeta(BaseModel):
     """是否需要重启才生效。True = 启动期才装配的字段。"""
 
     group: str
-    """section group：``model`` / ``runtime`` / ``tool_approval`` / ``safety`` / ``host_observ``。"""
+    """section group id；必须出现在 ``list_groups()`` 返回值中。"""
 
     min_value: float | None = None
     """数值字段下限（来自 pydantic ``Field(ge=...)``）。"""
@@ -96,6 +96,8 @@ _GROUPS: list[dict[str, str]] = [
     {"id": "tool_approval", "label": "工具与审批"},
     {"id": "safety", "label": "安全"},
     {"id": "host_observ", "label": "宿主与观测"},
+    {"id": "workflow", "label": "工作流"},
+    {"id": "sitian", "label": "司天"},
 ]
 
 
@@ -1073,6 +1075,217 @@ _FIELD_METAS: list[FieldMeta] = [
         restart_required=True,
         group="host_observ",
     ),
+    # =======================================================================
+    # group: workflow
+    # =======================================================================
+    FieldMeta(
+        path="workflow.enabled",
+        type="bool",
+        editable=True,
+        desc="是否启用 agent workflow 能力。需重启生效。",
+        restart_required=True,
+        group="workflow",
+    ),
+    FieldMeta(
+        path="workflow.home",
+        type="string",
+        editable=True,
+        desc="workflow 数据根目录；留空走 kongming_home/workflows。需重启生效。",
+        restart_required=True,
+        group="workflow",
+    ),
+    FieldMeta(
+        path="workflow.scan_interval",
+        type="float",
+        editable=True,
+        desc="workflow scanner 扫描间隔（秒）。需重启生效。",
+        restart_required=True,
+        min_value=0.0,
+        group="workflow",
+    ),
+    # =======================================================================
+    # group: sitian
+    # =======================================================================
+    FieldMeta(
+        path="sitian.version",
+        type="enum",
+        editable=False,
+        enum=["v1"],
+        desc="司天配置结构版本。只读字段。",
+        restart_required=True,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.default_scan_interval_sec",
+        type="int",
+        editable=True,
+        desc="source 未声明 scan_interval_sec 时使用的默认扫描间隔（秒）。需重启生效。",
+        restart_required=True,
+        min_value=1.0,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.idle_sleep_sec",
+        type="int",
+        editable=True,
+        desc="司天循环空闲时的 sleep 时长（秒）。需重启生效。",
+        restart_required=True,
+        min_value=1.0,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.output_subdir",
+        type="string",
+        editable=True,
+        desc="司天产物相对子目录；留空直接写入 root_dir。需重启生效。",
+        restart_required=True,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.scanner.recent_session_window_days",
+        type="int",
+        editable=True,
+        desc="最近活动窗口（天）；0 表示读取所有 session。需重启生效。",
+        restart_required=True,
+        min_value=0.0,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.scanner.session_recent_user_messages",
+        type="int",
+        editable=True,
+        desc="每个 session 取最后 N 条 user 消息；0 表示不取。需重启生效。",
+        restart_required=True,
+        min_value=0.0,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.scanner.session_recent_assistant_messages",
+        type="int",
+        editable=True,
+        desc="每个 session 取最后 N 条 assistant 消息；0 表示不取。需重启生效。",
+        restart_required=True,
+        min_value=0.0,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.scanner.session_message_max_chars",
+        type="int",
+        editable=True,
+        desc="单条消息最大字符数；0 表示不截断。需重启生效。",
+        restart_required=True,
+        min_value=0.0,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.analyzer.enabled",
+        type="bool",
+        editable=True,
+        desc="是否启用司天 LLM 分析层。需重启生效。",
+        restart_required=True,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.analyzer.model_name",
+        type="string",
+        editable=True,
+        desc="司天分析层模型名；留空表示禁用或由调用方决定。需重启生效。",
+        restart_required=True,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.analyzer.base_url",
+        type="string",
+        editable=True,
+        desc="司天分析层 API 根地址。需重启生效。",
+        restart_required=True,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.analyzer.api_key_env",
+        type="string",
+        editable=True,
+        desc="司天分析层 API key 所在环境变量名（填变量名）。需重启生效。",
+        restart_required=True,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.analyzer.max_tokens",
+        type="int",
+        editable=True,
+        desc="司天分析层单次响应最大 token 数。需重启生效。",
+        restart_required=True,
+        min_value=1.0,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.analyzer.temperature",
+        type="float",
+        editable=True,
+        desc="司天分析层采样温度 [0, 2]。需重启生效。",
+        restart_required=True,
+        min_value=0.0,
+        max_value=2.0,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.analyzer.timeout",
+        type="int",
+        editable=True,
+        desc="司天分析层单次请求超时（秒）。需重启生效。",
+        restart_required=True,
+        min_value=1.0,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.analyzer.max_context_chars",
+        type="int",
+        editable=True,
+        desc="司天分析层单次提示词最大上下文字符数。需重启生效。",
+        restart_required=True,
+        min_value=1.0,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.analyzer.skip_if_unchanged",
+        type="bool",
+        editable=True,
+        desc="输入上下文未变化时跳过重复分析。需重启生效。",
+        restart_required=True,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.analyzer.full_log_enabled",
+        type="bool",
+        editable=True,
+        desc="是否记录完整 LLM 提示词和回复到司天 full-log。需重启生效。",
+        restart_required=True,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.interests.projects",
+        type="list",
+        editable=False,
+        desc="司天关注项目列表。请在 yaml 内手工维护。需重启生效。",
+        restart_required=True,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.interests.focus",
+        type="string",
+        editable=True,
+        desc="司天关注重点，会注入分析层 prompt。需重启生效。",
+        restart_required=True,
+        group="sitian",
+    ),
+    FieldMeta(
+        path="sitian.sources",
+        type="list",
+        editable=False,
+        desc="司天 source 配置列表。请在 yaml 内手工维护。需重启生效。",
+        restart_required=True,
+        group="sitian",
+    ),
 ]
 
 
@@ -1087,7 +1300,7 @@ def list_field_metas() -> list[FieldMeta]:
 
 
 def list_groups() -> list[dict[str, str]]:
-    """返回 5 个 group 的 ``id`` / ``label`` 列表（按显示顺序）。"""
+    """返回 group 的 ``id`` / ``label`` 列表（按显示顺序）。"""
     return [dict(g) for g in _GROUPS]
 
 
