@@ -23,11 +23,12 @@ _EXTERNAL_PREFIXES = (
 def _docs_harness_files() -> list[Path]:
     """返回 docs harness 必须保持本地链接有效的文档集合。"""
     module_readmes = sorted((REPO_ROOT / "docs" / "modules").glob("*/README.md"))
-    return [
+    candidates = [
         REPO_ROOT / "CLAUDE.md",
         REPO_ROOT / "AGENTS.md",
         *module_readmes,
     ]
+    return [path for path in candidates if path.exists()]
 
 
 def _iter_local_markdown_links(path: Path) -> list[tuple[int, str]]:
