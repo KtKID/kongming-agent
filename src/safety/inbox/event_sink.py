@@ -30,7 +30,8 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from safety.inbox.helpers import emit_remove_safe, to_inbox_payload
 
 if TYPE_CHECKING:
-    from safety.approval.manager import ApprovalManager, _PendingApproval
+    from safety.approval import PendingApprovalView
+    from safety.approval.manager import ApprovalManager
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ class InboxEventSink:
         self._broadcaster = broadcaster
         self._manager = manager
 
-    async def emit_approval_required(self, *, pending: _PendingApproval) -> None:
+    async def emit_approval_required(self, *, pending: PendingApprovalView) -> None:
         """fan-out add 帧到所有 ws + 注册 resolve callback 到 broadcaster。
 
         步骤：
@@ -117,22 +118,22 @@ class InboxEventSink:
         3. ``broadcaster.emit_add(payload)`` fan-out 给所有订阅 ws。
 
         Args:
-            pending: manager 内部创建的 :class:`_PendingApproval`，
+            pending: manager 内部 pending 状态投影出的公开只读视图，
                 字段已完整（severity / matched_rule / auto_*_at_ms 等）。
 
         异常吞掉：任何步骤抛 → ``logger.exception`` + return（不向上抛）。
         """
         try:
-            # pending.timeout_ms 理论上 manager.request 已填实数（_PendingApproval
-            # 构造时传 actual_timeout_ms）；此处兜底 60_000 防御未来调用方
-            # 直接构造 _PendingApproval 时漏字段，保证前端 timeoutMs 始终是 int。
+            # pending.timeout_ms 理论上 manager.request 已投影为实数；此处兜底
+            # 60_000 防御未来调用方直构假对象时漏字段，保证前端 timeoutMs
+            # 始终是 int。
             timeout_ms = pending.timeout_ms if pending.timeout_ms is not None else 60_000
             payload = to_inbox_payload(
                 channel=pending.channel,
                 thread_id=pending.thread_id,
                 request_id=pending.request_id,
                 tool_name=pending.tool_name,
-                tool_input=pending.tool_input,
+                tool_input=dict(pending.tool_input),
                 cwd=pending.cwd,
                 arrived_at_ms=pending.arrived_at_ms,
                 timeout_ms=timeout_ms,

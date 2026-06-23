@@ -8,10 +8,12 @@ Web 审批收件箱接收器。
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from core.contracts import ApprovalAction, ApprovalRequest
-from safety.approval.manager import ApprovalManager, _PendingApproval
+from safety.approval import PendingApprovalView
+from safety.approval.manager import ApprovalManager
 from tools.runtime.approval import PromptActionFn
 
 logger = logging.getLogger(__name__)
@@ -24,7 +26,7 @@ class CLIApprovalEventSink:
         self._manager = manager
         self._action_prompt = action_prompt
 
-    async def emit_approval_required(self, *, pending: _PendingApproval) -> None:
+    async def emit_approval_required(self, *, pending: PendingApprovalView) -> None:
         """提示终端用户审批，并回写审批管理器里的待处理请求。"""
         if pending.channel != "cli":
             return
@@ -53,7 +55,7 @@ class CLIApprovalEventSink:
         del request_id, reason
 
 
-def _pending_to_request(pending: _PendingApproval) -> ApprovalRequest:
+def _pending_to_request(pending: PendingApprovalView) -> ApprovalRequest:
     metadata: dict[str, Any] = dict(pending.metadata or {})
     metadata["cwd"] = pending.cwd
     metadata["approval_channel"] = pending.channel
@@ -99,6 +101,8 @@ def _coerce_int(value: object, *, default: int) -> int:
 
 def _coerce_tool_input(value: object) -> dict[str, Any]:
     if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, Mapping):
         return dict(value)
     raise TypeError(f"pending.tool_input 必须是 dict，实际为 {type(value).__name__}")
 
