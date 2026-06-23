@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
+from typing import Any
 
 from core.contracts import ApprovalAction, ApprovalRequest
 from hosts.cli.approval_manager_sink import CLIApprovalEventSink
+from safety.approval import PendingApprovalView
 from safety.approval.manager import ApprovalManager, _PendingApproval
 from safety.approval.rules import ApprovalRules
 
@@ -43,6 +46,26 @@ def _pending(
     )
 
 
+def _view_for(pending: _PendingApproval, **overrides: Any) -> PendingApprovalView:
+    data: dict[str, Any] = {
+        "request_id": pending.request_id,
+        "channel": pending.channel,
+        "thread_id": pending.thread_id,
+        "cwd": pending.cwd,
+        "tool_name": pending.tool_name,
+        "tool_input": pending.tool_input,
+        "metadata": pending.metadata,
+        "severity": pending.severity,
+        "matched_rule": pending.matched_rule,
+        "auto_approve_at_ms": pending.auto_approve_at_ms,
+        "auto_reject_at_ms": pending.auto_reject_at_ms,
+        "arrived_at_ms": pending.arrived_at_ms,
+        "timeout_ms": pending.timeout_ms if pending.timeout_ms is not None else 60_000,
+    }
+    data.update(overrides)
+    return PendingApprovalView(**data)
+
+
 # 验证终端返回单次允许时，CLI 接收器回写审批管理器。
 async def test_cli_sink_accept_once_resolves_allow_payload() -> None:
     manager = ApprovalManager(rules=ApprovalRules())
@@ -56,7 +79,7 @@ async def test_cli_sink_accept_once_resolves_allow_payload() -> None:
     manager._pending[pending.request_id] = pending
     sink = CLIApprovalEventSink(manager, prompt)
 
-    await sink.emit_approval_required(pending=pending)
+    await sink.emit_approval_required(pending=_view_for(pending))
 
     assert pending.future.done()
     decision = pending.future.result()
@@ -89,7 +112,7 @@ async def test_cli_sink_projects_auto_approve_metadata() -> None:
     manager._pending[pending.request_id] = pending
     sink = CLIApprovalEventSink(manager, prompt)
 
-    await sink.emit_approval_required(pending=pending)
+    await sink.emit_approval_required(pending=_view_for(pending))
 
     assert pending.future.done()
     assert pending.future.result().outcome == "approved"
@@ -118,7 +141,7 @@ async def test_cli_sink_projects_auto_reject_metadata() -> None:
     manager._pending[pending.request_id] = pending
     sink = CLIApprovalEventSink(manager, prompt)
 
-    await sink.emit_approval_required(pending=pending)
+    await sink.emit_approval_required(pending=_view_for(pending))
 
     assert pending.future.done()
     assert pending.future.result().outcome == "rejected"
@@ -140,7 +163,7 @@ async def test_cli_sink_prompt_exception_rejects() -> None:
     manager._pending[pending.request_id] = pending
     sink = CLIApprovalEventSink(manager, prompt)
 
-    await sink.emit_approval_required(pending=pending)
+    await sink.emit_approval_required(pending=_view_for(pending))
 
     assert pending.future.done()
     assert pending.future.result().outcome == "rejected"
@@ -157,11 +180,24 @@ async def test_cli_sink_projection_exception_rejects() -> None:
         return ApprovalAction.ACCEPT_ONCE
 
     pending = _pending(asyncio.get_running_loop())
-    pending.tool_input = None  # type: ignore[assignment]
     manager._pending[pending.request_id] = pending
     sink = CLIApprovalEventSink(manager, prompt)
+    bad_view = SimpleNamespace(
+        request_id=pending.request_id,
+        channel=pending.channel,
+        thread_id=pending.thread_id,
+        cwd=pending.cwd,
+        tool_name=pending.tool_name,
+        tool_input=None,
+        metadata=pending.metadata,
+        severity=pending.severity,
+        matched_rule=pending.matched_rule,
+        auto_approve_at_ms=pending.auto_approve_at_ms,
+        auto_reject_at_ms=pending.auto_reject_at_ms,
+        timeout_ms=pending.timeout_ms,
+    )
 
-    await sink.emit_approval_required(pending=pending)
+    await sink.emit_approval_required(pending=bad_view)  # type: ignore[arg-type]
 
     assert called is False
     assert pending.future.done()
@@ -179,11 +215,10 @@ async def test_cli_sink_ignores_other_channels() -> None:
         return ApprovalAction.ACCEPT_ONCE
 
     pending = _pending(asyncio.get_running_loop())
-    pending.channel = "generic_chat"
     manager._pending[pending.request_id] = pending
     sink = CLIApprovalEventSink(manager, prompt)
 
-    await sink.emit_approval_required(pending=pending)
+    await sink.emit_approval_required(pending=_view_for(pending, channel="generic_chat"))
 
     assert called is False
     assert pending.future.done() is False

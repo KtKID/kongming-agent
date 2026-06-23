@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from core.contracts import ApprovalDecision, ApprovalRequest
+from safety.approval import PendingApprovalView
 from safety.approval.manager import (
     ApprovalEventSink,
     ApprovalManager,
@@ -538,13 +539,15 @@ async def test_sink_emit_failure_does_not_break_main_flow() -> None:
 async def test_pending_inherits_classify_severity_and_rule_info(
     manager: ApprovalManager,
 ) -> None:
-    """_PendingApproval 字段由 rules.classify 填充（阶段 1 默认值）。"""
+    """fan-out 的 PendingApprovalView 字段由 rules.classify 填充。"""
     sink: Any = AsyncMock(spec=ApprovalEventSink)
     manager.register_event_sink(sink)
+    internal_pending: list[_PendingApproval] = []
 
     async def resolve_later() -> None:
         await asyncio.sleep(0.05)
         req_id = next(iter(manager._pending.keys()))
+        internal_pending.append(manager._pending[req_id])
         manager.resolve(req_id, {"allow": True})
 
     _ = asyncio.create_task(resolve_later())  # noqa: RUF006
@@ -556,7 +559,10 @@ async def test_pending_inherits_classify_severity_and_rule_info(
         tool_input={},
     )
     # 阶段 1 ApprovalRules 默认：standard severity / 无规则命中 / 无自动倒计时
-    pending: _PendingApproval = sink.emit_approval_required.call_args.kwargs["pending"]
+    pending: PendingApprovalView = sink.emit_approval_required.call_args.kwargs["pending"]
+    assert isinstance(pending, PendingApprovalView)
+    assert not hasattr(pending, "future")
+    assert internal_pending[0].future is not None
     assert pending.severity == "standard"
     assert pending.matched_rule is None
     assert pending.auto_approve_at_ms is None
