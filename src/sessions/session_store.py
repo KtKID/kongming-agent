@@ -249,20 +249,24 @@ class SQLiteSession:
     def _migrate_sessions_table_sync(self, conn: sqlite3.Connection) -> None:
         """补齐旧 sessions 表缺失列，输入 sqlite 连接，无返回值。"""
 
-        rows = conn.execute("PRAGMA table_info(sessions)").fetchall()
-        existing = {str(row[1]) for row in rows}
+        existing = self._read_session_columns_sync(conn)
         if "session_id" not in existing:
             raise RuntimeError("sessions table missing required session_id column")
         for name, definition in _SESSION_COLUMNS_SQL.items():
             if name in existing:
                 continue
             conn.execute(f"ALTER TABLE sessions ADD COLUMN {name} {definition}")
-        migrated_rows = conn.execute("PRAGMA table_info(sessions)").fetchall()
-        migrated = {str(row[1]) for row in migrated_rows}
+        migrated = self._read_session_columns_sync(conn)
         missing = set(_SESSION_COLUMN_NAMES) - migrated
         if missing:
             missing_list = ", ".join(sorted(missing))
             raise RuntimeError(f"sessions table migration incomplete: {missing_list}")
+
+    def _read_session_columns_sync(self, conn: sqlite3.Connection) -> set[str]:
+        """读取 sessions 表列名，输入 sqlite 连接，输出列名集合。"""
+
+        rows = conn.execute("PRAGMA table_info(sessions)").fetchall()
+        return {str(row[1]) for row in rows}
 
     def _resolve_created_at_sync(self, conn: sqlite3.Connection, *, now: float) -> float:
         """解析 session 创建时间；优先保留既有 sessions 行，其次兼容旧 messages。"""
@@ -384,10 +388,6 @@ class SQLiteSession:
             conn.execute(
                 "INSERT INTO messages (session_id, seq, payload, created_at) VALUES (?, ?, ?, ?)",
                 (self.session_id, next_seq, payload, now),
-            )
-            conn.execute(
-                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
-                (now, self.session_id),
             )
 
         self._write_transaction_sync(operation)
