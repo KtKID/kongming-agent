@@ -69,10 +69,10 @@ def _create_pairing(client: TestClient, scopes: list[str] | None = None) -> dict
     return response.json()
 
 
-def _cfg_with_public_origin(public_origin: str) -> Config:
-    """构造带移动配对公开 origin 的测试 Config。"""
+def _cfg_with_server_origin(server_origin: str) -> Config:
+    """构造带移动配对 server origin 的测试 Config。"""
     cfg = _make_cfg()
-    web_cfg = cfg.web.model_copy(update={"public_origin": public_origin})
+    web_cfg = cfg.web.model_copy(update={"server_origin": server_origin})
     return cfg.model_copy(update={"web": web_cfg})
 
 
@@ -316,24 +316,24 @@ def test_mobile_pairing_status_view_after_denial(tmp_path: Path) -> None:
         authed.__exit__(None, None, None)
 
 
-def test_mobile_pairing_uses_configured_public_origin(tmp_path: Path) -> None:
-    """验证局域网 public origin 会写入扫码、exchange 和 handoff URL。"""
-    public_origin = "http://192.168.31.23:57567"
-    authed = _authed_client(tmp_path, cfg=_cfg_with_public_origin(public_origin))
+def test_mobile_pairing_uses_configured_server_origin(tmp_path: Path) -> None:
+    """验证局域网 server origin 会写入扫码、exchange 和 handoff URL。"""
+    server_origin = "http://192.168.31.23:57567"
+    authed = _authed_client(tmp_path, cfg=_cfg_with_server_origin(server_origin))
     anonymous = _anonymous_client(authed.app)
     try:
         created = _create_pairing(authed, scopes=["webview"])
-        assert created["copy_url"].startswith(f"{public_origin}/-/xspace/mobile/pair")
+        assert created["copy_url"].startswith(f"{server_origin}/-/xspace/mobile/pair")
 
         copy_query = parse_qs(urlparse(created["copy_url"]).query)
         qr_query = parse_qs(urlparse(created["qr_payload"]).query)
         nonce = copy_query["nonce"][0]
-        assert copy_query["server"] == [public_origin]
-        assert qr_query["server"] == [public_origin]
+        assert copy_query["server"] == [server_origin]
+        assert qr_query["server"] == [server_origin]
 
         pair_page = anonymous.get(created["copy_url"])
         assert pair_page.status_code == 200
-        assert f"server={public_origin.replace(':', '%3A').replace('/', '%2F')}" in pair_page.text
+        assert f"server={server_origin.replace(':', '%3A').replace('/', '%2F')}" in pair_page.text
 
         claim_response = anonymous.post(
             f"/api/xspace/mobile/pairing-sessions/{created['pairing_id']}/claim",
@@ -370,10 +370,10 @@ def test_mobile_pairing_uses_configured_public_origin(tmp_path: Path) -> None:
         )
         assert exchange_response.status_code == 200, exchange_response.text
         exchanged = exchange_response.json()
-        assert exchanged["server"] == public_origin
-        assert exchanged["instance"]["url"] == public_origin
+        assert exchanged["server"] == server_origin
+        assert exchanged["instance"]["url"] == server_origin
         assert exchanged["web_session_url"].startswith(
-            f"{public_origin}/-/xspace/mobile/session/consume?handoff_token=kgm_ht_"
+            f"{server_origin}/-/xspace/mobile/session/consume?handoff_token=kgm_ht_"
         )
 
         handoff_response = anonymous.post(
@@ -382,7 +382,7 @@ def test_mobile_pairing_uses_configured_public_origin(tmp_path: Path) -> None:
         )
         assert handoff_response.status_code == 200, handoff_response.text
         assert handoff_response.json()["web_session_url"].startswith(
-            f"{public_origin}/-/xspace/mobile/session/consume?handoff_token=kgm_ht_"
+            f"{server_origin}/-/xspace/mobile/session/consume?handoff_token=kgm_ht_"
         )
     finally:
         anonymous.close()

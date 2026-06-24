@@ -652,14 +652,6 @@ _FIELD_METAS: list[FieldMeta] = [
         group="host_observ",
     ),
     FieldMeta(
-        path="web.public_origin",
-        type="string",
-        editable=True,
-        desc="兼容旧字段：移动配对二维码和 handoff 使用的公开 origin；新功能优先使用 web.server_origin。需重启生效。",
-        restart_required=True,
-        group="host_observ",
-    ),
-    FieldMeta(
         path="web.host_environment",
         type="enum",
         editable=False,
