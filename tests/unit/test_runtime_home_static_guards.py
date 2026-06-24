@@ -21,8 +21,8 @@ _CURRENT_DOCS = (
     REPO_ROOT / "config" / "README.md",
     REPO_ROOT / "config" / "sitian.local.yaml",
     REPO_ROOT / "sitian.sh",
-    REPO_ROOT / "docs" / "worktree-development.md",
-    REPO_ROOT / "docs" / "xspace-tauri-kongming-migration.md",
+    REPO_ROOT / "docs" / "operations" / "worktree-development.md",
+    REPO_ROOT / "docs" / "integrations" / "xspace" / "tauri-kongming-migration.md",
     REPO_ROOT / "docs" / "modules" / "配置加载" / "README.md",
     REPO_ROOT / "docs" / "modules" / "命令行" / "README.md",
     REPO_ROOT / "docs" / "modules" / "XSpace打包" / "README.md",
@@ -30,7 +30,7 @@ _CURRENT_DOCS = (
     REPO_ROOT / "docs" / "modules" / "进化" / "README.md",
     REPO_ROOT / "docs" / "modules" / "网络" / "README.md",
     REPO_ROOT / "docs" / "modules" / "Web前端" / "README.md",
-    REPO_ROOT / "docs" / "kongming-agent-v1-minimal" / "11-v1-file-layout.md",
+    REPO_ROOT / "docs" / "spec" / "kongming-agent-v1-minimal" / "11-v1-file-layout.md",
 )
 
 _RESOLVER_CONSUMERS = (
