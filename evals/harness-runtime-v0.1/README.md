@@ -20,15 +20,15 @@ Kongming Agent runtime 级评测集。所有题目都在真实 `NativeRuntime + 
 - `base_files`：base commit 的初始仓库内容（模型可见），harness 建临时 git 仓库并 commit；
 - `test_files`：评测方持有的测试（模型不可见），写入后参与裁决；
 - `fail_to_pass`：修复后必须由失败转通过的 pytest node id；
-- `pass_to_pass`：修复必须始终保持通过的回归保护测试 node id；
-- `fixture_response`：标杆 unified diff，供 fixture 模式驱动 harness。
+- `pass_to_pass`：修复必须始终保持通过的回归保护测试 node id，至少声明 1 个；
+- `fixture_response`：标杆 unified diff，供 fixture 模式驱动 harness，可保留模型原始输出视角的 code fence。
 
-打分流程：①基线校验（未打补丁时 `fail_to_pass` 必须失败、`pass_to_pass` 必须通过，否则 case 非法）→ ②`git apply` 模型 diff（失败逐级回退 `git apply --3way` / `patch --fuzz`）→ ③复跑两组测试，`fail_to_pass` 全转通过且 `pass_to_pass` 不退化才判通过。
+打分流程：①基线校验（未打补丁时 `fail_to_pass` 必须失败、`pass_to_pass` 必须通过，否则 case 非法）→ ②`git apply` 模型 diff（失败回退到 `git apply --3way`，保持严格上下文匹配）→ ③复跑两组测试，`fail_to_pass` 全转通过且 `pass_to_pass` 不退化才判通过。
 
 ### `tool_execution` 字段约定
 
 - `expected_calls`：每项 `{name, arguments_contains?}`，scorer 顺序遍历 runtime 捕获的 `tool.call.end` 事件，确保按声明顺序全部命中；
-- `arguments_contains`：子集匹配 tool 调用入参；
+- `arguments_contains`：递归子集匹配 tool 调用入参；字符串按大小写无关子串匹配，dict/list 按期望子集匹配；
 - `final_contains`：最后一次 assistant 文本必须包含的关键词集合；
 - `min_turns`：最小 runner turn 数下限，防止模型短路只回文本。
 
@@ -50,7 +50,7 @@ uv run python scripts/run_kongming_harness_eval.py --environment minimax-full-ci
 
 | environment id | 模式 | profile | LLM preset | 用途 |
 |------|------|------|------|------|
-| `fixture-full` | `fixture` | `full` | — | 验证 harness 闭环、file session、metadata 和报告 |
+| `fixture-full` | `fixture` | `full` | — | 验证 Runner 请求链路、工具闭环、file session、metadata 和报告 |
 | `fixture-baseline` | `fixture` | `baseline-min` | — | 验证空 instructions、memory session、Noop compactor 的最小切片 |
 | `minimax-full-ci` | `preset` | `full` | `minimax-m3` | CI / nightly 真实模型评测 |
 
@@ -67,7 +67,13 @@ print(summary["run_dir"])
 
 ### fixture 模式（默认）
 
-用题目自带 `fixture_response` / 期望 tool_calls 驱动内置伪 LLM provider，用于验证 harness 闭环和 session 落盘，不打真模型：
+用题目自带 `fixture_response` / 期望 tool_calls 驱动内置伪 LLM provider，用于验证 Runner 请求链路、session 落盘和 scorer，跳过真实模型网络调用。
+
+fixture 模式的验证边界：
+
+- `tool_execution` 题会通过真实 Runner 产生 tool_call、执行 eval fake tools、回填 tool_result，并进入第二轮 LLM；
+- 其他题型使用伪 LLM 的确定性 `LLMResponse` 驱动 `NativeRuntime.run()`，验证 request/response 路径、session 落盘和 scorer 语义；
+- eval fake tools 由独立 `ToolRegistry` 提供，替换本评测题所需工具名的生产实现，保证 fixture 结果可重复。
 
 ```bash
 uv run python scripts/run_kongming_harness_eval.py

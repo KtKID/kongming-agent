@@ -406,12 +406,17 @@ def _run_pytest_nodes(
 ) -> dict[str, Any]:
     """在 sandbox 内按 pytest node id 选择性运行测试，输入目录/节点列表/超时，输出进程结果。
 
-    node id 形如 `tests/test_x.py::test_name`；空列表视为通过（exit_code=0），
-    用于 FAIL_TO_PASS / PASS_TO_PASS 两组测试的分别裁决。
+    node id 形如 `tests/test_x.py::test_name`；调用方负责保证列表非空，
+    避免把“未运行任何测试”误判为通过。
     """
 
     if not node_ids:
-        return {"exit_code": 0, "duration_ms": 0, "output": "", "skipped": True}
+        return {
+            "exit_code": 2,
+            "duration_ms": 0,
+            "output": "no pytest nodes configured",
+            "skipped": True,
+        }
     env = os.environ.copy()
     existing_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = (
@@ -479,8 +484,8 @@ def _init_repo_with_base(repo_dir: Path, base_files: dict[str, Any]) -> None:
 def _apply_model_diff(repo_dir: Path, diff_text: str) -> dict[str, Any]:
     """把模型产出的 diff 应用到 base 仓库，输入仓库目录和 patch 文本，输出应用结果。
 
-    应用策略由严到宽逐级回退：``git apply`` → ``git apply --3way`` →
-    ``patch -p1 --fuzz=3``（仅当系统存在 patch）。任一成功即 applied=True。
+    应用策略限定为 ``git apply`` → ``git apply --3way``。不启用 fuzzy patch，
+    避免上下文错位时把错误补丁误判为可接受结果。
     """
 
     if not diff_text.strip():
@@ -494,20 +499,6 @@ def _apply_model_diff(repo_dir: Path, diff_text: str) -> dict[str, Any]:
     if three_way.returncode == 0:
         return {"applied": True, "strategy": "git-apply-3way", "output": three_way.stdout}
     attempts.append(f"git-apply-3way:\n{three_way.stdout}")
-    patch_bin = shutil.which("patch")
-    if patch_bin:
-        patch_proc = subprocess.run(
-            [patch_bin, "-p1", "--fuzz=3", "--no-backup-if-mismatch"],
-            cwd=repo_dir,
-            text=True,
-            input=diff_text,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-        if patch_proc.returncode == 0:
-            return {"applied": True, "strategy": "patch-fuzz", "output": patch_proc.stdout}
-        attempts.append(f"patch-fuzz:\n{patch_proc.stdout}")
     return {"applied": False, "strategy": None, "output": "\n---\n".join(attempts)}
 
 
@@ -603,6 +594,8 @@ def _score_swebench_diff(task: Task, response: str, sandbox_dir: Path) -> ScoreR
         return ScoreResult(False, 0.0, {"error": "scoring.base_files is required"})
     if not fail_to_pass:
         return ScoreResult(False, 0.0, {"error": "scoring.fail_to_pass is required"})
+    if not pass_to_pass:
+        return ScoreResult(False, 0.0, {"error": "scoring.pass_to_pass is required"})
 
     repo_dir = sandbox_dir / "repo"
     _init_repo_with_base(repo_dir, base_files)
@@ -653,13 +646,31 @@ def _arguments_contain(actual: dict[str, Any], expected: dict[str, Any]) -> bool
     for key, expected_value in expected.items():
         if key not in actual:
             return False
-        actual_value = actual[key]
-        if isinstance(expected_value, str) and isinstance(actual_value, str):
-            if expected_value.lower() not in actual_value.lower():
-                return False
-        elif actual_value != expected_value:
+        if not _expected_value_matches(actual[key], expected_value):
             return False
     return True
+
+
+def _expected_value_matches(actual_value: Any, expected_value: Any) -> bool:
+    """递归执行参数子集匹配，输入实际值和期望值，输出布尔结果。"""
+
+    if isinstance(expected_value, str) and isinstance(actual_value, str):
+        return expected_value.lower() in actual_value.lower()
+    if isinstance(expected_value, dict):
+        if not isinstance(actual_value, dict):
+            return False
+        return all(
+            key in actual_value and _expected_value_matches(actual_value[key], nested_expected)
+            for key, nested_expected in expected_value.items()
+        )
+    if isinstance(expected_value, list):
+        if not isinstance(actual_value, list):
+            return False
+        return all(
+            any(_expected_value_matches(actual_item, expected_item) for actual_item in actual_value)
+            for expected_item in expected_value
+        )
+    return actual_value == expected_value
 
 
 def score_response(task: Task, response: str, task_run_dir: Path) -> ScoreResult:
@@ -668,15 +679,18 @@ def score_response(task: Task, response: str, task_run_dir: Path) -> ScoreResult
     scoring_type = task.scoring["type"]
     sandbox_dir = task_run_dir / "sandbox"
     sandbox_dir.mkdir(parents=True, exist_ok=True)
-    if scoring_type == "exact_text":
-        return _score_exact_text(task, response)
-    if scoring_type == "json":
-        return _score_json(task, response)
-    if scoring_type == "python_code":
-        return _score_python_code(task, response, sandbox_dir)
-    if scoring_type == "swebench_diff":
-        return _score_swebench_diff(task, response, sandbox_dir)
-    raise ValueError(f"unsupported scoring type: {scoring_type}")
+    try:
+        if scoring_type == "exact_text":
+            return _score_exact_text(task, response)
+        if scoring_type == "json":
+            return _score_json(task, response)
+        if scoring_type == "python_code":
+            return _score_python_code(task, response, sandbox_dir)
+        if scoring_type == "swebench_diff":
+            return _score_swebench_diff(task, response, sandbox_dir)
+        raise ValueError(f"unsupported scoring type: {scoring_type}")
+    finally:
+        shutil.rmtree(sandbox_dir, ignore_errors=True)
 
 
 def _tool_calls_from_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -978,7 +992,11 @@ class EvalCallMcpTool(BaseBuiltinTool):
 
 
 def build_eval_tools() -> ToolRegistry:
-    """构造评测 fake tools，输入为空，输出 ToolRegistry。"""
+    """构造评测 fake tools，输入为空，输出独立 ToolRegistry。
+
+    fixture 模式直接把该 registry 传入 NativeRuntime.build，不与生产 builtin tools
+    合并，确保评测工具名由确定性 fake tools 接管。
+    """
 
     return ToolRegistry(
         [
@@ -1375,8 +1393,27 @@ def _approval_provider_for(mode: str):
     if mode == "auto_allow":
         return AutoAllowApproval()
     if mode == "interactive":
+        if not sys.stdin.isatty():
+            raise RuntimeError("interactive approval requires a TTY")
         return InteractiveApproval(_prompt_eval_approval)
     raise ValueError(f"unsupported effective approval mode: {mode}")
+
+
+def _fixture_semantics(environment: ResolvedEvalEnvironment) -> dict[str, Any] | None:
+    """描述 fixture 模式验证边界，输入环境，输出 summary 元数据。"""
+
+    if environment.mode != "fixture":
+        return None
+    return {
+        "uses_real_runner": True,
+        "uses_real_llm_provider": False,
+        "tool_execution_checks_tool_loop": True,
+        "non_tool_tasks_check": [
+            "NativeRuntime.run request/response path",
+            "session persistence",
+            "deterministic scorer behavior",
+        ],
+    }
 
 
 def load_runtime_config(
@@ -1474,6 +1511,7 @@ async def run_task(
         "task_runtime": task.runtime,
     }
     task_home = run_dir / "tasks" / task.id / "kongming_home"
+    runtime: NativeRuntime | None = None
     try:
         with isolated_home(task_home):
             config = load_runtime_config(
@@ -1512,6 +1550,9 @@ async def run_task(
                 ),
             )
             if environment.mode == "fixture" and not environment.preset:
+                original_aclose = getattr(runtime.llm, "aclose", None)
+                if original_aclose is not None:
+                    await original_aclose()
                 runtime._llm = FixtureRuntimeLLM(task)  # type: ignore[attr-defined]
             result = await runtime.run(task.prompt, session_id=f"{run_id}-{task.id}")
             result_status = result.status
@@ -1523,6 +1564,10 @@ async def run_task(
                 error = str(result.error) if result.error else result.status
     except Exception as exc:
         error = str(exc)
+    finally:
+        if runtime is not None:
+            with contextlib.suppress(Exception):
+                await runtime.aclose()
 
     task_run_dir = run_dir / "tasks" / task.id
     if task.scoring.get("type") == "tool_execution":
@@ -1635,6 +1680,9 @@ async def run_resolved_environment(
         "categories": categories,
         "run_dir": str(run_dir),
     }
+    fixture_semantics = _fixture_semantics(environment)
+    if fixture_semantics is not None:
+        summary["fixture_semantics"] = fixture_semantics
     _write_json(run_dir / "summary.json", summary)
     _write_json(run_dir / "tasks.json", {"tasks": task_records})
     (run_dir / "report.md").write_text(render_report(summary, task_records), encoding="utf-8")
@@ -1753,6 +1801,13 @@ def render_report(summary: dict[str, Any], task_records: list[dict[str, Any]]) -
     """生成中文 Markdown 报告，输入汇总和题目记录，输出 Markdown 文本。"""
 
     environment = summary.get("environment") if isinstance(summary.get("environment"), dict) else {}
+    fixture_semantics = summary.get("fixture_semantics")
+    fixture_line = ""
+    if isinstance(fixture_semantics, dict):
+        fixture_line = (
+            "- Fixture 验证边界：`真实 Runner + 确定性伪 LLM；tool_execution 覆盖工具闭环，"
+            "非工具题覆盖 runtime 请求、session 落盘和 scorer`"
+        )
     category_rows = []
     for category, item in sorted(summary["categories"].items()):
         category_rows.append(
@@ -1787,6 +1842,7 @@ def render_report(summary: dict[str, Any], task_records: list[dict[str, Any]]) -
             f"- Output dir：`{environment.get('output_dir') or ''}`",
             f"- API keys present：`{json.dumps(environment.get('api_keys_present') or {}, ensure_ascii=False)}`",
             f"- Override sources：`{json.dumps(environment.get('override_sources') or {}, ensure_ascii=False)}`",
+            fixture_line,
             f"- 通过数：`{summary['passed']} / {summary['total']}`",
             f"- 总分：`{summary['score']:.2f}`",
             "",

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 import json
 import os
@@ -28,7 +27,8 @@ def _load_runner_module():
 
 
 @pytest.mark.unit
-def test_fixture_runtime_suite_runs_real_tool_loop(
+@pytest.mark.asyncio
+async def test_fixture_runtime_suite_runs_real_tool_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -37,19 +37,12 @@ def test_fixture_runtime_suite_runs_real_tool_loop(
     monkeypatch.delenv("KONGMING_HOME", raising=False)
     runner = _load_runner_module()
 
-    exit_code = runner.main(
-        [
-            "--environment",
-            "fixture-full",
-            "--run-id",
-            "unit-runtime",
-            "--output-dir",
-            str(tmp_path),
-        ]
+    await runner.run_harness_environment(
+        "fixture-full",
+        runner.EvalEnvironmentOverrides(run_id="unit-runtime", output_dir=str(tmp_path)),
     )
 
     run_dir = tmp_path / "unit-runtime"
-    assert exit_code == 0
     assert os.environ.get("KONGMING_HOME") is None
     summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
     assert summary["total"] == 9
@@ -59,10 +52,21 @@ def test_fixture_runtime_suite_runs_real_tool_loop(
     assert summary["profile"] == "full"
     assert summary["approval_mode"] == "auto_allow"
     assert summary["session_backend"] == "file"
+    assert summary["fixture_semantics"] == {
+        "uses_real_runner": True,
+        "uses_real_llm_provider": False,
+        "tool_execution_checks_tool_loop": True,
+        "non_tool_tasks_check": [
+            "NativeRuntime.run request/response path",
+            "session persistence",
+            "deterministic scorer behavior",
+        ],
+    }
     report = (run_dir / "report.md").read_text(encoding="utf-8")
     assert "工具执行" in report
     assert "通过数：`9 / 9`" in report
     assert "环境预设：`fixture-full`" in report
+    assert "Fixture 验证边界" in report
     assert "Environment config hash：`sha256:" in report
     assert "API keys present：`{}" in report
 
@@ -233,23 +237,20 @@ def test_environment_resolver_records_preset_key_presence(
 
 
 @pytest.mark.unit
-def test_python_api_runs_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_python_api_runs_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Python API 必须能按 environment id 直接运行 suite。"""
 
     monkeypatch.delenv("KONGMING_HOME", raising=False)
     runner = _load_runner_module()
 
-    summary = asyncio.run(
-        runner.run_harness_environment(
-            "fixture-full",
-            runner.EvalEnvironmentOverrides(run_id="unit-python-api", output_dir=str(tmp_path)),
-        )
+    summary = await runner.run_harness_environment(
+        "fixture-full",
+        runner.EvalEnvironmentOverrides(run_id="unit-python-api", output_dir=str(tmp_path)),
     )
-    rerun_summary = asyncio.run(
-        runner.run_harness_environment(
-            "fixture-full",
-            runner.EvalEnvironmentOverrides(run_id="unit-python-api", output_dir=str(tmp_path)),
-        )
+    rerun_summary = await runner.run_harness_environment(
+        "fixture-full",
+        runner.EvalEnvironmentOverrides(run_id="unit-python-api", output_dir=str(tmp_path)),
     )
 
     assert summary["passed"] == summary["total"] == 9
@@ -261,17 +262,16 @@ def test_python_api_runs_environment(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 @pytest.mark.unit
 @pytest.mark.parametrize("bad_run_id", ["../escape", ".", "..", "...", ""])
-def test_run_id_rejects_path_segments(bad_run_id: str) -> None:
+@pytest.mark.asyncio
+async def test_run_id_rejects_path_segments(bad_run_id: str) -> None:
     """run_id 必须是单段路径名，避免输出目录逃逸。"""
 
     runner = _load_runner_module()
 
     with pytest.raises(ValueError, match="run_id must contain"):
-        asyncio.run(
-            runner.run_harness_environment(
-                "fixture-full",
-                runner.EvalEnvironmentOverrides(run_id=bad_run_id),
-            )
+        await runner.run_harness_environment(
+            "fixture-full",
+            runner.EvalEnvironmentOverrides(run_id=bad_run_id),
         )
 
 
@@ -346,3 +346,80 @@ def test_tool_execution_scorer_reports_missing_call(tmp_path: Path) -> None:
     assert score.passed is False
     assert score.score == 0.0
     assert "missing call read_file" in score.details["failures"]
+
+
+@pytest.mark.unit
+def test_arguments_contain_supports_nested_subset() -> None:
+    """tool 参数子集匹配必须支持嵌套 dict/list。"""
+
+    runner = _load_runner_module()
+
+    assert runner._arguments_contain(
+        {
+            "query": "Runner.run implementation",
+            "filters": {"paths": ["src/core/runner.py", "tests/unit/test_runner.py"]},
+            "tags": [{"name": "runtime", "score": 1}, {"name": "tooling", "score": 2}],
+        },
+        {
+            "query": "runner.run",
+            "filters": {"paths": ["src/core/runner.py"]},
+            "tags": [{"name": "runtime"}],
+        },
+    )
+
+
+@pytest.mark.unit
+def test_swebench_diff_requires_pass_to_pass(tmp_path: Path) -> None:
+    """swebench_diff 必须声明至少一个 pass_to_pass 回归保护测试。"""
+
+    runner = _load_runner_module()
+    task = runner.Task(
+        id="repo-fix-no-regression",
+        category="repo_fix",
+        source="unit",
+        prompt="fix",
+        scoring={
+            "type": "swebench_diff",
+            "base_files": {"src/app.py": "def value():\n    return 1\n"},
+            "test_files": {
+                "tests/test_app.py": (
+                    "from src.app import value\n\ndef test_value():\n    assert value() == 2\n"
+                )
+            },
+            "fail_to_pass": ["tests/test_app.py::test_value"],
+            "pass_to_pass": [],
+        },
+        fixture_response="",
+        runtime={},
+        path=tmp_path / "task.yaml",
+    )
+
+    score = runner.score_response(task, "", tmp_path / "run")
+
+    assert score.passed is False
+    assert score.details["error"] == "scoring.pass_to_pass is required"
+
+
+@pytest.mark.unit
+def test_apply_model_diff_rejects_fuzzy_only_patch(tmp_path: Path) -> None:
+    """diff 只能靠 fuzzy patch 应用时必须失败。"""
+
+    runner = _load_runner_module()
+    repo_dir = tmp_path / "repo"
+    runner._init_repo_with_base(repo_dir, {"src/app.py": "line1\nline2\nline3\nline4\n"})
+    diff_text = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1,4 +1,4 @@
+-lineA
++lineA changed
+ lineB
+ lineC
+ lineD
+"""
+
+    result = runner._apply_model_diff(repo_dir, diff_text)
+
+    assert result["applied"] is False
+    assert result["strategy"] is None
+    assert "patch-fuzz" not in result["output"]
