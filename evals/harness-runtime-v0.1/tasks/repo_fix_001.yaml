@@ -1,0 +1,51 @@
+id: repo_fix_001
+category: repo_fix
+source: public_style:swebench
+prompt: |
+  下面是一个小仓库当前的源码。summarize_events 会把空字符串也计入事件总数，
+  导致统计偏高。请定位并修复这个 bug。
+
+  仓库文件 src/event_summary.py 当前内容：
+  ```python
+  def summarize_events(events: list[str]) -> dict[str, int]:
+      return {"total": len(events), "unique": len(set(events))}
+  ```
+
+  只输出一个 unified diff（git diff 格式，以 `diff --git` 或 `---` 开头），
+  不要输出任何解释或 Markdown 说明文字。
+scoring:
+  type: swebench_diff
+  timeout_seconds: 30
+  base_files:
+    src/event_summary.py: |
+      def summarize_events(events: list[str]) -> dict[str, int]:
+          return {"total": len(events), "unique": len(set(events))}
+  test_files:
+    tests/test_event_summary.py: |
+      from src.event_summary import summarize_events
+
+
+      def test_ignores_empty_events():
+          assert summarize_events(["run.start", "", "run.start", "tool.done"]) == {
+              "total": 3,
+              "unique": 2,
+          }
+
+
+      def test_counts_normal_events():
+          assert summarize_events(["a", "b", "a"]) == {"total": 3, "unique": 2}
+  fail_to_pass:
+    - tests/test_event_summary.py::test_ignores_empty_events
+  pass_to_pass:
+    - tests/test_event_summary.py::test_counts_normal_events
+fixture_response: |
+  ```diff
+  diff --git a/src/event_summary.py b/src/event_summary.py
+  --- a/src/event_summary.py
+  +++ b/src/event_summary.py
+  @@ -1,2 +1,3 @@
+   def summarize_events(events: list[str]) -> dict[str, int]:
+  -    return {"total": len(events), "unique": len(set(events))}
+  +    filtered = [event for event in events if event]
+  +    return {"total": len(filtered), "unique": len(set(filtered))}
+  ```

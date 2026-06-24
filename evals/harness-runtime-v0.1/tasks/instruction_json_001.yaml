@@ -1,0 +1,20 @@
+id: instruction_json_001
+category: instruction_following
+source: public_style:ifeval
+prompt: |
+  请只输出一个 JSON 对象，不要使用 Markdown。
+  JSON 必须包含三个字段：
+  - "answer": 字符串，值必须是 "ready"
+  - "tags": 字符串数组，必须包含 "harness" 和 "eval"
+  - "count": 整数，值必须是 2
+scoring:
+  type: json
+  equals:
+    answer: ready
+    count: 2
+  list_contains:
+    tags:
+      - harness
+      - eval
+fixture_response: |
+  {"answer":"ready","tags":["harness","eval"],"count":2}

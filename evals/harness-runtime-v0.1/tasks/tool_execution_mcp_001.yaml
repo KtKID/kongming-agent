@@ -1,0 +1,26 @@
+id: tool_execution_mcp_001
+category: tool_execution
+source: self_built
+prompt: |
+  请使用可用 MCP 相关工具查看 xcodeatlas 项目的依赖图摘要。
+
+  最终用中文一句话说明依赖图摘要，答案必须提到 xcodeatlas、core、tools 和 runtime_assembly。
+scoring:
+  type: tool_execution
+  expected_calls:
+    - name: list_mcp_servers
+    - name: list_mcp_tools
+      arguments_contains:
+        server_id: xcodeatlas
+    - name: call_mcp_tool
+      arguments_contains:
+        server_id: xcodeatlas
+        tool_name: graph
+  final_contains:
+    - xcodeatlas
+    - core
+    - tools
+    - runtime_assembly
+  min_turns: 2
+fixture_response: |
+  xcodeatlas 依赖图摘要显示 core、tools、runtime_assembly、infrastructure 和 hosts 之间存在调用关系，其中 core -> tools -> runtime_assembly 是关键链路。

@@ -1,0 +1,32 @@
+id: coding_normalize_001
+category: coding
+source: public_style:livecodebench
+prompt: |
+  写一个 Python 函数 normalize_tool_name(name: str) -> str。
+  要求：
+  - 去掉首尾空白
+  - 转小写
+  - 把连续的非字母数字字符替换成单个下划线
+  - 去掉首尾下划线
+  只输出 Python 代码。
+scoring:
+  type: python_code
+  solution_file: solution.py
+  tests:
+    - path: test_solution.py
+      content: |
+        from solution import normalize_tool_name
+
+
+        def test_normalize_tool_name():
+            assert normalize_tool_name(" Runner.run ") == "runner_run"
+            assert normalize_tool_name("MCP Tool Adapter") == "mcp_tool_adapter"
+            assert normalize_tool_name("__Agent---Harness!!") == "agent_harness"
+fixture_response: |
+  import re
+
+
+  def normalize_tool_name(name: str) -> str:
+      value = name.strip().lower()
+      value = re.sub(r"[^0-9a-z]+", "_", value)
+      return value.strip("_")
