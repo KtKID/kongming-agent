@@ -250,6 +250,36 @@ def test_environment_resolver_rejects_mode_preset_conflict() -> None:
 
 
 @pytest.mark.unit
+def test_environment_resolver_rejects_fixture_environment_with_preset(tmp_path: Path) -> None:
+    """environment YAML 中 fixture mode 也不能携带 preset。"""
+
+    runner = _load_runner_module()
+    env_path = tmp_path / "environments.yaml"
+    env_path.write_text(
+        """
+environments:
+  fixture-with-preset:
+    suite: evals/harness-runtime-v0.1
+    mode: fixture
+    preset: minimax-m3
+    profile: full
+    approval_mode: auto_allow
+    runner:
+      max_turns: 50
+    artifacts:
+      output_dir: evals/harness-runtime-v0.1/runs
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="fixture mode cannot be combined with preset"):
+        runner.resolve_eval_environment(
+            "fixture-with-preset",
+            runner.EvalEnvironmentOverrides(environment_config=str(env_path)),
+        )
+
+
+@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_python_api_runs_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Python API 必须能按 environment id 直接运行 suite。"""
@@ -414,6 +444,46 @@ def test_swebench_diff_requires_pass_to_pass(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_swebench_diff_stops_when_baseline_invalid(tmp_path: Path) -> None:
+    """baseline 非法时必须短路，避免继续应用模型 diff。"""
+
+    runner = _load_runner_module()
+    task = runner.Task(
+        id="repo-fix-baseline-invalid",
+        category="repo_fix",
+        source="unit",
+        prompt="fix",
+        scoring={
+            "type": "swebench_diff",
+            "base_files": {"src/app.py": "def value():\n    return 1\n"},
+            "test_files": {
+                "tests/test_app.py": (
+                    "from src.app import value\n\ndef test_value():\n    assert value() == 1\n"
+                )
+            },
+            "fail_to_pass": ["tests/test_app.py::test_value"],
+            "pass_to_pass": ["tests/test_app.py::test_value"],
+        },
+        fixture_response="""diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1,2 +1,2 @@
+ def value():
+-    return 1
++    return 2
+""",
+        runtime={},
+        path=tmp_path / "task.yaml",
+    )
+
+    score = runner.score_response(task, task.fixture_response or "", tmp_path / "run")
+
+    assert score.passed is False
+    assert score.details["phase"] == "baseline-invalid"
+    assert "apply" not in score.details
+
+
+@pytest.mark.unit
 def test_apply_model_diff_rejects_fuzzy_only_patch(tmp_path: Path) -> None:
     """diff 只能靠 fuzzy patch 应用时必须失败。"""
 
@@ -467,9 +537,11 @@ def test_pytest_env_uses_sandbox_only_pythonpath(
 
     runner = _load_runner_module()
     monkeypatch.setenv("PYTHONPATH", "/tmp/host-path")
+    monkeypatch.setenv("OPENAI_API_KEY", "secret")
 
     env = runner._pytest_env(tmp_path)
 
     assert env["PYTHONPATH"] == str(tmp_path)
     assert env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
     assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert "OPENAI_API_KEY" not in env

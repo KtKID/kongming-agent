@@ -377,7 +377,21 @@ def _write_file(root: Path, relative_path: str, content: str) -> Path:
 def _pytest_env(sandbox_dir: Path) -> dict[str, str]:
     """构造 pytest 子进程环境，输入 sandbox 目录，输出收窄后的环境变量。"""
 
-    env = os.environ.copy()
+    keep_keys = {
+        "PATH",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "SYSTEMROOT",
+        "COMSPEC",
+        "PATHEXT",
+    }
+    env = {
+        key: value for key, value in os.environ.items() if key in keep_keys or key.startswith("LC_")
+    }
     env["PYTHONPATH"] = str(sandbox_dir)
     env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -396,6 +410,7 @@ def _run_pytest(sandbox_dir: Path, timeout_seconds: int) -> dict[str, Any]:
             "-q",
             "--rootdir",
             str(sandbox_dir),
+            "--noconftest",
             "-p",
             "no:cacheprovider",
         ],
@@ -439,6 +454,7 @@ def _run_pytest_nodes(
             "-q",
             "--rootdir",
             str(sandbox_dir),
+            "--noconftest",
             "-p",
             "no:cacheprovider",
             *node_ids,
@@ -677,6 +693,17 @@ def _score_swebench_diff(task: Task, response: str, sandbox_dir: Path) -> ScoreR
     baseline_fail = _run_pytest_nodes(repo_dir, fail_to_pass, timeout_seconds)
     baseline_pass = _run_pytest_nodes(repo_dir, pass_to_pass, timeout_seconds)
     baseline_valid = baseline_fail["exit_code"] != 0 and baseline_pass["exit_code"] == 0
+    if not baseline_valid:
+        return ScoreResult(
+            False,
+            0.0,
+            {
+                "phase": "baseline-invalid",
+                "baseline_valid": False,
+                "fail_to_pass": {"before": baseline_fail},
+                "pass_to_pass": {"before": baseline_pass},
+            },
+        )
 
     diff_text = _extract_diff(response)
     apply_result = _apply_model_diff(repo_dir, diff_text)
@@ -1343,6 +1370,8 @@ def resolve_eval_environment(
     preset = str(preset_raw) if preset_raw is not None else None
     if mode == "preset" and not preset:
         raise ValueError("preset mode requires a preset id")
+    if mode == "fixture" and preset:
+        raise ValueError("fixture mode cannot be combined with preset")
 
     profile = _validate_choice(
         str(
