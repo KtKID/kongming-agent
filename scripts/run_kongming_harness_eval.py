@@ -379,12 +379,8 @@ def _pytest_env(sandbox_dir: Path) -> dict[str, str]:
 
     keep_keys = {
         "PATH",
-        "HOME",
         "LANG",
         "LC_ALL",
-        "TMPDIR",
-        "TEMP",
-        "TMP",
         "SYSTEMROOT",
         "COMSPEC",
         "PATHEXT",
@@ -392,6 +388,14 @@ def _pytest_env(sandbox_dir: Path) -> dict[str, str]:
     env = {
         key: value for key, value in os.environ.items() if key in keep_keys or key.startswith("LC_")
     }
+    home_dir = sandbox_dir / ".home"
+    temp_dir = sandbox_dir / ".tmp"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    env["HOME"] = str(home_dir)
+    env["TMPDIR"] = str(temp_dir)
+    env["TEMP"] = str(temp_dir)
+    env["TMP"] = str(temp_dir)
     env["PYTHONPATH"] = str(sandbox_dir)
     env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -1149,17 +1153,33 @@ def _fixture_tool_calls(task: Task) -> list[ToolCall]:
 
     calls: list[ToolCall] = []
     for index, expected in enumerate(task.scoring.get("expected_calls", []), start=1):
-        arguments = dict(expected.get("arguments") or expected.get("arguments_contains") or {})
+        tool_name = str(expected["name"])
+        arguments = dict(_fixture_default_arguments(tool_name))
+        arguments.update(dict(expected.get("arguments") or {}))
         if expected.get("name") == "call_mcp_tool":
             arguments.setdefault("args", {"format": "summary"})
         calls.append(
             ToolCall(
                 call_id=f"fixture-call-{index}",
-                tool_name=str(expected["name"]),
+                tool_name=tool_name,
                 arguments=arguments,
             )
         )
     return calls
+
+
+def _fixture_default_arguments(tool_name: str) -> dict[str, Any]:
+    """返回 fixture fake tool 的最小可运行参数，输入工具名，输出参数字典。"""
+
+    if tool_name == "search_code":
+        return {"query": "Runner.run"}
+    if tool_name == "read_file":
+        return {"path": "src/core/runner.py"}
+    if tool_name == "list_mcp_tools":
+        return {"server_id": "xcodeatlas"}
+    if tool_name == "call_mcp_tool":
+        return {"server_id": "xcodeatlas", "tool_name": "graph", "args": {"format": "summary"}}
+    return {}
 
 
 class EvalNoopCompactor:

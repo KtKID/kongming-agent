@@ -443,6 +443,34 @@ def test_arguments_contain_supports_nested_subset() -> None:
 
 
 @pytest.mark.unit
+def test_fixture_tool_calls_do_not_use_arguments_contains_as_arguments() -> None:
+    """fixture tool_call 参数必须来自默认值和显式 arguments。"""
+
+    runner = _load_runner_module()
+    task = runner.Task(
+        id="tool-execution-test",
+        category="tool_execution",
+        source="unit",
+        prompt="use tools",
+        scoring={
+            "type": "tool_execution",
+            "expected_calls": [
+                {"name": "search_code", "arguments_contains": {"query": "not-used"}},
+                {"name": "read_file", "arguments": {"path": "src/core/runner.py"}},
+            ],
+        },
+        fixture_response=None,
+        runtime={},
+        path=Path("task.yaml"),
+    )
+
+    calls = runner._fixture_tool_calls(task)
+
+    assert calls[0].arguments == {"query": "Runner.run"}
+    assert calls[1].arguments == {"path": "src/core/runner.py"}
+
+
+@pytest.mark.unit
 def test_swebench_diff_requires_pass_to_pass(tmp_path: Path) -> None:
     """swebench_diff 必须声明至少一个 pass_to_pass 回归保护测试。"""
 
@@ -644,6 +672,10 @@ def test_pytest_env_uses_sandbox_only_pythonpath(
     env = runner._pytest_env(tmp_path)
 
     assert env["PYTHONPATH"] == str(tmp_path)
+    assert env["HOME"] == str(tmp_path / ".home")
+    assert env["TMPDIR"] == str(tmp_path / ".tmp")
+    assert env["TEMP"] == str(tmp_path / ".tmp")
+    assert env["TMP"] == str(tmp_path / ".tmp")
     assert env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
     assert env["PYTHONDONTWRITEBYTECODE"] == "1"
     assert "OPENAI_API_KEY" not in env
