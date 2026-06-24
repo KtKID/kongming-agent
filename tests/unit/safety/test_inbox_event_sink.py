@@ -10,10 +10,11 @@
 
 from __future__ import annotations
 
-import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from safety.approval.manager import ApprovalManager, _PendingApproval
+from safety.approval import PendingApprovalView
+from safety.approval.manager import ApprovalManager
 from safety.inbox.event_sink import InboxEventSink
 
 
@@ -31,14 +32,13 @@ def _make_pending(
     auto_reject_at_ms: int | None = None,
     arrived_at_ms: int = 1234,
     timeout_ms: int | None = 60_000,
-) -> _PendingApproval:
-    """构造 _PendingApproval fixture。
+) -> PendingApprovalView:
+    """构造 PendingApprovalView fixture。
 
-    sink 不读 ``future``，所以直接塞 ``MagicMock()`` 兼容 dataclass 字段要求。
     ``timeout_ms`` 默认 60_000 与 manager.request 默认 actual_timeout_ms 行为一致；
     测试用例可显式传 None 验证兜底分支。
     """
-    return _PendingApproval(
+    return PendingApprovalView(
         request_id=request_id,
         channel=channel,
         thread_id=thread_id,
@@ -50,9 +50,8 @@ def _make_pending(
         matched_rule=matched_rule,
         auto_approve_at_ms=auto_approve_at_ms,
         auto_reject_at_ms=auto_reject_at_ms,
-        future=MagicMock(spec=asyncio.Future),
         arrived_at_ms=arrived_at_ms,
-        timeout_ms=timeout_ms,
+        timeout_ms=timeout_ms if timeout_ms is not None else 60_000,
     )
 
 
@@ -118,10 +117,10 @@ class TestEmitApprovalRequired:
         assert payload["autoRejectAtMs"] == 30_000
 
     async def test_payload_timeout_ms_from_pending(self) -> None:
-        """pending.timeout_ms 透传到 broadcaster.emit_add 的 payload.timeoutMs。
+        """pending view 的 timeout_ms 透传到 broadcaster.emit_add 的 payload.timeoutMs。
 
         覆盖 smart-approval-generic-chat-autoallow 任务 #1 P0 约束：
-        sink 从 _PendingApproval.timeout_ms 取实际超时值并以 camelCase
+        sink 从 PendingApprovalView.timeout_ms 取实际超时值并以 camelCase
         ``timeoutMs`` 写入 add 帧 payload，与前端 fallback 倒计时契约对齐。
         """
         broadcaster = AsyncMock()
@@ -138,15 +137,28 @@ class TestEmitApprovalRequired:
         assert isinstance(payload["timeoutMs"], int)
 
     async def test_payload_timeout_ms_fallback_when_none(self) -> None:
-        """pending.timeout_ms=None 时 sink 兜底 60_000（防御未来直构 _PendingApproval）。"""
+        """pending.timeout_ms=None 时 sink 兜底 60_000（防御未来直构假对象）。"""
         broadcaster = AsyncMock()
         broadcaster.register_resolve_target = MagicMock()
         manager = MagicMock(spec=ApprovalManager)
 
         sink = InboxEventSink(broadcaster=broadcaster, manager=manager)
-        pending = _make_pending(timeout_ms=None)
+        pending = SimpleNamespace(
+            request_id="r1",
+            channel="generic_chat",
+            thread_id="t1",
+            cwd="/tmp",
+            tool_name="Bash",
+            tool_input={"command": "ls"},
+            severity="standard",
+            matched_rule=None,
+            auto_approve_at_ms=None,
+            auto_reject_at_ms=None,
+            arrived_at_ms=1234,
+            timeout_ms=None,
+        )
 
-        await sink.emit_approval_required(pending=pending)
+        await sink.emit_approval_required(pending=pending)  # type: ignore[arg-type]
 
         payload = broadcaster.emit_add.call_args.args[0]
         assert payload["timeoutMs"] == 60_000

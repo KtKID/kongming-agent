@@ -1,23 +1,22 @@
 """AvatarApprovalSink 单元测试。
 
-本脚本验证审批 pending 能注册到 Avatar message registry。关键流程是构造
-_PendingApproval fixture，调用 AvatarApprovalSink.emit_approval_required，再用
+本脚本验证审批 pending view 能注册到 Avatar message registry。关键流程是构造
+PendingApprovalView fixture，调用 AvatarApprovalSink.emit_approval_required，再用
 AvatarManager.list_messages 查询真实 SQLite repository。关键函数职责：固定
 source/action/metadata 映射和 Web 装配幂等注册。
 """
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 from hosts.web.avatar import AvatarManager, AvatarMessageListQuery, AvatarMessageStatus
 from hosts.web.avatar.approval_sink import AvatarApprovalSink
 from hosts.web.avatar.repository import AvatarMessageRepository
 from hosts.web.run import _build_manager_and_inbox_sink
-from safety.approval.manager import _PendingApproval, reset_for_testing
+from safety.approval import PendingApprovalView
+from safety.approval.manager import reset_for_testing
 from safety.inbox.event_sink import InboxEventSink
 
 
@@ -30,9 +29,9 @@ def _make_pending(
     *,
     request_id: str = "req-avatar-1",
     severity: str = "standard",
-) -> _PendingApproval:
+) -> PendingApprovalView:
     """构造 AvatarApprovalSink 测试用 pending 审批。"""
-    return _PendingApproval(
+    return PendingApprovalView(
         request_id=request_id,
         channel="generic_chat",
         thread_id="thread-avatar",
@@ -44,7 +43,6 @@ def _make_pending(
         matched_rule="dangerous-command" if severity == "elevated" else None,
         auto_approve_at_ms=None,
         auto_reject_at_ms=12345 if severity == "elevated" else None,
-        future=MagicMock(spec=asyncio.Future),
         arrived_at_ms=1000,
         timeout_ms=60_000,
     )

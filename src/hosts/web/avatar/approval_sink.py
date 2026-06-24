@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from hosts.web.avatar.manager import AvatarManager
@@ -20,7 +21,7 @@ from hosts.web.avatar.models import (
 )
 
 if TYPE_CHECKING:
-    from safety.approval.manager import _PendingApproval
+    from safety.approval import PendingApprovalView
 
 logger = logging.getLogger(__name__)
 
@@ -35,20 +36,20 @@ def _truncate(value: str, limit: int) -> str:
     return value[: limit - 1] + "…"
 
 
-def _tool_input_preview(tool_input: dict[str, Any]) -> str:
+def _tool_input_preview(tool_input: Mapping[str, Any]) -> str:
     """生成工具参数预览。
 
     关键输入：ApprovalManager pending 中的 tool_input。
     关键输出：短 JSON 字符串，供 Avatar 消息 body 和 metadata 展示。
     """
     try:
-        raw = json.dumps(tool_input, ensure_ascii=False, sort_keys=True)
+        raw = json.dumps(dict(tool_input), ensure_ascii=False, sort_keys=True)
     except TypeError:
         raw = repr(tool_input)
     return _truncate(raw, _TOOL_INPUT_PREVIEW_LIMIT)
 
 
-def _body_for_pending(pending: _PendingApproval) -> str:
+def _body_for_pending(pending: PendingApprovalView) -> str:
     """生成 Avatar 消息正文。
 
     关键输入：pending 审批上下文。
@@ -67,7 +68,7 @@ class AvatarApprovalSink:
 
     职责：实现 ApprovalEventSink 形状，把 ``emit_approval_required`` 映射为
     ``AvatarManager.register_message``。
-    关键输入：ApprovalManager 的 _PendingApproval。
+    关键输入：ApprovalManager 的公开 pending view。
     关键输出：Avatar registry 中 source=approval 的 active 消息。
     """
 
@@ -79,7 +80,7 @@ class AvatarApprovalSink:
         """
         self._avatar_manager = avatar_manager
 
-    async def emit_approval_required(self, *, pending: _PendingApproval) -> None:
+    async def emit_approval_required(self, *, pending: PendingApprovalView) -> None:
         """注册一条 Avatar 审批消息。
 
         关键输入：pending 审批上下文。

@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from core.contracts import ApprovalAction, ApprovalDecision, ApprovalRequest
+from safety.approval.events import PendingApprovalView
 from safety.approval.rules import ApprovalRules
 
 logger = logging.getLogger(__name__)
@@ -100,12 +101,12 @@ class ApprovalEventSink(Protocol):
     - sink 不持 state：每次调用都用 manager 传过来的 pending 上下文
     """
 
-    async def emit_approval_required(self, *, pending: _PendingApproval) -> None:
+    async def emit_approval_required(self, *, pending: PendingApprovalView) -> None:
         """通知 sink 有新 pending 审批需要用户决策。
 
         Args:
-            pending: 新创建的 ``_PendingApproval``，sink 据此调 broadcaster.emit_add
-                + 注册按 request_id 路由的 resolve callback
+            pending: 新创建 pending 的公开只读视图，sink 据此展示审批请求并注册
+                按 request_id 路由的 resolve callback。
         """
         ...
 
@@ -306,8 +307,12 @@ class ApprovalManager:
             sinks_snapshot = list(self._event_sinks)
 
         # R9：lock 外 fan-out（emit 失败不影响主流程）
+        pending_view = _pending_to_view(
+            pending,
+            default_timeout_ms=self._default_timeout_ms,
+        )
         await asyncio.gather(
-            *(s.emit_approval_required(pending=pending) for s in sinks_snapshot),
+            *(s.emit_approval_required(pending=pending_view) for s in sinks_snapshot),
             return_exceptions=True,
         )
 
@@ -716,10 +721,33 @@ def _decision_to_action(
     return ApprovalAction.REJECT
 
 
+def _pending_to_view(
+    pending: _PendingApproval,
+    *,
+    default_timeout_ms: int,
+) -> PendingApprovalView:
+    """把 manager 内部 pending 状态投影成公开只读视图。"""
+    return PendingApprovalView(
+        request_id=pending.request_id,
+        channel=pending.channel,
+        thread_id=pending.thread_id,
+        cwd=pending.cwd,
+        tool_name=pending.tool_name,
+        tool_input=pending.tool_input,
+        metadata=pending.metadata,
+        severity=pending.severity,
+        matched_rule=pending.matched_rule,
+        auto_approve_at_ms=pending.auto_approve_at_ms,
+        auto_reject_at_ms=pending.auto_reject_at_ms,
+        arrived_at_ms=pending.arrived_at_ms,
+        timeout_ms=pending.timeout_ms if pending.timeout_ms is not None else default_timeout_ms,
+    )
+
+
 __all__ = [
     "ApprovalEventSink",
     "ApprovalManager",
-    "_PendingApproval",
+    "PendingApprovalView",
     "_decision_to_action",
     "get_approval_manager",
     "make_manager_prompt_fn",

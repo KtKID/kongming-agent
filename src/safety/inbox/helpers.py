@@ -7,6 +7,7 @@ manager（阶段 1）和 ApprovalBridge（阶段 2）都调用本模块；
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 # 注：broadcaster 类型用 Any 避免 safety→web 跨层 import（.importlinter Contract 3
@@ -23,7 +24,7 @@ def to_inbox_payload(
     thread_id: str,
     request_id: str,
     tool_name: str,
-    tool_input: dict[str, Any],
+    tool_input: Mapping[str, Any],
     cwd: str,
     arrived_at_ms: int,
     timeout_ms: int,
@@ -61,7 +62,7 @@ def to_inbox_payload(
         "requestId": request_id,
         "threadId": thread_id,
         "toolName": tool_name,
-        "toolInput": tool_input,
+        "toolInput": dict(tool_input),
         "autoApproveAtMs": auto_approve_at_ms,
         "autoRejectAtMs": auto_reject_at_ms,
         "timeoutMs": timeout_ms,
