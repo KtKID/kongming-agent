@@ -25,6 +25,7 @@ interface FieldBucket {
 }
 
 function bucketKey(path: string): string {
+  if (!path) return "__other__";
   const parts = path.split(".");
   if (parts.length >= 3) return parts.slice(0, 2).join(".");
   return parts[0] ?? "__other__";
