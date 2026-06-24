@@ -35,11 +35,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sqlite3
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from core.contracts import Session
 from core.message import Message, ToolCall
@@ -128,12 +130,41 @@ def _message_from_dict(data: dict[str, Any]) -> Message:
 # schema 版本号，写入 payload 头部时用于未来兼容升级。
 _SCHEMA_VERSION = 1
 
+_SESSION_COLUMNS_SQL: dict[str, str] = {
+    "session_id": "TEXT PRIMARY KEY",
+    "created_at": "REAL NOT NULL DEFAULT 0",
+    "updated_at": "REAL NOT NULL DEFAULT 0",
+    "agent_name": "TEXT NOT NULL DEFAULT ''",
+    "model_name": "TEXT NOT NULL DEFAULT ''",
+    "instruction_sources": "TEXT NOT NULL DEFAULT '[]'",
+    "instruction_text_hash": "TEXT NOT NULL DEFAULT ''",
+    "cwd": "TEXT NOT NULL DEFAULT ''",
+    "app_version": "TEXT NOT NULL DEFAULT ''",
+    "system_prompt": "TEXT",
+    "run_count": "INTEGER NOT NULL DEFAULT 0",
+}
+_SESSION_COLUMN_NAMES = tuple(_SESSION_COLUMNS_SQL)
+_T = TypeVar("_T")
+
+
+def _create_sessions_table_sql() -> str:
+    """根据单一列定义生成 sessions 建表 SQL。"""
+
+    columns_sql = ",\n                    ".join(
+        f"{name} {definition}" for name, definition in _SESSION_COLUMNS_SQL.items()
+    )
+    return f"""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    {columns_sql}
+                )
+                """
+
 
 class SQLiteSession:
     """:class:`core.contracts.Session` 协议的 SQLite 工程化实现。
 
     结构性满足 :class:`core.contracts.Session`：同时提供 ``session_id`` 属性和
-    ``append / history / clear`` 三个 async 方法。类型注解上不显式继承 Protocol，
+    ``append / history / clear / advance_run_index`` async 方法。类型注解上不显式继承 Protocol，
     靠 Python 的结构化协议校验。
 
     表结构::
@@ -146,6 +177,12 @@ class SQLiteSession:
             PRIMARY KEY(session_id, seq)
         )
 
+        sessions(
+            session_id TEXT PRIMARY KEY,
+            ...
+            run_count INTEGER NOT NULL DEFAULT 0
+        )
+
     ``payload`` 为 :func:`_message_to_dict` 输出后 ``json.dumps`` 的字符串；
     ``seq`` 从 1 起递增，唯一决定同一个 session 的消息顺序。
     """
@@ -154,15 +191,20 @@ class SQLiteSession:
         self,
         session_id: str,
         db_path: str | Path,
+        *,
+        bootstrap: SessionBootstrap | None = None,
     ) -> None:
         """初始化。
 
         Args:
             session_id: 会话标识。同一个 db 文件可以存多个 session，通过此字段隔离。
             db_path: SQLite 文件路径。父目录不存在时会在初始化阶段尝试创建。
+            bootstrap: 会话初始化元数据。未传入时使用空元数据兜底，兼容直接构造
+                ``SQLiteSession`` 的测试和旧调用点。
         """
         self.session_id: str = session_id
         self._db_path: str = str(db_path)
+        self._bootstrap: SessionBootstrap | None = bootstrap
         self._init_done: bool = False
         self._init_lock: asyncio.Lock = asyncio.Lock()
 
@@ -189,6 +231,7 @@ class SQLiteSession:
         if path.parent and str(path.parent) not in ("", "."):
             path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self._db_path) as conn:
+            conn.execute(_create_sessions_table_sql())
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS messages (
@@ -200,7 +243,122 @@ class SQLiteSession:
                 )
                 """
             )
+            self._migrate_sessions_table_sync(conn)
             conn.commit()
+
+    def _migrate_sessions_table_sync(self, conn: sqlite3.Connection) -> None:
+        """补齐旧 sessions 表缺失列，输入 sqlite 连接，无返回值。"""
+
+        existing = self._read_session_columns_sync(conn)
+        if "session_id" not in existing:
+            raise RuntimeError("sessions table missing required session_id column")
+        for name, definition in _SESSION_COLUMNS_SQL.items():
+            if name in existing:
+                continue
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {name} {definition}")
+        migrated = self._read_session_columns_sync(conn)
+        missing = set(_SESSION_COLUMN_NAMES) - migrated
+        if missing:
+            missing_list = ", ".join(sorted(missing))
+            raise RuntimeError(f"sessions table migration incomplete: {missing_list}")
+
+    def _read_session_columns_sync(self, conn: sqlite3.Connection) -> set[str]:
+        """读取 sessions 表列名，输入 sqlite 连接，输出列名集合。"""
+
+        rows = conn.execute("PRAGMA table_info(sessions)").fetchall()
+        return {str(row[1]) for row in rows}
+
+    def _resolve_created_at_sync(self, conn: sqlite3.Connection, *, now: float) -> float:
+        """解析 session 创建时间；优先保留既有 sessions 行，其次兼容旧 messages。"""
+
+        session_row = conn.execute(
+            "SELECT created_at FROM sessions WHERE session_id = ?",
+            (self.session_id,),
+        ).fetchone()
+        if session_row and session_row[0] is not None:
+            return float(session_row[0])
+        row = conn.execute(
+            "SELECT MIN(created_at) FROM messages WHERE session_id = ?",
+            (self.session_id,),
+        ).fetchone()
+        if row and row[0] is not None:
+            return float(row[0])
+        if self._bootstrap is not None:
+            return float(self._bootstrap.created_at)
+        return now
+
+    def _ensure_session_row_sync(self, conn: sqlite3.Connection, *, now: float) -> None:
+        """按需创建 session 元数据行，并在已有行上刷新 updated_at。"""
+        bootstrap = self._bootstrap
+        if bootstrap is None:
+            created_at = self._resolve_created_at_sync(conn, now=now)
+            agent_name = ""
+            model_name = ""
+            instruction_sources = "[]"
+            instruction_text_hash = ""
+            cwd = ""
+            app_version = ""
+            system_prompt = None
+        else:
+            created_at = self._resolve_created_at_sync(conn, now=now)
+            agent_name = bootstrap.agent_name
+            model_name = bootstrap.model_name
+            instruction_sources = json.dumps(bootstrap.instruction_sources, ensure_ascii=False)
+            instruction_text_hash = bootstrap.instruction_text_hash
+            cwd = bootstrap.cwd
+            app_version = bootstrap.app_version or ""
+            system_prompt = bootstrap.instruction_text
+        conn.execute(
+            """
+            INSERT INTO sessions (
+                session_id,
+                created_at,
+                updated_at,
+                agent_name,
+                model_name,
+                instruction_sources,
+                instruction_text_hash,
+                cwd,
+                app_version,
+                system_prompt,
+                run_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            ON CONFLICT(session_id) DO UPDATE SET
+                updated_at = excluded.updated_at
+            """,
+            (
+                self.session_id,
+                created_at,
+                now,
+                agent_name,
+                model_name,
+                instruction_sources,
+                instruction_text_hash,
+                cwd,
+                app_version,
+                system_prompt,
+            ),
+        )
+
+    def _write_transaction_sync(
+        self,
+        operation: Callable[[sqlite3.Connection, float], _T],
+    ) -> _T:
+        """用 BEGIN IMMEDIATE 包裹一次同步写操作，返回 operation 的结果。"""
+
+        conn = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            now = time.time()
+            result = operation(conn, now)
+            conn.execute("COMMIT")
+            return result
+        except Exception:
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
 
     # -- Session 协议实现 ----------------------------------------------------
 
@@ -210,7 +368,7 @@ class SQLiteSession:
         await asyncio.to_thread(self._append_sync, message, usage)
 
     def _append_sync(self, message: Message, usage: dict[str, Any] | None = None) -> None:
-        """同步 append：查最大 seq + 1，再 insert。"""
+        """同步 append：确保 session 行存在，查最大 seq + 1，再 insert。"""
         payload_obj = {
             "schema_version": _SCHEMA_VERSION,
             "message": _message_to_dict(message),
@@ -218,8 +376,9 @@ class SQLiteSession:
         if usage is not None:
             payload_obj["usage"] = dict(usage)
         payload = json.dumps(payload_obj, ensure_ascii=False)
-        now = time.time()
-        with sqlite3.connect(self._db_path) as conn:
+
+        def operation(conn: sqlite3.Connection, now: float) -> None:
+            self._ensure_session_row_sync(conn, now=now)
             cur = conn.execute(
                 "SELECT COALESCE(MAX(seq), 0) FROM messages WHERE session_id = ?",
                 (self.session_id,),
@@ -230,7 +389,8 @@ class SQLiteSession:
                 "INSERT INTO messages (session_id, seq, payload, created_at) VALUES (?, ?, ?, ?)",
                 (self.session_id, next_seq, payload, now),
             )
-            conn.commit()
+
+        self._write_transaction_sync(operation)
 
     async def history(self) -> list[Message]:
         """返回按 append 顺序排列的历史副本。"""
@@ -269,24 +429,49 @@ class SQLiteSession:
         await asyncio.to_thread(self._clear_sync)
 
     def _clear_sync(self) -> None:
-        """同步清空。"""
-        with sqlite3.connect(self._db_path) as conn:
+        """同步清空，并把当前 session 的 run_count 重置为 0。"""
+
+        def operation(conn: sqlite3.Connection, now: float) -> None:
+            self._ensure_session_row_sync(conn, now=now)
             conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (self.session_id,),
             )
-            conn.commit()
+            conn.execute(
+                "UPDATE sessions SET run_count = 0, updated_at = ? WHERE session_id = ?",
+                (now, self.session_id),
+            )
+
+        self._write_transaction_sync(operation)
 
     async def advance_run_index(self) -> int:
-        """sqlite 后端不维护 run_count；调用即抛 ``NotImplementedError``。
+        """递增并返回当前 session 的 run 编号。"""
+        await self._ensure_init()
+        return await asyncio.to_thread(self._advance_run_index_sync)
 
-        项目当前默认 ``backend: file``，sqlite 是代码里留的备用通道但最近版本
-        不再维护。需要 run_id 自增语义请使用 :class:`sessions.file_session.FileSession`
-        或 :class:`core.session.InMemorySession`。
-        """
-        raise NotImplementedError(
-            "sqlite backend deprecated; use file or memory backend for run_id counting"
-        )
+    def _advance_run_index_sync(self) -> int:
+        """同步递增 run_count；事务保证同一 sqlite db 内原子递增。"""
+
+        def operation(conn: sqlite3.Connection, now: float) -> int:
+            self._ensure_session_row_sync(conn, now=now)
+            conn.execute(
+                """
+                UPDATE sessions
+                SET run_count = run_count + 1,
+                    updated_at = ?
+                WHERE session_id = ?
+                """,
+                (now, self.session_id),
+            )
+            row = conn.execute(
+                "SELECT run_count FROM sessions WHERE session_id = ?",
+                (self.session_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(f"session row missing after upsert: {self.session_id}")
+            return int(row[0])
+
+        return self._write_transaction_sync(operation)
 
     # -- 调试辅助 ------------------------------------------------------------
 
@@ -317,8 +502,8 @@ def build_session(
     Args:
         config: 统一配置对象，至少含 ``session.backend`` / ``session.store_path``。
         session_id: 此次运行绑定的 session 标识。
-        bootstrap: CLI 阶段产出的稳定元数据，file backend 需要。
-            memory / sqlite 后端忽略此参数。
+        bootstrap: CLI 阶段产出的稳定元数据，file / sqlite backend 会持久化使用；
+            memory backend 忽略此参数。
 
     Raises:
         ValueError: 当 backend 取了协议未声明的值时抛出。
@@ -334,6 +519,7 @@ def build_session(
         return SQLiteSession(
             session_id,
             resolve_kongming_path(config.session.store_path),
+            bootstrap=bootstrap,
         )
     if backend == "file":
         if bootstrap is None:

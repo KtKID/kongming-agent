@@ -31,7 +31,7 @@ class Session(Protocol):
         ...
 
     async def clear(self) -> None:
-        """清空当前会话历史。"""
+        """清空当前会话历史，并把该会话的 run 编号重置为初始状态。"""
         ...
 
     async def advance_run_index(self) -> int:
@@ -39,9 +39,8 @@ class Session(Protocol):
 
         语义：
         - 调用一次 → +1 → 返回新值
-        - 持久化后端（FileSession / 未来 SQLite）必须把递增后的值落盘
+        - 持久化后端（FileSession / SQLiteSession）必须把递增后的值落盘
         - 内存后端（InMemorySession）只更新实例字段
-        - sqlite 后端当前不维护，可抛 ``NotImplementedError``
 
         非事务原子约定（v0.x 简化）：
         - 调用方通常在 ``session.append(user_msg)`` 之后立刻调用本方法，

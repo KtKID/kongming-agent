@@ -37,6 +37,7 @@ class InMemorySession:
 
     async def clear(self) -> None:
         self._messages.clear()
+        self._run_count = 0
 
     async def advance_run_index(self) -> int:
         # 内存后端无持久化；进程重启后从 0 重数（与 history 同语义）。
