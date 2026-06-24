@@ -133,7 +133,7 @@ class SQLiteSession:
     """:class:`core.contracts.Session` 协议的 SQLite 工程化实现。
 
     结构性满足 :class:`core.contracts.Session`：同时提供 ``session_id`` 属性和
-    ``append / history / clear`` 三个 async 方法。类型注解上不显式继承 Protocol，
+    ``append / history / clear / advance_run_index`` async 方法。类型注解上不显式继承 Protocol，
     靠 Python 的结构化协议校验。
 
     表结构::
@@ -146,6 +146,12 @@ class SQLiteSession:
             PRIMARY KEY(session_id, seq)
         )
 
+        sessions(
+            session_id TEXT PRIMARY KEY,
+            ...
+            run_count INTEGER NOT NULL DEFAULT 0
+        )
+
     ``payload`` 为 :func:`_message_to_dict` 输出后 ``json.dumps`` 的字符串；
     ``seq`` 从 1 起递增，唯一决定同一个 session 的消息顺序。
     """
@@ -154,15 +160,20 @@ class SQLiteSession:
         self,
         session_id: str,
         db_path: str | Path,
+        *,
+        bootstrap: SessionBootstrap | None = None,
     ) -> None:
         """初始化。
 
         Args:
             session_id: 会话标识。同一个 db 文件可以存多个 session，通过此字段隔离。
             db_path: SQLite 文件路径。父目录不存在时会在初始化阶段尝试创建。
+            bootstrap: 会话初始化元数据。未传入时使用空元数据兜底，兼容直接构造
+                ``SQLiteSession`` 的测试和旧调用点。
         """
         self.session_id: str = session_id
         self._db_path: str = str(db_path)
+        self._bootstrap: SessionBootstrap | None = bootstrap
         self._init_done: bool = False
         self._init_lock: asyncio.Lock = asyncio.Lock()
 
@@ -191,6 +202,23 @@ class SQLiteSession:
         with sqlite3.connect(self._db_path) as conn:
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id TEXT PRIMARY KEY,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    model_name TEXT NOT NULL,
+                    instruction_sources TEXT NOT NULL,
+                    instruction_text_hash TEXT NOT NULL,
+                    cwd TEXT NOT NULL,
+                    app_version TEXT NOT NULL,
+                    system_prompt TEXT,
+                    run_count INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS messages (
                     session_id TEXT NOT NULL,
                     seq INTEGER NOT NULL,
@@ -202,6 +230,57 @@ class SQLiteSession:
             )
             conn.commit()
 
+    def _ensure_session_row_sync(self, conn: sqlite3.Connection, *, now: float) -> None:
+        """确保当前 session 的元数据行存在。"""
+        bootstrap = self._bootstrap
+        if bootstrap is None:
+            created_at = now
+            agent_name = ""
+            model_name = ""
+            instruction_sources = "[]"
+            instruction_text_hash = ""
+            cwd = ""
+            app_version = ""
+            system_prompt = None
+        else:
+            created_at = float(bootstrap.created_at)
+            agent_name = bootstrap.agent_name
+            model_name = bootstrap.model_name
+            instruction_sources = json.dumps(bootstrap.instruction_sources, ensure_ascii=False)
+            instruction_text_hash = bootstrap.instruction_text_hash
+            cwd = bootstrap.cwd
+            app_version = bootstrap.app_version or ""
+            system_prompt = bootstrap.instruction_text
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO sessions (
+                session_id,
+                created_at,
+                updated_at,
+                agent_name,
+                model_name,
+                instruction_sources,
+                instruction_text_hash,
+                cwd,
+                app_version,
+                system_prompt,
+                run_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            """,
+            (
+                self.session_id,
+                created_at,
+                now,
+                agent_name,
+                model_name,
+                instruction_sources,
+                instruction_text_hash,
+                cwd,
+                app_version,
+                system_prompt,
+            ),
+        )
+
     # -- Session 协议实现 ----------------------------------------------------
 
     async def append(self, message: Message, *, usage: dict[str, Any] | None = None) -> None:
@@ -210,7 +289,7 @@ class SQLiteSession:
         await asyncio.to_thread(self._append_sync, message, usage)
 
     def _append_sync(self, message: Message, usage: dict[str, Any] | None = None) -> None:
-        """同步 append：查最大 seq + 1，再 insert。"""
+        """同步 append：在 sqlite 写事务里查最大 seq + 1，再 insert。"""
         payload_obj = {
             "schema_version": _SCHEMA_VERSION,
             "message": _message_to_dict(message),
@@ -220,6 +299,8 @@ class SQLiteSession:
         payload = json.dumps(payload_obj, ensure_ascii=False)
         now = time.time()
         with sqlite3.connect(self._db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._ensure_session_row_sync(conn, now=now)
             cur = conn.execute(
                 "SELECT COALESCE(MAX(seq), 0) FROM messages WHERE session_id = ?",
                 (self.session_id,),
@@ -229,6 +310,10 @@ class SQLiteSession:
             conn.execute(
                 "INSERT INTO messages (session_id, seq, payload, created_at) VALUES (?, ?, ?, ?)",
                 (self.session_id, next_seq, payload, now),
+            )
+            conn.execute(
+                "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+                (now, self.session_id),
             )
             conn.commit()
 
@@ -269,24 +354,47 @@ class SQLiteSession:
         await asyncio.to_thread(self._clear_sync)
 
     def _clear_sync(self) -> None:
-        """同步清空。"""
+        """同步清空，并把当前 session 的 run_count 重置为 0。"""
+        now = time.time()
         with sqlite3.connect(self._db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._ensure_session_row_sync(conn, now=now)
             conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (self.session_id,),
             )
+            conn.execute(
+                "UPDATE sessions SET run_count = 0, updated_at = ? WHERE session_id = ?",
+                (now, self.session_id),
+            )
             conn.commit()
 
     async def advance_run_index(self) -> int:
-        """sqlite 后端不维护 run_count；调用即抛 ``NotImplementedError``。
+        """递增并返回当前 session 的 run 编号。"""
+        await self._ensure_init()
+        return await asyncio.to_thread(self._advance_run_index_sync)
 
-        项目当前默认 ``backend: file``，sqlite 是代码里留的备用通道但最近版本
-        不再维护。需要 run_id 自增语义请使用 :class:`sessions.file_session.FileSession`
-        或 :class:`core.session.InMemorySession`。
-        """
-        raise NotImplementedError(
-            "sqlite backend deprecated; use file or memory backend for run_id counting"
-        )
+    def _advance_run_index_sync(self) -> int:
+        """同步递增 run_count；事务保证同一 sqlite db 内原子递增。"""
+        now = time.time()
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._ensure_session_row_sync(conn, now=now)
+            conn.execute(
+                """
+                UPDATE sessions
+                SET run_count = run_count + 1,
+                    updated_at = ?
+                WHERE session_id = ?
+                """,
+                (now, self.session_id),
+            )
+            row = conn.execute(
+                "SELECT run_count FROM sessions WHERE session_id = ?",
+                (self.session_id,),
+            ).fetchone()
+            conn.commit()
+        return int(row[0]) if row else 1
 
     # -- 调试辅助 ------------------------------------------------------------
 
@@ -317,8 +425,8 @@ def build_session(
     Args:
         config: 统一配置对象，至少含 ``session.backend`` / ``session.store_path``。
         session_id: 此次运行绑定的 session 标识。
-        bootstrap: CLI 阶段产出的稳定元数据，file backend 需要。
-            memory / sqlite 后端忽略此参数。
+        bootstrap: CLI 阶段产出的稳定元数据，file / sqlite backend 会持久化使用；
+            memory backend 忽略此参数。
 
     Raises:
         ValueError: 当 backend 取了协议未声明的值时抛出。
@@ -334,6 +442,7 @@ def build_session(
         return SQLiteSession(
             session_id,
             resolve_kongming_path(config.session.store_path),
+            bootstrap=bootstrap,
         )
     if backend == "file":
         if bootstrap is None:
