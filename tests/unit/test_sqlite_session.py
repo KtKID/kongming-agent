@@ -25,6 +25,7 @@ import pytest
 from core.message import Message, ToolCall
 from core.session import InMemorySession
 from infrastructure.config.models import Config, ModelConfig, SessionConfig
+from sessions.session_bootstrap import SessionBootstrap
 from sessions.session_store import (
     SQLiteSession,
     _message_from_dict,
@@ -43,6 +44,19 @@ def _cfg(tmp_path: Path, backend: str = "memory", **extra) -> Config:
     return Config(
         model=ModelConfig(name="m", base_url="http://localhost:1234"),
         session=SessionConfig(**session_cfg),
+    )
+
+
+def _bootstrap(tmp_path: Path) -> SessionBootstrap:
+    return SessionBootstrap(
+        agent_name="agent",
+        model_name="model",
+        instruction_sources=["runtime", "memory"],
+        instruction_text_hash="sha256:test",
+        created_at=123.0,
+        cwd=str(tmp_path),
+        instruction_text="system text",
+        app_version="test-version",
     )
 
 
@@ -268,7 +282,8 @@ def test_build_session_memory(tmp_path):
 
 
 def test_build_session_sqlite(tmp_path):
-    s = build_session(_cfg(tmp_path, "sqlite"), "sid")
+    bootstrap = _bootstrap(tmp_path)
+    s = build_session(_cfg(tmp_path, "sqlite"), "sid", bootstrap=bootstrap)
     assert isinstance(s, SQLiteSession)
     assert s.session_id == "sid"
 
@@ -295,8 +310,81 @@ def test_build_session_file_with_bootstrap(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_advance_run_index_raises_not_implemented(tmp_path):
-    """sqlite 后端按方案不维护 run_count；调用 advance_run_index 必须抛 NotImplementedError。"""
-    s = SQLiteSession("sid", str(tmp_path / "x.db"))
-    with pytest.raises(NotImplementedError, match="sqlite backend deprecated"):
-        await s.advance_run_index()
+async def test_sqlite_session_advance_run_index_persists_across_instances(tmp_path):
+    """run_count 在 sqlite sessions 表中持久化，跨实例继续递增。"""
+    db = tmp_path / "x.db"
+    first = SQLiteSession("sid", db)
+
+    assert await first.advance_run_index() == 1
+    assert await first.advance_run_index() == 2
+
+    second = SQLiteSession("sid", db)
+    assert await second.advance_run_index() == 3
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_advance_run_index_isolated_per_session(tmp_path):
+    """同一个 db 文件内，不同 session_id 的 run_count 互不影响。"""
+    db = tmp_path / "x.db"
+    a = SQLiteSession("a", db)
+    b = SQLiteSession("b", db)
+
+    assert await a.advance_run_index() == 1
+    assert await b.advance_run_index() == 1
+    assert await a.advance_run_index() == 2
+    assert await b.advance_run_index() == 2
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_clear_resets_run_index(tmp_path):
+    """clear 清空当前 session 的消息，并把 run_count 重置为 0。"""
+    db = tmp_path / "x.db"
+    session = SQLiteSession("sid", db)
+
+    await session.append(Message.user("hello"))
+    assert await session.advance_run_index() == 1
+
+    await session.clear()
+
+    assert await session.history() == []
+    assert await session.advance_run_index() == 1
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_persists_bootstrap_metadata_from_factory(tmp_path):
+    """sqlite backend 通过 build_session 接收 bootstrap，并在底层落 metadata。"""
+    cfg = _cfg(tmp_path, "sqlite")
+    bootstrap = _bootstrap(tmp_path)
+    session = build_session(cfg, "sid", bootstrap=bootstrap)
+    assert isinstance(session, SQLiteSession)
+
+    await session.append(Message.user("hello"))
+    assert await session.advance_run_index() == 1
+
+    with sqlite3.connect(str(tmp_path / "session.db")) as conn:
+        row = conn.execute(
+            """
+            SELECT
+                agent_name,
+                model_name,
+                instruction_sources,
+                instruction_text_hash,
+                cwd,
+                app_version,
+                system_prompt,
+                run_count
+            FROM sessions
+            WHERE session_id = ?
+            """,
+            ("sid",),
+        ).fetchone()
+
+    assert row is not None
+    assert row[0] == "agent"
+    assert row[1] == "model"
+    assert json.loads(row[2]) == ["runtime", "memory"]
+    assert row[3] == "sha256:test"
+    assert row[4] == str(tmp_path)
+    assert row[5] == "test-version"
+    assert row[6] == "system text"
+    assert row[7] == 1
