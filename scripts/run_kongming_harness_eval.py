@@ -475,7 +475,7 @@ def _run_pytest_nodes(
 
 
 def _run_git(
-    args: list[str], cwd: Path, *, stdin: str | None = None
+    args: list[str], cwd: Path, *, stdin: str | None = None, timeout_seconds: int = 30
 ) -> subprocess.CompletedProcess[str]:
     """在指定目录执行一次 git 命令，输入参数列表/工作目录/可选 stdin，输出进程结果。
 
@@ -491,15 +491,24 @@ def _run_git(
         "-c",
         "commit.gpgsign=false",
     ]
-    return subprocess.run(
-        base + args,
-        cwd=cwd,
-        text=True,
-        input=stdin,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
-    )
+    command = base + args
+    try:
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            text=True,
+            input=stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            stdout=f"git command timed out after {timeout_seconds}s: {exc}",
+        )
 
 
 def _init_repo_with_base(repo_dir: Path, base_files: dict[str, Any]) -> None:
@@ -542,6 +551,10 @@ def _validate_diff_paths(repo_dir: Path, diff_text: str) -> str | None:
 
     root = repo_dir.resolve()
     for line in diff_text.splitlines():
+        if line.startswith(("rename from ", "rename to ", "copy from ", "copy to ")):
+            return f"unsupported diff metadata: {line}"
+        if line.startswith(("GIT binary patch", "Binary files ")):
+            return f"unsupported binary diff: {line}"
         if not (
             line.startswith("diff --git ") or line.startswith("--- ") or line.startswith("+++ ")
         ):
@@ -556,6 +569,8 @@ def _validate_diff_paths(repo_dir: Path, diff_text: str) -> str | None:
             path = PurePosixPath(normalized)
             if path.is_absolute() or ".." in path.parts or not normalized:
                 return f"path escapes sandbox: {token}"
+            if path.parts and path.parts[0] == ".git":
+                return f"git metadata path is unsupported: {token}"
             target = (root / Path(*path.parts)).resolve()
             if root not in target.parents and target != root:
                 return f"path escapes sandbox: {token}"
@@ -579,8 +594,8 @@ def _validate_repo_symlinks(repo_dir: Path) -> str | None:
 def _apply_model_diff(repo_dir: Path, diff_text: str) -> dict[str, Any]:
     """把模型产出的 diff 应用到 base 仓库，输入仓库目录和 patch 文本，输出应用结果。
 
-    应用策略限定为 ``git apply`` → ``git apply --3way``。不启用 fuzzy patch，
-    避免上下文错位时把错误补丁误判为可接受结果。
+    应用策略限定为普通 ``git apply``。不启用 3way / fuzzy patch，
+    避免合并回退或上下文错位时把错误补丁误判为可接受结果。
     """
 
     if not diff_text.strip():
@@ -592,7 +607,6 @@ def _apply_model_diff(repo_dir: Path, diff_text: str) -> dict[str, Any]:
             "strategy": "rejected-outside-sandbox",
             "output": path_error,
         }
-    attempts: list[str] = []
     primary = _run_git(["apply", "--whitespace=nowarn", "-"], repo_dir, stdin=diff_text)
     if primary.returncode == 0:
         symlink_error = _validate_repo_symlinks(repo_dir)
@@ -603,19 +617,7 @@ def _apply_model_diff(repo_dir: Path, diff_text: str) -> dict[str, Any]:
                 "output": symlink_error,
             }
         return {"applied": True, "strategy": "git-apply", "output": primary.stdout}
-    attempts.append(f"git-apply:\n{primary.stdout}")
-    three_way = _run_git(["apply", "--3way", "--whitespace=nowarn", "-"], repo_dir, stdin=diff_text)
-    if three_way.returncode == 0:
-        symlink_error = _validate_repo_symlinks(repo_dir)
-        if symlink_error:
-            return {
-                "applied": False,
-                "strategy": "rejected-outside-sandbox",
-                "output": symlink_error,
-            }
-        return {"applied": True, "strategy": "git-apply-3way", "output": three_way.stdout}
-    attempts.append(f"git-apply-3way:\n{three_way.stdout}")
-    return {"applied": False, "strategy": None, "output": "\n---\n".join(attempts)}
+    return {"applied": False, "strategy": None, "output": f"git-apply:\n{primary.stdout}"}
 
 
 # ---------------------------------------------------------------------------
@@ -1233,6 +1235,45 @@ def _require_environment_field(
         cursor = cursor[part]
 
 
+def _reject_unknown_environment_fields(
+    entry: dict[str, Any],
+    *,
+    path: Path,
+    environment_id: str,
+) -> None:
+    """拒绝 environment 未知字段，输入 entry，无返回值。"""
+
+    allowed_top_level = {
+        "suite",
+        "mode",
+        "preset",
+        "profile",
+        "approval_mode",
+        "runner",
+        "artifacts",
+    }
+    allowed_nested = {
+        "runner": {"max_turns"},
+        "artifacts": {"output_dir"},
+    }
+    extras = sorted(set(entry) - allowed_top_level)
+    if extras:
+        joined = ", ".join(extras)
+        raise ValueError(f"{path}: environment {environment_id!r} has unknown fields: {joined}")
+    for field, allowed in allowed_nested.items():
+        nested = entry.get(field)
+        if nested is None:
+            continue
+        if not isinstance(nested, dict):
+            raise ValueError(
+                f"{path}: environment {environment_id!r} field {field!r} must be object"
+            )
+        nested_extras = sorted(set(nested) - allowed)
+        if nested_extras:
+            joined = ", ".join(f"{field}.{key}" for key in nested_extras)
+            raise ValueError(f"{path}: environment {environment_id!r} has unknown fields: {joined}")
+
+
 def _validate_environment_entry(
     entry: dict[str, Any],
     *,
@@ -1241,6 +1282,7 @@ def _validate_environment_entry(
 ) -> None:
     """校验单个 environment schema，输入配置字典，无返回值。"""
 
+    _reject_unknown_environment_fields(entry, path=path, environment_id=environment_id)
     required_fields = (
         "suite",
         "mode",

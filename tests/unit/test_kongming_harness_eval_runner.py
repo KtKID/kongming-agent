@@ -179,6 +179,37 @@ def test_environment_resolver_reports_unknown_environment() -> None:
 
 
 @pytest.mark.unit
+def test_environment_resolver_rejects_unknown_environment_fields(tmp_path: Path) -> None:
+    """environment YAML 出现未知字段时必须拒绝。"""
+
+    runner = _load_runner_module()
+    env_path = tmp_path / "environments.yaml"
+    env_path.write_text(
+        """
+environments:
+  extra:
+    suite: evals/harness-runtime-v0.1
+    mode: fixture
+    profile: full
+    approval_mode: auto_allow
+    runner:
+      max_turns: 50
+      retries: 2
+    artifacts:
+      output_dir: evals/harness-runtime-v0.1/runs
+    passthrough: true
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unknown fields: passthrough"):
+        runner.resolve_eval_environment(
+            "extra",
+            runner.EvalEnvironmentOverrides(environment_config=str(env_path)),
+        )
+
+
+@pytest.mark.unit
 def test_environment_resolver_rejects_invalid_profile_and_approval(tmp_path: Path) -> None:
     """非法 profile / approval_mode 必须被 resolver 拦截。"""
 
@@ -530,6 +561,52 @@ def test_apply_model_diff_rejects_paths_outside_sandbox(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("diff_text", "message"),
+    [
+        (
+            """diff --git a/src/app.py b/src/renamed.py
+similarity index 100%
+rename from src/app.py
+rename to src/renamed.py
+""",
+            "unsupported diff metadata",
+        ),
+        (
+            """diff --git a/image.bin b/image.bin
+GIT binary patch
+literal 0
+""",
+            "unsupported binary diff",
+        ),
+        (
+            """diff --git a/.git/config b/.git/config
+--- a/.git/config
++++ b/.git/config
+@@ -0,0 +1 @@
++owned
+""",
+            "git metadata path is unsupported",
+        ),
+    ],
+)
+def test_apply_model_diff_rejects_unsafe_diff_metadata(
+    tmp_path: Path, diff_text: str, message: str
+) -> None:
+    """模型 diff 使用高风险元数据时必须在 git apply 前拒绝。"""
+
+    runner = _load_runner_module()
+    repo_dir = tmp_path / "repo"
+    runner._init_repo_with_base(repo_dir, {"src/app.py": "value = 1\n"})
+
+    result = runner._apply_model_diff(repo_dir, diff_text)
+
+    assert result["applied"] is False
+    assert result["strategy"] == "rejected-outside-sandbox"
+    assert message in result["output"]
+
+
+@pytest.mark.unit
 def test_apply_model_diff_rejects_symlink_escape(tmp_path: Path) -> None:
     """模型 diff 创建逃逸 symlink 时必须在 pytest 前拒绝。"""
 
@@ -562,6 +639,7 @@ def test_pytest_env_uses_sandbox_only_pythonpath(
     runner = _load_runner_module()
     monkeypatch.setenv("PYTHONPATH", "/tmp/host-path")
     monkeypatch.setenv("OPENAI_API_KEY", "secret")
+    monkeypatch.setenv("KONGMING_HOME", "/tmp/kongming-home")
 
     env = runner._pytest_env(tmp_path)
 
@@ -569,3 +647,4 @@ def test_pytest_env_uses_sandbox_only_pythonpath(
     assert env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
     assert env["PYTHONDONTWRITEBYTECODE"] == "1"
     assert "OPENAI_API_KEY" not in env
+    assert "KONGMING_HOME" not in env
