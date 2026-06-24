@@ -562,6 +562,20 @@ def _validate_diff_paths(repo_dir: Path, diff_text: str) -> str | None:
     return None
 
 
+def _validate_repo_symlinks(repo_dir: Path) -> str | None:
+    """校验 repo 内符号链接不逃出 sandbox，输入 repo，输出错误字符串或 None。"""
+
+    root = repo_dir.resolve()
+    for path in repo_dir.rglob("*"):
+        if not path.is_symlink():
+            continue
+        target = path.resolve(strict=False)
+        if root not in target.parents and target != root:
+            relative_path = path.relative_to(repo_dir)
+            return f"symlink escapes sandbox: {relative_path} -> {target}"
+    return None
+
+
 def _apply_model_diff(repo_dir: Path, diff_text: str) -> dict[str, Any]:
     """把模型产出的 diff 应用到 base 仓库，输入仓库目录和 patch 文本，输出应用结果。
 
@@ -581,10 +595,24 @@ def _apply_model_diff(repo_dir: Path, diff_text: str) -> dict[str, Any]:
     attempts: list[str] = []
     primary = _run_git(["apply", "--whitespace=nowarn", "-"], repo_dir, stdin=diff_text)
     if primary.returncode == 0:
+        symlink_error = _validate_repo_symlinks(repo_dir)
+        if symlink_error:
+            return {
+                "applied": False,
+                "strategy": "rejected-outside-sandbox",
+                "output": symlink_error,
+            }
         return {"applied": True, "strategy": "git-apply", "output": primary.stdout}
     attempts.append(f"git-apply:\n{primary.stdout}")
     three_way = _run_git(["apply", "--3way", "--whitespace=nowarn", "-"], repo_dir, stdin=diff_text)
     if three_way.returncode == 0:
+        symlink_error = _validate_repo_symlinks(repo_dir)
+        if symlink_error:
+            return {
+                "applied": False,
+                "strategy": "rejected-outside-sandbox",
+                "output": symlink_error,
+            }
         return {"applied": True, "strategy": "git-apply-3way", "output": three_way.stdout}
     attempts.append(f"git-apply-3way:\n{three_way.stdout}")
     return {"applied": False, "strategy": None, "output": "\n---\n".join(attempts)}

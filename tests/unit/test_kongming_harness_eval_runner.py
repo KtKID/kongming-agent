@@ -530,6 +530,30 @@ def test_apply_model_diff_rejects_paths_outside_sandbox(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_apply_model_diff_rejects_symlink_escape(tmp_path: Path) -> None:
+    """模型 diff 创建逃逸 symlink 时必须在 pytest 前拒绝。"""
+
+    runner = _load_runner_module()
+    repo_dir = tmp_path / "repo"
+    runner._init_repo_with_base(repo_dir, {"src/app.py": "value = 1\n"})
+    diff_text = """diff --git a/evil b/evil
+new file mode 120000
+index 0000000..e111f83
+--- /dev/null
++++ b/evil
+@@ -0,0 +1 @@
++../../outside.txt
+\\ No newline at end of file
+"""
+
+    result = runner._apply_model_diff(repo_dir, diff_text)
+
+    assert result["applied"] is False
+    assert result["strategy"] == "rejected-outside-sandbox"
+    assert "symlink escapes sandbox" in result["output"]
+
+
+@pytest.mark.unit
 def test_pytest_env_uses_sandbox_only_pythonpath(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
