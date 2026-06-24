@@ -2,7 +2,7 @@
  * GenericConfigSection 最小用例：
  *
  * 1. effective=null 时返回 null
- * 2. 字段按 path 分桶
+ * 2. 字段按 group 内相对 path 分桶
  * 3. 空 path 进入 __other__ 兜底桶
  */
 
@@ -53,11 +53,43 @@ describe("GenericConfigSection", () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it("按 path 分桶", () => {
+  it("按 group 内相对 path 分桶", () => {
     const fields = [
-      makeField("workflow.enabled"),
       makeField("sitian.scanner.recent_session_window_days"),
+      makeField("sitian.output_subdir"),
+      makeField("sitian.analyzer.enabled"),
     ];
+    act(() => {
+      useConfigStore.setState({
+        effective: makeEffective(fields.map((f) => f.path)),
+      });
+    });
+
+    render(
+      <GenericConfigSection
+        groupId="sitian"
+        label="司天"
+        fields={fields}
+      />,
+    );
+
+    expect(
+      document.querySelector('[data-generic-config-bucket="sitian.__general__"]'),
+    ).not.toBeNull();
+    expect(
+      document.querySelector('[data-generic-config-bucket="sitian.scanner"]'),
+    ).not.toBeNull();
+    expect(
+      document.querySelector('[data-generic-config-bucket="sitian.analyzer"]'),
+    ).not.toBeNull();
+    expect(screen.getByText("基础配置")).toBeInTheDocument();
+    expect(screen.getByText("扫描器")).toBeInTheDocument();
+    expect(screen.getByText("分析器")).toBeInTheDocument();
+    expect(screen.getAllByTestId("field-stub")).toHaveLength(3);
+  });
+
+  it("workflow 直属字段归入基础配置桶", () => {
+    const fields = [makeField("workflow.home"), makeField("workflow.enabled")];
     act(() => {
       useConfigStore.setState({
         effective: makeEffective(fields.map((f) => f.path)),
@@ -73,12 +105,15 @@ describe("GenericConfigSection", () => {
     );
 
     expect(
-      document.querySelector('[data-generic-config-bucket="workflow"]'),
+      document.querySelector(
+        '[data-generic-config-bucket="workflow.__general__"]',
+      ),
     ).not.toBeNull();
-    expect(
-      document.querySelector('[data-generic-config-bucket="sitian.scanner"]'),
-    ).not.toBeNull();
-    expect(screen.getAllByTestId("field-stub")).toHaveLength(2);
+    expect(screen.getByText("基础配置")).toBeInTheDocument();
+    const renderedPaths = screen
+      .getAllByTestId("field-stub")
+      .map((node) => node.getAttribute("data-path"));
+    expect(renderedPaths).toEqual(["workflow.enabled", "workflow.home"]);
   });
 
   it("空 path 进入 __other__ 兜底桶", () => {

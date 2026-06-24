@@ -2,8 +2,8 @@
  * dashboard/config 子模块内部通用 section。
  *
  * 用于后端 schema 已声明、前端暂无专用 section 的配置分组。组件按字段 path
- * 自动分桶：三段及以上路径取前两段（如 sitian.analyzer），一到两段路径取
- * 第一段（如 workflow），保证新增字段进入 UI 后有稳定展示入口。
+ * 自动分桶：优先按当前 group 内的相对路径分组（如 sitian.analyzer），group
+ * 直属字段进入基础配置桶，保证新增字段进入 UI 后有稳定展示入口。
  */
 
 import { type ReactNode } from "react";
@@ -24,17 +24,42 @@ interface FieldBucket {
   fields: FieldMeta[];
 }
 
-function bucketKey(path: string): string {
+const BUCKET_LABELS: Record<string, string> = {
+  "__other__": "其他",
+  "sitian.__general__": "基础配置",
+  "sitian.analyzer": "分析器",
+  "sitian.interests": "关注范围",
+  "sitian.scanner": "扫描器",
+  "sitian.sources": "来源",
+  "workflow.__general__": "基础配置",
+};
+
+function prettifyBucketKey(key: string): string {
+  if (BUCKET_LABELS[key]) return BUCKET_LABELS[key];
+  return key
+    .split(".")
+    .filter(Boolean)
+    .map((part) => part.replaceAll("_", " "))
+    .join(" / ");
+}
+
+function bucketKey(path: string, groupId: string): string {
   if (!path) return "__other__";
-  const parts = path.split(".");
-  if (parts.length >= 3) return parts.slice(0, 2).join(".");
+  const prefix = `${groupId}.`;
+  if (path.startsWith(prefix)) {
+    const relativeParts = path.slice(prefix.length).split(".").filter(Boolean);
+    if (relativeParts.length >= 2) return `${groupId}.${relativeParts[0]}`;
+    return `${groupId}.__general__`;
+  }
+  const parts = path.split(".").filter(Boolean);
+  if (parts.length >= 2) return parts.slice(0, 2).join(".");
   return parts[0] ?? "__other__";
 }
 
-function bucketize(fields: FieldMeta[]): FieldBucket[] {
+function bucketize(fields: FieldMeta[], groupId: string): FieldBucket[] {
   const buckets = new Map<string, FieldMeta[]>();
   for (const meta of fields) {
-    const key = bucketKey(meta.path);
+    const key = bucketKey(meta.path, groupId);
     const bucket = buckets.get(key);
     if (bucket) {
       bucket.push(meta);
@@ -44,9 +69,9 @@ function bucketize(fields: FieldMeta[]): FieldBucket[] {
   }
   return Array.from(buckets, ([key, bucketFields]) => ({
     key,
-    label: key === "__other__" ? "其他" : key,
-    fields: bucketFields,
-  }));
+    label: prettifyBucketKey(key),
+    fields: [...bucketFields].sort((a, b) => a.path.localeCompare(b.path)),
+  })).sort((a, b) => a.key.localeCompare(b.key));
 }
 
 export function GenericConfigSection({
@@ -61,7 +86,7 @@ export function GenericConfigSection({
 
   if (!effective) return null;
 
-  const buckets = bucketize(fields);
+  const buckets = bucketize(fields, groupId);
 
   return (
     <div className="space-y-5" data-section={groupId}>
