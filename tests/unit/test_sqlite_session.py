@@ -388,3 +388,100 @@ async def test_sqlite_session_persists_bootstrap_metadata_from_factory(tmp_path)
     assert row[5] == "test-version"
     assert row[6] == "system text"
     assert row[7] == 1
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_migrates_legacy_sessions_table_run_count(tmp_path):
+    """旧 sessions 表缺 run_count 时，初始化必须补列并继续递增。"""
+    db = tmp_path / "legacy.db"
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE sessions (
+                session_id TEXT PRIMARY KEY,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                agent_name TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                instruction_sources TEXT NOT NULL,
+                instruction_text_hash TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                app_version TEXT NOT NULL,
+                system_prompt TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO sessions (
+                session_id,
+                created_at,
+                updated_at,
+                agent_name,
+                model_name,
+                instruction_sources,
+                instruction_text_hash,
+                cwd,
+                app_version,
+                system_prompt
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("sid", 10.0, 10.0, "", "", "[]", "", "", "", None),
+        )
+        conn.commit()
+
+    session = SQLiteSession("sid", db)
+
+    assert await session.advance_run_index() == 1
+    with sqlite3.connect(str(db)) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        row = conn.execute(
+            "SELECT run_count FROM sessions WHERE session_id = ?",
+            ("sid",),
+        ).fetchone()
+
+    assert "run_count" in columns
+    assert row is not None
+    run_count = row[0]
+    assert run_count == 1
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_backfills_created_at_from_legacy_messages(tmp_path):
+    """旧 messages 行先于 sessions 行存在时，created_at 必须取最早消息时间。"""
+    db = tmp_path / "legacy-messages.db"
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE messages (
+                session_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                PRIMARY KEY(session_id, seq)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, seq, payload, created_at) VALUES (?, ?, ?, ?)",
+            (
+                "sid",
+                1,
+                json.dumps(_message_to_dict(Message.user("legacy"))),
+                12.5,
+            ),
+        )
+        conn.commit()
+
+    session = SQLiteSession("sid", db, bootstrap=_bootstrap(tmp_path))
+    await session.append(Message.assistant(content="new"))
+
+    with sqlite3.connect(str(db)) as conn:
+        row = conn.execute(
+            "SELECT created_at FROM sessions WHERE session_id = ?",
+            ("sid",),
+        ).fetchone()
+
+    assert row is not None
+    created_at = row[0]
+    assert created_at == 12.5

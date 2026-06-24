@@ -31,7 +31,7 @@ class Session(Protocol):
         ...
 
     async def clear(self) -> None:
-        """清空当前会话历史。"""
+        """清空当前会话历史，并把该会话的 run 编号重置为初始状态。"""
         ...
 
     async def advance_run_index(self) -> int:

@@ -53,6 +53,14 @@ async def test_clear_is_idempotent():
     assert await s.history() == []
 
 
+@pytest.mark.asyncio
+async def test_clear_resets_run_index():
+    s = InMemorySession("sid")
+    assert await s.advance_run_index() == 1
+    await s.clear()
+    assert await s.advance_run_index() == 1
+
+
 def test_auto_generated_session_id_when_not_provided():
     a = InMemorySession()
     b = InMemorySession()
