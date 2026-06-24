@@ -23,7 +23,7 @@ Kongming Agent runtime 级评测集。所有题目都在真实 `NativeRuntime + 
 - `pass_to_pass`：修复必须始终保持通过的回归保护测试 node id，至少声明 1 个；
 - `fixture_response`：标杆 unified diff，供 fixture 模式驱动 harness，可保留模型原始输出视角的 code fence。
 
-打分流程：①基线校验（未打补丁时 `fail_to_pass` 必须失败、`pass_to_pass` 必须通过，否则 case 非法）→ ②`git apply` 模型 diff（失败回退到 `git apply --3way`，保持严格上下文匹配）→ ③复跑两组测试，`fail_to_pass` 全转通过且 `pass_to_pass` 不退化才判通过。
+打分流程：①基线校验（未打补丁时 `fail_to_pass` 必须失败、`pass_to_pass` 必须通过，否则 case 非法）→ ②普通 `git apply` 模型 diff（禁用 `--3way` / fuzzy fallback，并拒绝逃逸路径、`.git` 路径、rename/copy/binary patch 与逃逸 symlink）→ ③复跑两组测试，`fail_to_pass` 全转通过且 `pass_to_pass` 不退化才判通过。
 
 ### `tool_execution` 字段约定
 
@@ -77,7 +77,7 @@ fixture 模式的验证边界：
 
 ### 执行边界
 
-本 eval harness 面向本地可信评测任务和可信运行环境。`python_code` 会把模型生成代码写入 sandbox 后运行 pytest；`swebench_diff` 会在临时 git 仓库里应用模型 diff 并运行 pytest。脚本会拒绝逃逸 sandbox 的 diff 路径，pytest 子进程只继承 sandbox `PYTHONPATH` 并禁用插件自动加载；这不是完整 OS 级安全沙箱。不要把未信任的题集、模型输出或第三方 fixture 放到有敏感文件的宿主上执行。
+本 eval harness 面向本地可信评测任务和可信运行环境。`python_code` 会把模型生成代码写入 sandbox 后运行 pytest；`swebench_diff` 会在临时 git 仓库里应用模型 diff 并运行 pytest。脚本会拒绝逃逸 sandbox 的 diff 路径、`.git` 路径、rename/copy/binary patch 和逃逸 symlink；pytest 子进程的 `PYTHONPATH`、`HOME`、`TMPDIR`、`TEMP`、`TMP` 指向 sandbox，透传宿主 `PATH` / locale 相关变量，过滤宿主 `PYTHONPATH`、`KONGMING_HOME` 和 API key，并禁用 pytest 插件自动加载。这不是完整 OS 级安全沙箱。不要把未信任的题集、模型输出或第三方 fixture 放到有敏感文件的宿主上执行。
 
 ```bash
 uv run python scripts/run_kongming_harness_eval.py
