@@ -348,6 +348,7 @@ async def test_sqlite_session_clear_resets_run_index(tmp_path):
 
     assert await session.history() == []
     assert await session.advance_run_index() == 1
+    assert await session.advance_run_index() == 2
 
 
 @pytest.mark.asyncio
@@ -443,7 +444,59 @@ async def test_sqlite_session_migrates_legacy_sessions_table_run_count(tmp_path)
     assert "run_count" in columns
     assert row is not None
     run_count = row[0]
+    assert isinstance(run_count, int)
     assert run_count == 1
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_migrates_partial_legacy_sessions_table(tmp_path):
+    """旧 sessions 表只有 session_id 时，初始化必须补齐全部标准列。"""
+    db = tmp_path / "partial-legacy.db"
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute("CREATE TABLE sessions (session_id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO sessions (session_id) VALUES (?)", ("sid",))
+        conn.commit()
+
+    session = SQLiteSession("sid", db)
+
+    assert await session.advance_run_index() == 1
+    with sqlite3.connect(str(db)) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        row = conn.execute(
+            """
+            SELECT
+                created_at,
+                updated_at,
+                agent_name,
+                model_name,
+                instruction_sources,
+                run_count
+            FROM sessions
+            WHERE session_id = ?
+            """,
+            ("sid",),
+        ).fetchone()
+
+    assert {
+        "session_id",
+        "created_at",
+        "updated_at",
+        "agent_name",
+        "model_name",
+        "instruction_sources",
+        "instruction_text_hash",
+        "cwd",
+        "app_version",
+        "system_prompt",
+        "run_count",
+    } <= columns
+    assert row is not None
+    assert row[0] == 0
+    assert row[1] > 0
+    assert row[2] == ""
+    assert row[3] == ""
+    assert row[4] == "[]"
+    assert row[5] == 1
 
 
 @pytest.mark.asyncio
@@ -485,3 +538,41 @@ async def test_sqlite_session_backfills_created_at_from_legacy_messages(tmp_path
     assert row is not None
     created_at = row[0]
     assert created_at == 12.5
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_preserves_existing_created_at_after_clear(tmp_path):
+    """sessions 行已存在时，clear 后再次 append 必须保留原 created_at。"""
+    db = tmp_path / "created-at.db"
+    first = SQLiteSession("sid", db, bootstrap=_bootstrap(tmp_path))
+    await first.append(Message.user("first"))
+    await first.clear()
+
+    second_bootstrap = SessionBootstrap(
+        agent_name="agent-2",
+        model_name="model-2",
+        instruction_sources=[],
+        instruction_text_hash="sha256:second",
+        created_at=999.0,
+        cwd=str(tmp_path),
+        instruction_text="second",
+        app_version="second-version",
+    )
+    second = SQLiteSession("sid", db, bootstrap=second_bootstrap)
+    await second.append(Message.user("second"))
+
+    with sqlite3.connect(str(db)) as conn:
+        row = conn.execute(
+            """
+            SELECT created_at, agent_name, model_name, instruction_text_hash
+            FROM sessions
+            WHERE session_id = ?
+            """,
+            ("sid",),
+        ).fetchone()
+
+    assert row is not None
+    assert row[0] == 123.0
+    assert row[1] == "agent"
+    assert row[2] == "model"
+    assert row[3] == "sha256:test"

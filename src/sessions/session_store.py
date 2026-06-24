@@ -35,11 +35,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sqlite3
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from core.contracts import Session
 from core.message import Message, ToolCall
@@ -141,6 +143,21 @@ _SESSION_COLUMNS_SQL: dict[str, str] = {
     "system_prompt": "TEXT",
     "run_count": "INTEGER NOT NULL DEFAULT 0",
 }
+_SESSION_COLUMN_NAMES = tuple(_SESSION_COLUMNS_SQL)
+_T = TypeVar("_T")
+
+
+def _create_sessions_table_sql() -> str:
+    """根据单一列定义生成 sessions 建表 SQL。"""
+
+    columns_sql = ",\n                    ".join(
+        f"{name} {definition}" for name, definition in _SESSION_COLUMNS_SQL.items()
+    )
+    return f"""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    {columns_sql}
+                )
+                """
 
 
 class SQLiteSession:
@@ -214,23 +231,7 @@ class SQLiteSession:
         if path.parent and str(path.parent) not in ("", "."):
             path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self._db_path) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS sessions (
-                    session_id TEXT PRIMARY KEY,
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL,
-                    agent_name TEXT NOT NULL,
-                    model_name TEXT NOT NULL,
-                    instruction_sources TEXT NOT NULL,
-                    instruction_text_hash TEXT NOT NULL,
-                    cwd TEXT NOT NULL,
-                    app_version TEXT NOT NULL,
-                    system_prompt TEXT,
-                    run_count INTEGER NOT NULL DEFAULT 0
-                )
-                """
-            )
+            conn.execute(_create_sessions_table_sql())
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS messages (
@@ -250,14 +251,28 @@ class SQLiteSession:
 
         rows = conn.execute("PRAGMA table_info(sessions)").fetchall()
         existing = {str(row[1]) for row in rows}
+        if "session_id" not in existing:
+            raise RuntimeError("sessions table missing required session_id column")
         for name, definition in _SESSION_COLUMNS_SQL.items():
-            if name in existing or name == "session_id":
+            if name in existing:
                 continue
             conn.execute(f"ALTER TABLE sessions ADD COLUMN {name} {definition}")
+        migrated_rows = conn.execute("PRAGMA table_info(sessions)").fetchall()
+        migrated = {str(row[1]) for row in migrated_rows}
+        missing = set(_SESSION_COLUMN_NAMES) - migrated
+        if missing:
+            missing_list = ", ".join(sorted(missing))
+            raise RuntimeError(f"sessions table migration incomplete: {missing_list}")
 
-    def _legacy_created_at_sync(self, conn: sqlite3.Connection, *, now: float) -> float:
-        """从旧 messages 行推断 session 创建时间，输入连接和当前时间，输出时间戳。"""
+    def _resolve_created_at_sync(self, conn: sqlite3.Connection, *, now: float) -> float:
+        """解析 session 创建时间；优先保留既有 sessions 行，其次兼容旧 messages。"""
 
+        session_row = conn.execute(
+            "SELECT created_at FROM sessions WHERE session_id = ?",
+            (self.session_id,),
+        ).fetchone()
+        if session_row and session_row[0] is not None:
+            return float(session_row[0])
         row = conn.execute(
             "SELECT MIN(created_at) FROM messages WHERE session_id = ?",
             (self.session_id,),
@@ -269,10 +284,10 @@ class SQLiteSession:
         return now
 
     def _ensure_session_row_sync(self, conn: sqlite3.Connection, *, now: float) -> None:
-        """确保当前 session 的元数据行存在。"""
+        """按需创建 session 元数据行，并在已有行上刷新 updated_at。"""
         bootstrap = self._bootstrap
         if bootstrap is None:
-            created_at = self._legacy_created_at_sync(conn, now=now)
+            created_at = self._resolve_created_at_sync(conn, now=now)
             agent_name = ""
             model_name = ""
             instruction_sources = "[]"
@@ -281,7 +296,7 @@ class SQLiteSession:
             app_version = ""
             system_prompt = None
         else:
-            created_at = self._legacy_created_at_sync(conn, now=now)
+            created_at = self._resolve_created_at_sync(conn, now=now)
             agent_name = bootstrap.agent_name
             model_name = bootstrap.model_name
             instruction_sources = json.dumps(bootstrap.instruction_sources, ensure_ascii=False)
@@ -291,7 +306,7 @@ class SQLiteSession:
             system_prompt = bootstrap.instruction_text
         conn.execute(
             """
-            INSERT OR IGNORE INTO sessions (
+            INSERT INTO sessions (
                 session_id,
                 created_at,
                 updated_at,
@@ -321,6 +336,26 @@ class SQLiteSession:
             ),
         )
 
+    def _write_transaction_sync(
+        self,
+        operation: Callable[[sqlite3.Connection, float], _T],
+    ) -> _T:
+        """用 BEGIN IMMEDIATE 包裹一次同步写操作，返回 operation 的结果。"""
+
+        conn = sqlite3.connect(self._db_path, isolation_level=None)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            now = time.time()
+            result = operation(conn, now)
+            conn.execute("COMMIT")
+            return result
+        except Exception:
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+
     # -- Session 协议实现 ----------------------------------------------------
 
     async def append(self, message: Message, *, usage: dict[str, Any] | None = None) -> None:
@@ -337,10 +372,8 @@ class SQLiteSession:
         if usage is not None:
             payload_obj["usage"] = dict(usage)
         payload = json.dumps(payload_obj, ensure_ascii=False)
-        now = time.time()
-        conn = sqlite3.connect(self._db_path)
-        try:
-            conn.execute("BEGIN IMMEDIATE")
+
+        def operation(conn: sqlite3.Connection, now: float) -> None:
             self._ensure_session_row_sync(conn, now=now)
             cur = conn.execute(
                 "SELECT COALESCE(MAX(seq), 0) FROM messages WHERE session_id = ?",
@@ -356,12 +389,8 @@ class SQLiteSession:
                 "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
                 (now, self.session_id),
             )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+
+        self._write_transaction_sync(operation)
 
     async def history(self) -> list[Message]:
         """返回按 append 顺序排列的历史副本。"""
@@ -401,10 +430,8 @@ class SQLiteSession:
 
     def _clear_sync(self) -> None:
         """同步清空，并把当前 session 的 run_count 重置为 0。"""
-        now = time.time()
-        conn = sqlite3.connect(self._db_path)
-        try:
-            conn.execute("BEGIN IMMEDIATE")
+
+        def operation(conn: sqlite3.Connection, now: float) -> None:
             self._ensure_session_row_sync(conn, now=now)
             conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
@@ -414,12 +441,8 @@ class SQLiteSession:
                 "UPDATE sessions SET run_count = 0, updated_at = ? WHERE session_id = ?",
                 (now, self.session_id),
             )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+
+        self._write_transaction_sync(operation)
 
     async def advance_run_index(self) -> int:
         """递增并返回当前 session 的 run 编号。"""
@@ -428,10 +451,8 @@ class SQLiteSession:
 
     def _advance_run_index_sync(self) -> int:
         """同步递增 run_count；事务保证同一 sqlite db 内原子递增。"""
-        now = time.time()
-        conn = sqlite3.connect(self._db_path)
-        try:
-            conn.execute("BEGIN IMMEDIATE")
+
+        def operation(conn: sqlite3.Connection, now: float) -> int:
             self._ensure_session_row_sync(conn, now=now)
             conn.execute(
                 """
@@ -446,15 +467,11 @@ class SQLiteSession:
                 "SELECT run_count FROM sessions WHERE session_id = ?",
                 (self.session_id,),
             ).fetchone()
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-        if row is None:
-            raise RuntimeError(f"session row missing after upsert: {self.session_id}")
-        return int(row[0])
+            if row is None:
+                raise RuntimeError(f"session row missing after upsert: {self.session_id}")
+            return int(row[0])
+
+        return self._write_transaction_sync(operation)
 
     # -- 调试辅助 ------------------------------------------------------------
 
