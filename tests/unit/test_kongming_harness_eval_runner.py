@@ -237,6 +237,19 @@ def test_environment_resolver_records_preset_key_presence(
 
 
 @pytest.mark.unit
+def test_environment_resolver_rejects_mode_preset_conflict() -> None:
+    """CLI 同时指定 fixture mode 和 preset 时必须显式报错。"""
+
+    runner = _load_runner_module()
+
+    with pytest.raises(ValueError, match="--preset requires --mode preset"):
+        runner.resolve_eval_environment(
+            "fixture-full",
+            runner.EvalEnvironmentOverrides(mode="fixture", preset="minimax-m3"),
+        )
+
+
+@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_python_api_runs_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Python API 必须能按 environment id 直接运行 suite。"""
@@ -423,3 +436,40 @@ def test_apply_model_diff_rejects_fuzzy_only_patch(tmp_path: Path) -> None:
     assert result["applied"] is False
     assert result["strategy"] is None
     assert "patch-fuzz" not in result["output"]
+
+
+@pytest.mark.unit
+def test_apply_model_diff_rejects_paths_outside_sandbox(tmp_path: Path) -> None:
+    """模型 diff 指向 sandbox 外路径时必须在 git apply 前拒绝。"""
+
+    runner = _load_runner_module()
+    repo_dir = tmp_path / "repo"
+    runner._init_repo_with_base(repo_dir, {"src/app.py": "value = 1\n"})
+    diff_text = """diff --git a/../../outside.txt b/../../outside.txt
+--- a/../../outside.txt
++++ b/../../outside.txt
+@@ -0,0 +1 @@
++owned
+"""
+
+    result = runner._apply_model_diff(repo_dir, diff_text)
+
+    assert result["applied"] is False
+    assert result["strategy"] == "rejected-outside-sandbox"
+    assert "path escapes sandbox" in result["output"]
+
+
+@pytest.mark.unit
+def test_pytest_env_uses_sandbox_only_pythonpath(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pytest 子进程环境必须避免继承宿主 PYTHONPATH。"""
+
+    runner = _load_runner_module()
+    monkeypatch.setenv("PYTHONPATH", "/tmp/host-path")
+
+    env = runner._pytest_env(tmp_path)
+
+    assert env["PYTHONPATH"] == str(tmp_path)
+    assert env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"

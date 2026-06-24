@@ -194,6 +194,7 @@ class NativeRuntime:
         message_compactor: MessageCompactor | None = None,
         prompt_debug_sink: PromptDebugSink | None = None,
         instruction_origins: Sequence[str] | None = None,
+        llm_provider: LLMProvider | None = None,
     ) -> NativeRuntime:
         """按 Config 装配一份默认 runtime。
 
@@ -229,6 +230,8 @@ class NativeRuntime:
             prompt_debug_sink: prompt debug 输出 sink；不传则关闭。
             instruction_origins: CLI / host 侧收集到的真实 instruction 来源列表，
                 仅用于 prompt debug dump。
+            llm_provider: 显式注入的 LLMProvider。测试和 eval harness 可用它提供
+                确定性 provider；未传时按 Config 构造 provider。
 
         Returns:
             装配好的 :class:`NativeRuntime`，直接 ``await runtime.run(...)`` 即可。
@@ -237,8 +240,11 @@ class NativeRuntime:
         # （host=api.anthropic.com / path 段含 "anthropic"）时自动切到 anthropic
         # 协议，让用户在 .env 里切第三方 anthropic 兼容端点（MiniMax / OpenRouter）
         # 时无需手动改 yaml 里的 provider 字段。
-        if config.model.effective_provider == "anthropic":
-            llm: LLMProvider = AnthropicMessagesProvider(
+        llm: LLMProvider
+        if llm_provider is not None:
+            llm = llm_provider
+        elif config.model.effective_provider == "anthropic":
+            llm = AnthropicMessagesProvider(
                 model_config=config.model,
                 max_retries=config.retry.max_retries,
                 retry_backoff=config.retry.retry_backoff,

@@ -39,6 +39,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -47,7 +48,7 @@ from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
 
 import yaml
@@ -373,21 +374,33 @@ def _write_file(root: Path, relative_path: str, content: str) -> Path:
     return target
 
 
+def _pytest_env(sandbox_dir: Path) -> dict[str, str]:
+    """构造 pytest 子进程环境，输入 sandbox 目录，输出收窄后的环境变量。"""
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(sandbox_dir)
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
 def _run_pytest(sandbox_dir: Path, timeout_seconds: int) -> dict[str, Any]:
     """在 sandbox 内运行 pytest，输入目录和超时，输出进程结果。"""
 
-    env = os.environ.copy()
-    existing_pythonpath = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = (
-        str(sandbox_dir)
-        if not existing_pythonpath
-        else str(sandbox_dir) + os.pathsep + existing_pythonpath
-    )
     started = time.monotonic()
     proc = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q"],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "--rootdir",
+            str(sandbox_dir),
+            "-p",
+            "no:cacheprovider",
+        ],
         cwd=sandbox_dir,
-        env=env,
+        env=_pytest_env(sandbox_dir),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -417,18 +430,21 @@ def _run_pytest_nodes(
             "output": "no pytest nodes configured",
             "skipped": True,
         }
-    env = os.environ.copy()
-    existing_pythonpath = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = (
-        str(sandbox_dir)
-        if not existing_pythonpath
-        else str(sandbox_dir) + os.pathsep + existing_pythonpath
-    )
     started = time.monotonic()
     proc = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", *node_ids],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "--rootdir",
+            str(sandbox_dir),
+            "-p",
+            "no:cacheprovider",
+            *node_ids,
+        ],
         cwd=sandbox_dir,
-        env=env,
+        env=_pytest_env(sandbox_dir),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -481,6 +497,55 @@ def _init_repo_with_base(repo_dir: Path, base_files: dict[str, Any]) -> None:
     _run_git(["commit", "-q", "-m", "base commit"], repo_dir)
 
 
+def _diff_path_token(line: str) -> list[str]:
+    """从 diff header 行提取路径 token，输入一行 patch，输出路径列表。"""
+
+    try:
+        parts = shlex.split(line)
+    except ValueError:
+        return []
+    if len(parts) >= 4 and parts[0] == "diff" and parts[1] == "--git":
+        return [parts[2], parts[3]]
+    if len(parts) >= 2 and parts[0] in {"---", "+++"}:
+        return [parts[1]]
+    return []
+
+
+def _normalize_diff_path_token(token: str) -> str | None:
+    """规范化 diff path token，输入原始 token，输出仓库相对路径或 None。"""
+
+    if token == "/dev/null":
+        return None
+    if token.startswith(("a/", "b/")):
+        token = token[2:]
+    return token
+
+
+def _validate_diff_paths(repo_dir: Path, diff_text: str) -> str | None:
+    """校验 diff 路径是否留在 repo 内，输入 repo 和 patch，输出错误字符串或 None。"""
+
+    root = repo_dir.resolve()
+    for line in diff_text.splitlines():
+        if not (
+            line.startswith("diff --git ") or line.startswith("--- ") or line.startswith("+++ ")
+        ):
+            continue
+        tokens = _diff_path_token(line)
+        if not tokens:
+            return f"invalid diff header: {line}"
+        for token in tokens:
+            normalized = _normalize_diff_path_token(token)
+            if normalized is None:
+                continue
+            path = PurePosixPath(normalized)
+            if path.is_absolute() or ".." in path.parts or not normalized:
+                return f"path escapes sandbox: {token}"
+            target = (root / Path(*path.parts)).resolve()
+            if root not in target.parents and target != root:
+                return f"path escapes sandbox: {token}"
+    return None
+
+
 def _apply_model_diff(repo_dir: Path, diff_text: str) -> dict[str, Any]:
     """把模型产出的 diff 应用到 base 仓库，输入仓库目录和 patch 文本，输出应用结果。
 
@@ -490,6 +555,13 @@ def _apply_model_diff(repo_dir: Path, diff_text: str) -> dict[str, Any]:
 
     if not diff_text.strip():
         return {"applied": False, "strategy": None, "output": "empty diff"}
+    path_error = _validate_diff_paths(repo_dir, diff_text)
+    if path_error:
+        return {
+            "applied": False,
+            "strategy": "rejected-outside-sandbox",
+            "output": path_error,
+        }
     attempts: list[str] = []
     primary = _run_git(["apply", "--whitespace=nowarn", "-"], repo_dir, stdin=diff_text)
     if primary.returncode == 0:
@@ -1261,9 +1333,12 @@ def resolve_eval_environment(
         default_value=None,
         override_sources=override_sources,
     )
-    if resolved_overrides.preset is not None and resolved_overrides.mode is None:
-        mode_raw = "preset"
-        override_sources["mode"] = "cli-derived"
+    if resolved_overrides.preset is not None:
+        if resolved_overrides.mode is not None and resolved_overrides.mode != "preset":
+            raise ValueError("--preset requires --mode preset or no --mode")
+        if resolved_overrides.mode is None:
+            mode_raw = "preset"
+            override_sources["mode"] = "cli-derived"
     mode = _validate_choice(str(mode_raw), field="mode", choices={"fixture", "preset"})
     preset = str(preset_raw) if preset_raw is not None else None
     if mode == "preset" and not preset:
@@ -1536,6 +1611,11 @@ async def run_task(
                     reasoning_effort=config.model.reasoning_effort,
                     metadata={"profile": "baseline-min"},
                 )
+            llm_provider = (
+                FixtureRuntimeLLM(task)
+                if environment.mode == "fixture" and not environment.preset
+                else None
+            )
             runtime = NativeRuntime.build(
                 config,
                 event_sinks=[sink],
@@ -1548,12 +1628,8 @@ async def run_task(
                 message_compactor=(
                     EvalNoopCompactor() if environment.compactor_mode == "noop-script" else None
                 ),
+                llm_provider=llm_provider,
             )
-            if environment.mode == "fixture" and not environment.preset:
-                original_aclose = getattr(runtime.llm, "aclose", None)
-                if original_aclose is not None:
-                    await original_aclose()
-                runtime._llm = FixtureRuntimeLLM(task)  # type: ignore[attr-defined]
             result = await runtime.run(task.prompt, session_id=f"{run_id}-{task.id}")
             result_status = result.status
             turn_count = result.turn_count

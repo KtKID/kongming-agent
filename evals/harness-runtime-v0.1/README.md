@@ -75,6 +75,10 @@ fixture 模式的验证边界：
 - 其他题型使用伪 LLM 的确定性 `LLMResponse` 驱动 `NativeRuntime.run()`，验证 request/response 路径、session 落盘和 scorer 语义；
 - eval fake tools 由独立 `ToolRegistry` 提供，替换本评测题所需工具名的生产实现，保证 fixture 结果可重复。
 
+### 执行边界
+
+本 eval harness 面向本地可信评测任务和可信运行环境。`python_code` 会把模型生成代码写入 sandbox 后运行 pytest；`swebench_diff` 会在临时 git 仓库里应用模型 diff 并运行 pytest。脚本会拒绝逃逸 sandbox 的 diff 路径，pytest 子进程只继承 sandbox `PYTHONPATH` 并禁用插件自动加载；这不是完整 OS 级安全沙箱。不要把未信任的题集、模型输出或第三方 fixture 放到有敏感文件的宿主上执行。
+
 ```bash
 uv run python scripts/run_kongming_harness_eval.py
 # 等价于：
