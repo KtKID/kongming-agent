@@ -85,6 +85,14 @@ describe("GenericConfigSection", () => {
     expect(screen.getByText("基础配置")).toBeInTheDocument();
     expect(screen.getByText("扫描器")).toBeInTheDocument();
     expect(screen.getByText("分析器")).toBeInTheDocument();
+    const bucketKeys = Array.from(
+      document.querySelectorAll("[data-generic-config-bucket]"),
+    ).map((node) => node.getAttribute("data-generic-config-bucket"));
+    expect(bucketKeys).toEqual([
+      "sitian.__general__",
+      "sitian.scanner",
+      "sitian.analyzer",
+    ]);
     expect(screen.getAllByTestId("field-stub")).toHaveLength(3);
   });
 

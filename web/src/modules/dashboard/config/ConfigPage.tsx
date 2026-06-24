@@ -111,9 +111,11 @@ export function ConfigPage(): ReactNode {
   if (!schema) return null;
 
   const group = schema.groups.find((g) => g.id === section);
-  if (schema.groups.length > 0 && !group) {
+  if (!group) {
     const fallback = schema.groups[0]?.id ?? "model";
-    return <Navigate to={`/manage/config/${fallback}`} replace />;
+    if (section !== fallback) {
+      return <Navigate to={`/manage/config/${fallback}`} replace />;
+    }
   }
 
   const fields = schema.fields.filter((f) => f.group === section);

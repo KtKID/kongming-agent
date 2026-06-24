@@ -316,6 +316,17 @@ describe("ConfigPage", () => {
     expect(screen.getByTestId("save-restart-bar")).toBeInTheDocument();
   });
 
+  it("schema.groups 为空且 section 非法时重定向到 /manage/config/model", () => {
+    useConfigStore.setState({
+      loadStatus: "loaded",
+      schema: { fields: [makeField("model.name", "model")], groups: [] },
+      effective: makeEffective(),
+      raw: makeRaw(),
+    });
+    renderAt("/manage/config/invalid_id");
+    expect(screen.getByTestId("model-section")).toBeInTheDocument();
+  });
+
   it("idle 状态时触发 store.load() 一次", () => {
     const loadSpy = vi.fn().mockResolvedValue(undefined);
     useConfigStore.setState({ loadStatus: "idle", load: loadSpy });

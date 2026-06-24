@@ -34,6 +34,16 @@ const BUCKET_LABELS: Record<string, string> = {
   "workflow.__general__": "基础配置",
 };
 
+const BUCKET_ORDER: Record<string, number> = {
+  "__other__": 99,
+  "sitian.__general__": 0,
+  "sitian.scanner": 1,
+  "sitian.analyzer": 2,
+  "sitian.interests": 3,
+  "sitian.sources": 4,
+  "workflow.__general__": 0,
+};
+
 function prettifyBucketKey(key: string): string {
   if (BUCKET_LABELS[key]) return BUCKET_LABELS[key];
   return key
@@ -71,7 +81,10 @@ function bucketize(fields: FieldMeta[], groupId: string): FieldBucket[] {
     key,
     label: prettifyBucketKey(key),
     fields: [...bucketFields].sort((a, b) => a.path.localeCompare(b.path)),
-  })).sort((a, b) => a.key.localeCompare(b.key));
+  })).sort((a, b) => {
+    const orderDelta = (BUCKET_ORDER[a.key] ?? 50) - (BUCKET_ORDER[b.key] ?? 50);
+    return orderDelta === 0 ? a.key.localeCompare(b.key) : orderDelta;
+  });
 }
 
 export function GenericConfigSection({

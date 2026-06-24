@@ -1147,7 +1147,7 @@ _FIELD_METAS: list[FieldMeta] = [
         editable=True,
         desc="最近活动窗口（天）；0 表示读取所有 session。需重启生效。",
         restart_required=True,
-        min_value=0.0,
+        min_value=0,
         group="sitian",
     ),
     FieldMeta(
@@ -1156,7 +1156,7 @@ _FIELD_METAS: list[FieldMeta] = [
         editable=True,
         desc="每个 session 取最后 N 条 user 消息；0 表示不取。需重启生效。",
         restart_required=True,
-        min_value=0.0,
+        min_value=0,
         group="sitian",
     ),
     FieldMeta(
@@ -1165,7 +1165,7 @@ _FIELD_METAS: list[FieldMeta] = [
         editable=True,
         desc="每个 session 取最后 N 条 assistant 消息；0 表示不取。需重启生效。",
         restart_required=True,
-        min_value=0.0,
+        min_value=0,
         group="sitian",
     ),
     FieldMeta(
@@ -1174,7 +1174,7 @@ _FIELD_METAS: list[FieldMeta] = [
         editable=True,
         desc="单条消息最大字符数；0 表示不截断。需重启生效。",
         restart_required=True,
-        min_value=0.0,
+        min_value=0,
         group="sitian",
     ),
     FieldMeta(
