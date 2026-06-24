@@ -7,12 +7,12 @@
  * 3. loadStatus=loading → 渲染 "加载配置中..."
  * 4. loadStatus=error → 渲染 "加载失败：xxx"
  * 5. loadStatus=loaded + section=model → 渲染 ModelSection stub
- * 6. 顶部 5 个 NavLink 都渲染（含正确 href + label）
+ * 6. 顶部 NavLink 跟随后端 schema.groups 渲染（含正确 href + label）
  * 7. SaveRestartBar 出现在 DOM
  *
  * ## stub 策略
  *
- * 把 5 个 section 和 SaveRestartBar 全部 vi.mock 成轻量 stub —— 我们只测装配
+ * 把 section 和 SaveRestartBar 全部 vi.mock 成轻量 stub —— 我们只测装配
  * （是否按 section id 选对了组件，是否传了 fields，是否挂了 bar），section 内部
  * 行为另有专用测试覆盖。
  *
@@ -76,6 +76,27 @@ vi.mock("../sections/HostObservSection", () => ({
   ),
 }));
 
+vi.mock("../sections/GenericConfigSection", () => ({
+  GenericConfigSection: ({
+    groupId,
+    label,
+    fields,
+  }: {
+    groupId: string;
+    label: string;
+    fields: FieldMeta[];
+  }) => (
+    <div
+      data-testid="generic-config-section"
+      data-group-id={groupId}
+      data-label={label}
+      data-field-count={fields.length}
+    >
+      GenericConfigSection({groupId}:{fields.length})
+    </div>
+  ),
+}));
+
 vi.mock("../components/SaveRestartBar", () => ({
   SaveRestartBar: () => <div data-testid="save-restart-bar" />,
 }));
@@ -105,6 +126,9 @@ function makeSchema(): SchemaResponse {
       makeField("tool.allow", "tool_approval"),
       makeField("safety.rules", "safety"),
       makeField("host.kind", "host_observ"),
+      makeField("workflow.enabled", "workflow"),
+      makeField("workflow.scan_interval", "workflow"),
+      makeField("sitian.version", "sitian"),
     ],
     groups: [
       { id: "model", label: "模型" },
@@ -112,6 +136,8 @@ function makeSchema(): SchemaResponse {
       { id: "tool_approval", label: "工具与审批" },
       { id: "safety", label: "安全" },
       { id: "host_observ", label: "宿主与可观测" },
+      { id: "workflow", label: "工作流" },
+      { id: "sitian", label: "司天" },
     ],
   };
 }
@@ -224,7 +250,22 @@ describe("ConfigPage", () => {
     expect(screen.queryByTestId("model-section")).toBeNull();
   });
 
-  it("顶部 5 个 NavLink 全部渲染，含正确 href + label", () => {
+  it("loaded + 未专用实现的 section 时渲染 GenericConfigSection", () => {
+    useConfigStore.setState({
+      loadStatus: "loaded",
+      schema: makeSchema(),
+      effective: makeEffective(),
+      raw: makeRaw(),
+    });
+    renderAt("/manage/config/workflow");
+    const stub = screen.getByTestId("generic-config-section");
+    expect(stub).toBeInTheDocument();
+    expect(stub.getAttribute("data-group-id")).toBe("workflow");
+    expect(stub.getAttribute("data-label")).toBe("工作流");
+    expect(stub.getAttribute("data-field-count")).toBe("2");
+  });
+
+  it("顶部 NavLink 跟随后端 schema.groups 渲染，含正确 href + label", () => {
     useConfigStore.setState({
       loadStatus: "loaded",
       schema: makeSchema(),
@@ -234,13 +275,15 @@ describe("ConfigPage", () => {
     renderAt("/manage/config/model");
     const tabs = screen.getByTestId("config-section-tabs");
     const links = tabs.querySelectorAll("a");
-    expect(links).toHaveLength(5);
+    expect(links).toHaveLength(7);
     const expected: Array<[string, string]> = [
       ["/manage/config/model", "模型"],
       ["/manage/config/runtime", "运行时"],
       ["/manage/config/tool_approval", "工具与审批"],
       ["/manage/config/safety", "安全"],
       ["/manage/config/host_observ", "宿主与可观测"],
+      ["/manage/config/workflow", "工作流"],
+      ["/manage/config/sitian", "司天"],
     ];
     expected.forEach(([href, label], idx) => {
       const a = links[idx]!;
@@ -271,6 +314,17 @@ describe("ConfigPage", () => {
     expect(screen.queryByTestId("config-section-tabs")).toBeNull();
     // SaveRestartBar 仍渲染
     expect(screen.getByTestId("save-restart-bar")).toBeInTheDocument();
+  });
+
+  it("schema.groups 为空且 section 非法时重定向到 /manage/config/model", () => {
+    useConfigStore.setState({
+      loadStatus: "loaded",
+      schema: { fields: [makeField("model.name", "model")], groups: [] },
+      effective: makeEffective(),
+      raw: makeRaw(),
+    });
+    renderAt("/manage/config/invalid_id");
+    expect(screen.getByTestId("model-section")).toBeInTheDocument();
   });
 
   it("idle 状态时触发 store.load() 一次", () => {

@@ -116,13 +116,13 @@ def _origin(request: Request) -> str:
 def _server_origin(request: Request) -> str:
     """生成移动配对对外 server origin。
 
-    关键输入：FastAPI request 与 app.state.config.web.public_origin。
+    关键输入：FastAPI request 与 app.state.config.web.server_origin。
     关键输出：手机可访问的 ``scheme://host[:port]`` origin。
     """
     cfg = getattr(request.app.state, "config", None)
-    public_origin = getattr(getattr(cfg, "web", None), "public_origin", None)
-    if isinstance(public_origin, str) and public_origin.strip():
-        return public_origin.strip().rstrip("/")
+    server_origin = getattr(getattr(cfg, "web", None), "server_origin", None)
+    if isinstance(server_origin, str) and server_origin.strip():
+        return server_origin.strip().rstrip("/")
     return _origin(request)
 
 

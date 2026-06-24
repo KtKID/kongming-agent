@@ -1163,8 +1163,6 @@ class WebConfig(BaseModel):
         port: HTTP / WS 端口。
         server_origin: 扫码登录和移动端 handoff 使用的服务器 origin。公网
             场景填 ``https://domain``，局域网扫码填 ``http://192.168.x.x:port``。
-        public_origin: 兼容旧字段。为空时按请求 origin 生成；新功能优先使用
-            ``server_origin``。
         host_environment: Web sidecar 宿主环境。``browser`` 表示普通浏览器，
             ``xspace`` 表示由 XSpace 桌面宿主启动。
         dev_mode: 跳过登录鉴权（仅本地开发）；上线必须 False。
@@ -1200,7 +1198,6 @@ class WebConfig(BaseModel):
     host: str = "0.0.0.0"
     port: Annotated[int, Field(ge=1, le=65535)] = 8080
     server_origin: str | None = None
-    public_origin: str | None = None
     host_environment: WebHostEnvironment = "browser"
     dev_mode: bool = False
     initial_password: str | None = None
@@ -1243,7 +1240,7 @@ class WebConfig(BaseModel):
             seen.add(preset.id)
         return self
 
-    @field_validator("server_origin", "public_origin")
+    @field_validator("server_origin")
     @classmethod
     def _normalize_origin(cls, value: str | None) -> str | None:
         """外部访问 origin 只接受 http(s) origin，返回去尾斜杠后的标准值。"""
@@ -1258,13 +1255,6 @@ class WebConfig(BaseModel):
         if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
             raise ValueError("web origin must not include path, query, or fragment")
         return f"{parsed.scheme}://{parsed.netloc}"
-
-    @model_validator(mode="after")
-    def _backfill_server_origin(self) -> WebConfig:
-        """让旧 public_origin 配置继续驱动新 server_origin 语义。"""
-        if self.server_origin is None and self.public_origin is not None:
-            object.__setattr__(self, "server_origin", self.public_origin)
-        return self
 
     @property
     def normalized_dashboard_poll_interval_seconds(self) -> int:
