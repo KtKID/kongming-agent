@@ -257,7 +257,7 @@ class ConfigProfileManager:
         )
 
     def sync_copy(self, path: str, reason: str = "XSpace profile 继承主配置值") -> None:
-        """把主配置字段复制到 XSpace profile，并记录 sync-copy 决策。
+        """把主配置字段复制到已存在的 XSpace profile，并记录 sync-copy 决策。
 
         Args:
             path: Config leaf dot-path。

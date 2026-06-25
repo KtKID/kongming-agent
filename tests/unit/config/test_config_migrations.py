@@ -158,6 +158,34 @@ web:
     assert cfg.web.server_origin == "http://127.0.0.1:8765"
 
 
+def test_migration_renames_legacy_web_origin_from_v0_yaml(tmp_path: Path) -> None:
+    """v0 配置残留旧 origin 字段时，升级到当前版本也必须保留值。"""
+    config_path = _write_legacy_config(
+        tmp_path,
+        """\
+model:
+  name: local
+  base_url: http://127.0.0.1:1234/v1
+web:
+  public_origin: http://127.0.0.1:8765
+""",
+    )
+
+    result = migrate_config_if_needed(config_path)
+    cfg = load_config(config_path, load_env_file=False)
+
+    assert result.migrated is True
+    assert result.source_version == "v0"
+    assert "config_schema_version" in result.added_fields
+    assert "web.server_origin" in result.added_fields
+    assert result.removed_fields == ("web.public_origin",)
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert raw["config_schema_version"] == CURRENT_CONFIG_SCHEMA_VERSION
+    assert "public_origin" not in raw["web"]
+    assert raw["web"]["server_origin"] == "http://127.0.0.1:8765"
+    assert cfg.web.server_origin == "http://127.0.0.1:8765"
+
+
 def test_migration_backfills_server_origin_for_current_yaml(tmp_path: Path) -> None:
     """当前版本配置缺少 server_origin 时会补入显式空值。"""
     config_path = _write_legacy_config(
