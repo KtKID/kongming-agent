@@ -14,6 +14,11 @@ set -euo pipefail
 : "${REVIEW_PROVIDER:=openai_compatible}"
 : "${REVIEW_MAX_TOKENS:=131072}"
 
+if ! [[ "$REVIEW_MAX_TOKENS" =~ ^[0-9]+$ ]]; then
+  echo "::error::REVIEW_MAX_TOKENS must be a valid number, got: ${REVIEW_MAX_TOKENS}"
+  exit 1
+fi
+
 MAX_DIFF_CHARS=80000
 
 # ── 1. 收集 PR 信息 ──
@@ -125,7 +130,7 @@ else
 fi
 
 if [ -z "$REVIEW" ]; then
-  STOP_REASON=$(echo "$BODY" | jq -r '.stop_reason // "unknown"')
+  STOP_REASON=$(echo "$BODY" | jq -r 'if .choices then (.choices[0].finish_reason // "unknown") else (.stop_reason // "unknown") end')
   CONTENT_TYPES=$(echo "$BODY" | jq -r 'if .choices then "choices" else ([.content[]?.type] | unique | join(", ")) end')
   COMMENT="## 🤖 LLM Code Review
 

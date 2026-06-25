@@ -142,6 +142,126 @@ printf '%s\\n200' '{"choices":[{"message":{"content":"### [🔵 Minor] app.py:1\
     assert "Reviewed by openai_compatible (glm-5.2)" in comment
 
 
+def test_review_script_rejects_invalid_max_tokens(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+
+    _write_executable(
+        bin_dir / "gh",
+        """#!/usr/bin/env bash
+set -euo pipefail
+
+case "$1 $2" in
+  "pr view")
+    if [[ "$*" == *"-q .title"* ]]; then
+      printf '%s\\n' "测试 PR"
+    else
+      printf '%s\\n' "测试描述"
+    fi
+    ;;
+  "pr diff")
+    printf '%s\\n' "diff --git a/app.py b/app.py"
+    printf '%s\\n' "+print('ok')"
+    ;;
+  *)
+    echo "unexpected gh args: $*" >&2
+    exit 2
+    ;;
+esac
+""",
+    )
+
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "PR_NUMBER": "123",
+        "REVIEW_PROVIDER": "openai_compatible",
+        "REVIEW_API_KEY": "glm-secret",
+        "REVIEW_API_URL": "https://api.z.ai/api/coding/paas/v4",
+        "REVIEW_MODEL": "glm-5.2",
+        "REVIEW_MAX_TOKENS": "bad-value",
+    }
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT)],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "REVIEW_MAX_TOKENS must be a valid number" in result.stdout
+
+
+def test_review_script_reports_openai_finish_reason_for_empty_content(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    comment_file = tmp_path / "comment.md"
+
+    _write_executable(
+        bin_dir / "gh",
+        """#!/usr/bin/env bash
+set -euo pipefail
+
+case "$1 $2" in
+  "pr view")
+    if [[ "$*" == *"-q .title"* ]]; then
+      printf '%s\\n' "测试 PR"
+    else
+      printf '%s\\n' "测试描述"
+    fi
+    ;;
+  "pr diff")
+    printf '%s\\n' "diff --git a/app.py b/app.py"
+    printf '%s\\n' "+print('ok')"
+    ;;
+  "pr comment")
+    printf '%s' "$5" > "$COMMENT_FILE"
+    ;;
+  *)
+    echo "unexpected gh args: $*" >&2
+    exit 2
+    ;;
+esac
+""",
+    )
+    _write_executable(
+        bin_dir / "curl",
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n200' '{"choices":[{"finish_reason":"length","message":{"content":""}}]}'
+""",
+    )
+
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "COMMENT_FILE": str(comment_file),
+        "PR_NUMBER": "123",
+        "REVIEW_PROVIDER": "openai_compatible",
+        "REVIEW_API_KEY": "glm-secret",
+        "REVIEW_API_URL": "https://api.z.ai/api/coding/paas/v4",
+        "REVIEW_MODEL": "glm-5.2",
+        "REVIEW_MAX_TOKENS": "4096",
+    }
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT)],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    comment = comment_file.read_text(encoding="utf-8")
+    assert "- stop_reason: length" in comment
+    assert "- content_types: choices" in comment
+
+
 def test_review_script_uses_anthropic_provider(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
