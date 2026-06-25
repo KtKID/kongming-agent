@@ -1,0 +1,30 @@
+id: long_context_001
+category: long_context
+source: public_style:longbench
+prompt: |
+  请阅读资料并只输出 JSON：
+  {"answer": "...", "source_id": "..."}
+
+  [doc-a]
+  Agent Harness 的核心是把模型输出接到可控运行循环、工具协议、上下文装配、权限和观测里。
+
+  [doc-b]
+  当前 P0 评测闭环包含固定题集、单模型运行、确定性打分、代码 sandbox 和 Markdown 报告。
+
+  [doc-c]
+  后续 P1 会加入 LLM judge、失败分类、多模型对比和历史回归曲线。
+
+  问题：P0 评测闭环包含哪五个部分？答案必须来自资料。
+scoring:
+  type: json
+  equals:
+    source_id: doc-b
+  contains:
+    answer:
+      - 固定题集
+      - 单模型运行
+      - 确定性打分
+      - 代码 sandbox
+      - Markdown 报告
+fixture_response: |
+  {"answer":"固定题集、单模型运行、确定性打分、代码 sandbox 和 Markdown 报告","source_id":"doc-b"}

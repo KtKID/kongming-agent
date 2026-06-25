@@ -1,0 +1,27 @@
+id: tool_execution_runner_001
+category: tool_execution
+source: self_built
+prompt: |
+  请使用可用工具定位 Runner.run 的定义并阅读其实现。
+
+  最终用中文回答两点：
+  1. Runner.run 的定义在哪个文件
+  2. 它如何把 tool_call 执行结果回传给下一轮模型
+
+  答案必须提到 src/core/runner.py、Runner.run 和 tool_result。
+scoring:
+  type: tool_execution
+  expected_calls:
+    - name: search_code
+      arguments_contains:
+        query: Runner.run
+    - name: read_file
+      arguments_contains:
+        path: src/core/runner.py
+  final_contains:
+    - src/core/runner.py
+    - Runner.run
+    - tool_result
+  min_turns: 2
+fixture_response: |
+  Runner.run 的定义在 src/core/runner.py。它在模型返回 tool_calls 后执行工具，把执行结果作为 role='tool' 的 tool_result 写回 session，然后进入下一轮模型请求。

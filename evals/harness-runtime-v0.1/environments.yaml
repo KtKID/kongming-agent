@@ -1,0 +1,42 @@
+environments:
+  fixture-baseline:
+    suite: evals/harness-runtime-v0.1
+    mode: fixture
+    profile: baseline-min
+    approval_mode: auto_allow
+    runner:
+      max_turns: 50
+    artifacts:
+      output_dir: evals/harness-runtime-v0.1/runs
+
+  fixture-full:
+    suite: evals/harness-runtime-v0.1
+    mode: fixture
+    profile: full
+    approval_mode: auto_allow
+    runner:
+      max_turns: 50
+    artifacts:
+      output_dir: evals/harness-runtime-v0.1/runs
+
+  minimax-full-ci:
+    suite: evals/harness-runtime-v0.1
+    mode: preset
+    preset: minimax-m3
+    profile: full
+    approval_mode: auto_allow
+    runner:
+      max_turns: 50
+    artifacts:
+      output_dir: evals/harness-runtime-v0.1/runs
+
+  minimax-baseline-ci:
+    suite: evals/harness-runtime-v0.1
+    mode: preset
+    preset: minimax-m3
+    profile: baseline-min
+    approval_mode: auto_allow
+    runner:
+      max_turns: 50
+    artifacts:
+      output_dir: evals/harness-runtime-v0.1/runs

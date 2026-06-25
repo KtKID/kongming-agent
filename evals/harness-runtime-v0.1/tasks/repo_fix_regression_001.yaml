@@ -1,0 +1,73 @@
+id: repo_fix_regression_001
+category: repo_fix
+source: public_style:swebench
+prompt: |
+  下面是一个文本工具模块。slugify 在遇到连续空白时会生成多个连字符
+  （例如 "Hello   World" 变成 "hello---world"），应该折叠成单个连字符。
+  请只修复 slugify，不要改动 truncate 的行为。
+
+  仓库文件 src/text_tools.py 当前内容：
+  ```python
+  import re
+
+
+  def slugify(value: str) -> str:
+      return value.strip().lower().replace(" ", "-")
+
+
+  def truncate(value: str, limit: int) -> str:
+      return value if len(value) <= limit else value[: limit - 1] + "…"
+  ```
+
+  只输出一个 unified diff（git diff 格式，以 `diff --git` 或 `---` 开头），
+  不要输出任何解释或 Markdown 说明文字。
+scoring:
+  type: swebench_diff
+  timeout_seconds: 30
+  base_files:
+    src/text_tools.py: |
+      import re
+
+
+      def slugify(value: str) -> str:
+          return value.strip().lower().replace(" ", "-")
+
+
+      def truncate(value: str, limit: int) -> str:
+          return value if len(value) <= limit else value[: limit - 1] + "…"
+  test_files:
+    tests/test_text_tools.py: |
+      from src.text_tools import slugify, truncate
+
+
+      def test_slugify_collapses_whitespace():
+          assert slugify("  Hello   World  ") == "hello-world"
+
+
+      def test_truncate_keeps_short():
+          assert truncate("hello", 10) == "hello"
+
+
+      def test_truncate_adds_ellipsis():
+          assert truncate("hello world", 5) == "hell…"
+  fail_to_pass:
+    - tests/test_text_tools.py::test_slugify_collapses_whitespace
+  pass_to_pass:
+    - tests/test_text_tools.py::test_truncate_keeps_short
+    - tests/test_text_tools.py::test_truncate_adds_ellipsis
+fixture_response: |
+  ```diff
+  diff --git a/src/text_tools.py b/src/text_tools.py
+  --- a/src/text_tools.py
+  +++ b/src/text_tools.py
+  @@ -1,7 +1,7 @@
+   import re
+
+
+   def slugify(value: str) -> str:
+  -    return value.strip().lower().replace(" ", "-")
+  +    return re.sub(r"\s+", "-", value.strip().lower())
+
+
+   def truncate(value: str, limit: int) -> str:
+  ```

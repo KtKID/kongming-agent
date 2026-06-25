@@ -1,0 +1,32 @@
+id: coding_window_001
+category: coding
+source: public_style:livecodebench
+prompt: |
+  写一个 Python 函数 moving_window_sum(values: list[int], size: int) -> list[int]。
+  返回每个长度为 size 的连续窗口和。size 小于等于 0 时抛 ValueError。
+  只输出 Python 代码。
+scoring:
+  type: python_code
+  solution_file: solution.py
+  tests:
+    - path: test_solution.py
+      content: |
+        import pytest
+
+        from solution import moving_window_sum
+
+
+        def test_window_sum():
+            assert moving_window_sum([1, 2, 3, 4], 2) == [3, 5, 7]
+            assert moving_window_sum([5], 1) == [5]
+            assert moving_window_sum([1, 2], 3) == []
+
+
+        def test_invalid_size():
+            with pytest.raises(ValueError):
+                moving_window_sum([1, 2, 3], 0)
+fixture_response: |
+  def moving_window_sum(values: list[int], size: int) -> list[int]:
+      if size <= 0:
+          raise ValueError("size must be positive")
+      return [sum(values[index:index + size]) for index in range(0, len(values) - size + 1)]
