@@ -31,11 +31,13 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from infrastructure.config.errors import ConfigLoadError  # noqa: E402
 from infrastructure.config.profile_manager import (  # noqa: E402
     ConfigProfileManager,
     ProfileDecisionAction,
     format_review_issues,
 )
+from infrastructure.config.writer import ConfigWriterError  # noqa: E402
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -143,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_decision(args)
         if args.command == "sync":
             return _cmd_sync(args)
-    except ValueError as exc:
+    except (ConfigLoadError, ConfigWriterError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     parser.error(f"unknown command: {args.command}")

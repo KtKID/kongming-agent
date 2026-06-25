@@ -248,6 +248,35 @@ def test_config_xspace_sync_script_rejects_blank_reason(tmp_path: Path) -> None:
     assert policy.read_text(encoding="utf-8") == before
 
 
+def test_config_xspace_sync_script_sync_reports_missing_target(tmp_path: Path) -> None:
+    """sync 子命令遇到 writer/IO 错误时，必须转为稳定退出码。"""
+    source, _target, policy = _copy_profile_files(tmp_path)
+    missing_target = tmp_path / "missing-xspace-setting.yaml"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SYNC_SCRIPT),
+            "--source",
+            str(source),
+            "--target",
+            str(missing_target),
+            "--policy",
+            str(policy),
+            "sync",
+            "--path",
+            "web.host",
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "error:" in result.stderr
+
+
 def test_config_xspace_sync_script_review_passes(tmp_path: Path) -> None:
     """脚本 review 子命令必须调用 Manager 并返回可诊断输出。"""
     source, target, policy = _copy_profile_files(tmp_path)
