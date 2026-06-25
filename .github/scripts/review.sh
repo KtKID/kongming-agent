@@ -13,9 +13,21 @@ set -euo pipefail
 : "${REVIEW_MODEL:?REVIEW_MODEL is required}"
 : "${REVIEW_PROVIDER:=openai_compatible}"
 : "${REVIEW_MAX_TOKENS:=131072}"
+: "${REVIEW_CONNECT_TIMEOUT:=15}"
+: "${REVIEW_MAX_TIME:=180}"
 
 if ! [[ "$REVIEW_MAX_TOKENS" =~ ^[0-9]+$ ]]; then
   echo "::error::REVIEW_MAX_TOKENS must be a valid number, got: ${REVIEW_MAX_TOKENS}"
+  exit 1
+fi
+
+if ! [[ "$REVIEW_CONNECT_TIMEOUT" =~ ^[0-9]+$ ]]; then
+  echo "::error::REVIEW_CONNECT_TIMEOUT must be a valid number, got: ${REVIEW_CONNECT_TIMEOUT}"
+  exit 1
+fi
+
+if ! [[ "$REVIEW_MAX_TIME" =~ ^[0-9]+$ ]]; then
+  echo "::error::REVIEW_MAX_TIME must be a valid number, got: ${REVIEW_MAX_TIME}"
   exit 1
 fi
 
@@ -63,32 +75,34 @@ Diff:
 ${DIFF}
 \`\`\`"
 
-PAYLOAD=$(jq -n \
-  --arg model "$REVIEW_MODEL" \
-  --arg system "$SYSTEM_PROMPT" \
-  --arg user "$USER_PROMPT" \
-  --argjson max_tokens "$REVIEW_MAX_TOKENS" \
-  '{
-    model: $model,
-    max_tokens: $max_tokens,
-    messages: [
-      {role: "system", content: $system},
-      {role: "user", content: $user}
-    ]
-  }')
-
 # ── 3. 调用 API ──
 
 API_BASE="${REVIEW_API_URL%/}"
 
 if [ "$REVIEW_PROVIDER" = "openai_compatible" ]; then
-  HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" \
+  PAYLOAD=$(jq -n \
+    --arg model "$REVIEW_MODEL" \
+    --arg system "$SYSTEM_PROMPT" \
+    --arg user "$USER_PROMPT" \
+    --argjson max_tokens "$REVIEW_MAX_TOKENS" \
+    '{
+      model: $model,
+      max_tokens: $max_tokens,
+      messages: [
+        {role: "system", content: $system},
+        {role: "user", content: $user}
+      ]
+    }')
+  HTTP_RESPONSE=$(curl -s \
+    --connect-timeout "$REVIEW_CONNECT_TIMEOUT" \
+    --max-time "$REVIEW_MAX_TIME" \
+    -w "\n%{http_code}" \
     "${API_BASE}/chat/completions" \
     -H "Authorization: Bearer ${REVIEW_API_KEY}" \
     -H "content-type: application/json" \
     -d "$PAYLOAD")
 elif [ "$REVIEW_PROVIDER" = "anthropic" ]; then
-  ANTHROPIC_PAYLOAD=$(jq -n \
+  PAYLOAD=$(jq -n \
     --arg model "$REVIEW_MODEL" \
     --arg system "$SYSTEM_PROMPT" \
     --arg user "$USER_PROMPT" \
@@ -101,12 +115,15 @@ elif [ "$REVIEW_PROVIDER" = "anthropic" ]; then
         {role: "user", content: $user}
       ]
     }')
-  HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" \
+  HTTP_RESPONSE=$(curl -s \
+    --connect-timeout "$REVIEW_CONNECT_TIMEOUT" \
+    --max-time "$REVIEW_MAX_TIME" \
+    -w "\n%{http_code}" \
     "${API_BASE}/v1/messages" \
     -H "x-api-key: ${REVIEW_API_KEY}" \
     -H "content-type: application/json" \
     -H "anthropic-version: 2023-06-01" \
-    -d "$ANTHROPIC_PAYLOAD")
+    -d "$PAYLOAD")
 else
   echo "::error::Unsupported REVIEW_PROVIDER: ${REVIEW_PROVIDER}"
   exit 1

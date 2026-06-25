@@ -34,4 +34,6 @@ jobs:
           REVIEW_API_URL: ${{ vars.PR_REVIEW_API_URL }}
           REVIEW_MODEL: ${{ vars.PR_REVIEW_MODEL }}
           REVIEW_MAX_TOKENS: ${{ vars.PR_REVIEW_MAX_TOKENS || '131072' }}
+          REVIEW_CONNECT_TIMEOUT: ${{ vars.PR_REVIEW_CONNECT_TIMEOUT || '15' }}
+          REVIEW_MAX_TIME: ${{ vars.PR_REVIEW_MAX_TIME || '180' }}
           PR_NUMBER: ${{ github.event.pull_request.number }}

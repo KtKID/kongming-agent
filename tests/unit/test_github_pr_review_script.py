@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
@@ -28,7 +29,15 @@ def test_pr_review_workflow_uses_repository_configuration() -> None:
     assert "secrets.PR_REVIEW_API_KEY" not in workflow
     assert "glm-5.2" not in workflow
     assert "api.z.ai" not in workflow
-    assert "131072" in workflow
+    assert "vars.PR_REVIEW_CONNECT_TIMEOUT" in workflow
+    assert "vars.PR_REVIEW_MAX_TIME" in workflow
+
+    max_tokens_match = re.search(
+        r"REVIEW_MAX_TOKENS:\s*\$\{\{\s*vars\.PR_REVIEW_MAX_TOKENS\s*\|\|\s*'(?P<value>\d+)'\s*\}\}",
+        workflow,
+    )
+    assert max_tokens_match is not None
+    assert int(max_tokens_match.group("value")) == 128 * 1024
 
 
 def test_review_script_uses_openai_compatible_provider(tmp_path: Path) -> None:
@@ -38,6 +47,7 @@ def test_review_script_uses_openai_compatible_provider(tmp_path: Path) -> None:
     request_url_file = tmp_path / "request-url.txt"
     request_headers_file = tmp_path / "request-headers.txt"
     request_payload_file = tmp_path / "request-payload.json"
+    request_args_file = tmp_path / "request-args.txt"
 
     _write_executable(
         bin_dir / "gh",
@@ -74,6 +84,7 @@ set -euo pipefail
 url=""
 payload=""
 headers=""
+printf '%s\n' "$@" > "$REQUEST_ARGS_FILE"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -H)
@@ -109,12 +120,15 @@ printf '%s\\n200' '{"choices":[{"message":{"content":"### [🔵 Minor] app.py:1\
         "REQUEST_URL_FILE": str(request_url_file),
         "REQUEST_HEADERS_FILE": str(request_headers_file),
         "REQUEST_PAYLOAD_FILE": str(request_payload_file),
+        "REQUEST_ARGS_FILE": str(request_args_file),
         "PR_NUMBER": "123",
         "REVIEW_PROVIDER": "openai_compatible",
         "REVIEW_API_KEY": "glm-secret",
         "REVIEW_API_URL": "https://api.z.ai/api/coding/paas/v4",
         "REVIEW_MODEL": "glm-5.2",
         "REVIEW_MAX_TOKENS": "4096",
+        "REVIEW_CONNECT_TIMEOUT": "17",
+        "REVIEW_MAX_TIME": "181",
     }
 
     result = subprocess.run(
@@ -130,6 +144,9 @@ printf '%s\\n200' '{"choices":[{"message":{"content":"### [🔵 Minor] app.py:1\
     assert request_url_file.read_text(encoding="utf-8") == (
         "https://api.z.ai/api/coding/paas/v4/chat/completions"
     )
+    request_args = request_args_file.read_text(encoding="utf-8")
+    assert "--connect-timeout\n17\n" in request_args
+    assert "--max-time\n181\n" in request_args
     assert "Authorization: Bearer glm-secret" in request_headers_file.read_text(encoding="utf-8")
 
     payload = json.loads(request_payload_file.read_text(encoding="utf-8"))
@@ -269,6 +286,7 @@ def test_review_script_uses_anthropic_provider(tmp_path: Path) -> None:
     request_url_file = tmp_path / "request-url.txt"
     request_headers_file = tmp_path / "request-headers.txt"
     request_payload_file = tmp_path / "request-payload.json"
+    request_args_file = tmp_path / "request-args.txt"
 
     _write_executable(
         bin_dir / "gh",
@@ -305,6 +323,7 @@ set -euo pipefail
 url=""
 payload=""
 headers=""
+printf '%s\n' "$@" > "$REQUEST_ARGS_FILE"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -H)
@@ -340,12 +359,15 @@ printf '%s\\n200' '{"content":[{"type":"text","text":"### [🔵 Minor] app.py:1\
         "REQUEST_URL_FILE": str(request_url_file),
         "REQUEST_HEADERS_FILE": str(request_headers_file),
         "REQUEST_PAYLOAD_FILE": str(request_payload_file),
+        "REQUEST_ARGS_FILE": str(request_args_file),
         "PR_NUMBER": "123",
         "REVIEW_PROVIDER": "anthropic",
         "REVIEW_API_KEY": "minimax-secret",
         "REVIEW_API_URL": "https://api.minimaxi.com/anthropic",
         "REVIEW_MODEL": "MiniMax-M3",
         "REVIEW_MAX_TOKENS": "4096",
+        "REVIEW_CONNECT_TIMEOUT": "19",
+        "REVIEW_MAX_TIME": "182",
     }
 
     result = subprocess.run(
@@ -361,6 +383,9 @@ printf '%s\\n200' '{"content":[{"type":"text","text":"### [🔵 Minor] app.py:1\
     assert request_url_file.read_text(encoding="utf-8") == (
         "https://api.minimaxi.com/anthropic/v1/messages"
     )
+    request_args = request_args_file.read_text(encoding="utf-8")
+    assert "--connect-timeout\n19\n" in request_args
+    assert "--max-time\n182\n" in request_args
     headers = request_headers_file.read_text(encoding="utf-8")
     assert "x-api-key: minimax-secret" in headers
     assert "anthropic-version: 2023-06-01" in headers
