@@ -58,7 +58,8 @@ class _FieldMigration:
 
 
 _WEB_PARENT = ("web",)
-_LEGACY_ORIGIN_FIELD = "public" + "_origin"
+# 这是 web.public_origin 在 v0.5.x 退役字段，迁移时转存到 server_origin 后清理。
+_LEGACY_ORIGIN_FIELD = "public_origin"
 _REMOVED_FIELDS: tuple[tuple[str, ...], ...] = (("web", _LEGACY_ORIGIN_FIELD),)
 _CURRENT_VERSION_BACKFILL_FIELDS: tuple[_FieldMigration, ...] = (
     _FieldMigration(
@@ -235,6 +236,8 @@ def migrate_config_if_needed(yaml_path: Path) -> MigrationResult:
         if source_version == _LEGACY_UNVERSIONED_SCHEMA:
             _set_schema_version(doc)
             added_fields.append("config_schema_version")
+        added_fields.extend(_rename_legacy_origin_field(doc))
+        if source_version == _LEGACY_UNVERSIONED_SCHEMA:
             added_fields.extend(_apply_v0_to_v05(doc))
         added_fields.extend(_apply_current_version_backfills(doc))
         removed_fields.extend(_remove_removed_fields(doc))
@@ -333,6 +336,22 @@ def _apply_v0_to_v05(doc: CommentedMap) -> list[str]:
 def _apply_current_version_backfills(doc: CommentedMap) -> list[str]:
     """补齐当前版本历史用户配置中缺失的关键字段。"""
     return _apply_field_migrations(doc, _CURRENT_VERSION_BACKFILL_FIELDS)
+
+
+def _rename_legacy_origin_field(doc: CommentedMap) -> list[str]:
+    """把旧 public_origin 值迁移到 server_origin，返回新增路径。"""
+    web = _mapping_at_path(doc, _WEB_PARENT)
+    if web is None:
+        return []
+    if "server_origin" in web or _LEGACY_ORIGIN_FIELD not in web:
+        return []
+    web["server_origin"] = _to_yaml_value(web[_LEGACY_ORIGIN_FIELD])
+    _set_before_comment(
+        web,
+        "server_origin",
+        "扫码登录和外部客户端 handoff 使用的服务器访问地址；公网填 https://域名，局域网填 http://私网IP:端口。",
+    )
+    return ["web.server_origin"]
 
 
 def _apply_field_migrations(

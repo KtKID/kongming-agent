@@ -108,7 +108,7 @@ def test_migration_is_idempotent_for_current_version(tmp_path: Path) -> None:
 
 def test_migration_removes_legacy_web_origin_field_from_current_yaml(tmp_path: Path) -> None:
     """当前版本配置残留旧 Web origin 字段时会被迁移层删除。"""
-    legacy_key = "public" + "_origin"
+    legacy_key = "public_origin"
     config_path = _write_legacy_config(
         tmp_path,
         f"""\
@@ -130,6 +130,32 @@ web:
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert legacy_key not in raw["web"]
     assert cfg.web.server_origin == "http://192.168.31.23:8765"
+
+
+def test_migration_renames_legacy_web_origin_when_server_origin_missing(tmp_path: Path) -> None:
+    """旧 origin 字段有值且新字段缺失时，迁移必须保留用户 origin。"""
+    config_path = _write_legacy_config(
+        tmp_path,
+        f"""\
+config_schema_version: {CURRENT_CONFIG_SCHEMA_VERSION}
+model:
+  name: local
+  base_url: http://127.0.0.1:1234/v1
+web:
+  public_origin: http://127.0.0.1:8765
+""",
+    )
+
+    result = migrate_config_if_needed(config_path)
+    cfg = load_config(config_path, load_env_file=False)
+
+    assert result.migrated is True
+    assert result.added_fields == ("web.server_origin",)
+    assert result.removed_fields == ("web.public_origin",)
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert "public_origin" not in raw["web"]
+    assert raw["web"]["server_origin"] == "http://127.0.0.1:8765"
+    assert cfg.web.server_origin == "http://127.0.0.1:8765"
 
 
 def test_migration_backfills_server_origin_for_current_yaml(tmp_path: Path) -> None:

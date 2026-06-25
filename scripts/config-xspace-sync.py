@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import cast
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -32,6 +33,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from infrastructure.config.profile_manager import (  # noqa: E402
     ConfigProfileManager,
+    ProfileDecisionAction,
     format_review_issues,
 )
 
@@ -115,7 +117,7 @@ def _cmd_decision(args: argparse.Namespace) -> int:
     manager = _manager_from_args(args)
     manager.write_decision(
         path=args.path,
-        action=args.action,  # type: ignore[arg-type]
+        action=cast(ProfileDecisionAction, args.action),
         reason=args.reason,
     )
     print(f"decision=written path={args.path} action={args.action}")
