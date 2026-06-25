@@ -32,7 +32,8 @@ model:
   #   anthropic：       **不带版本段**。代码拼 /v1/messages。
   #     ⚠ 若 anthropic 端点误写 /anthropic/v1，会拼成 /anthropic/v1/v1/messages 而 404。
   #
-  # 通常省略 provider 字段即可。仅当未知厂商 + URL 无强信号 + host 不在 provider_routing 时（罕见 corner case），才需显式 declare。
+  # 通常省略 provider 字段即可；留空走自动检测，显式声明示例：provider: anthropic。
+  # 仅当未知厂商 + URL 无强信号 + host 不在 provider_routing 时（罕见 corner case），才需显式 declare。
   provider:
   name: gemma-4-e4b-it
   base_url: http://127.0.0.1:1234/v1
@@ -157,6 +158,7 @@ scheduler:
   home:
   interval: 1.0
   max_inflight: 8
+  # 留空表示不按任务年龄自动过期。
   max_task_age_seconds:
   default_timezone: Asia/Shanghai
   default_delivery_channel: web

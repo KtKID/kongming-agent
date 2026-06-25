@@ -15,7 +15,7 @@ import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, get_args
 
 from ruamel.yaml import YAML
 
@@ -25,7 +25,9 @@ from infrastructure.config.writer import PatchItem, round_trip_update
 
 ProfileDecisionAction = Literal["sync-copy", "xspace-keep", "main-only"]
 
-_VALID_ACTIONS: frozenset[str] = frozenset(("sync-copy", "xspace-keep", "main-only"))
+_VALID_ACTIONS: frozenset[str] = frozenset(
+    str(action) for action in get_args(ProfileDecisionAction)
+)
 
 
 @dataclass(frozen=True)
@@ -458,7 +460,7 @@ def _write_policy(
             break
     else:
         decisions.append(replacement_data)
-        decisions.sort(key=lambda item: str(item.get("path", "")) if isinstance(item, dict) else "")
+    decisions.sort(key=lambda item: str(item.get("path", "")) if isinstance(item, dict) else "")
 
     policy_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = policy_path.with_name(f"{policy_path.name}.tmp.{os.getpid()}.{time.time_ns()}")

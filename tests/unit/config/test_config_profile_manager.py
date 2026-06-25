@@ -159,6 +159,29 @@ def test_sync_copy_updates_target_and_policy(tmp_path: Path) -> None:
     assert not review.issues
 
 
+def test_write_decision_keeps_policy_decisions_sorted(tmp_path: Path) -> None:
+    """替换已有 decision 后，policy 条目仍按 path 稳定排序。"""
+    source, target, policy = _copy_profile_files(tmp_path)
+    manager = _manager(source, target, policy)
+    manager.write_decision("web.host", "xspace-keep", "XSpace sidecar 默认监听本机")
+    manager.write_decision("mcp.servers", "main-only", "XSpace profile 省略 MCP server 列表")
+
+    yaml = YAML(typ="rt")
+    yaml.preserve_quotes = True
+    with policy.open("r", encoding="utf-8") as f:
+        doc = yaml.load(f)
+    doc["decisions"] = list(reversed(doc["decisions"]))
+    with policy.open("w", encoding="utf-8") as f:
+        yaml.dump(doc, f)
+
+    manager.write_decision("web.host", "xspace-keep", "XSpace sidecar 默认监听本机")
+
+    with policy.open("r", encoding="utf-8") as f:
+        updated = yaml.load(f)
+    paths = [item["path"] for item in updated["decisions"]]
+    assert paths == sorted(paths)
+
+
 def test_write_decision_rejects_blank_reason(tmp_path: Path) -> None:
     """decision reason 为空时，Manager 必须拒绝写入自失效 policy。"""
     source, target, policy = _copy_profile_files(tmp_path)
