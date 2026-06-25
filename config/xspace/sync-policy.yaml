@@ -1,0 +1,35 @@
+# XSpace profile 同步决策文件。
+#
+# 维护流程：
+# 1. 新增或修改配置字段时，先改 config/setting.yaml。
+# 2. 运行 `uv run python scripts/config-xspace-sync.py review` 查看待决策字段。
+# 3. 按字段语义选择 sync-copy / xspace-keep / main-only。
+#
+# action 说明：
+# - sync-copy：把 config/setting.yaml 的值复制到 config/xspace/setting.yaml。
+# - xspace-keep：XSpace 保留自己在 config/xspace/setting.yaml 里的差异值。
+# - main-only：字段只归主配置维护，XSpace profile 省略该字段。
+#
+# 格式示例：
+#
+# version: 1
+# source: config/setting.yaml
+# target: config/xspace/setting.yaml
+# decisions:
+# - path: scheduler.default_max_turns
+#   action: sync-copy
+#   reason: XSpace 继承主配置默认 turn 上限
+#   source_hash: sha256:example00000000
+# - path: web.host
+#   action: xspace-keep
+#   reason: XSpace sidecar 默认只监听本机地址
+#   source_hash: sha256:example11111111
+# - path: mcp.servers
+#   action: main-only
+#   reason: XSpace 安装包默认不携带第三方 MCP server 列表
+#   source_hash: sha256:example22222222
+
+version: 1
+source: config/setting.yaml
+target: config/xspace/setting.yaml
+decisions: []

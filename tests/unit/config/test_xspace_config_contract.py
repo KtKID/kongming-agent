@@ -14,9 +14,12 @@ from pydantic import BaseModel
 from infrastructure.config import load_config
 from infrastructure.config.models import Config
 from infrastructure.config.paths import resolve_kongming_path
+from infrastructure.config.profile_manager import ConfigProfileManager
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+SETTING_CONFIG = REPO_ROOT / "config" / "setting.yaml"
 XSPACE_CONFIG = REPO_ROOT / "config" / "xspace" / "setting.yaml"
+XSPACE_POLICY = REPO_ROOT / "config" / "xspace" / "sync-policy.yaml"
 
 
 @pytest.fixture(autouse=True)
@@ -88,13 +91,33 @@ def test_xspace_runtime_env_marks_xspace_host(monkeypatch) -> None:
     assert cfg.web.host_environment == "xspace"
 
 
-def test_xspace_runtime_config_declares_every_config_leaf_field() -> None:
-    """新增 Config 字段时，x-space 配置必须同步显式分类维护。"""
-    raw = yaml.safe_load(XSPACE_CONFIG.read_text(encoding="utf-8"))
+def test_setting_yaml_declares_every_config_leaf_field() -> None:
+    """新增 Config 字段时，主配置必须先显式声明全部 leaf 字段。"""
+    raw = yaml.safe_load(SETTING_CONFIG.read_text(encoding="utf-8"))
     assert isinstance(raw, dict)
 
     missing = sorted(path for path in _config_leaf_paths(Config) if not _has_yaml_path(raw, path))
     assert missing == []
+
+
+def test_xspace_runtime_config_profile_policy_template_lists_pending_decisions() -> None:
+    """空 policy 模板必须让 review 列出待决策字段。"""
+    review = ConfigProfileManager(
+        source_path=SETTING_CONFIG,
+        target_path=XSPACE_CONFIG,
+        policy_path=XSPACE_POLICY,
+    ).review()
+
+    assert review.decision_count == 0
+    assert any(
+        issue.path == "web.host" and issue.code == "xspace-keep-decision-required"
+        for issue in review.issues
+    )
+    assert any(
+        issue.path == "mcp.servers" and issue.code == "target-missing-decision-required"
+        for issue in review.issues
+    )
+    assert not any(issue.path == "web.server_origin" for issue in review.issues)
 
 
 def test_xspace_runtime_data_paths_resolve_under_kongming_home(tmp_path: Path) -> None:

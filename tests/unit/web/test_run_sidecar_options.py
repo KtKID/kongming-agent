@@ -88,7 +88,6 @@ def test_resolve_runtime_options_cli_wins(tmp_path: Path, monkeypatch) -> None:
     assert options.host == "127.0.0.1"
     assert options.port == 0
     assert options.server_origin == "http://192.168.31.23:57567"
-    assert options.public_origin == "http://192.168.31.23:57567"
     assert options.home == home.resolve()
     assert options.config_path == config.resolve()
     assert options.dist_dir == dist.resolve()
@@ -154,27 +153,6 @@ def test_resolve_runtime_options_uses_host_environment_env(
 
     assert options.host_environment == "xspace"
     assert os.environ["KONGMING_WEB_HOST_ENVIRONMENT"] == "xspace"
-
-
-def test_resolve_runtime_options_supports_public_origin_alias(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    """旧 --public-origin alias 回填 server_origin。"""
-    monkeypatch.delenv("KONGMING_CONFIG", raising=False)
-    home = tmp_path / "home"
-
-    options = _resolve_runtime_options(
-        [
-            "--home",
-            str(home),
-            "--public-origin",
-            "https://kongming.example.com/",
-        ]
-    )
-
-    assert options.server_origin == "https://kongming.example.com"
-    assert options.public_origin == "https://kongming.example.com"
 
 
 def test_load_config_runtime_host_environment_defaults_to_browser(
@@ -260,7 +238,6 @@ def test_override_web_bind_config_sets_actual_host_port() -> None:
     assert cfg.web.host == "127.0.0.1"
     assert cfg.web.port == 49152
     assert cfg.web.server_origin == "http://192.168.31.23:49152"
-    assert cfg.web.public_origin == "http://192.168.31.23:49152"
     assert cfg.web.host_environment == "xspace"
 
 
@@ -277,7 +254,6 @@ def test_ready_payload_schema(tmp_path: Path) -> None:
     assert payload["type"] == "kongming_web_ready"
     assert payload["base_url"] == "http://127.0.0.1:60000"
     assert payload["server_origin"] == "http://192.168.31.23:60000"
-    assert payload["public_origin"] == "http://192.168.31.23:60000"
     assert payload["health_url"] == "http://127.0.0.1:60000/health"
     assert payload["server_json"] == str(tmp_path / "web" / "server.json")
     assert payload["dist_dir"] == str(tmp_path / "dist")
@@ -319,7 +295,6 @@ def test_write_ready_payload_writes_file_and_stdout(tmp_path: Path, capsys) -> N
     from_stdout = json.loads(capsys.readouterr().out)
     assert from_file["type"] == "kongming_web_ready"
     assert from_file["server_origin"] == "http://192.168.31.23:60000"
-    assert from_file["public_origin"] == "http://192.168.31.23:60000"
     assert datetime.fromisoformat(from_file["started_at"]).utcoffset() == timedelta(hours=8)
     assert from_stdout["server_json"] == str(server_json)
     assert from_stdout["started_at"] == from_file["started_at"]

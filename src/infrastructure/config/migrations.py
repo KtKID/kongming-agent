@@ -44,6 +44,7 @@ class MigrationResult:
     target_version: str
     migrated: bool
     added_fields: tuple[str, ...]
+    removed_fields: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,17 @@ class _FieldMigration:
 
 
 _WEB_PARENT = ("web",)
+# 这是 web.public_origin 在 v0.5.x 退役字段，迁移时转存到 server_origin 后清理。
+_LEGACY_ORIGIN_FIELD = "public_origin"
+_REMOVED_FIELDS: tuple[tuple[str, ...], ...] = (("web", _LEGACY_ORIGIN_FIELD),)
+_CURRENT_VERSION_BACKFILL_FIELDS: tuple[_FieldMigration, ...] = (
+    _FieldMigration(
+        ("web", "server_origin"),
+        None,
+        "扫码登录和外部客户端 handoff 使用的服务器访问地址；公网填 https://域名，局域网填 http://私网IP:端口。",
+        _WEB_PARENT,
+    ),
+)
 
 _SECTION_COMMENTS: dict[tuple[str, ...], str] = {
     (
@@ -74,12 +86,6 @@ _V0_TO_V05_FIELDS: tuple[_FieldMigration, ...] = (
         ("web", "server_origin"),
         None,
         "扫码登录和外部客户端 handoff 使用的服务器访问地址；公网填 https://域名，局域网填 http://私网IP:端口。",
-        _WEB_PARENT,
-    ),
-    _FieldMigration(
-        ("web", "public_origin"),
-        None,
-        "兼容旧字段：移动配对和外部客户端使用的公开访问地址；新功能优先使用 server_origin。",
         _WEB_PARENT,
     ),
     _FieldMigration(
@@ -225,19 +231,25 @@ def migrate_config_if_needed(yaml_path: Path) -> MigrationResult:
         source_version = _read_source_version(doc, yaml_path)
         original_text = yaml_path.read_text(encoding="utf-8")
         added_fields: list[str] = []
+        removed_fields: list[str] = []
 
         if source_version == _LEGACY_UNVERSIONED_SCHEMA:
             _set_schema_version(doc)
             added_fields.append("config_schema_version")
+        added_fields.extend(_rename_legacy_origin_field(doc))
+        if source_version == _LEGACY_UNVERSIONED_SCHEMA:
             added_fields.extend(_apply_v0_to_v05(doc))
+        added_fields.extend(_apply_current_version_backfills(doc))
+        removed_fields.extend(_remove_removed_fields(doc))
 
-        if not added_fields:
+        if not added_fields and not removed_fields:
             return MigrationResult(
                 yaml_path=yaml_path,
                 source_version=source_version,
                 target_version=CURRENT_CONFIG_SCHEMA_VERSION,
                 migrated=False,
                 added_fields=(),
+                removed_fields=(),
             )
 
         tmp_path = _make_tmp_path(yaml_path)
@@ -251,6 +263,7 @@ def migrate_config_if_needed(yaml_path: Path) -> MigrationResult:
             target_version=CURRENT_CONFIG_SCHEMA_VERSION,
             migrated=True,
             added_fields=tuple(dict.fromkeys(added_fields)),
+            removed_fields=tuple(dict.fromkeys(removed_fields)),
         )
     except ConfigLoadError:
         raise
@@ -317,8 +330,37 @@ def _schema_version_first(text: str) -> str:
 
 def _apply_v0_to_v05(doc: CommentedMap) -> list[str]:
     """执行 v0 到 v0.5 的显式字段迁移。"""
+    return _apply_field_migrations(doc, _V0_TO_V05_FIELDS)
+
+
+def _apply_current_version_backfills(doc: CommentedMap) -> list[str]:
+    """补齐当前版本历史用户配置中缺失的关键字段。"""
+    return _apply_field_migrations(doc, _CURRENT_VERSION_BACKFILL_FIELDS)
+
+
+def _rename_legacy_origin_field(doc: CommentedMap) -> list[str]:
+    """把旧 public_origin 值迁移到 server_origin，返回新增路径。"""
+    web = _mapping_at_path(doc, _WEB_PARENT)
+    if web is None:
+        return []
+    if "server_origin" in web or _LEGACY_ORIGIN_FIELD not in web:
+        return []
+    web["server_origin"] = _to_yaml_value(web[_LEGACY_ORIGIN_FIELD])
+    _set_before_comment(
+        web,
+        "server_origin",
+        "扫码登录和外部客户端 handoff 使用的服务器访问地址；公网填 https://域名，局域网填 http://私网IP:端口。",
+    )
+    return ["web.server_origin"]
+
+
+def _apply_field_migrations(
+    doc: CommentedMap,
+    migrations: tuple[_FieldMigration, ...],
+) -> list[str]:
+    """按字段迁移声明补齐缺失字段，返回新增路径。"""
     added: list[str] = []
-    for migration in _V0_TO_V05_FIELDS:
+    for migration in migrations:
         if (
             migration.requires_existing_parent
             and _mapping_at_path(doc, migration.requires_existing_parent) is None
@@ -334,6 +376,20 @@ def _apply_v0_to_v05(doc: CommentedMap) -> list[str]:
         _set_before_comment(parent, leaf, migration.comment)
         added.append(".".join(migration.path))
     return added
+
+
+def _remove_removed_fields(doc: CommentedMap) -> list[str]:
+    """删除已退役的 YAML 字段，返回被删除路径。"""
+    removed: list[str] = []
+    for path in _REMOVED_FIELDS:
+        parent = _mapping_at_path(doc, path[:-1])
+        if parent is None:
+            continue
+        leaf = path[-1]
+        if leaf in parent:
+            del parent[leaf]
+            removed.append(".".join(path))
+    return removed
 
 
 def _path_exists(root: CommentedMap, path: tuple[str, ...]) -> bool:
