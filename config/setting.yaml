@@ -33,7 +33,7 @@ model:
   #     ⚠ 若 anthropic 端点误写 /anthropic/v1，会拼成 /anthropic/v1/v1/messages 而 404。
   #
   # 通常省略 provider 字段即可。仅当未知厂商 + URL 无强信号 + host 不在 provider_routing 时（罕见 corner case），才需显式 declare。
-  # provider: anthropic
+  provider:
   name: gemma-4-e4b-it
   base_url: http://127.0.0.1:1234/v1
   # 本地模型留空；远端模型在 .env 中填写 KONGMING_MODEL_API_KEY。
@@ -59,6 +59,17 @@ model:
   #
   # 注意：path 启发式（path 含 "anthropic" 段 / 末尾 vN）**优先于**本表。同 host
   # 双协议（如 MiniMax 同时有 /v1 OpenAI 和 /anthropic Anthropic 端点）由 path 区分。
+  provider_routing:
+    openai_compatible:
+    - api.openai.com
+    - open.bigmodel.cn
+    - api.deepseek.com
+    - api.moonshot.cn
+    - api.minimaxi.com
+    - localhost
+    - 127.0.0.1
+    anthropic:
+    - api.anthropic.com
 
   # 推理深度控制。可选值：low | medium | high | （注释掉表示不发此参数，使用模型默认）。
   # 仅在 reasoning_profiles 中声明了对应模型时生效；不声明 profile 则此字段被忽略。
@@ -142,10 +153,17 @@ approval:
 
 scheduler:
   enabled: true
+  # 留空时使用 <kongming_home>/cron；显式 .kongming/* 会继续派生到 kongming_home。
+  home:
+  interval: 1.0
+  max_inflight: 8
+  max_task_age_seconds:
   default_timezone: Asia/Shanghai
+  default_delivery_channel: web
   # v0.5.1: 任务级 task.policy.max_turns=None 时的兜底；司天扫描类重型任务建议 ≥60。
   default_max_turns: 90
   approval:
+    mode: trust
     allow_write_file_create_in_cwd: true
 tool:
   shell:
@@ -487,6 +505,8 @@ safety:
   #   ❌ "/abs/path"          不展开绝对路径，会变成 <project_root>//abs/path（静默失效）
   # 想表达"home 下目录信任放行"，用 sensitive_paths 的 path_prefix 模式（见上）
   # 或 allow_writes（仅写）。
+  skill_call_rules: []
+
   trusted_workdirs: []
   # 例子：
   # trusted_workdirs:
@@ -548,9 +568,9 @@ web:
   # uvicorn bind IP：仅本机用 127.0.0.1；需外网访问改 0.0.0.0 + 防火墙
   host: "0.0.0.0"
   port: 60000
+  # 二维码扫码登录使用的服务器 origin；公网填 https://域名，局域网填 http://局域网IP:端口。
+  server_origin:
   host_environment: browser
-  # 移动配对和外部客户端使用的公开访问地址；留空时按请求 origin 生成。
-  public_origin:
 
   # 跳过登录鉴权（仅本地开发！）；上线必须 false 并设强密码
   dev_mode: false
@@ -654,3 +674,36 @@ web:
 
   # ---- 启用 / 调优请改上方 yaml 字段，或用 KONGMING_WEB_* env 覆盖 ----
   # 完整 env 清单见 .env.example 的「Web 服务」段（单一真源；本处不再列）。
+
+workflow:
+  enabled: true
+  # 留空时使用 <kongming_home>/workflows；显式 .kongming/* 会继续派生到 kongming_home。
+  home:
+  scan_interval: 30.0
+
+sitian:
+  version: v1
+  default_scan_interval_sec: 300
+  idle_sleep_sec: 30
+  # 留空时使用 <kongming_home>/sitian；设置后作为该根目录下的相对子目录名。
+  output_subdir:
+  scanner:
+    recent_session_window_days: 3
+    session_recent_user_messages: 1
+    session_recent_assistant_messages: 1
+    session_message_max_chars: 500
+  analyzer:
+    enabled: false
+    model_name: ""
+    base_url: ""
+    api_key_env: SITIAN_ANALYZER_API_KEY
+    max_tokens: 2048
+    temperature: 0.3
+    timeout: 30
+    max_context_chars: 50000
+    skip_if_unchanged: true
+    full_log_enabled: false
+  interests:
+    projects: []
+    focus: ""
+  sources: []

@@ -33,9 +33,9 @@ export interface FieldMeta {
 }
 
 export interface GroupMeta {
-  /** "model" | "runtime" | "tool_approval" | "safety" | "host_observ" */
+  /** 后端 schema.groups[].id，前端按返回值动态渲染 tab。 */
   id: string;
-  /** "模型" | "运行时" | "工具与审批" | "安全" | "宿主与可观测" */
+  /** 后端 schema.groups[].label，直接作为 tab 和 section 标题。 */
   label: string;
 }
 

@@ -97,7 +97,7 @@ def _configured_server_origin(request: Request) -> str | None:
     """读取配置里的扫码登录 server origin。"""
     cfg = getattr(request.app.state, "config", None)
     web_cfg = getattr(cfg, "web", None)
-    origin = getattr(web_cfg, "server_origin", None) or getattr(web_cfg, "public_origin", None)
+    origin = getattr(web_cfg, "server_origin", None)
     if isinstance(origin, str) and origin.strip():
         return origin.strip()
     return None

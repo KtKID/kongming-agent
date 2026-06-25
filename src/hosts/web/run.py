@@ -35,7 +35,6 @@ class WebRuntimeOptions:
         config_path: 配置文件路径。
         dist_dir: 前端 dist 目录；为 ``None`` 时走环境变量或默认路径。
         server_origin: 手机等外部客户端访问 Web 的服务器 origin。
-        public_origin: 兼容旧字段，语义同 server_origin。
         host_environment: Web sidecar 启动宿主环境。
         print_ready_json: 是否在启动成功后向 stdout 输出一次 ready JSON。
     """
@@ -46,7 +45,6 @@ class WebRuntimeOptions:
     config_path: Path
     dist_dir: Path | None
     server_origin: str | None
-    public_origin: str | None
     host_environment: WebHostEnvironment
     print_ready_json: bool
 
@@ -67,10 +65,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--home", type=Path, help="Kongming runtime home directory.")
     parser.add_argument("--config", type=Path, help="Explicit config file path.")
     parser.add_argument("--dist-dir", type=Path, help="Frontend dist directory.")
-    parser.add_argument(
-        "--public-origin",
-        help="Compatibility alias for --server-origin.",
-    )
     parser.add_argument(
         "--server-origin",
         help="Server origin used by mobile login QR, pairing QR, copy, and handoff URLs.",
@@ -212,10 +206,7 @@ def _resolve_runtime_options(argv: list[str] | None = None) -> WebRuntimeOptions
     dist_dir = _resolve_dist_dir(args.dist_dir)
     host = args.host or os.environ.get("KONGMING_WEB_HOST") or ""
     server_origin = _normalize_server_origin(
-        args.server_origin
-        or os.environ.get("KONGMING_WEB_SERVER_ORIGIN")
-        or args.public_origin
-        or os.environ.get("KONGMING_WEB_PUBLIC_ORIGIN")
+        args.server_origin or os.environ.get("KONGMING_WEB_SERVER_ORIGIN")
     )
     host_environment = (
         _normalize_host_environment(
@@ -238,7 +229,6 @@ def _resolve_runtime_options(argv: list[str] | None = None) -> WebRuntimeOptions
         config_path=config_path,
         dist_dir=dist_dir,
         server_origin=server_origin,
-        public_origin=server_origin,
         host_environment=host_environment,
         print_ready_json=bool(args.print_ready_json or args.once_ready_json),
     )
@@ -287,7 +277,6 @@ def _override_web_bind_config(
     host: str,
     port: int,
     server_origin: str | None = None,
-    public_origin: str | None = None,
     host_environment: WebHostEnvironment | None = None,
 ) -> Any:
     """把运行时绑定地址写入 Config 副本。
@@ -297,17 +286,14 @@ def _override_web_bind_config(
         host: 实际绑定 host。
         port: 实际绑定端口，必须大于 0。
         server_origin: 运行时指定的服务器 origin；``None`` 时保留配置文件值。
-        public_origin: 兼容旧字段；``server_origin`` 为空时作为服务器 origin 使用。
         host_environment: 运行时指定的宿主环境；``None`` 时保留配置文件值。
 
     Returns:
         更新了 ``web.host`` / ``web.port`` 的 Config 副本。
     """
     updates: dict[str, object] = {"host": host, "port": port}
-    origin = server_origin if server_origin is not None else public_origin
-    if origin is not None:
-        updates["server_origin"] = origin
-        updates["public_origin"] = origin
+    if server_origin is not None:
+        updates["server_origin"] = server_origin
     if host_environment is not None:
         updates["host_environment"] = host_environment
     web_cfg = cfg.web.model_copy(update=updates)
@@ -399,7 +385,6 @@ def _build_ready_payload(
     home: Path,
     dist_dir: Path | None,
     server_origin: str | None = None,
-    public_origin: str | None = None,
     timezone_name: str = "UTC",
 ) -> dict[str, object]:
     """构造 ready JSON / server.json payload。
@@ -409,10 +394,8 @@ def _build_ready_payload(
         port: 实际绑定端口。
         home: kongming home。
         dist_dir: 前端 dist 目录。
-        public_origin: 手机等外部客户端访问 Web 的公开 origin。
-        timezone_name: 配置里的 IANA 时区名。
         server_origin: 手机等外部客户端访问 Web 的服务器 origin。
-        public_origin: 兼容旧字段，语义同 server_origin。
+        timezone_name: 配置里的 IANA 时区名。
 
     Returns:
         可 JSON 序列化的 ready payload。
@@ -425,8 +408,7 @@ def _build_ready_payload(
         "host": host,
         "port": port,
         "base_url": base_url,
-        "server_origin": server_origin or public_origin,
-        "public_origin": public_origin or server_origin,
+        "server_origin": server_origin,
         "health_url": f"{base_url}/health",
         "home": str(home),
         "server_json": str(server_json),
@@ -458,7 +440,6 @@ def _write_ready_payload(
     home: Path,
     dist_dir: Path | None,
     server_origin: str | None = None,
-    public_origin: str | None = None,
     timezone_name: str = "UTC",
     print_ready_json: bool,
 ) -> dict[str, object]:
@@ -469,10 +450,8 @@ def _write_ready_payload(
         port: 实际绑定端口。
         home: kongming home。
         dist_dir: 前端 dist 目录。
-        public_origin: 手机等外部客户端访问 Web 的公开 origin。
-        timezone_name: 配置里的 IANA 时区名。
         server_origin: 手机等外部客户端访问 Web 的服务器 origin。
-        public_origin: 兼容旧字段，语义同 server_origin。
+        timezone_name: 配置里的 IANA 时区名。
         print_ready_json: 是否输出 ready JSON。
 
     Returns:
@@ -484,7 +463,6 @@ def _write_ready_payload(
         home=home,
         dist_dir=dist_dir,
         server_origin=server_origin,
-        public_origin=public_origin,
         timezone_name=timezone_name,
     )
     _write_json_atomic(home / "web" / "server.json", payload)
@@ -520,7 +498,6 @@ async def _serve_with_ready_payload(
     home: Path,
     dist_dir: Path | None,
     server_origin: str | None,
-    public_origin: str | None,
     timezone_name: str,
     log_level: str,
     print_ready_json: bool,
@@ -535,10 +512,8 @@ async def _serve_with_ready_payload(
         bound_port: 实际绑定端口。
         home: kongming home。
         dist_dir: 前端 dist 目录。
-        public_origin: 手机等外部客户端访问 Web 的公开 origin。
-        timezone_name: 配置里的 IANA 时区名。
         server_origin: 手机等外部客户端访问 Web 的服务器 origin。
-        public_origin: 兼容旧字段，语义同 server_origin。
+        timezone_name: 配置里的 IANA 时区名。
         log_level: uvicorn 日志级别。
         print_ready_json: 是否向 stdout 打印 ready payload。
     """
@@ -564,7 +539,6 @@ async def _serve_with_ready_payload(
                 home=home,
                 dist_dir=dist_dir,
                 server_origin=server_origin,
-                public_origin=public_origin,
                 timezone_name=timezone_name,
                 print_ready_json=print_ready_json,
             )
@@ -628,7 +602,6 @@ def main(argv: list[str] | None = None) -> int:
             host=actual_host,
             port=actual_port,
             server_origin=options.server_origin,
-            public_origin=options.public_origin,
             host_environment=options.host_environment,
         )
 
@@ -689,7 +662,6 @@ def main(argv: list[str] | None = None) -> int:
                     home=home,
                     dist_dir=options.dist_dir,
                     server_origin=cfg.web.server_origin,
-                    public_origin=cfg.web.public_origin,
                     timezone_name=cfg.scheduler.default_timezone,
                     log_level=log_level,
                     print_ready_json=options.print_ready_json,

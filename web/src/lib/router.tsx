@@ -18,7 +18,7 @@ import { TaskDetailOverlayPage } from "@/modules/task-detail";
  * - /chat[/:thread_id]
  * - /manage                          → /manage/config（默认重定向）
  * - /manage/config                   → /manage/config/model（section 兜底）
- * - /manage/config/:section          ConfigPage（5 个合法 section：model/runtime/tool_approval/safety/host_observ）
+ * - /manage/config/:section          ConfigPage（合法 section 由后端 schema.groups 决定）
  * - /manage/model-providers          ModelProvidersPage
  * - /manage/network                  RuntimeStatusPage（原 /manage/runtime-status，破坏性更名，无兼容 alias）
  * - 其它 → NotFound

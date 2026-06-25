@@ -10,9 +10,7 @@ schema.py 必须同步修改，否则 manage UI 与真实 pydantic schema 不一
 2. 同步改 ``src/infrastructure/config/schema.py``（_FIELD_METAS 列表 + _GROUPS 若需新增）。
 3. 跑本测试 ``uv run pytest tests/unit/web/dashboard/config/test_schema.py -v``，全过即可。
 
-**覆盖范围限定**：一期 stage 1 只覆盖 16 个顶层模块。``sitian`` / ``workflow`` 两个
-顶层模块**不在断言范围内**——它们由后续 stage 引入。本测试在 pydantic 覆盖断言里会
-扁平化后**过滤掉 sitian.* / workflow.* 前缀**。
+覆盖范围：pydantic ``Config`` 的全部 leaf 字段都必须出现在 manage 配置页 schema 中。
 
 每个断言用独立 test 函数（pytest failure-locality 最佳实践，方便看哪条断言 fail）。
 """
@@ -35,9 +33,6 @@ from infrastructure.config.schema import (
 # 常量
 # ---------------------------------------------------------------------------
 
-# 一期不覆盖的顶层模块（后续 stage 接入）
-_EXCLUDED_TOP_LEVEL_MODULES: frozenset[str] = frozenset({"sitian", "workflow"})
-
 # group 期望顺序（与 schema._GROUPS 同步）
 _EXPECTED_GROUP_IDS: list[str] = [
     "model",
@@ -45,6 +40,8 @@ _EXPECTED_GROUP_IDS: list[str] = [
     "tool_approval",
     "safety",
     "host_observ",
+    "workflow",
+    "sitian",
 ]
 
 # type 字段允许的闭集
@@ -106,7 +103,7 @@ def groups() -> list[dict[str, str]]:
 
 @pytest.fixture
 def pydantic_leaf_paths() -> set[str]:
-    """从 pydantic Config 真源扁平化得到的全部 leaf path 集合（已过滤排除模块）。
+    """从 pydantic Config 真源扁平化得到的全部 leaf path 集合。
 
     构造方式：``Config()`` 实例化（``model`` 必填，给一份本地 endpoint 占位），
     其余子节走 pydantic ``Field(default_factory=...)`` 默认值——这正是漂移检测
@@ -119,8 +116,7 @@ def pydantic_leaf_paths() -> set[str]:
         )
     )
     dumped = cfg.model_dump(mode="json")
-    all_paths = flatten_dict(dumped)
-    return {p for p in all_paths if p.split(".", 1)[0] not in _EXCLUDED_TOP_LEVEL_MODULES}
+    return set(flatten_dict(dumped))
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +144,7 @@ def test_every_field_group_is_known(metas: list[FieldMeta], groups: list[dict[st
 
 
 # ---------------------------------------------------------------------------
-# 断言 3：5 个 group 正好且顺序匹配
+# 断言 3：group 正好且顺序匹配
 # ---------------------------------------------------------------------------
 
 
@@ -193,7 +189,7 @@ def test_field_types_are_in_allowed_set(metas: list[FieldMeta]) -> None:
 def test_schema_covers_all_pydantic_fields(
     metas: list[FieldMeta], pydantic_leaf_paths: set[str]
 ) -> None:
-    """pydantic 真源里的所有字段（排除 sitian/workflow）必须在 schema 中有对应 FieldMeta。
+    """pydantic 真源里的所有字段必须在 schema 中有对应 FieldMeta。
 
     允许 schema 多出字段（如显示用的虚拟分组项），但不允许少。
     """

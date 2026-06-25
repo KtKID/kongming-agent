@@ -51,6 +51,12 @@ from infrastructure.config.paths import (
     kongming_home_config_candidates,
     resolve_kongming_path,
 )
+from infrastructure.config.profile_manager import (
+    ConfigProfileManager,
+    ProfileDecision,
+    ProfileReview,
+    ProfileReviewIssue,
+)
 
 __all__ = [
     "ApprovalConfig",
@@ -58,6 +64,7 @@ __all__ = [
     "Config",
     "ConfigSchemaVersion",
     "ConfigManager",
+    "ConfigProfileManager",
     "CURRENT_CONFIG_SCHEMA_VERSION",
     "ConfigLoadError",
     "ConfigValidationError",
@@ -68,6 +75,9 @@ __all__ = [
     "McpServerConfig",
     "McpToolAliasConfig",
     "ModelConfig",
+    "ProfileDecision",
+    "ProfileReview",
+    "ProfileReviewIssue",
     "RetryConfig",
     "RunnerConfig",
     "SchedulerConfig",
