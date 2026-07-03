@@ -80,7 +80,7 @@ class CodexRolloutLocator(Protocol):
 
 @runtime_checkable
 class GenericChatSessionLocator(Protocol):
-    """thread_id → (FileSession messages.jsonl 路径, provider 厂商)。
+    """thread_id → (FileSession session JSONL 路径, provider 厂商)。
 
     返回 None 的几种情况：
 
@@ -125,6 +125,10 @@ class UsageTokenManager:
         self._claude = claude_locator
         self._codex = codex_locator
         self._generic = generic_locator
+        # 注：per-agent 用量分桶（task-5）不在本 manager 上挂状态——本类是「完全无状态」
+        # 查询入口（pre-push 测试断言此约束）。per-agent 累加器 AgentUsageBucket 是独立类，
+        # 由装配层（EventSink 或 AgentManager）持有，不挂在 UsageTokenManager 上。
+        # Event 已带 agent_id（task-1），SDK jsonl 真源无 agent_id，故 agent 维度从 Event 侧聚合。
 
     async def get_thread_usage(self, thread_id: str) -> ThreadUsage | None:
         """唯一公共方法：返回 thread 当前 token 用量 DTO。
@@ -178,6 +182,12 @@ class UsageTokenManager:
         return None
 
     # ------------------------------------------------------------------
+    # agent-tree-v0.1 task-5：per-agent 用量分桶不在本 manager 上（本类无状态）。
+    # 独立类 AgentUsageBucket（见文件末尾）由装配层持有；Event usage sink 调它累加。
+    # 本 manager 的 get_thread_usage 仍走 SDK jsonl 真源（thread 级），不涉及 agent 维度。
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
     # 私有派发（按 backend_kind 路由）
     # ------------------------------------------------------------------
 
@@ -202,6 +212,7 @@ class UsageTokenManager:
 
 
 __all__ = [
+    "AgentUsageBucket",
     "ClaudeJsonlLocator",
     "CodexRolloutLocator",
     "GenericChatSessionLocator",
@@ -209,3 +220,49 @@ __all__ = [
     "ThreadMetadataReader",
     "UsageTokenManager",
 ]
+
+
+# ---------------------------------------------------------------------------
+# agent-tree-v0.1 task-5：per-agent 用量累加（独立有状态类）
+# ---------------------------------------------------------------------------
+# 抽到独立类，让 UsageTokenManager 保持「完全无状态」（pre-push 测试断言此约束）。
+# Event 已带 agent_id（task-1），SDK jsonl 真源无 agent_id，故 agent 维度只能从 Event 侧
+# 聚合。进程内瞬态，重启归零（v1 接受，见 04-data-and-state.md 持久化方案）。
+class AgentUsageBucket:
+    """按 agent_id 累加 token 用量的进程内瞬态累加器。
+
+    由 UsageTokenManager 持有一个实例；Event usage sink 调 ``record`` 累加，
+    查询走 ``get`` / ``list_all``。无持久化，重启归零。
+    """
+
+    def __init__(self) -> None:
+        self._buckets: dict[str, dict[str, int]] = {}
+
+    def record(
+        self,
+        agent_id: str,
+        *,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
+    ) -> dict[str, int]:
+        """累加一次 agent 用量，返回该 agent 当前累计快照。"""
+        bucket = self._buckets.setdefault(
+            agent_id,
+            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        )
+        bucket["prompt_tokens"] += prompt_tokens
+        bucket["completion_tokens"] += completion_tokens
+        bucket["total_tokens"] += total_tokens
+        return dict(bucket)
+
+    def get(self, agent_id: str) -> dict[str, int]:
+        """查单 agent 累计；未记录返回全 0。"""
+        bucket = self._buckets.get(agent_id)
+        if bucket is None:
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        return dict(bucket)
+
+    def list_all(self) -> dict[str, dict[str, int]]:
+        """列出所有 agent 累计快照（副本，调用方可安全迭代）。"""
+        return {aid: dict(bucket) for aid, bucket in self._buckets.items()}

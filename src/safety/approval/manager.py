@@ -21,12 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from core.clock import now_epoch_ms
 from core.contracts import ApprovalAction, ApprovalDecision, ApprovalRequest
 from safety.approval.events import PendingApprovalView
 from safety.approval.rules import ApprovalRules
@@ -51,6 +51,10 @@ class _PendingApproval:
         request_id: 全局唯一 ID（uuid hex），用户决策回写时按这个查 future
         channel: 通道名（generic_chat / claude_code / cron / evolution / cli）
         thread_id: 通道内 thread 标识
+        agent_id: 触发审批的 agent 归属（agent-tree-v0.1 模块 F）。仅展示归属——
+            路由仍按 ``thread_id``（子 agent 审批规则 = 父规则，子 runner 共享树
+            ApprovalManager/bridge）。主 agent = ``""`` 兼容现有调用；子 agent = 子
+            agent_id。``cancel_subtree`` 时按 agent_id 批量取消子树 pending future。
         cwd: 触发审批的工作目录
         tool_name: 工具名（如 ``Bash`` / ``Edit``）
         tool_input: 工具参数原始 dict
@@ -68,6 +72,7 @@ class _PendingApproval:
     request_id: str
     channel: str
     thread_id: str
+    agent_id: str
     cwd: str
     tool_name: str
     tool_input: dict[str, Any]
@@ -77,7 +82,7 @@ class _PendingApproval:
     auto_approve_at_ms: int | None
     auto_reject_at_ms: int | None
     future: asyncio.Future[ApprovalDecision]
-    arrived_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
+    arrived_at_ms: int = field(default_factory=lambda: now_epoch_ms())
     timeout_ms: int | None = None
 
 
@@ -192,6 +197,27 @@ class ApprovalManager:
         """当前 pending 审批数（仅供监控 / 测试断言用）。"""
         return len(self._pending)
 
+    def pending_count_for_thread(self, thread_id: str, *, channel: str | None = None) -> int:
+        """返回指定 thread 当前仍在等待用户处理的审批数。
+
+        Args:
+            thread_id: 通道内 thread 标识。
+            channel: 可选通道过滤；None 时统计该 thread 的所有通道。
+        """
+        if not thread_id:
+            return 0
+        return sum(
+            1
+            for pending in self._pending.values()
+            if pending.thread_id == thread_id
+            and (channel is None or pending.channel == channel)
+            and not pending.future.done()
+        )
+
+    def has_pending_for_thread(self, thread_id: str, *, channel: str | None = None) -> bool:
+        """返回指定 thread 是否存在仍在等待用户处理的审批。"""
+        return self.pending_count_for_thread(thread_id, channel=channel) > 0
+
     @property
     def timeout_task_count(self) -> int:
         """当前 timeout task 数（应等于 pending_count；用于 R10 内存泄漏监控）。"""
@@ -216,6 +242,7 @@ class ApprovalManager:
         tool_input: dict[str, Any],
         metadata: dict[str, Any] | None = None,
         timeout_ms: int | None = None,
+        agent_id: str = "",
     ) -> ApprovalDecision:
         """请求用户审批。阻塞直到 resolve / timeout / cancel。
 
@@ -236,6 +263,9 @@ class ApprovalManager:
             tool_input: 工具参数原始 dict
             metadata: 额外 metadata（透传给 EventSink；默认 ``{}``）
             timeout_ms: 用户决策超时（毫秒）；None 走 rules 返回或 manager 默认
+            agent_id: 触发审批的 agent 归属（agent-tree-v0.1 模块 F）。默认 ``""``
+                兼容现有调用（主 agent）；子 agent 审批填子 agent_id，仅展示归属，
+                路由仍按 thread_id。``cancel_by_agent`` 按此批量取消子树 pending。
 
         Returns:
             ``ApprovalDecision``，``outcome`` 为 ``"approved"`` / ``"rejected"``
@@ -268,6 +298,7 @@ class ApprovalManager:
             request_id=request_id,
             channel=channel,
             thread_id=thread_id,
+            agent_id=agent_id,
             cwd=cwd,
             tool_name=tool_name,
             tool_input=tool_input,
@@ -295,7 +326,7 @@ class ApprovalManager:
             self._pending[request_id] = pending
             timeout_delay = actual_timeout_ms / 1000.0
             if rule_dec.auto_approve_at_ms is not None:
-                now_ms = int(time.time() * 1000)
+                now_ms = now_epoch_ms()
                 auto_delay = max(0.0, (rule_dec.auto_approve_at_ms - now_ms) / 1000.0)
                 auto_task = asyncio.create_task(self._handle_auto_approve(request_id, auto_delay))
                 self._auto_approve_tasks[request_id] = auto_task
@@ -459,6 +490,32 @@ class ApprovalManager:
             self._rules.clear_thread_grants(thread_id)
         except Exception:
             logger.exception("clear_thread_grants failed: thread=%s", thread_id)
+        return count
+
+    def cancel_by_agent(self, agent_id: str, reason: str = "cancelled") -> int:
+        """取消某 agent_id 名下所有 pending 审批（agent-tree-v0.1 模块 F）。
+
+        ``cancel_subtree`` 编排时按 agent_id 批量取消子树 pending future，避免子
+        agent 被 cancel 后审批卡 timeout。``agent_id=""`` 时取消所有 agent_id 为空的
+        pending（兼容主 agent 场景）；调用方（AgentManager）遍历子树各 agent_id 逐个
+        调用。幂等：未知 agent_id 或无 pending 返回 0。
+
+        Args:
+            agent_id: 要清理的 agent。空串匹配 agent_id 为空的 pending（主 agent）。
+            reason: 写到每条 pending 的 metadata.reason。
+
+        Returns:
+            实际取消的 pending 数量。
+        """
+        targets = [
+            req_id
+            for req_id, p in self._pending.items()
+            if p.agent_id == agent_id and not p.future.done()
+        ]
+        count = 0
+        for req_id in targets:
+            if self.cancel(req_id, reason=reason):
+                count += 1
         return count
 
     async def _handle_timeout(self, request_id: str, timeout_seconds: float) -> None:
@@ -731,6 +788,7 @@ def _pending_to_view(
         request_id=pending.request_id,
         channel=pending.channel,
         thread_id=pending.thread_id,
+        agent_id=pending.agent_id,
         cwd=pending.cwd,
         tool_name=pending.tool_name,
         tool_input=pending.tool_input,

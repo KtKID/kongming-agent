@@ -7,10 +7,11 @@
 
 from __future__ import annotations
 
-import time
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from core.clock import now_epoch_ms
 
 TaskProgressStatus = Literal["pending", "in_progress", "completed"]
 TaskProgressSource = Literal["api", "llm", "workflow"]
@@ -22,7 +23,7 @@ TASK_PROGRESS_MAX_ERROR_LENGTH = 2000
 
 def current_time_ms() -> int:
     """返回 Unix 毫秒时间戳。"""
-    return int(time.time() * 1000)
+    return now_epoch_ms()
 
 
 class TaskProgressCounts(BaseModel):

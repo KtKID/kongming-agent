@@ -12,7 +12,7 @@
 6. 入帧循环：
 
    - ``user.input``  → ``asyncio.create_task(cell.bridge.run_once(text))``
-   - ``approval.ack`` → ``cell.adapter.resolve_approval(call_id, approved)``
+   - ``approval.ack`` → 旧审批帧，generic_chat 主链已迁到 ``approval.inbox.resolve``
    - ``ping``         → 回 ``pong``
 
    - 帧 > 1MB → 推 ``error`` 帧 + 继续读
@@ -21,8 +21,8 @@
 
 设计要点：
 
-- ``run_once`` 用 :func:`asyncio.create_task` 不阻塞读循环 —— 推理过程中
-  ``approval.ack`` 才能送达；任务出错由 done_callback 推 ``error`` 帧。
+- ``run_once`` 用 :func:`asyncio.create_task` 不阻塞读循环；任务出错由
+  done_callback 推 ``error`` 帧。
 - protocol-frame-type-unify-v0.2：discriminated union 字段 ``kind`` →
   ``frame_type``；``_dispatch_frame`` 内分派也从 ``frame.kind`` 切到
   ``frame.frame_type``。
@@ -40,15 +40,12 @@ import json
 import logging
 import re
 import time
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
-from uuid import uuid4
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
-from evolution.state_store import EvolutionStateStore
-from evolution.store import EvolutionStore, resolve_evolution_root
+from hosts.web.app_support.generic_history import normalize_generic_history
 from hosts.web.app_support.llm_protocol import NormalizedMessage
 from hosts.web.approvals.auto.ws_handlers import (
     handle_auto_approval_query,
@@ -61,10 +58,10 @@ from hosts.web.generic_channel_log import (
 )
 from hosts.web.protocol import (
     ErrorFrame,
+    GenericChatC2SAdapter,
     PongFrame,
     SystemNoticeFrame,
     ThreadHistoryFrame,
-    WSFrameC2SAdapter,
 )
 from network import get_network_manager
 from network.network_log import log_network_event, log_network_exception
@@ -81,14 +78,11 @@ MAX_FRAME_BYTES = 1_000_000  # 1 MB
 """单帧最大字节数（UTF-8 编码后）。"""
 
 WS_CLOSE_POLICY_VIOLATION = 1008
+PENDING_INPUT_QUEUE_FULL_REASON = "pending_input_queue_full"
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
-
-
-def _now_iso_utc() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def register_ws_routes(app: FastAPI) -> None:
@@ -97,6 +91,131 @@ def register_ws_routes(app: FastAPI) -> None:
     @app.websocket("/ws/threads/{thread_id}")
     async def thread_ws(websocket: WebSocket, thread_id: str) -> None:
         await handle_thread_ws_channel(websocket, thread_id)
+
+    @app.websocket("/ws/cron/tasks/{task_id}/runs/{run_id}")
+    async def cron_run_ws(websocket: WebSocket, task_id: str, run_id: str) -> None:
+        await _cron_run_ws_handler(websocket, task_id, run_id)
+
+
+def _find_cron_run(store: Any, task_id: str, run_id: str) -> Any | None:
+    for run in store.list_runs(task_id, limit=None):
+        if getattr(run, "run_id", None) == run_id:
+            return run
+    return None
+
+
+def _resolve_cron_run_preset_id(websocket: WebSocket, task: Any) -> str:
+    candidate = str(getattr(task, "preset_id", "") or "").strip()
+    if candidate:
+        return candidate
+
+    parent_thread_id = str(getattr(task, "thread_id", "") or "")
+    tm = getattr(websocket.app.state, "thread_manager", None)
+    if tm is not None and parent_thread_id:
+        try:
+            for meta in tm.list_threads():
+                if getattr(meta, "id", "") == parent_thread_id:
+                    preset_id = str(getattr(meta, "preset_id", "") or "").strip()
+                    if preset_id:
+                        return preset_id
+        except Exception:
+            logger.warning(
+                "failed to resolve cron run preset from parent thread metadata",
+                exc_info=True,
+            )
+
+    cfg = getattr(websocket.app.state, "config", None)
+    presets = list(getattr(getattr(cfg, "web", None), "llm_presets", []) or [])
+    if presets:
+        return str(getattr(presets[0], "id", "") or "")
+    return ""
+
+
+async def _cron_run_ws_handler(websocket: WebSocket, task_id: str, run_id: str) -> None:
+    """处理定时任务 run history 的临时 WS 会话。
+
+    关键输入是 task_id/run_id，输出是一条只服务当前连接的 ephemeral cell。该路径不
+    读写 thread metadata，也不接入 pending input queue；断开连接时由本函数关闭
+    adapter 和 runtime。
+    """
+    serializer: URLSafeTimedSerializer | None = getattr(websocket.app.state, "serializer", None)
+    if serializer is None:
+        await websocket.close(code=WS_CLOSE_POLICY_VIOLATION, reason="auth not configured")
+        return
+
+    raw_cookie = websocket.cookies.get(SESSION_COOKIE_NAME)
+    payload = verify_session_cookie(raw_cookie, serializer)
+    if payload is None:
+        await websocket.close(code=WS_CLOSE_POLICY_VIOLATION, reason="not authenticated")
+        return
+
+    store = getattr(websocket.app.state, "scheduler_store", None)
+    if store is None:
+        await websocket.close(code=WS_CLOSE_POLICY_VIOLATION, reason="scheduler not configured")
+        return
+
+    task = store.get_task(task_id)
+    if task is None:
+        await websocket.close(code=WS_CLOSE_POLICY_VIOLATION, reason="task not found")
+        return
+    run = _find_cron_run(store, task_id, run_id)
+    if run is None:
+        await websocket.close(code=WS_CLOSE_POLICY_VIOLATION, reason="run not found")
+        return
+
+    session_id = str(getattr(run, "session_id", "") or "").strip()
+    if not session_id:
+        await websocket.close(code=WS_CLOSE_POLICY_VIOLATION, reason="run session missing")
+        return
+    preset_id = _resolve_cron_run_preset_id(websocket, task)
+    if not preset_id:
+        await websocket.close(code=WS_CLOSE_POLICY_VIOLATION, reason="preset missing")
+        return
+
+    tm: ThreadManagerProtocol = websocket.app.state.thread_manager
+    try:
+        cell = await tm.build_ephemeral_session_cell(
+            session_id=session_id,
+            preset_id=preset_id,
+        )
+    except Exception as exc:
+        logger.exception("build cron run cell failed for task=%s run=%s", task_id, run_id)
+        log_generic_channel_exception(
+            "cron_run_boot_failed",
+            exc,
+            level="ERROR",
+            thread_id=session_id,
+            task_id=task_id,
+            run_id=run_id,
+        )
+        await websocket.close(code=WS_CLOSE_POLICY_VIOLATION, reason="boot failed")
+        return
+
+    await websocket.accept()
+    network_manager = getattr(websocket.app.state, "network_manager", None)
+    if network_manager is None:
+        network_manager = get_network_manager()
+    conn_id = await network_manager.register("cron-run", websocket, session_id)
+    log_generic_channel_event(
+        "cron_run_registered",
+        thread_id=session_id,
+        conn_id=conn_id,
+        task_id=task_id,
+        run_id=run_id,
+    )
+    cell.attach_ws(websocket)
+    cell.touch()
+
+    try:
+        await _send_history_frame(websocket, cell)
+        await _receive_loop(websocket, cell, tm, session_id, network_manager, conn_id)
+    finally:
+        with contextlib.suppress(Exception):
+            await network_manager.unregister(conn_id)
+        with contextlib.suppress(Exception):
+            cell.detach_ws(websocket)
+        with contextlib.suppress(Exception):
+            await tm.close_ephemeral_session_cell(cell, reason="session_close")
 
 
 async def handle_thread_ws_channel(
@@ -225,6 +344,7 @@ async def _thread_ws_handler(
     # 5. 推 thread.history
     try:
         await _send_history_frame(websocket, cell)
+        await _send_pending_input_snapshot(websocket, tm, thread_id)
         if include_evolution_replay:
             await _send_evolution_replay_frames(websocket, cell)
         log_generic_channel_event("history_replay_sent", thread_id=thread_id, conn_id=conn_id)
@@ -346,48 +466,11 @@ async def _receive_loop(
             await _send_error_frame(websocket, "internal", f"frame parse error: {exc}")
             continue
 
-        # smart-approval v0.5：auto-approval-toggle / auto-approval-query 是
-        # 命令式帧，**不在** WSFrameC2S discriminated union 内（union 只收
-        # user.input / approval.ack / ping / interrupt 四种流式帧）—— 旁路
-        # validate_json，直接拿原 dict 派发到共用 handler。这样既避免污染
-        # 协议（命令式语义跟流式分派不混），也避免 ValidationError 把
-        # auto-approval 帧识别成"非法帧"。其他帧仍按原 union 校验。
-        #
-        # 字段命名：peek 读 ``frame_type``（protocol-frame-type-unify-v0.2
-        # 之后 wire 协议从历史的 ``kind`` / ``type`` 统一到 ``frame_type``；
-        # 前端 useAutoApproval.ts 和 claude_code route 都已切，本旁路漏改过
-        # 一次导致整帧被 union 拒，现修正）。
         peek_type: str | None = None
         if isinstance(data, dict):
             t = data.get("frame_type")
             if isinstance(t, str):
                 peek_type = t
-        if peek_type in ("auto-approval-toggle", "auto-approval-query"):
-            log_generic_channel_event(
-                "auto_approval_frame",
-                thread_id=thread_id,
-                conn_id=conn_id,
-                frame_type=peek_type,
-                raw_bytes=raw_bytes,
-                cwd_present=bool(data.get("cwd")) if isinstance(data, dict) else None,
-            )
-            cell.touch()
-            policy = getattr(websocket.app.state, "auto_approval_policy", None)
-            if peek_type == "auto-approval-toggle":
-                await handle_auto_approval_toggle(
-                    websocket,
-                    data,
-                    policy,
-                    channel="generic_chat",
-                )
-            else:
-                await handle_auto_approval_query(
-                    websocket,
-                    data,
-                    policy,
-                    channel="generic_chat",
-                )
-            continue
 
         if isinstance(data, dict) and await network_manager.handle_inbound(conn_id, data):
             log_generic_channel_event(
@@ -400,9 +483,9 @@ async def _receive_loop(
             )
             continue
 
-        # JSON 解析 + discriminated union
+        # JSON 解析 + generic_chat discriminated union
         try:
-            frame = WSFrameC2SAdapter.validate_python(data)
+            frame = GenericChatC2SAdapter.validate_python(data)
         except ValidationError as exc:
             log_generic_channel_event(
                 "frame_validation_failed",
@@ -448,8 +531,35 @@ async def _dispatch_frame(
     thread_id: str,
     conn_id: str,
 ) -> None:
-    """分派单个 C2S 帧。"""
+    """分派单个 C2S 帧。
+
+    user.input / choice.submit 会优先走 ThreadManager 的 pending input queue；
+    只有 ephemeral cell 这类无队列状态的连接回落到 direct run helper。队列入口的
+    异步拒绝会转成稳定 error 帧，供前端恢复草稿。
+
+    状态归属：本函数只解析 wire frame 并调用 ThreadManager Protocol；队列排序、
+    drain、版本号和广播全部由 manager 维护。
+    """
     frame_type = frame.frame_type
+    if frame_type in {"auto-approval-toggle", "auto-approval-query"}:
+        policy = getattr(websocket.app.state, "auto_approval_policy", None)
+        payload = frame.model_dump()
+        if frame_type == "auto-approval-toggle":
+            await handle_auto_approval_toggle(
+                websocket,
+                payload,
+                policy,
+                channel="generic_chat",
+            )
+        else:
+            await handle_auto_approval_query(
+                websocket,
+                payload,
+                policy,
+                channel="generic_chat",
+            )
+        return
+
     if frame_type == "user.input":
         ensure_runtime = getattr(tm, "ensure_cell_runtime_preset_current", None)
         if callable(ensure_runtime):
@@ -461,7 +571,6 @@ async def _dispatch_frame(
                     "模型切换尚未完成，runtime 刷新失败；请稍后重试。",
                 )
                 return
-        # 后台跑 run_once；不阻塞读循环
         effort = getattr(frame, "reasoning_effort", None)
         # claude-image-paste-e2e #20：把 UserInputAttachment(BaseModel) 列表
         # 提前打成 dict，全链路（runtime / runner / Message.metadata / assembler
@@ -470,42 +579,71 @@ async def _dispatch_frame(
         attachments_dicts: list[dict[str, Any]] | None = (
             [a.model_dump() for a in raw_attachments] if raw_attachments else None
         )
-        _start_run_once_task(
-            cell,
-            thread_id,
-            websocket,
-            frame.text,
-            reasoning_effort=effort,
-            attachments=attachments_dicts,
+        raw_references = getattr(frame, "references", None)
+        reference_dicts: list[dict[str, Any]] | None = (
+            [r.model_dump() for r in raw_references] if raw_references else None
         )
+        if _supports_pending_input_queue(cell):
+            try:
+                result = await tm.submit_user_input(
+                    thread_id,
+                    frame.text,
+                    request_id=getattr(frame, "request_id", None),
+                    reasoning_effort=effort,
+                    attachments=attachments_dicts,
+                    references=reference_dicts,
+                    source_conn_id=conn_id,
+                )
+            except Exception as exc:
+                await _send_submit_error(websocket, exc)
+                log_generic_channel_exception(
+                    "user_input_rejected",
+                    exc,
+                    level="WARNING",
+                    thread_id=thread_id,
+                    conn_id=conn_id,
+                    frame_type=frame_type,
+                    request_id=getattr(frame, "request_id", None),
+                )
+                return
+            started = getattr(result, "started", False)
+        else:
+            current_task: asyncio.Task[Any] | None = getattr(cell, "current_run_task", None)
+            if current_task is not None and not current_task.done():
+                await _send_error_frame(websocket, "internal", "当前任务正在运行，请稍后重试。")
+                log_generic_channel_event(
+                    "user_input_rejected",
+                    level="WARNING",
+                    thread_id=thread_id,
+                    conn_id=conn_id,
+                    frame_type=frame_type,
+                    request_id=getattr(frame, "request_id", None),
+                    reason="active_run",
+                )
+                return
+            _start_run_once_task(
+                cell,
+                thread_id,
+                websocket,
+                frame.text,
+                reasoning_effort=effort,
+                attachments=attachments_dicts,
+                references=reference_dicts,
+            )
+            started = True
         log_generic_channel_event(
-            "run_task_started",
+            "user_input_submitted",
             thread_id=thread_id,
             conn_id=conn_id,
             frame_type=frame_type,
             request_id=getattr(frame, "request_id", None),
+            started=started,
             text_len=len(frame.text),
             reasoning_effort=effort,
             attachment_count=len(attachments_dicts) if attachments_dicts else 0,
+            reference_count=len(reference_dicts) if reference_dicts else 0,
         )
     elif frame_type == "choice.submit":
-        choice_task: asyncio.Task[Any] | None = getattr(cell, "current_run_task", None)
-        if choice_task is not None and not choice_task.done():
-            await _send_error_frame(
-                websocket,
-                "internal",
-                "当前任务仍在运行，请稍后再确认选择。",
-            )
-            log_generic_channel_event(
-                "choice_submit_rejected",
-                level="WARNING",
-                thread_id=thread_id,
-                conn_id=conn_id,
-                frame_type=frame_type,
-                request_id=getattr(frame, "request_id", None),
-                reason="active_run",
-            )
-            return
         try:
             choice_text = format_choice_submit_as_user_input(frame)
         except ValueError as exc:
@@ -521,69 +659,146 @@ async def _dispatch_frame(
                 error=str(exc),
             )
             return
-        _start_run_once_task(cell, thread_id, websocket, choice_text)
+        if _supports_pending_input_queue(cell):
+            try:
+                result = await tm.submit_choice_result(
+                    thread_id,
+                    choice_text,
+                    request_id=getattr(frame, "request_id", ""),
+                )
+            except Exception as exc:
+                await _send_submit_error(websocket, exc)
+                log_generic_channel_exception(
+                    "choice_submit_rejected",
+                    exc,
+                    level="WARNING",
+                    thread_id=thread_id,
+                    conn_id=conn_id,
+                    frame_type=frame_type,
+                    request_id=getattr(frame, "request_id", None),
+                )
+                return
+            started = getattr(result, "started", False)
+        else:
+            current_task = getattr(cell, "current_run_task", None)
+            if current_task is not None and not current_task.done():
+                await _send_error_frame(websocket, "internal", "当前任务正在运行，请稍后重试。")
+                log_generic_channel_event(
+                    "choice_submit_rejected",
+                    level="WARNING",
+                    thread_id=thread_id,
+                    conn_id=conn_id,
+                    frame_type=frame_type,
+                    request_id=getattr(frame, "request_id", None),
+                    reason="active_run",
+                )
+                return
+            _start_run_once_task(cell, thread_id, websocket, choice_text)
+            started = True
         log_generic_channel_event(
-            "choice_submit_run_started",
+            "choice_submit_submitted",
             thread_id=thread_id,
             conn_id=conn_id,
             frame_type=frame_type,
             request_id=getattr(frame, "request_id", None),
+            started=started,
             answer_count=len(getattr(frame, "answers", []) or []),
             text_len=len(choice_text),
         )
+    elif frame_type == "pending-input.update":
+        # 编辑帧只修改尚未启动的队列项；服务端返回 changed 快照后前端覆盖本地状态。
+        try:
+            await tm.update_pending_input(thread_id, frame.pending_input_id, frame.content)
+        except Exception as exc:
+            await _send_submit_error(websocket, exc)
+    elif frame_type == "pending-input.cancel":
+        # 删除帧只作用于 pending_inputs 列表；active run 的取消仍走 interrupt 分支。
+        try:
+            await tm.cancel_pending_input(thread_id, frame.pending_input_id)
+        except Exception as exc:
+            await _send_submit_error(websocket, exc)
+    elif frame_type == "pending-input.reorder":
+        # 拖拽排序只在松手后发最终顺序；集合校验和 sequence 重写由 ThreadManager 裁决。
+        try:
+            await tm.reorder_pending_inputs(thread_id, frame.ordered_ids)
+        except Exception as exc:
+            await _send_submit_error(websocket, exc)
     elif frame_type == "interrupt":
         # interrupt-run-v0.1：浏览器点 Stop。检查当前 run 是否真在跑：
         # - None / 已 done：推 system notice "no_active_run"，不 cancel
-        # - 否则 task.cancel() → runner 顶层 except → emit run.cancelled
+        # - 否则 cancel run → runner 顶层 except → emit run.cancelled
         #   → WSEventSink fanout 转 RunInterruptedFrame（多 tab 自动同步）
-        current_task: asyncio.Task[Any] | None = getattr(cell, "current_run_task", None)
-        if current_task is None or current_task.done():
-            await _send_no_active_run_notice(websocket, thread_id)
-            log_generic_channel_event(
-                "interrupt_no_active_run",
-                thread_id=thread_id,
-                conn_id=conn_id,
-                frame_type=frame_type,
-                run_id=getattr(frame, "run_id", None),
-            )
+        #
+        # agent-tree-v0.1（task-4）：cell 已装配 root_agent（agent_loop 副路径启用）时，
+        # 走 tree-aware interrupt（tm.interrupt_agent_tree: cancel_subtree + bump_epoch
+        # + purge 旧世代内部 mail）；否则保留旧 current_run_task.cancel() 路径（并存）。
+        root_agent = getattr(cell, "root_agent", None)
+        tree_interrupt = getattr(tm, "interrupt_agent_tree", None)
+        if root_agent is not None and callable(tree_interrupt):
+            # tree-aware 路径：cancel_subtree 砍 root run_task + bump_epoch + purge。
+            did_cancel = await tree_interrupt(thread_id, reason="user_interrupt")
+            if not did_cancel:
+                # 无在途 run：推 no_active_run（与旧路径一致）。
+                await _send_no_active_run_notice(websocket, thread_id)
+                log_generic_channel_event(
+                    "interrupt_no_active_run",
+                    thread_id=thread_id,
+                    conn_id=conn_id,
+                    frame_type=frame_type,
+                    run_id=getattr(frame, "run_id", None),
+                )
+            else:
+                logger.info(
+                    "interrupt requested for thread=%s; cancel_subtree + bump_epoch",
+                    thread_id,
+                )
+                log_generic_channel_event(
+                    "interrupt_requested",
+                    thread_id=thread_id,
+                    conn_id=conn_id,
+                    frame_type=frame_type,
+                    run_id=getattr(frame, "run_id", None),
+                )
         else:
-            current_task.cancel()
-            logger.info(
-                "interrupt requested for thread=%s; cancelled current_run_task",
-                thread_id,
-            )
-            log_generic_channel_event(
-                "interrupt_requested",
-                thread_id=thread_id,
-                conn_id=conn_id,
-                frame_type=frame_type,
-                run_id=getattr(frame, "run_id", None),
-            )
+            # 旧路径（current_run_task.cancel）：cell 未装配 root_agent 时走此分支。
+            interrupt_task: asyncio.Task[Any] | None = getattr(cell, "current_run_task", None)
+            if interrupt_task is None or interrupt_task.done():
+                await _send_no_active_run_notice(websocket, thread_id)
+                log_generic_channel_event(
+                    "interrupt_no_active_run",
+                    thread_id=thread_id,
+                    conn_id=conn_id,
+                    frame_type=frame_type,
+                    run_id=getattr(frame, "run_id", None),
+                )
+            else:
+                interrupt_task.cancel()
+                logger.info(
+                    "interrupt requested for thread=%s; cancelled current_run_task",
+                    thread_id,
+                )
+                log_generic_channel_event(
+                    "interrupt_requested",
+                    thread_id=thread_id,
+                    conn_id=conn_id,
+                    frame_type=frame_type,
+                    run_id=getattr(frame, "run_id", None),
+                )
     elif frame_type == "approval.ack":
-        # v0.1.6 三态：传递字符串字面值给 thread_manager，由它转 ApprovalAction
-        # 枚举（thread_manager 在装配层，可 import core.contracts；ws 是 app shell
-        # 层不允许）。非法字段降级为 REJECT 由 thread_manager 处理。
-        try:
-            tm.resolve_approval(thread_id, frame.call_id, frame.action)
-            log_generic_channel_event(
-                "approval_ack_resolved",
-                thread_id=thread_id,
-                conn_id=conn_id,
-                frame_type=frame_type,
-                call_id=frame.call_id,
-                action=frame.action,
-            )
-        except Exception as exc:
-            logger.exception("resolve_approval raised; ignored")
-            log_generic_channel_exception(
-                "approval_ack_resolve_failed",
-                exc,
-                thread_id=thread_id,
-                conn_id=conn_id,
-                frame_type=frame_type,
-                call_id=frame.call_id,
-                action=frame.action,
-            )
+        log_generic_channel_event(
+            "approval_ack_retired",
+            level="WARNING",
+            thread_id=thread_id,
+            conn_id=conn_id,
+            frame_type=frame_type,
+            call_id=frame.call_id,
+            action=frame.action,
+        )
+        await _send_error_frame(
+            websocket,
+            "internal",
+            "approval.ack 已下线，请通过全局审批 inbox 处理。",
+        )
     elif frame_type == "ping":
         try:
             pong = PongFrame(timestamp_ms=_now_ms(), ts=getattr(frame, "ts", None))
@@ -622,11 +837,13 @@ def _frame_log_fields(frame: Any) -> dict[str, Any]:
     frame_type = getattr(frame, "frame_type", None)
     if frame_type == "user.input":
         attachments = getattr(frame, "attachments", None)
+        references = getattr(frame, "references", None)
         return {
             "request_id": getattr(frame, "request_id", None),
             "text_len": len(getattr(frame, "text", "") or ""),
             "reasoning_effort": getattr(frame, "reasoning_effort", None),
             "attachment_count": len(attachments) if attachments else 0,
+            "reference_count": len(references) if references else 0,
         }
     if frame_type == "approval.ack":
         return {
@@ -646,6 +863,17 @@ def _frame_log_fields(frame: Any) -> dict[str, Any]:
     return {}
 
 
+def _supports_pending_input_queue(cell: Any) -> bool:
+    """判断当前 cell 是否属于 metadata thread 队列状态机。
+
+    ThreadCell 拥有 pending_input_lock；临时 session cell 没有该字段，因此继续使用
+    单次 direct run 语义。
+
+    输入是已 boot 的 cell；输出决定 user.input 分支走队列入口还是 direct run。
+    """
+    return hasattr(cell, "pending_input_lock")
+
+
 def _start_run_once_task(
     cell: Any,
     thread_id: str,
@@ -654,8 +882,14 @@ def _start_run_once_task(
     *,
     reasoning_effort: str | None = None,
     attachments: list[dict[str, Any]] | None = None,
+    references: list[dict[str, Any]] | None = None,
 ) -> asyncio.Task[Any]:
-    """创建并登记一次后台 run_once task。"""
+    """创建并登记一次后台 direct run_once task。
+
+    该 helper 只服务无 pending queue 的 ephemeral cell；普通 metadata thread 由
+    ThreadManager._start_pending_input_run 统一启动和 drain。完成回调只清理
+    current_run_task，不触发队列消费。
+    """
     task = asyncio.create_task(
         _run_once_safely(
             cell,
@@ -663,6 +897,7 @@ def _start_run_once_task(
             websocket,
             reasoning_effort=reasoning_effort,
             attachments=attachments,
+            references=references,
         ),
         name=f"web-run-once-{thread_id}",
     )
@@ -730,22 +965,24 @@ async def _run_once_safely(
     *,
     reasoning_effort: str | None = None,
     attachments: list[dict[str, Any]] | None = None,
+    references: list[dict[str, Any]] | None = None,
 ) -> None:
     """在后台跑 ``cell.bridge.run_once``；异常推 ``error`` 帧不沉默死掉。
 
     token 持久化由 :class:`UsagePersistSink` 在每个 turn 的 ``usage``
     event 时增量写盘，不在此处做 run 结束一次性写入。
 
-    ``attachments`` 是 :class:`web.protocol.rest_models.UserInputAttachment`
-    经 ``model_dump()`` 后的 dict 列表；为 None 表示纯文本输入。一路透传到
+    ``attachments`` / ``references`` 都是 Pydantic DTO ``model_dump()`` 后的
+    dict 列表；为 None 表示本轮无对应输入。它们一路透传到
     :meth:`core.runner.Runner._seed_messages`，最终写入 user
-    :class:`core.message.Message` 的 ``metadata["attachments"]``。
+    :class:`core.message.Message` 的 metadata。
     """
     try:
         await cell.bridge.run_once(
             text,
             reasoning_effort=reasoning_effort,
             attachments=attachments,
+            references=references,
         )
         log_generic_channel_event(
             "run_once_completed",
@@ -753,6 +990,7 @@ async def _run_once_safely(
             text_len=len(text),
             reasoning_effort=reasoning_effort,
             attachment_count=len(attachments) if attachments else 0,
+            reference_count=len(references) if references else 0,
         )
     except asyncio.CancelledError:
         log_generic_channel_event(
@@ -761,6 +999,7 @@ async def _run_once_safely(
             text_len=len(text),
             reasoning_effort=reasoning_effort,
             attachment_count=len(attachments) if attachments else 0,
+            reference_count=len(references) if references else 0,
         )
         raise
     except Exception as exc:
@@ -773,6 +1012,7 @@ async def _run_once_safely(
             text_len=len(text),
             reasoning_effort=reasoning_effort,
             attachment_count=len(attachments) if attachments else 0,
+            reference_count=len(references) if references else 0,
         )
         with contextlib.suppress(Exception):
             await _send_error_frame(
@@ -832,114 +1072,18 @@ async def _send_history_frame(websocket: WebSocket, cell: Any) -> None:
                             )
                             history = []
 
-    for msg in history:
-        # msg 形态可能是 dict 或 Message 对象
-        role = _extract_field(msg, "role", default="user")
-        content = _extract_field(msg, "content", default="")
-        tool_call_id = _extract_field(msg, "tool_call_id", default=None)
-        # 只接受 v0.1.5 协议合法的 role；其它一律标 "assistant"
-        if role not in ("user", "assistant", "tool"):
-            role = "assistant"
-        # Message.content 类型是 ``str | None``（assistant 只发 tool_calls 时为
-        # None）。v0.1.6 修：之前 ``str(content)`` 会把 None 转成字面 "None"
-        # 传到前端，UI 在用户消息后显示一个白框写着 "None"，体感像 bug。
-        # 改成空串兜底——"无文本"的语义就是空，不是字符串 "None"。
-        if not isinstance(content, str):
-            content = ""
-        timestamp = _now_iso_utc()
-
-        tool_calls = _extract_field(msg, "tool_calls", default=None)
-        if role == "assistant" and tool_calls:
-            if content:
-                messages.append(
-                    {
-                        "id": str(uuid4()),
-                        "sessionId": None,
-                        "timestamp": timestamp,
-                        "provider": "generic_chat",
-                        "frame_type": "text",
-                        "role": "assistant",
-                        "content": content,
-                    }
-                )
-            for call in tool_calls:
-                call_id = _extract_field(call, "call_id", default=None)
-                tool_name = _extract_field(call, "tool_name", default=None)
-                arguments = _extract_field(call, "arguments", default=None)
-                messages.append(
-                    {
-                        "id": str(uuid4()),
-                        "sessionId": None,
-                        "timestamp": timestamp,
-                        "provider": "generic_chat",
-                        "frame_type": "tool_use",
-                        "toolId": call_id if isinstance(call_id, str) else str(uuid4()),
-                        "toolName": tool_name if isinstance(tool_name, str) else "unknown",
-                        "toolInput": arguments if isinstance(arguments, dict) else {},
-                    }
-                )
-            continue
-
-        if role == "tool":
-            raw_name = _extract_field(msg, "name", default=None)
-            tool_name = raw_name if isinstance(raw_name, str) else None
-            metadata = _extract_field(msg, "metadata", default=None)
-            ok: bool | None = None
-            error_message: str | None = None
-            if isinstance(metadata, dict):
-                meta_ok = metadata.get("ok")
-                ok = bool(meta_ok) if isinstance(meta_ok, bool) else None
-                meta_err = metadata.get("error_message")
-                error_message = meta_err if isinstance(meta_err, str) else None
-            messages.append(
-                {
-                    "id": str(uuid4()),
-                    "sessionId": None,
-                    "timestamp": timestamp,
-                    "provider": "generic_chat",
-                    "frame_type": "tool_result",
-                    "toolId": tool_call_id if isinstance(tool_call_id, str) else str(uuid4()),
-                    "toolName": tool_name if isinstance(tool_name, str) else "unknown",
-                    "content": content or error_message or "",
-                    "isError": ok is False,
-                }
-            )
-            continue
-
-        out_role: Literal["user", "assistant"] = "assistant"
-        if role == "user":
-            out_role = "user"
-        messages.append(
-            {
-                "id": str(uuid4()),
-                "sessionId": None,
-                "timestamp": timestamp,
-                "provider": "generic_chat",
-                "frame_type": "text",
-                "role": out_role,
-                "content": content,
-            }
-        )
-
+    messages = normalize_generic_history(history)
     frame = ThreadHistoryFrame(messages=messages, timestamp_ms=_now_ms())
     await websocket.send_json(frame.model_dump())
 
 
 async def _send_evolution_replay_frames(websocket: WebSocket, cell: Any) -> None:
-    cfg = getattr(websocket.app.state, "config", None)
-    if cfg is None:
+    manager = getattr(websocket.app.state, "evolution_manager", None)
+    if manager is None:
         return
-    if getattr(cfg.evolution.learning, "enabled", False) is not True:
+    if getattr(manager, "enabled", False) is not True:
         return
-    raw_root = getattr(cfg.evolution.learning, "root_path", None)
-    if not isinstance(raw_root, str) or not raw_root.strip():
-        return
-    root_dir = resolve_evolution_root(raw_root)
-    store = EvolutionStore(
-        root_dir=root_dir,
-        state_store=EvolutionStateStore(root_dir),
-    )
-    snapshots = await store.list_notice_snapshots_for_session(str(cell.thread_id))
+    snapshots = await manager.list_notice_snapshots_for_session(str(cell.thread_id))
     for snapshot in snapshots:
         frame = SystemNoticeFrame(
             notice_key="self_evolution.review",
@@ -955,11 +1099,36 @@ async def _send_evolution_replay_frames(websocket: WebSocket, cell: Any) -> None
         await websocket.send_json(frame.model_dump())
 
 
-def _extract_field(obj: Any, name: str, *, default: Any) -> Any:
-    """从 dict 或对象上取字段；缺字段返回 default。"""
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
+async def _send_pending_input_snapshot(
+    websocket: WebSocket,
+    tm: ThreadManagerProtocol,
+    thread_id: str,
+) -> None:
+    """推当前 pending input 队列快照。
+
+    WS 建连后调用，输出完整 snapshot 帧；前端用 version 与 thread_id 合并状态。
+    该帧是连接级补偿机制，覆盖断线期间的队列增删改和 drain 结果。
+    """
+    snapshot = await tm.pending_input_snapshot(thread_id)
+    await websocket.send_json(snapshot.model_dump())
+
+
+async def _send_submit_error(websocket: WebSocket, exc: Exception) -> None:
+    """把提交入口错误转换为稳定 WS error 帧。
+
+    pending_input_queue_full 会带 reason，前端据此恢复最近一次 Composer 草稿；其他
+    异常统一按 internal message 返回。
+    """
+    reason = str(getattr(exc, "reason", "") or "")
+    if reason == PENDING_INPUT_QUEUE_FULL_REASON:
+        await _send_error_frame(
+            websocket,
+            "internal",
+            "队列已满，最多支持 20 条待发送消息。",
+            reason=PENDING_INPUT_QUEUE_FULL_REASON,
+        )
+        return
+    await _send_error_frame(websocket, "internal", str(exc))
 
 
 async def _send_error_frame(
@@ -968,6 +1137,7 @@ async def _send_error_frame(
     message: str,
     *,
     turn: int | None = None,
+    reason: str | None = None,
 ) -> None:
     """推 :class:`ErrorFrame`。"""
     try:
@@ -975,6 +1145,7 @@ async def _send_error_frame(
             error_code=error_code,  # type: ignore[arg-type]
             message=message,
             turn=turn,
+            reason=reason,
             timestamp_ms=_now_ms(),
         )
         await websocket.send_json(frame.model_dump())

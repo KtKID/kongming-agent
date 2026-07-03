@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import quote
 
+from core.clock import now_epoch_ms
 from core.contracts import Event, EventSink
 from evolution.models import (
     ApplyJob,
@@ -217,6 +218,7 @@ class EvolutionStore:
         *,
         run_id: str,
         nutrients: tuple[EvolutionNutrient, ...],
+        extra_sinks: Sequence[EventSink] = (),
     ) -> None:
         for nutrient in nutrients:
             event = Event(
@@ -230,7 +232,12 @@ class EvolutionStore:
                     "suggested_target": nutrient.suggested_target,
                 },
             )
-            for sink in self._event_sinks:
+            seen: set[int] = set()
+            for sink in (*self._event_sinks, *extra_sinks):
+                sink_id = id(sink)
+                if sink_id in seen:
+                    continue
+                seen.add(sink_id)
                 await sink.emit(event)
 
     def _list_reviews_for_session_sync(self, session_id: str) -> tuple[ReviewResult, ...]:
@@ -324,7 +331,7 @@ class EvolutionStore:
         record = self._read_decision_sync(review_id)
         if record is None:
             raise ValueError(f"decision record not found: {review_id}")
-        updated_at_ms = applied_at_ms if applied_at_ms is not None else int(time.time() * 1000)
+        updated_at_ms = applied_at_ms if applied_at_ms is not None else now_epoch_ms()
         items = list(record.items)
         found = False
         for index, item in enumerate(items):

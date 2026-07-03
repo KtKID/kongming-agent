@@ -34,7 +34,7 @@ from pydantic import BaseModel, ConfigDict
 #: - ``network``：连接 LLM endpoint / 工具远端失败（DNS / TCP / TLS 层）
 #: - ``llm_error``：LLM 端返回 4xx / 5xx 或解析模型响应失败
 #: - ``tool_error``：工具执行抛异常（不含 ok=False 的业务失败，那个走 tool.call.end）
-#: - ``approval_timeout``：浏览器在 ``pending_approval_timeout_seconds`` 内没回 ack
+#: - ``approval_timeout``：ApprovalManager 等待人工审批超时
 #: - ``internal``：runtime 内部 panic / 不在以上四类的兜底
 #:
 #: 新增 code 视为破坏性变更，必须 bump 协议小版本（v0.1.6+）。
@@ -113,9 +113,16 @@ class _S2CFrameBase(_FrameBase):
 
     某些 S2C 帧带 ``turn`` 和 ``seq``（流式增量类）；某些不带（控制类如
     ``pong`` / ``cell.evicted``）。具体帧自行声明。
+
+    ``agent_id``（agent-tree-v0.1 模块 G）：产生该帧的 agent 归属，默认 ``""``
+    兼容现有构造点（非 Event 源帧如 ``pong`` / ``cell.evicted`` 不携带）。
+    WSEventSink 把 runtime :class:`Event` 翻成帧时透传 ``event.agent_id``，
+    让前端能按 agent 归属展示流式帧（多 agent 场景）。TS 侧对应为可选
+    ``agent_id?: string``。
     """
 
     timestamp_ms: int
+    agent_id: str = ""
 
 
 __all__: list[str] = [

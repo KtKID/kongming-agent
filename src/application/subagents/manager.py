@@ -29,7 +29,11 @@ from application.subagents.permissions import (
     validate_scoped_tool_names,
     wrap_scoped_file_tools,
 )
-from core.agent_spec import AgentSpec
+from application.subagents.runtime_resolver import (
+    ResolvedSubAgentRuntime,
+    resolved_runtime_payload,
+)
+from core.agent_spec import AgentSpec, coerce_reasoning_effort
 from core.contracts import Tool
 from core.result import Result
 from infrastructure.config.paths import resolve_kongming_path
@@ -51,8 +55,29 @@ class SubAgentTask:
     context: str = ""
     tool_names: tuple[str, ...] = ()
     skill_names: tuple[str, ...] = ()
+    agent_role_id: str | None = None
     permission: SubAgentPermissionSpec | None = None
+    runtime: ResolvedSubAgentRuntime | None = None
     metadata: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AvailableToolDescription:
+    """子 agent prompt 可见工具说明。"""
+
+    name: str
+    description: str
+
+
+@dataclass(frozen=True)
+class SubAgentPromptInput:
+    """传给子 agent LLM 的独立 prompt 数据结构。"""
+
+    task_name: str
+    task_description: str
+    context: str
+    available_tools: tuple[AvailableToolDescription, ...] = ()
+    working_dir_hint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -70,7 +95,23 @@ class SubAgentRun:
 
 
 class SubAgentManager:
-    """Runs isolated child agents through the shared Runner boundary."""
+    """Runs isolated child agents through the shared Runner boundary.
+
+    .. deprecated:: agent-tree-v0.1 task-5
+
+        本类已**标记 DEPRECATED**（agent-tree-v0.1 task-5）。spawn 主路径已迁移到
+        :class:`application.agents.manager.AgentManager`（异步 spawn + 树级打断 +
+        ``single_shot`` AgentCell）。
+
+        **保留原因**：workflow strategies（parallel / map_reduce / roundtable_review /
+        task_flow / deep_research 共 6 文件）深度依赖 :class:`SubAgentTask` 作 task
+        spec 载体，spec 同时要求「workflow 不破坏」。完整淘汰 SubAgentManager 全家桶
+        推迟到「workflow 收编为 policy agent」（v2）。本 task（task-5）仅新增
+        AgentManager 并存，不删本类。
+
+        **新代码不要使用本类**——派生子 agent 走
+        :class:`application.agents.manager.AgentManager.spawn`。
+    """
 
     def __init__(
         self,
@@ -91,6 +132,7 @@ class SubAgentManager:
         source: str = "workflow",
     ) -> SubAgentRun:
         """Run one child task in a fresh session."""
+        runtime = _require_runtime(task)
         resolved_workflow_id = workflow_id or source or "subagent"
         task_run_id = _task_run_id(task)
         session_id = self._build_child_session_id(
@@ -101,7 +143,7 @@ class SubAgentManager:
         self._lifecycle_registry.record_started(
             thread_id=parent_session_id,
             source=source,
-            workflow_id=resolved_workflow_id,
+            workflow_id=workflow_id,
             task_id=task.task_id,
             task_run_id=task_run_id,
             task_name=task.task_name,
@@ -145,13 +187,17 @@ class SubAgentManager:
                 llm=self._runtime.llm,
                 tools=self._runtime.tools,
                 approval=approval,
-                max_turns=min(_task_max_turns(task), self._runtime.config.runner.max_turns),
+                max_turns=runtime.max_turns,
                 enabled_tools=enabled_tools,
                 lifecycle_hooks=lifecycle_hooks,
+                max_tokens=runtime.max_tokens,
+                temperature=runtime.temperature,
+                timeout_seconds=runtime.timeout_seconds,
+                llm_request_metadata=_llm_request_metadata(runtime),
             )
         except asyncio.CancelledError as exc:
             self._record_finished(
-                workflow_id=resolved_workflow_id,
+                workflow_id=workflow_id,
                 parent_session_id=parent_session_id,
                 source=source,
                 task=task,
@@ -163,7 +209,7 @@ class SubAgentManager:
             raise
         except Exception as exc:
             self._record_finished(
-                workflow_id=resolved_workflow_id,
+                workflow_id=workflow_id,
                 parent_session_id=parent_session_id,
                 source=source,
                 task=task,
@@ -175,7 +221,7 @@ class SubAgentManager:
             raise
         run = self._to_run(task=task, session_id=session_id, result=result)
         self._record_finished(
-            workflow_id=resolved_workflow_id,
+            workflow_id=workflow_id,
             parent_session_id=parent_session_id,
             source=source,
             task=task,
@@ -187,6 +233,10 @@ class SubAgentManager:
         return run
 
     def _build_child_agent_spec(self, task: SubAgentTask) -> AgentSpec:
+        runtime = _require_runtime(task)
+        role_instructions = ""
+        if runtime.role_description:
+            role_instructions = f"你的角色职责：{runtime.role_description}。"
         return AgentSpec(
             name=f"subagent-{_slug(task.task_name)}",
             instructions=(
@@ -196,18 +246,35 @@ class SubAgentManager:
                 "任务要求输出结论或报告时，直接作为最终回复返回。"
                 "只有任务明确要求写文件且提供写入工具时才写文件。"
                 "输出包含：结论、关键依据、风险或未完成项。"
+                f"{role_instructions}"
             ),
-            default_model=self._runtime.agent_spec.default_model,
+            default_model=runtime.model,
             tool_names=tuple(task.tool_names),
-            max_turns=3,
-            metadata={"agent_role": "subagent"},
-            reasoning_effort=self._runtime.agent_spec.reasoning_effort,
+            max_turns=runtime.max_turns,
+            metadata={
+                "agent_role": "subagent",
+                "subagent_model_name": runtime.model,
+                "subagent_role_id": runtime.role_id or "",
+            },
+            reasoning_effort=coerce_reasoning_effort(runtime.reasoning_effort),
         )
 
     def _build_dispatch_prompt(self, task: SubAgentTask) -> str:
+        prompt_input = SubAgentPromptInput(
+            task_name=task.task_name,
+            task_description=task.prompt.strip(),
+            context=task.context.strip(),
+            available_tools=tuple(
+                AvailableToolDescription(name=tool.name, description=tool.description)
+                for tool in self._resolve_enabled_tools(task)
+            ),
+            working_dir_hint=_working_dir_hint(task),
+        )
+        return _render_prompt_input(prompt_input)
+
+    def _build_dispatch_prompt_legacy(self, task: SubAgentTask) -> str:
         parts = [
             f"任务名称：{task.task_name}",
-            f"任务 ID：{task.task_id}",
             "",
             "任务：",
             task.prompt.strip(),
@@ -279,6 +346,7 @@ class SubAgentManager:
             context=task.context,
             tool_names=task.tool_names,
             skill_names=task.skill_names,
+            resolved_runtime=resolved_runtime_payload(task.runtime) or {},
             permission=task.permission,
             grant=grant,
             task_run_dir=grant.task_run_dir,
@@ -374,6 +442,13 @@ def _task_max_turns(task: SubAgentTask) -> int:
     return 3
 
 
+def _require_runtime(task: SubAgentTask) -> ResolvedSubAgentRuntime:
+    """读取已解析 runtime，输入为任务，输出运行参数或抛错。"""
+    if task.runtime is None:
+        raise ValueError(f"subagent task {task.task_id!r} has no resolved runtime")
+    return task.runtime
+
+
 def _finished_status(status: str) -> _SubAgentFinishedStatus:
     if status in {"completed", "failed", "cancelled"}:
         return cast(_SubAgentFinishedStatus, status)
@@ -391,8 +466,52 @@ def _usage_from_result_metadata(metadata: dict[str, object]) -> dict[str, int]:
     }
 
 
+def _llm_request_metadata(runtime: ResolvedSubAgentRuntime) -> dict[str, object]:
+    return {"resolved_runtime": runtime.to_payload()}
+
+
+def _working_dir_hint(task: SubAgentTask) -> str | None:
+    """生成工作目录提示，输入为任务 metadata，输出 prompt 可见提示或 None。"""
+    raw = task.metadata.get("working_dir")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
+
+
+def _render_prompt_input(prompt_input: SubAgentPromptInput) -> str:
+    """渲染子 agent prompt，输入为 prompt 数据结构，输出最终文本。"""
+    parts = [
+        f"任务名称：{prompt_input.task_name}",
+        "",
+        "任务描述：",
+        prompt_input.task_description,
+    ]
+    if prompt_input.context.strip():
+        parts.extend(["", "上下文：", prompt_input.context.strip()])
+    if prompt_input.available_tools:
+        parts.extend(["", "可用工具："])
+        for tool in prompt_input.available_tools:
+            parts.append(f"- {tool.name}: {tool.description}")
+    if prompt_input.working_dir_hint:
+        parts.extend(
+            [
+                "",
+                "工作目录提示：",
+                prompt_input.working_dir_hint,
+                "文件写入限定在这个工作目录内。",
+            ]
+        )
+    return "\n".join(parts).strip()
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-__all__ = ["SubAgentManager", "SubAgentRun", "SubAgentTask"]
+__all__ = [
+    "AvailableToolDescription",
+    "SubAgentManager",
+    "SubAgentPromptInput",
+    "SubAgentRun",
+    "SubAgentTask",
+]

@@ -42,9 +42,10 @@ from __future__ import annotations
 import json
 import os
 import threading
-import time
 from pathlib import Path
 from typing import Any, Literal
+
+from core.clock import now_epoch_ms
 
 # 合法 outcome（用于 helper 校验，运行时只警告不抛）
 Outcome = Literal[
@@ -104,7 +105,7 @@ class AuditLogger:
         即使后续 decision 因连接断开等原因未落盘，也能查到 request 本身。
         """
         record = {
-            "ts_ms": ts_ms if ts_ms is not None else int(time.time() * 1000),
+            "ts_ms": ts_ms if ts_ms is not None else now_epoch_ms(),
             "channel": channel,
             "thread_id": thread_id,
             "cwd": cwd,
@@ -143,7 +144,7 @@ class AuditLogger:
         # 不抛——审计不能因字段错误阻断主流程；非白名单值带 unknown: 前缀
         outcome_safe = outcome if outcome in _VALID_OUTCOMES else f"unknown:{outcome}"
 
-        now_ms = int(time.time() * 1000)
+        now_ms = now_epoch_ms()
         record = {
             "ts_ms": ts_ms if ts_ms is not None else now_ms,
             "channel": channel,

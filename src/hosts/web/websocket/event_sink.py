@@ -11,9 +11,8 @@
 - **静默丢弃未识别 kind**：runtime 未来可能新增 EventKind（如 v0.2 又
   加几个流式相关），sink 不识别的直接 return，避免每加一个 kind 都要
   改 sink。
-- **不重复推 ``approval.request``**：runner 发出 ``approval.request``
-  Event 时，:class:`web.app_support.host_adapter.WebHostAdapter.prompt_approval`
-  已经推了 ``ApprovalRequestFrame``；sink 这里识别但不推（避免双发）。
+- **不推旧 ``approval.request``**：generic_chat 审批走全局
+  ``approval.inbox.*`` 帧，旧 per-thread 审批帧保留为协议兼容，不由本 sink 推送。
 - **不推 ``thread.history`` / ``assistant.final`` / ``cell.evicted``**：
   - ``thread.history``：建连时 ThreadManager 单独推（不走 Event）
   - ``assistant.final``：HostAdapter.write_output 推
@@ -27,9 +26,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import time
 from typing import Any, cast
 
+from core.clock import now_epoch_ms
 from core.contracts import Event
 from devtools import get_full_logger
 from hosts.web.protocol import (
@@ -59,7 +58,9 @@ logger = logging.getLogger(__name__)
 
 
 def _now_ms() -> int:
-    return int(time.time() * 1000)
+    # agent-tree-v0.1 模块 H：统一走 core.clock.now_epoch_ms（tz-aware），
+    # 取代裸 now_epoch_ms()。
+    return now_epoch_ms()
 
 
 # core.contracts.ErrorCode 的 5 类与 web.protocol.ErrorCode 5 类一一对应；
@@ -245,6 +246,9 @@ class WSEventSink:
         turn = event.turn or 0
         # Event.run_id 类型为 str | None；前端 buffer key 不接受 None，统一兜底为 ""
         run_id = event.run_id or ""
+        # agent-tree-v0.1 模块 G：透传 Event.agent_id 坐标字段到 wire 帧，
+        # 让前端能按 agent 归属展示流式帧（多 agent 场景）。
+        agent_id = event.agent_id or ""
 
         # ----- 流式增量 -----
         if kind == "content.delta":
@@ -254,6 +258,7 @@ class WSEventSink:
                 seq=int(payload.get("seq", 0) or 0),
                 run_id=run_id,
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
         if kind == "reasoning.delta":
             return ReasoningDeltaFrame(
@@ -262,13 +267,14 @@ class WSEventSink:
                 seq=int(payload.get("seq", 0) or 0),
                 run_id=run_id,
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
 
         # ----- turn 边界 -----
         if kind == "turn.start":
-            return TurnStartFrame(turn=turn, run_id=run_id, timestamp_ms=ts)
+            return TurnStartFrame(turn=turn, run_id=run_id, timestamp_ms=ts, agent_id=agent_id)
         if kind == "turn.end":
-            return TurnEndFrame(turn=turn, run_id=run_id, timestamp_ms=ts)
+            return TurnEndFrame(turn=turn, run_id=run_id, timestamp_ms=ts, agent_id=agent_id)
 
         # ----- 工具调用 -----
         if kind == "tool.call.start":
@@ -279,6 +285,7 @@ class WSEventSink:
                 arguments=_safe_dict(payload.get("arguments")),
                 run_id=run_id,
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
         if kind == "tool.call.end":
             # v0.1.6：把 ToolResult 的 content / data 一并写入 frame，前端
@@ -294,6 +301,7 @@ class WSEventSink:
                 data=data_raw if isinstance(data_raw, dict) else None,
                 run_id=run_id,
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
 
         if kind == "choice.requested":
@@ -305,11 +313,12 @@ class WSEventSink:
                 turn=turn,
                 run_id=run_id,
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
 
         # ----- 审批 -----
-        # ``approval.request`` 不在这里推（HostAdapter.prompt_approval 已推）
-        # 但 ``approval.decision`` 走这里：runner 在审批通过 / 拒绝 / 取消后 emit。
+        # ``approval.request`` 是旧 per-thread 审批帧；generic_chat 审批走
+        # ApprovalManager → approval.inbox.*，本 sink 只推 approval.decision。
         if kind == "approval.decision":
             outcome_raw = payload.get("outcome")
             # ApprovalOutcome 枚举与 core 一致：approved / rejected / cancelled
@@ -323,6 +332,7 @@ class WSEventSink:
                 outcome=outcome,
                 turn=turn,
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
 
         # ----- 用量（usage-token-v2-bigbang 重构）-----
@@ -336,6 +346,7 @@ class WSEventSink:
                 run_id=run_id,
                 usage=usage_dto,
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
 
         # ----- 错误 -----
@@ -348,6 +359,7 @@ class WSEventSink:
                 message=message,
                 turn=event.turn,  # 可为 None
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
 
         # ----- 系统 notice -----
@@ -362,6 +374,7 @@ class WSEventSink:
                 payload=payload,
                 run_id=run_id,
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
 
         # ----- interrupt-run-v0.1：run 被用户打断 -----
@@ -377,9 +390,10 @@ class WSEventSink:
                 cancelled_tool_call_id=cancelled_id,
                 cancel_reason=str(payload.get("cancel_reason", "user_interrupt")),
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
 
-        # ----- 其它（run.start / run.end / approval.request /
+        # ----- 其它（run.start / run.end / legacy approval.request /
         # tool.silently_allowed / memory.* / safety 决策事件 / llm.* / ...）
         # 一律静默丢；sink 不阻塞 runtime 演化。
         return None
@@ -405,6 +419,7 @@ def _translate_evolution_notice(
     payload: dict[str, Any],
     run_id: str,
     timestamp_ms: int,
+    agent_id: str = "",
 ) -> SystemNoticeFrame:
     if kind == "evolution.review.started":
         review_id = _optional_str(payload.get("review_id")) or ""
@@ -427,6 +442,7 @@ def _translate_evolution_notice(
             icon="running",
             run_id=run_id,
             timestamp_ms=timestamp_ms,
+            agent_id=agent_id,
         )
 
     if kind == "evolution.review.completed":
@@ -470,6 +486,7 @@ def _translate_evolution_notice(
             icon="success",
             run_id=run_id,
             timestamp_ms=timestamp_ms,
+            agent_id=agent_id,
         )
 
     if kind == "evolution.review.failed":
@@ -498,6 +515,7 @@ def _translate_evolution_notice(
             icon="error",
             run_id=run_id,
             timestamp_ms=timestamp_ms,
+            agent_id=agent_id,
         )
 
     pending_review_ids = _coerce_str_list(payload.get("pending_review_ids"))
@@ -517,6 +535,7 @@ def _translate_evolution_notice(
         icon="warning",
         run_id=run_id,
         timestamp_ms=timestamp_ms,
+        agent_id=agent_id,
     )
 
 

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
+from core.clock import now_epoch_ms
 from core.message import Message
 
 TranscriptRole = Literal["user", "assistant", "tool", "system"]
@@ -733,7 +733,7 @@ def _normalize_review_result_payload(
     if not isinstance(normalized.get("reviewed_at_ms"), int):
         reviewed_at_ms = root_data.get("reviewed_at_ms")
         normalized["reviewed_at_ms"] = (
-            reviewed_at_ms if isinstance(reviewed_at_ms, int) else int(time.time() * 1000)
+            reviewed_at_ms if isinstance(reviewed_at_ms, int) else now_epoch_ms()
         )
     if (
         not isinstance(normalized.get("review_summary"), str)

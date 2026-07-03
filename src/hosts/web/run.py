@@ -67,7 +67,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dist-dir", type=Path, help="Frontend dist directory.")
     parser.add_argument(
         "--server-origin",
-        help="Server origin used by mobile login QR, pairing QR, copy, and handoff URLs.",
+        help="Server origin used by mobile QR/copy/handoff URLs.",
     )
     parser.add_argument(
         "--host-environment",
@@ -605,14 +605,13 @@ def main(argv: list[str] | None = None) -> int:
             host_environment=options.host_environment,
         )
 
-        runtime_factory = _make_runtime_factory(cfg)
-        progress.report("factory")
-
-        # claude-image-paste-e2e P1 #2:注入 AssetStorage 让 ThreadManager.delete_thread
-        # 同步清理 thread 名下上传资产(images / videos / files),否则 thread 删除留孤儿磁盘。
+        # Web 上传资产存储由宿主层创建，供 provider 多模态读取和 thread 删除清理共用。
         from hosts.web.uploads.storage import AssetStorage
 
-        asset_storage = AssetStorage()
+        asset_storage = AssetStorage(base_dir=home / "web" / "uploads")
+
+        runtime_factory = _make_runtime_factory(cfg, asset_reader=asset_storage)
+        progress.report("factory")
 
         tm = ThreadManager(
             cfg,
@@ -620,6 +619,9 @@ def main(argv: list[str] | None = None) -> int:
             runtime_factory=runtime_factory,  # type: ignore[arg-type]
             asset_storage=asset_storage,
         )
+        # agent-tree-v0.1（P0-1）：把共享 spawn_subagent 句柄挂到 ThreadManager，
+        # 让每个 cell boot 时 init_root_agent 装配独立 AgentManager 并按 session 绑定。
+        tm.set_spawn_handle(runtime_factory._agent_tree_spawn_handle)  # type: ignore[attr-defined]
 
         try:
             from sessions import SessionTaskProgressManager
@@ -632,6 +634,7 @@ def main(argv: list[str] | None = None) -> int:
                     runtime_factory, "_scheduler_runtime_factory", None
                 ),
                 task_progress_manager=SessionTaskProgressManager.from_config(cfg),
+                asset_storage=asset_storage,
             )
         except Exception as exc:
             runtime_socket.close()
@@ -645,8 +648,7 @@ def main(argv: list[str] | None = None) -> int:
         # 注入 :class:`ApprovalRules`，实现 "用户 UI 一处 toggle 即时生效于所有通道"。
         # 此处 attr 设置而非 factory 入参修改：ThreadManager 调用签名
         # ``factory(thread_id, preset_id, adapter, sinks)`` 不可破坏。
-        setattr(runtime_factory, "_app", app)  # noqa: B010
-        app.state.runtime_factory = runtime_factory
+        _attach_runtime_factory_to_app_state(app, runtime_factory)
         progress.report("app")
 
         log_level = cfg.logging.level.lower()
@@ -686,10 +688,8 @@ def _build_manager_and_inbox_sink(*, app: Any) -> Any:
 
     approval-rules-unified（破坏性改造）：
 
-    - 删除 ``default_timeout_ms`` 参数。manager 走默认 60s 即可（与
-      :attr:`web.app_support.host_adapter.WebHostAdapter._timeout` 默认对齐）；
-      ``cfg.web.pending_approval_timeout_seconds`` 仍归 host_adapter 用，
-      不再串通到 manager / ApprovalRules。
+    - 删除 ``default_timeout_ms`` 参数。manager 走默认 60s 即可；
+      显式审批超时归 ApprovalManager / auto-approval rule 真源维护。
     - :class:`ApprovalRules` 注入 ``app.state.auto_approval_policy`` 完整实例
       （而非仅 ``config_store``）——让 generic_chat 通道完全复用 claude_code
       的 24 条规则 + per-cwd 总开关 + audit 评估快照（同一份真源）。
@@ -720,6 +720,12 @@ def _build_manager_and_inbox_sink(*, app: Any) -> Any:
     manager = get_approval_manager(
         rules=ApprovalRules(policy=policy),
     )
+    if app is not None:
+        app.state.approval_manager = manager
+        thread_manager = getattr(app.state, "thread_manager", None)
+        set_approval_manager = getattr(thread_manager, "set_approval_manager", None)
+        if callable(set_approval_manager):
+            set_approval_manager(manager)
     # 幂等：只在首次装配时注入 InboxEventSink；按 sink 类型判定
     has_inbox_sink = any(isinstance(s, InboxEventSink) for s in manager._event_sinks)
     if not has_inbox_sink:
@@ -732,40 +738,30 @@ def _build_manager_and_inbox_sink(*, app: Any) -> Any:
     return manager
 
 
+def _cwd_string(path: Path) -> str:
+    return path.expanduser().resolve(strict=False).as_posix()
+
+
+def _configured_workspace_root(app: Any | None) -> Path:
+    """解析 Web 默认 workspace root，优先使用 app.state，再使用 kongming_home。"""
+    if app is not None:
+        state = getattr(app, "state", None)
+        raw_root = getattr(state, "workspace_root", None)
+        if raw_root:
+            return Path(raw_root).expanduser().resolve(strict=False)
+        raw_home = getattr(state, "kongming_home", None)
+        if raw_home:
+            return Path(raw_home).expanduser().resolve(strict=False)
+    from infrastructure.config.paths import get_kongming_home
+
+    return get_kongming_home()
+
+
 def _resolve_default_cwd_for_thread(app: Any, thread_id: str) -> str:
-    """解析 thread 装配时的默认 cwd（thread-cwd-fallback 任务 #4）。
-
-    优先级：
-
-    1. 通过 ``app.state.thread_manager.list_threads()`` 反查 metadata，
-       命中后走 :func:`web.workspace.model.resolve_workspace_cwd`：
-       ``meta.cwd`` 非空直接返回，空时 fallback 到 server 启动目录
-       （``app.state.workspace_root``）。
-    2. ``app`` 未注入 / thread_manager 缺失 / list_threads 抛错 / metadata
-       查不到 → **显式降级**到 ``app.state.workspace_root`` 字符串；
-       连 workspace_root 也拿不到时退到当前进程 cwd。
-
-    用户心智：未绑 cwd 的纯聊天 thread，审批默认走 server 启动目录的 cwd 配置
-    （而不是空字符串导致命中不到任何 ProjectConfig）。
-
-    Args:
-        app: FastAPI app 实例；可能为 ``None``（main() 装配链尚未把 app 回挂到
-            runtime_factory 时）。
-        thread_id: 待装配 cell 对应的 thread id。
-
-    Returns:
-        非空字符串：thread.cwd / server cwd / 进程 cwd 三级兜底。
-    """
+    """解析 thread 装配默认 cwd：thread.cwd 优先，空值使用配置 workspace root。"""
     from hosts.web.workspace.model import resolve_workspace_cwd
 
-    def _cwd_string(path: Path) -> str:
-        return path.as_posix()
-
-    server_workspace_root: Path
-    if app is not None:
-        server_workspace_root = Path(getattr(app.state, "workspace_root", Path.cwd()))
-    else:
-        server_workspace_root = Path.cwd()
+    server_workspace_root = _configured_workspace_root(app)
 
     if app is None:
         return _cwd_string(server_workspace_root)
@@ -786,23 +782,35 @@ def _resolve_default_cwd_for_thread(app: Any, thread_id: str) -> str:
 
     meta = next((m for m in metas if m.id == thread_id), None)
     if meta is None:
-        # 装配链上 thread metadata 通常已写盘（先 create_thread → metadata.json
-        # → 再调 factory）。拿不到属异常路径，显式降级到 server cwd 而非
-        # silently 走空字符串。
+        # 装配链上 thread metadata 通常已写盘；异常路径降级到配置 workspace root。
         return _cwd_string(server_workspace_root)
 
     return resolve_workspace_cwd(meta, server_workspace_root)
 
 
-def _make_runtime_factory(cfg: object) -> object:
+def _attach_runtime_factory_to_app_state(app: Any, runtime_factory: Any) -> None:
+    """把 Web runtime factory 绑定到 app.state，输出共享 runtime 与子 agent 生命周期 registry。"""
+    setattr(runtime_factory, "_app", app)  # noqa: B010
+    app.state.runtime_factory = runtime_factory
+    app.state.subagent_lifecycle_registry = runtime_factory._subagent_lifecycle_registry
+
+
+def _make_runtime_factory(cfg: object, *, asset_reader: Any = None) -> object:
     """Build a runtime factory for web thread cells and cron runs."""
+    from application.agent_workflows.prompt_catalog import build_default_workflow_prompt_listing
+    from application.subagents.lifecycle import SubAgentLifecycleRegistry
     from hosts.shared.mcp_runtime_registration import McpRuntimeRegistrationManager
     from hosts.shared.session_bridge import SessionBridge
     from infrastructure.config.models import Config, LLMPresetConfig
     from infrastructure.config.paths import get_kongming_home
+    from infrastructure.llm_providers.provider_factory import apply_preset
     from infrastructure.tracing import JsonlTraceSink
+    from prompting.context_sources.conversation_reference_manager import (
+        ConversationReferenceContext,
+    )
     from prompting.skills.skill_loader import format_skill_listing, load_skill_specs
     from runtime_assembly.native_runtime import NativeRuntime
+    from safety.approval.chain import build_safety_chain
     from safety.approval.manager import make_manager_prompt_fn
     from sessions import SessionBootstrap, build_session
     from tools import (
@@ -818,6 +826,7 @@ def _make_runtime_factory(cfg: object) -> object:
     assert isinstance(cfg, Config)
     real_cfg: Config = cfg
     home = get_kongming_home()
+    subagent_lifecycle_registry = SubAgentLifecycleRegistry()
 
     def _current_preset_map() -> dict[str, LLMPresetConfig]:
         return {p.id: p for p in real_cfg.web.llm_presets}
@@ -828,33 +837,30 @@ def _make_runtime_factory(cfg: object) -> object:
     _agent_role_manager_cache: list[Any | None] = [None]
     _instructions_cache: list[str | None] = [None]
     _origins_cache: list[list[str] | None] = [None]
-    _workflow_prompt_cache_key: list[object | None] = [None]
+    _instructions_cache_key: list[str | None] = [None]
     _scheduler_runtime_factory_cache: list[object | None] = [None]
     _mcp_runtime_registration_cache: list[McpRuntimeRegistrationManager | None] = [None]
     _cache_lock = asyncio.Lock()
 
+    # agent-tree-v0.1（P0-1 装配修复）：spawn_subagent 工具的延迟绑定句柄。
+    # per-session 分桶：每个 web thread boot 时由 ThreadManager.init_root_agent 装配
+    # 独立 AgentManager 并 bind(handle, session_id=thread_id)；工具运行期按
+    # ToolContext.session_id 解析对应 manager。句柄本身无状态，可共享单例注册进
+    # ToolRegistry（同 AgentWorkflowHandle）。
+    from tools.agent_workflow_tool import AgentTreeSpawnHandle
+
+    _agent_tree_spawn_handle = AgentTreeSpawnHandle()
+
     def _prompt_hash(text: str) -> str:
         return f"sha256:{hashlib.sha256(text.encode()).hexdigest()}"
 
-    def _workflow_prompt_cache_matches(cache_key: object | None, candidate: object) -> bool:
-        return (
-            cache_key is not None
-            and getattr(cache_key, "base_instructions_hash", None)
-            == getattr(candidate, "base_instructions_hash", None)
-            and getattr(cache_key, "workflow_template_version", None)
-            == getattr(candidate, "workflow_template_version", None)
-            and getattr(cache_key, "workflow_listing_hash", None)
-            == getattr(candidate, "workflow_listing_hash", None)
-        )
-
-    async def _build_workflow_prompt_cache_candidate(
+    async def _load_instruction_sources_with_hash(
         *,
-        workflow_render: Any,
+        cwd: Path | str,
         sitian_root: Path | None,
-    ) -> tuple[object, list[Any]]:
-        from application.agent_workflows.prompt_catalog import (
-            build_workflow_prompt_cache_key,
-        )
+        workflow_catalog: str,
+        skill_listing: str,
+    ) -> tuple[str, list[Any], str]:
         from prompting.instructions.instruction_loader import (
             InstructionLoader,
             load_instruction_sources,
@@ -862,71 +868,77 @@ def _make_runtime_factory(cfg: object) -> object:
 
         base_sources = await load_instruction_sources(
             kongming_home=home,
+            cwd=cwd,
             sitian_root=sitian_root,
+            workflow_catalog=workflow_catalog,
+            skill_listing=skill_listing,
         )
         base_rendered = InstructionLoader.render(base_sources)
-        return (
-            build_workflow_prompt_cache_key(
-                base_instructions_hash=_prompt_hash(base_rendered),
-                render=workflow_render,
-            ),
-            base_sources,
-        )
+        return _prompt_hash(base_rendered), base_sources, base_rendered
 
-    def _insert_workflow_prompt_source(
+    async def _ensure_shared_assets(
+        sinks: object,
         *,
-        base_sources: list[Any],
-        workflow_render: Any,
-    ) -> list[Any]:
-        from prompting.instructions.instruction_loader import InstructionSource
-
-        if not getattr(workflow_render, "text", "").strip():
-            return [*base_sources]
-        workflow_source = InstructionSource(
-            origin=workflow_render.origin,
-            content=workflow_render.text,
-        )
-        insert_at = 1 if base_sources and base_sources[0].origin == "runtime" else 0
-        return [*base_sources[:insert_at], workflow_source, *base_sources[insert_at:]]
-
-    async def _ensure_shared_assets(sinks: object) -> None:
-        from application.agent_workflows.prompt_catalog import (
-            build_default_workflow_prompt_listing,
-        )
-        from prompting.instructions.instruction_loader import InstructionLoader
-
+        runtime_cwd: str,
+        workspace_root: Path,
+    ) -> tuple[
+        str,
+        list[str],
+        ToolRegistry,
+        list[str],
+        Any,
+        Any,
+        object | None,
+        McpRuntimeRegistrationManager | None,
+    ]:
         sitian_raw = os.environ.get("SITIAN_PROMPT_ROOT", "").strip()
         sitian_root = Path(sitian_raw).expanduser().resolve() if sitian_raw else None
+        resolved_workspace_root = workspace_root.expanduser().resolve(strict=False)
 
         async with _cache_lock:
-            workflow_render = build_default_workflow_prompt_listing()
-            workflow_cache_key, base_sources = await _build_workflow_prompt_cache_candidate(
-                workflow_render=workflow_render,
-                sitian_root=sitian_root,
-            )
-            if _instructions_cache[0] is not None and _workflow_prompt_cache_matches(
-                _workflow_prompt_cache_key[0],
-                workflow_cache_key,
-            ):
-                return
-
             sink_list = list(sinks) if sinks else []  # type: ignore[call-overload]
             skill_specs_list = await load_skill_specs(
                 home,
-                workspace=Path.cwd(),
+                workspace=resolved_workspace_root,
                 event_sinks=sink_list,
             )
-            listing = format_skill_listing(skill_specs_list)
-            sources = _insert_workflow_prompt_source(
-                base_sources=base_sources,
-                workflow_render=workflow_render,
+            skill_listing = format_skill_listing(skill_specs_list)
+            workflow_listing = build_default_workflow_prompt_listing().text
+            candidate_hash, base_sources, rendered = await _load_instruction_sources_with_hash(
+                cwd=runtime_cwd,
+                sitian_root=sitian_root,
+                workflow_catalog=workflow_listing,
+                skill_listing=skill_listing,
             )
-            rendered = InstructionLoader.render(sources)
-            origins = [source.origin for source in sources]
-            if listing:
-                rendered = rendered + f"\n\n# skills\n{listing}"
-                origins = [*origins, "skills"]
-
+            if _instructions_cache_key[0] == candidate_hash:
+                factory._instructions_cache_key = candidate_hash  # type: ignore[attr-defined]
+                instructions = _instructions_cache[0]
+                origins = _origins_cache[0]
+                registry = _registry_cache[0]
+                enabled_tool_names = _enabled_tools_cache[0]
+                agent_workflow_handle = _agent_workflow_handle_cache[0]
+                agent_role_manager = _agent_role_manager_cache[0]
+                scheduler_runtime_factory = _scheduler_runtime_factory_cache[0]
+                mcp_runtime_registration = _mcp_runtime_registration_cache[0]
+                assert instructions is not None
+                assert origins is not None
+                assert registry is not None
+                assert enabled_tool_names is not None
+                assert agent_workflow_handle is not None
+                assert agent_role_manager is not None
+                return (
+                    instructions,
+                    origins,
+                    registry,
+                    enabled_tool_names,
+                    agent_workflow_handle,
+                    agent_role_manager,
+                    scheduler_runtime_factory,
+                    mcp_runtime_registration,
+                )
+            origins = [source.origin for source in base_sources]
+            _instructions_cache_key[0] = candidate_hash
+            factory._instructions_cache_key = candidate_hash  # type: ignore[attr-defined]
             skill_specs = {spec.name: spec for spec in skill_specs_list}
             registry = build_default_registry(
                 file_enabled=real_cfg.tool.file.enabled,
@@ -938,25 +950,67 @@ def _make_runtime_factory(cfg: object) -> object:
                 skill_specs=skill_specs or None,
                 skill_event_sinks=sink_list,
             )
+            from infrastructure.config.paths import materialize_kongming_home_agent_config
+
             agent_role_manager, agent_workflow_handle = _register_agent_workflow_tools(
                 registry,
                 role_dir=home / "agent_roles",
+                agent_config_path=materialize_kongming_home_agent_config(home),
+                spawn_handle=_agent_tree_spawn_handle,
             )
 
             app_ref = getattr(factory, "_app", None)
             thread_manager = getattr(getattr(app_ref, "state", None), "thread_manager", None)
             cron_dispatcher = None
+            cron_web_sink = None
             if real_cfg.scheduler.enabled:
                 from hosts.web.app_support.cron_delivery import ThreadTargetSink, WebDeliverySink
                 from hosts.web.websocket.cron import get_broker
                 from scheduler.delivery import DeliveryDispatcher
 
+                cron_web_sink = WebDeliverySink(get_broker())
                 cron_dispatcher = DeliveryDispatcher(
-                    web_sink=WebDeliverySink(get_broker()),
+                    web_sink=cron_web_sink,
                     target_sink=ThreadTargetSink(thread_manager)
                     if thread_manager is not None
                     else None,
                 )
+
+            def _thread_id_for_scheduler_task(task: Any) -> str:
+                thread_id = getattr(task, "thread_id", "")
+                if isinstance(thread_id, str) and thread_id:
+                    return thread_id
+                delivery = getattr(task, "delivery", None)
+                target = getattr(delivery, "target", None)
+                if isinstance(target, str) and target.startswith("thread:"):
+                    return target[len("thread:") :]
+                return ""
+
+            def _scheduler_approval_factory(task: Any) -> Any | None:
+                thread_id = _thread_id_for_scheduler_task(task)
+                if real_cfg.approval.mode != "interactive" or not thread_id:
+                    return None
+                current_app = getattr(factory, "_app", None)
+                manager = _build_manager_and_inbox_sink(app=current_app)
+                prompt_fn = make_manager_prompt_fn(
+                    manager,
+                    thread_id,
+                    default_cwd=_resolve_default_cwd_for_thread(current_app, thread_id),
+                )
+                base_approval = build_default_approval(
+                    real_cfg.approval.mode,
+                    prompt_fn=prompt_fn,
+                )
+                return build_safety_chain(
+                    real_cfg,
+                    interactive_approval=base_approval,
+                    event_sinks=sink_list,
+                )
+
+            def _scheduler_tool_context_metadata_factory(task: Any) -> dict[str, str]:
+                thread_id = _thread_id_for_scheduler_task(task)
+                current_app = getattr(factory, "_app", None)
+                return {"cwd": _resolve_default_cwd_for_thread(current_app, thread_id)}
 
             def _scheduler_runtime_factory(store):  # type: ignore[no-untyped-def]
                 from scheduler.runtime_factory import build_cron_execution_bridge
@@ -967,9 +1021,13 @@ def _make_runtime_factory(cfg: object) -> object:
                     event_sinks=sink_list,
                     tools=registry,
                     enabled_tool_names=enabled_tool_names,
-                    instructions=_instructions_cache[0],
+                    instructions=rendered,
                     dispatcher=cron_dispatcher,
                     preset_map=_current_preset_map(),
+                    lifecycle_sink=cron_web_sink,
+                    approval_factory=_scheduler_approval_factory,
+                    tool_context_metadata={"cwd": _cwd_string(resolved_workspace_root)},
+                    tool_context_metadata_factory=_scheduler_tool_context_metadata_factory,
                 )
 
             register_schedule_tool_if_enabled(
@@ -979,9 +1037,11 @@ def _make_runtime_factory(cfg: object) -> object:
                 default_preset_id=next(iter(_current_preset_map()), ""),
                 thread_provisioner=thread_manager,
             )
+            evolution_manager = getattr(getattr(app_ref, "state", None), "evolution_manager", None)
             register_evolution_write_tool_if_enabled(
                 registry,
                 real_cfg,
+                evolution_manager=evolution_manager,
                 event_sinks=sink_list,
             )
             register_choice_tool(registry, event_sinks=sink_list)
@@ -1004,7 +1064,16 @@ def _make_runtime_factory(cfg: object) -> object:
             _origins_cache[0] = origins
             _scheduler_runtime_factory_cache[0] = _scheduler_runtime_factory
             _mcp_runtime_registration_cache[0] = mcp_runtime_registration
-            _workflow_prompt_cache_key[0] = workflow_cache_key
+            return (
+                rendered,
+                origins,
+                registry,
+                enabled_tool_names,
+                agent_workflow_handle,
+                agent_role_manager,
+                _scheduler_runtime_factory,
+                mcp_runtime_registration,
+            )
 
     async def factory(
         thread_id: str,
@@ -1019,10 +1088,11 @@ def _make_runtime_factory(cfg: object) -> object:
             raise ValueError(f"unknown preset_id: {preset_id!r}")
 
         if isinstance(sinks, list):
-            trace_path = resolve_kongming_path(real_cfg.trace.output_path, kongming_home=home)
-            stem = trace_path.stem
-            suffix = trace_path.suffix
-            per_thread_path = trace_path.with_name(f"{stem}.{thread_id}{suffix}")
+            session_root = resolve_kongming_path(
+                real_cfg.session.file_store_path,
+                kongming_home=home,
+            )
+            per_thread_path = session_root / thread_id / "trace.jsonl"
             sinks.append(
                 JsonlTraceSink(
                     per_thread_path,
@@ -1030,33 +1100,27 @@ def _make_runtime_factory(cfg: object) -> object:
                 )
             )
 
-        api_key = os.environ.get(preset.api_key_env, "") if preset.api_key_env else ""
-        model_overrides: dict[str, Any] = {
-            "name": preset.model,
-            "base_url": preset.base_url,
-            "api_key": api_key,
-        }
-        if preset.provider is not None:
-            model_overrides["provider"] = preset.provider
-        if preset.reasoning_effort is not None:
-            model_overrides["reasoning_effort"] = preset.reasoning_effort
-        preset_model = real_cfg.model.model_copy(update=model_overrides)
-        preset_cfg = real_cfg.model_copy(update={"model": preset_model})
+        preset_cfg = apply_preset(real_cfg, preset)
 
-        await _ensure_shared_assets(sinks)
-        factory._workflow_prompt_cache_key = _workflow_prompt_cache_key[0]  # type: ignore[attr-defined]
-        factory._scheduler_runtime_factory = _scheduler_runtime_factory_cache[0]  # type: ignore[attr-defined]
-        factory._mcp_runtime_registration = _mcp_runtime_registration_cache[0]  # type: ignore[attr-defined]
-        instructions = _instructions_cache[0]
-        assert instructions is not None
-        origins = _origins_cache[0] or []
-        registry = _registry_cache[0]
-        assert registry is not None
-        enabled_tool_names = _enabled_tools_cache[0] or []
-        agent_workflow_handle = _agent_workflow_handle_cache[0]
-        agent_role_manager = _agent_role_manager_cache[0]
-        assert agent_workflow_handle is not None
-        assert agent_role_manager is not None
+        app_ref = getattr(factory, "_app", None)
+        default_cwd = _resolve_default_cwd_for_thread(app_ref, thread_id)
+        (
+            instructions,
+            origins,
+            registry,
+            enabled_tool_names,
+            agent_workflow_handle,
+            agent_role_manager,
+            scheduler_runtime_factory,
+            mcp_runtime_registration,
+        ) = await _ensure_shared_assets(
+            sinks,
+            runtime_cwd=default_cwd,
+            workspace_root=Path(default_cwd),
+        )
+        factory._scheduler_runtime_factory = scheduler_runtime_factory  # type: ignore[attr-defined]
+        factory._mcp_runtime_registration = mcp_runtime_registration  # type: ignore[attr-defined]
+        factory._subagent_lifecycle_registry = subagent_lifecycle_registry  # type: ignore[attr-defined]
 
         # 阶段 1 (smart-approval-manager-v0.5)：generic_chat 通道走 ApprovalManager
         # 路径（无 feature flag；回滚 = git revert）。manager + InboxEventSink 是
@@ -1070,8 +1134,7 @@ def _make_runtime_factory(cfg: object) -> object:
         # 注入 ConfigStore 让 generic_chat 通道能查 cwd 自动通过配置。
         #
         # approval-rules-unified：
-        # - manager 默认 timeout 60s（与 host_adapter 默认对齐），不再读 cfg
-        #   ``pending_approval_timeout_seconds``（仍归 host_adapter 用）。
+        # - manager 默认 timeout 60s，不再读旧 web pending approval timeout 配置。
         # - ApprovalRules 直接拿 ``app.state.auto_approval_policy`` 完整实例，
         #   走 24 规则 + per-cwd 总开关统一真源。
         #
@@ -1080,8 +1143,6 @@ def _make_runtime_factory(cfg: object) -> object:
         #   空时 fallback 到 server 启动目录（``app.state.workspace_root``），
         #   交给 prompt_fn 作为 ``req.metadata.cwd`` 空时的兜底——保证 generic_chat
         #   通道在「纯聊天 thread 未绑 cwd」场景下仍能命中 cwd 自动通过规则。
-        app_ref = getattr(factory, "_app", None)
-        default_cwd = _resolve_default_cwd_for_thread(app_ref, thread_id)
         manager = _build_manager_and_inbox_sink(app=app_ref)
         prompt_fn = (
             make_manager_prompt_fn(
@@ -1115,7 +1176,19 @@ def _make_runtime_factory(cfg: object) -> object:
             enabled_tool_names=enabled_tool_names,
             session_factory=session_factory,
             instructions=instructions,
+            conversation_reference_context=ConversationReferenceContext(
+                home=get_kongming_home(),
+                workspace=Path(default_cwd),
+                thread_id=thread_id,
+            ),
+            asset_reader=asset_reader,
+            tool_context_metadata={"cwd": default_cwd},
         )
+        evolution_manager = getattr(getattr(app_ref, "state", None), "evolution_manager", None)
+        if evolution_manager is not None:
+            from evolution.lifecycle import register_evolution_lifecycle_hook
+
+            register_evolution_lifecycle_hook(runtime=runtime, manager=evolution_manager)
         _bind_agent_workflow_manager(
             handle=agent_workflow_handle,
             thread_id=thread_id,
@@ -1124,6 +1197,7 @@ def _make_runtime_factory(cfg: object) -> object:
             workspace_root=Path(default_cwd),
             role_manager=agent_role_manager,
             tool_registry=registry,
+            lifecycle_registry=subagent_lifecycle_registry,
         )
         bridge = SessionBridge(
             runtime=runtime,
@@ -1135,19 +1209,37 @@ def _make_runtime_factory(cfg: object) -> object:
 
     factory._scheduler_runtime_factory = _scheduler_runtime_factory_cache[0]  # type: ignore[attr-defined]
     factory._mcp_runtime_registration = _mcp_runtime_registration_cache[0]  # type: ignore[attr-defined]
+    factory._subagent_lifecycle_registry = subagent_lifecycle_registry  # type: ignore[attr-defined]
+    # agent-tree-v0.1（P0-1）：暴露共享 spawn handle 给 main()，挂到 ThreadManager。
+    factory._agent_tree_spawn_handle = _agent_tree_spawn_handle  # type: ignore[attr-defined]
     return factory
 
 
-def _register_agent_workflow_tools(registry: Any, *, role_dir: Path) -> tuple[Any, Any]:
-    """注册 Web generic_chat 的 agent workflow 工具，输入为 registry 和角色目录，输出角色 manager 与 workflow handle。"""
+def _register_agent_workflow_tools(
+    registry: Any,
+    *,
+    role_dir: Path,
+    agent_config_path: Path | None = None,
+    spawn_handle: Any | None = None,
+) -> tuple[Any, Any]:
+    """注册 Web generic_chat 的 agent workflow 工具，输入为 registry 和角色目录，输出角色 manager 与 workflow handle。
+
+    spawn_handle（agent-tree-v0.1 P0-1）：可选的 :class:`AgentTreeSpawnHandle`，
+    非空时把 ``spawn_subagent`` 工具一并注册进 registry（per-session 延迟绑定，
+    工具运行期按 ``ToolContext.session_id`` 解析对应 thread 的 AgentManager）。
+    """
     from application.agent_roles import AgentRoleManager
     from tools import register_agent_role_tool, register_agent_workflow_tool
     from tools.agent_workflow_tool import AgentWorkflowHandle
 
-    role_manager = AgentRoleManager(role_dir=role_dir)
+    role_manager = AgentRoleManager(role_dir=role_dir, config_path=agent_config_path)
     workflow_handle = AgentWorkflowHandle()
     register_agent_role_tool(registry, role_manager)
     register_agent_workflow_tool(registry, workflow_handle)
+    if spawn_handle is not None:
+        from tools import register_spawn_subagent_tool
+
+        register_spawn_subagent_tool(registry, spawn_handle)
     return role_manager, workflow_handle
 
 
@@ -1160,6 +1252,7 @@ def _bind_agent_workflow_manager(
     workspace_root: Path,
     role_manager: Any,
     tool_registry: Any,
+    lifecycle_registry: Any | None = None,
 ) -> None:
     """把当前 Web thread runtime 绑定到 workflow handle，输入为运行时和工作区，输出为可执行 workflow manager。"""
     from application.agent_workflows.manager import AgentWorkflowManager
@@ -1184,7 +1277,7 @@ def _bind_agent_workflow_manager(
 
     handle.bind(
         AgentWorkflowManager(
-            subagents=SubAgentManager(runtime),
+            subagents=SubAgentManager(runtime, lifecycle_registry=lifecycle_registry),
             config=config,
             workspace_root=workspace_root,
             role_manager=role_manager,

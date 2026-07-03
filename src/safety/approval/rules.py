@@ -22,9 +22,10 @@ claude_code 通道仍走 :meth:`web.app_support.host_adapter.WebHostAdapter.prom
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+from core.clock import now_epoch_ms
 
 logger = logging.getLogger(__name__)
 
@@ -299,7 +300,7 @@ class ApprovalRules:
             return self._default_decision()
 
         if pdec.auto_eligible and enabled_for_cwd:
-            now_ms = int(time.time() * 1000)
+            now_ms = now_epoch_ms()
             return _RuleDecision(
                 is_immediate=False,
                 immediate_outcome=None,
@@ -364,7 +365,7 @@ class ApprovalRules:
     @staticmethod
     def _blocked_decision(*, matched_rule: str, timeout_ms: int) -> _RuleDecision:
         """危险规则命中：人工可显式允许，超时默认拒绝。"""
-        now_ms = int(time.time() * 1000)
+        now_ms = now_epoch_ms()
         return _RuleDecision(
             is_immediate=False,
             immediate_outcome=None,

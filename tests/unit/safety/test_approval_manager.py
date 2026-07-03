@@ -73,8 +73,13 @@ def _make_request(call_id: str = "call-1", **overrides: Any) -> ApprovalRequest:
 # ============ _PendingApproval 字段对齐（spec 20-data-model#1）============
 
 
-def test_pending_approval_has_all_12_fields() -> None:
-    """spec 20-data-model#1 12 字段必须有（阶段 2 接入不再改 dataclass）。
+def test_pending_approval_has_all_expected_fields() -> None:
+    """spec 20-data-model#1 字段齐全（task-5 agent-tree #6 新增 ``agent_id``）。
+
+    历史背景：dataclass 最初 12 字段（核心 11 + arrived_at_ms）。agent-tree-v0.1
+    模块 F 给 ``_PendingApproval`` 加了 ``agent_id``（展示归属 + cancel_by_agent
+    批量取消子树 pending future），现为 13 字段。后续阶段 2-4 通道接入不再改
+    dataclass 形态。
 
     用 MagicMock(spec=asyncio.Future) 替代真 Future（避免 new_event_loop + close
     污染下游 test_instruction_loader 的 get_event_loop()）。
@@ -84,6 +89,7 @@ def test_pending_approval_has_all_12_fields() -> None:
         request_id="r1",
         channel="generic_chat",
         thread_id="t1",
+        agent_id="",  # 主 agent 默认空串（task-5 #6）
         cwd="/tmp",
         tool_name="Bash",
         tool_input={},
@@ -94,11 +100,13 @@ def test_pending_approval_has_all_12_fields() -> None:
         auto_reject_at_ms=None,
         future=fut,
     )
-    # 12 字段：核心 11 + arrived_at_ms（默认）+ timeout_ms（默认 None）
+    # 13 字段：核心 11 + agent_id（task-5）+ arrived_at_ms（默认）
+    # + timeout_ms（默认 None）
     for fld in (
         "request_id",
         "channel",
         "thread_id",
+        "agent_id",
         "cwd",
         "tool_name",
         "tool_input",
@@ -112,6 +120,8 @@ def test_pending_approval_has_all_12_fields() -> None:
         "timeout_ms",
     ):
         assert hasattr(p, fld), f"missing field: {fld}"
+    # agent_id 默认空串（主 agent 兼容）；可在构造时填子 agent_id
+    assert p.agent_id == ""
     # arrived_at_ms 默认填充（毫秒级时间戳）
     assert isinstance(p.arrived_at_ms, int)
     assert p.arrived_at_ms > 0
@@ -278,6 +288,46 @@ async def test_cancel_by_thread_cancels_all_pending_under_that_thread() -> None:
     assert d3.outcome == "rejected"
     assert m.pending_count == 0
     assert m.timeout_task_count == 0
+
+
+async def test_pending_count_for_thread_counts_only_live_matching_pending() -> None:
+    """按 thread / channel 查询 pending 数；已 resolve 的 future 不再计数。"""
+    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=10_000)
+
+    async def make_request(tid: str, channel: str) -> ApprovalDecision:
+        return await m.request(
+            channel=channel,
+            thread_id=tid,
+            cwd="/",
+            tool_name="X",
+            tool_input={},
+        )
+
+    t1_generic_a = asyncio.create_task(make_request("thread-A", "generic_chat"))
+    t1_generic_b = asyncio.create_task(make_request("thread-A", "generic_chat"))
+    t1_cli = asyncio.create_task(make_request("thread-A", "cli"))
+    t2_generic = asyncio.create_task(make_request("thread-B", "generic_chat"))
+
+    await asyncio.sleep(0.05)
+    assert m.pending_count_for_thread("thread-A") == 3
+    assert m.pending_count_for_thread("thread-A", channel="generic_chat") == 2
+    assert m.pending_count_for_thread("thread-A", channel="cli") == 1
+    assert m.pending_count_for_thread("thread-B", channel="generic_chat") == 1
+    assert m.pending_count_for_thread("missing", channel="generic_chat") == 0
+    assert m.has_pending_for_thread("thread-A", channel="generic_chat") is True
+
+    first_generic = next(
+        req_id
+        for req_id, pending in m._pending.items()
+        if pending.thread_id == "thread-A" and pending.channel == "generic_chat"
+    )
+    assert m.resolve(first_generic, {"allow": True})
+    assert m.pending_count_for_thread("thread-A", channel="generic_chat") == 1
+
+    for req_id in list(m._pending.keys()):
+        m.cancel(req_id, reason="test_cleanup")
+    _ = await asyncio.gather(t1_generic_a, t1_generic_b, t1_cli, t2_generic)
+    assert m.pending_count == 0
 
 
 def test_cancel_by_thread_returns_zero_when_no_match(

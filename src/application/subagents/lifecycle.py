@@ -1,4 +1,4 @@
-"""子 agent 生命周期注册表。
+"""子 agent 生命周期注册表（DEPRECATED，task-5 删除整个包）。
 
 功能：为所有来源的子 agent spawn 提供统一 started/completed/failed/cancelled
 事件入口和 thread 维度状态查询。
@@ -8,6 +8,13 @@
 已注册 listener；listener 异常被隔离并写 warning，子 agent 主流程继续执行。
 关键函数：record_started 写入运行中记录，record_finished 收口结束状态，
 list_thread 返回当前 thread 记录，_notify fan-out 生命周期事件。
+
+DEPRECATED（agent-tree-v0.1 task-3 迁移准备）：
+本模块的审计字段（status / started_at / finished_at / error_message）已迁移到
+``src/application/agents/registry.py::TaskRecord``。新代码应使用 TaskRegistry 而非
+SubAgentLifecycleRecord/Store。task-5 将正式删除整个 ``src/application/subagents/``
+包；本 task 仅做迁移准备，保留 class 以避免回归（thread_subagents router 仍通过
+Protocol 消费本模块的 list_thread 投影）。
 """
 
 from __future__ import annotations
@@ -28,11 +35,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class SubAgentLifecycleRecord:
-    """单个子 agent 运行的当前生命周期状态。
+    """单个子 agent 运行的当前生命周期状态（DEPRECATED，task-5 删除）。
 
     职责：承载 thread、来源、任务、子 session、状态和时间戳字段。
     关键输入：由 record_started 或 record_finished 根据运行坐标构造。
     关键输出：to_dict 输出 REST 和事件 listener 可消费的字典。
+
+    DEPRECATED：审计字段（status / started_at / finished_at / error_message）
+    已迁移到 ``application.agents.registry.TaskRecord``。task-5 将删除整个
+    subagents 包；新代码请用 TaskRegistry。
     """
 
     thread_id: str
@@ -73,11 +84,14 @@ class SubAgentLifecycleEvent:
 
 
 class SubAgentLifecycleStore:
-    """按 thread 保存子 agent 生命周期状态的内存 store。
+    """按 thread 保存子 agent 生命周期状态的内存 store（DEPRECATED，task-5 删除）。
 
     职责：维护每个 thread 当前活跃和近期结束的子 agent 记录。
     关键输入：record_started 和 record_finished 传入运行坐标与状态。
     关键输出：list_thread 返回指定 thread 的记录列表。
+
+    DEPRECATED：审计字段已迁移到 ``application.agents.registry.TaskRecord``。
+    task-5 将删除整个 subagents 包；新代码请用 TaskRegistry。
     """
 
     def __init__(self, *, max_records_per_thread: int = 200) -> None:
@@ -143,17 +157,6 @@ class SubAgentLifecycleStore:
         with self._lock:
             bucket = self._records_by_thread.setdefault(thread_id, {})
             existing = bucket.get(key)
-            if existing is None:
-                logger.warning(
-                    "subagent lifecycle finished before start: thread_id=%s source=%s "
-                    "workflow_id=%s task_run_id=%s session_id=%s status=%s",
-                    thread_id,
-                    source,
-                    workflow_id,
-                    task_run_id,
-                    session_id,
-                    status,
-                )
             started_at = existing.started_at if existing is not None else now
             record = SubAgentLifecycleRecord(
                 thread_id=thread_id,
@@ -190,11 +193,7 @@ class SubAgentLifecycleStore:
         bucket = self._records_by_thread.get(thread_id)
         if bucket is None or len(bucket) <= self._max_records_per_thread:
             return
-        ordered = sorted(
-            bucket.values(),
-            key=lambda item: (item.status == "running", item.updated_at),
-            reverse=True,
-        )
+        ordered = sorted(bucket.values(), key=lambda item: item.updated_at, reverse=True)
         keep = {_record_key(record) for record in ordered[: self._max_records_per_thread]}
         self._records_by_thread[thread_id] = {
             key: record for key, record in bucket.items() if key in keep

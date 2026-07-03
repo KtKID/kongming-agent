@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from pathlib import Path
 from typing import Any
 
+from core.clock import now_epoch_ms
 from evolution.models import SessionLearningState
 
 
 def _now_ms() -> int:
-    return int(time.time() * 1000)
+    return now_epoch_ms()
 
 
 class EvolutionStateStore:

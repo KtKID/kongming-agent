@@ -27,6 +27,7 @@ def _pending(
         request_id="req-1",
         channel="cli",
         thread_id="cli-session",
+        agent_id="",
         cwd="/proj",
         tool_name="run_shell",
         tool_input={"command": "ls"},

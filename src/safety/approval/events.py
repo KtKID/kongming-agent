@@ -11,7 +11,7 @@ PendingApprovalView 交给 CLI、Web inbox、Avatar 等展示层。
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
@@ -27,16 +27,17 @@ class PendingApprovalView:
     request_id: str
     channel: str
     thread_id: str
-    cwd: str
-    tool_name: str
-    tool_input: Mapping[str, Any]
-    metadata: Mapping[str, Any]
-    severity: str
-    matched_rule: str | None
-    auto_approve_at_ms: int | None
-    auto_reject_at_ms: int | None
-    arrived_at_ms: int
-    timeout_ms: int
+    agent_id: str = ""
+    cwd: str = ""
+    tool_name: str = ""
+    tool_input: Mapping[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    severity: str = "standard"
+    matched_rule: str | None = None
+    auto_approve_at_ms: int | None = None
+    auto_reject_at_ms: int | None = None
+    arrived_at_ms: int = 0
+    timeout_ms: int = 0
 
     def __post_init__(self) -> None:
         """冻结可变映射字段，防止宿主 sink 改写 manager 内部状态。"""

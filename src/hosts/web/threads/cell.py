@@ -24,8 +24,11 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from enum import StrEnum
+from typing import Any
 
+from application.agents.cell import AgentCell
+from application.agents.registry import TaskRegistry
 from core.contracts import EventSink
 from core.result import Result
 from hosts.shared.session_bridge import SessionBridge
@@ -33,12 +36,27 @@ from hosts.web.app_support.host_adapter import WebHostAdapter
 from hosts.web.threads.metadata import ThreadMetadata
 from runtime_assembly.native_runtime import NativeRuntime
 
-# cell 状态机（单字段 status）。
-# - idle：未在跑 turn，无 pending approval
-# - running：正在跑 turn（runner.run 进行中）
-# - awaiting_approval：runner 阻塞在 prompt_approval（pending future 非空）
-# - evicting：ThreadManager 已开始 evict_cell；后续 send 应当被 closed 标记吞掉
-ThreadCellStatus = Literal["idle", "running", "awaiting_approval", "evicting"]
+
+class ThreadCellStatus(StrEnum):
+    """cell 状态机。
+
+    设计：只有 ``EVICTING`` 是 Manager 主动写入的"独立事实"——它表达
+    "ThreadManager 已决定 evict 这个 cell"，无法从其它字段推导。``RUNNING`` /
+    ``AWAITING_APPROVAL`` / ``IDLE`` 全是派生量，由 ``ThreadManager._effective_status``
+    从 ``current_run_task`` / pending approval 现算，不落字段，避免多点手工同步漂移。
+
+    成员（``StrEnum``，序列化值即小写字符串，与 Web wire 协议保持一致）：
+
+    - ``IDLE``：未在跑 turn（默认占位）
+    - ``RUNNING``：正在跑 turn（``current_run_task`` 非空，现算）
+    - ``AWAITING_APPROVAL``：当前 thread 有待审批（现算）
+    - ``EVICTING``：ThreadManager 已开始 evict_cell；后续 send 应被 closed 标记吞掉
+    """
+
+    IDLE = "idle"
+    RUNNING = "running"
+    AWAITING_APPROVAL = "awaiting_approval"
+    EVICTING = "evicting"
 
 
 @dataclass
@@ -53,8 +71,7 @@ class ThreadCell:
             provider，每个 cell 一份 httpx pool；v0.1.6+ 再做共享）。
         bridge: 把 adapter / runtime 缝起来的 :class:`SessionBridge`；调用
             ``bridge.run_once(user_input)`` 触发一轮对话。
-        adapter: 当前 :class:`WebHostAdapter` 实例；持有 WS 引用 +
-            pending_approvals dict。
+        adapter: 当前 :class:`WebHostAdapter` 实例；持有 HostAdapter 输出兼容入口。
         event_sinks: cell 私有的事件 sink 列表（典型为
             ``[WSEventSink, JsonlTraceSink?]``；不跨 cell 共享）。
         boot_lock: per-cell asyncio.Lock，``boot_or_attach`` 对同 thread_id
@@ -65,6 +82,16 @@ class ThreadCell:
         status: cell 当前状态。
         current_run_task: 当前正在执行的 ``run_once`` task；shutdown 时
             可 cancel 它快速结束（非 None 表示有进行中的 turn）。
+        pending_inputs: 当前 thread 的后续普通输入队列，后端真源；只存尚未启动
+            的输入，已经启动的输入交给 current_run_task 追踪。
+        pending_input_lock: 队列和普通 run start gate 的互斥锁；入队、出队、即时
+            启动判断必须在同一把锁内完成，避免并发提交创建两个 run。
+        pending_input_sequence: 队列项 FIFO 序号，只在本 cell 内递增。
+        pending_input_version: 队列 snapshot 版本号，用于前端丢弃旧帧；只有队列
+            内容或顺序发生变化时递增。
+        pending_input_drain_block_reason: 阻止 run done callback 继续 drain 的
+            终止原因；evict / shutdown / delete / runtime refresh failed 写入，避免
+            已失效 runtime 继续消费用户输入。
         runtime_preset_id: 当前 runtime 构造时使用的 preset。thread metadata
             允许先被 REST 更新；下一次发送前用本字段判断是否需要重建 runtime。
         preset_refresh_lock: 串行化同一 cell 的 runtime preset 刷新，避免并发
@@ -79,10 +106,35 @@ class ThreadCell:
     event_sinks: list[EventSink] = field(default_factory=list)
     boot_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     last_active_at: float = field(default_factory=time.time)
-    status: ThreadCellStatus = "idle"
+    status: ThreadCellStatus = ThreadCellStatus.IDLE
     current_run_task: asyncio.Task[Result] | None = None
+
+    # pending input queue 的状态归属在 cell 内存中。ThreadManager 是唯一写入者；
+    # WS 路由和前端只通过 snapshot / changed / started 帧观察它。
+    pending_inputs: list[Any] = field(default_factory=list)
+    pending_input_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    pending_input_sequence: int = 0
+    pending_input_version: int = 0
+    # drain_block_reason 是队列消费的停止闸门。evict、delete、shutdown、runtime
+    # refresh failed 会写入原因，done callback 看到后停止启动下一条。
+    pending_input_drain_block_reason: str | None = None
     runtime_preset_id: str = ""
     preset_refresh_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    # ------------------------------------------------------------------
+    # agent-tree-v0.1（模块 C）：ThreadCell 演进为树态 owner（不新建 ConversationTree）
+    # ------------------------------------------------------------------
+    # 三字段 + bump_epoch 让 ThreadCell 既是 host 装配外壳，又是 agent 树态 owner。
+    # 用户决策：不新建 ConversationTree 类，epoch/registry/root_agent 归入 ThreadCell。
+    # task-4 阶段新机制（agent_loop + mailbox）与旧机制（current_run_task /
+    # pending_inputs）并存过渡：旧路径保留不破坏现有功能，agent_loop 是新主路径
+    # （task-5 多 agent 形态时切换生产路径）。
+    #
+    # root_agent 默认 None：旧 _build_cell 路径 / 旧测试不构造 AgentCell 也能建 cell；
+    # 真正接入 agent_loop 的 cell 由 manager 显式 set root_agent（opt-in 并存）。
+    root_agent: AgentCell | None = None
+    registry: TaskRegistry = field(default_factory=TaskRegistry)
+    epoch: int = 0
 
     def attach_ws(self, new_ws: Any) -> None:
         """把一个新连接注册到 adapter / 所有 sink。
@@ -116,10 +168,22 @@ class ThreadCell:
         """
         self.last_active_at = time.time()
 
-    @property
-    def has_pending_approvals(self) -> bool:
-        """便于 idle eviction 判定：有 pending approval 时不 evict。"""
-        return self.adapter.pending_approval_count > 0
+    # ------------------------------------------------------------------
+    # agent-tree-v0.1（模块 C）：epoch 唯一 bump 入口
+    # ------------------------------------------------------------------
+    def bump_epoch(self) -> int:
+        """epoch 唯一 bump 入口，输入为空，输出为 bump 后的新 epoch。
+
+        ``cancel_subtree`` 触发：把世代计数器 +1，让旧世代内部投递（``child_result``
+        / ``system_notice``）在 mailbox 消费侧被 epoch 门卫丢弃。``user_message``
+        永不过期（用户输入不携带世代语义，门卫判定时跳过 user_message）。
+
+        返回 bump 后的新 epoch（单调递增）。调用方一般是 :class:`TaskRegistry`
+        编排 / Web InterruptFrame：``bump_epoch()`` → ``registry.cancel_subtree(root)``
+        → purge mailbox 旧世代内部投递。
+        """
+        self.epoch += 1
+        return self.epoch
 
 
 __all__ = ["ThreadCell", "ThreadCellStatus"]

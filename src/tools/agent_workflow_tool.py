@@ -43,7 +43,6 @@ _MAP_REDUCE_REQUIRED_PAYLOAD_KEYS = frozenset(
     }
 )
 _NULL_STRINGS = frozenset({"", "null", "none"})
-
 _MAP_REDUCE_PAYLOAD_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
@@ -228,7 +227,6 @@ _DEEP_RESEARCH_PAYLOAD_SCHEMA: dict[str, Any] = {
         "source_policy": {
             "type": "object",
             "properties": {
-                "provider": {"type": "string", "enum": ["fake", "internal"]},
                 "language": {"type": "string", "default": "zh-CN"},
                 "freshness_days": {"type": ["integer", "null"], "default": None},
                 "allowed_domains": {"type": "array", "items": {"type": "string"}},
@@ -405,6 +403,8 @@ class RunParallelSubagentsTool(BaseBuiltinTool):
         if manager is None:
             raise RuntimeError("agent workflow manager is not bound")
 
+        if "subagent_runtime" in args:
+            raise ValueError("subagent_runtime is resolved from agent configuration")
         task_specs = _parse_tasks(args["tasks"])
         mode = args.get("mode", "parallel")
         if not isinstance(mode, str):
@@ -413,6 +413,7 @@ class RunParallelSubagentsTool(BaseBuiltinTool):
             "mode": mode,
             "parent_session_id": ctx.session_id,
             "task_specs": task_specs,
+            "parent_agent": _parent_agent_from_context(ctx),
         }
         if isinstance(args.get("desc"), str):
             kwargs["desc"] = args["desc"]
@@ -569,6 +570,7 @@ class RunAgentWorkflowTool(BaseBuiltinTool):
             mode=mode.strip(),
             parent_session_id=ctx.session_id,
             payload=normalized_payload,
+            parent_agent=_parent_agent_from_context(ctx),
         )
         return _format_result(result), _result_data(result)
 
@@ -596,7 +598,8 @@ class RunAgentWorkflowTool(BaseBuiltinTool):
                 "1. deep_research payload 顶层必须包含 topic；objective 可省略，省略时使用 topic。\n"
                 "2. source_queries 是研究问题数组；缺省时会根据 topic 生成 overview、primary_source、risks 三条查询。\n"
                 "3. limits 控制 jury_size、reject_quorum、source_budget、fetch_budget、fact_cap 等预算。\n"
-                "4. source_policy 控制 provider、language、freshness_days、allowed_domains、blocked_domains、prefer_primary_sources。\n"
+                "4. source_policy 控制 language、freshness_days、allowed_domains、blocked_domains、prefer_primary_sources。\n"
+                "   网页搜索统一调用 web_search 工具；底层 MCP 缺失时 web_search 返回工具缺失。\n"
                 "5. output_contract 固定为 deep_research_report。\n"
                 "6. 重新调用前先按下面骨架修正参数：\n"
                 "{\n"
@@ -610,8 +613,8 @@ class RunAgentWorkflowTool(BaseBuiltinTool):
                 "    ],\n"
                 '    "limits": {"jury_size": 3, "reject_quorum": 2, '
                 '"source_budget": 10, "fetch_budget": 10, "fact_cap": 20},\n'
-                '    "source_policy": {"provider": "internal", "language": "zh-CN", '
-                '"freshness_days": null, "allowed_domains": [], '
+                '    "source_policy": {"language": "zh-CN", "freshness_days": null, '
+                '"allowed_domains": [], '
                 '"blocked_domains": [], "prefer_primary_sources": true},\n'
                 '    "output_contract": "deep_research_report"\n'
                 "  }\n"
@@ -721,6 +724,198 @@ class DescribeAgentWorkflowStrategyTool(BaseBuiltinTool):
 AgentWorkflowTool = RunParallelSubagentsTool
 
 
+class AgentTreeSpawnHandle:
+    """agent-tree-v0.1 task-5：AgentManager.spawn 的延迟绑定句柄。
+
+    与 :class:`AgentWorkflowHandle` 同款延迟绑定模式：装配层（ThreadManager /
+    run.py）在 root agent + AgentManager 就绪后调 :meth:`bind` 注入；工具运行期
+    通过 :meth:`get` 取回。``Any`` 类型避免 tools → application 的 import-linter
+    分层冲突（application 层高于 tools 层），句柄只持有引用不做静态类型检查。
+
+    AgentManager（application.agents.manager.AgentManager）通过本句柄暴露给 spawn
+    工具入口；旧 SubAgentManager 同步路径（AgentWorkflowHandle）保留为 workflow 兼容。
+
+    per-session 绑定（对抗式审查 P0-1 装配修复）：每个 web thread 持有独立
+    AgentManager（独立 TaskRegistry / epoch / approval_canceller），故句柄按
+    ``session_id`` 分桶。``bind(manager)`` 无 session_id 时写默认 manager（兼容
+    单测桩）；``get(ctx)`` 优先取当前 session 绑定，其次默认绑定。
+
+    Attributes:
+        manager: 默认 AgentManager（Any，避免分层 import）；None 表示未绑定。
+        _managers_by_session_id: session_id → 该 thread 的 AgentManager。
+    """
+
+    def __init__(self) -> None:
+        self.manager: Any | None = None
+        self._managers_by_session_id: dict[str, Any] = {}
+
+    def bind(self, manager: Any, *, session_id: str | None = None) -> None:
+        """绑定 AgentManager（装配期调用），输入为 manager，输出为已绑定状态。
+
+        session_id 为空时写默认 manager（兼容单测桩）；非空时写 thread 专属
+        AgentManager（生产 per-cell 装配路径）。
+        """
+        if session_id is None:
+            self.manager = manager
+            return
+        self._managers_by_session_id[session_id] = manager
+
+    def get(self, ctx: ToolContext | None = None) -> Any | None:
+        """取回 AgentManager，输入为可选 ToolContext，输出为 manager 或 None。
+
+        优先返回 ctx.session_id 对应的 per-thread 绑定，其次默认绑定；ctx 为 None
+        时只取默认绑定（兼容旧 ``get()`` 调用与单测桩）。
+        """
+        if ctx is not None and ctx.session_id:
+            per_session = self._managers_by_session_id.get(ctx.session_id)
+            if per_session is not None:
+                return per_session
+        return self.manager
+
+
+class SpawnSubAgentTool(BaseBuiltinTool):
+    """agent-tree-v0.1 task-5：异步派生一个后台子 agent（spawn 主路径）。
+
+    与旧 :class:`RunParallelSubagentsTool`（同步 SubAgentManager 路径）并存：
+    本工具调 ``AgentManager.spawn``，立即返回 ``{child_id, status:"dispatched"}``，
+    父永不阻塞；子最终结果走 ``child_result`` Mail 在父下一 run 注入。
+
+    范围收窄（task-5）：本入口作为 spawn 新主路径新增，旧 workflow 入口（parallel /
+    map_reduce 等）保留 SubAgentManager 兼容，工具入口完全切换推迟到 workflow
+    policy-agent 收编（v2）。
+    """
+
+    name = "spawn_subagent"
+    description = (
+        "Asynchronously spawn a background child agent (single_shot) and return "
+        "immediately with {child_id, status:'dispatched'}. The child's final result "
+        "is delivered to the parent agent via a child_result message on its next run. "
+        "The parent never blocks waiting. Spawn depth is fixed at 1 in v1."
+    )
+    input_schema: dict[str, Any] = {  # noqa: RUF012
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "The seed user message handed to the child agent.",
+            },
+            "name": {
+                "type": "string",
+                "description": "Child agent display name.",
+            },
+            "instructions": {
+                "type": "string",
+                "description": "Child agent system prompt. Defaults to empty.",
+            },
+            "tool_names": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Child agent tool whitelist (default empty = no tools).",
+            },
+            "model": {
+                "type": "string",
+                "description": "Child agent default model. Defaults to parent model.",
+            },
+            "cwd": {
+                "type": "string",
+                "description": "Child agent working directory.",
+            },
+        },
+        "required": ["prompt", "name", "cwd"],
+    }
+
+    def __init__(
+        self,
+        spawn_handle: AgentTreeSpawnHandle,
+        *,
+        parent_model: str = "",
+    ) -> None:
+        self._spawn_handle = spawn_handle
+        self._parent_model = parent_model
+
+    async def _run(
+        self,
+        args: dict[str, Any],
+        ctx: ToolContext,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """执行 spawn，输入为模型参数 + 上下文，输出为 dispatched 结果文本 + data。"""
+        manager = self._spawn_handle.get(ctx)
+        if manager is None:
+            raise RuntimeError("AgentManager is not bound (spawn_subagent requires agent-tree)")
+
+        prompt = args.get("prompt")
+        name = args.get("name")
+        cwd = args.get("cwd")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("'prompt' must be a non-empty string")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("'name' must be a non-empty string")
+        if not isinstance(cwd, str) or not cwd.strip():
+            raise ValueError("'cwd' must be a non-empty string")
+
+        # 从 ToolContext.agent_id 查父 cell（AgentManager.get_agent）；空串 = 主 agent。
+        parent_agent_id = ctx.agent_id or ""
+        parent_cell = manager.get_agent(parent_agent_id)
+        if parent_cell is None:
+            raise RuntimeError(
+                f"parent agent not found for agent_id={parent_agent_id!r}; "
+                "spawn_subagent must run within an agent-tree cell"
+            )
+
+        # 构造子 AgentSpec（复用 AgentSpec，独立 name/instructions/tools/model）。
+        from core.agent_spec import AgentSpec
+
+        instructions = args.get("instructions", "")
+        if not isinstance(instructions, str):
+            instructions = ""
+        tool_names_raw = args.get("tool_names", [])
+        if not isinstance(tool_names_raw, list):
+            tool_names_raw = []
+        tool_names = tuple(t for t in tool_names_raw if isinstance(t, str))
+        model = args.get("model")
+        if not isinstance(model, str) or not model.strip():
+            model = self._parent_model or parent_cell.spec.default_model
+        spec = AgentSpec(
+            name=name.strip(),
+            instructions=instructions,
+            default_model=model,
+            tool_names=tool_names,
+            max_turns=parent_cell.spec.max_turns,
+        )
+
+        from core.message import Message
+
+        seed = Message.user(prompt.strip())
+
+        try:
+            result = manager.spawn(
+                parent_cell,
+                spec,
+                (),
+                seed,
+                cwd=cwd.strip(),
+                role_id=None,
+            )
+        except Exception as exc:
+            # spawn 拒绝（深度超限 / registry 关门）：返回拒绝 tool_result 不打断父 run。
+            error_message = f"spawn rejected: {exc}"
+            return error_message, {
+                "child_id": None,
+                "status": "rejected",
+                "error": error_message,
+            }
+
+        content = (
+            f"child dispatched: agent_id={result.child_id} "
+            f"status=dispatched task_id={result.task_id}"
+        )
+        return content, {
+            "child_id": result.child_id,
+            "status": result.status,
+            "task_id": result.task_id,
+        }
+
+
 def build_agent_workflow_tool(handle: AgentWorkflowHandle) -> RunParallelSubagentsTool:
     return RunParallelSubagentsTool(handle)
 
@@ -733,6 +928,19 @@ def build_describe_agent_workflow_strategy_tool(
     handle: AgentWorkflowHandle,
 ) -> DescribeAgentWorkflowStrategyTool:
     return DescribeAgentWorkflowStrategyTool(handle)
+
+
+def build_spawn_subagent_tool(
+    spawn_handle: AgentTreeSpawnHandle,
+    *,
+    parent_model: str = "",
+) -> SpawnSubAgentTool:
+    """构造 spawn_subagent 工具，输入为 spawn 句柄，输出为工具实例。
+
+    装配层（run.py）在 AgentManager 就绪后构造本工具注册进 ToolRegistry。
+    ``parent_model`` 透传给子 AgentSpec 的默认模型（子未指定 model 时兜底）。
+    """
+    return SpawnSubAgentTool(spawn_handle, parent_model=parent_model)
 
 
 def _parse_tasks(raw: Any) -> list[dict[str, object]]:
@@ -802,9 +1010,13 @@ def _normalize_workflow_payload(
     workspace_root: Path | None = None,
     tool_context: ToolContext | None = None,
 ) -> dict[str, object]:
+    if _has_subagent_runtime_payload(payload):
+        raise ValueError("subagent_runtime is resolved from agent configuration")
     if mode == "parallel":
         raw_tasks = payload.get("task_specs", payload.get("tasks"))
-        normalized: dict[str, object] = {"task_specs": _parse_tasks(raw_tasks)}
+        normalized: dict[str, object] = {
+            "task_specs": _parse_tasks(raw_tasks),
+        }
         desc = payload.get("desc")
         if isinstance(desc, str):
             normalized["desc"] = desc
@@ -827,6 +1039,29 @@ def _normalize_workflow_payload(
     normalized = dict(payload)
     normalized.setdefault("mode", mode)
     return normalized
+
+
+def _has_subagent_runtime_payload(payload: dict[str, Any]) -> bool:
+    """检查旧 runtime 字段，输入为原始 payload，输出是否出现禁用字段。"""
+    if "subagent_runtime" in payload:
+        return True
+    for wrapper_name in (
+        _MAP_REDUCE_SPEC_WRAPPER,
+        _ROUNDTABLE_REVIEW_SPEC_WRAPPER,
+        _DEEP_RESEARCH_SPEC_WRAPPER,
+    ):
+        nested = payload.get(wrapper_name)
+        if isinstance(nested, dict) and "subagent_runtime" in nested:
+            return True
+    return False
+
+
+def _parent_agent_from_context(ctx: ToolContext) -> dict[str, object] | None:
+    """读取父 agent 快照，输入为 ToolContext，输出 metadata 中的 parent_agent。"""
+    raw = ctx.metadata.get("parent_agent")
+    if isinstance(raw, dict):
+        return {str(key): value for key, value in raw.items()}
+    return None
 
 
 def _normalize_map_reduce_payload(
@@ -1104,7 +1339,6 @@ def _normalize_deep_research_payload(payload: dict[str, Any]) -> dict[str, Any]:
             limits[key] = _coerce_int(limits.get(key))
     normalized["limits"] = limits
     source_policy = _object_copy(normalized.get("source_policy")) or {}
-    source_policy.setdefault("provider", "internal")
     source_policy.setdefault("language", "zh-CN")
     source_policy.setdefault("freshness_days", None)
     source_policy.setdefault("allowed_domains", [])
@@ -1259,6 +1493,8 @@ def _is_temporary_absolute_placeholder(value: str) -> bool:
     """识别模型生成的临时绝对占位路径，输入为路径文本，输出为是否可转 inline。"""
     if not value:
         return False
+    if any(value.startswith(root) for root in _TEMP_INLINE_INPUT_ROOTS):
+        return not Path(value).expanduser().exists()
     path = Path(value).expanduser()
     if not path.is_absolute() or path.exists():
         return False
@@ -1693,12 +1929,15 @@ def _json_safe_value(value: Any, *, context: str) -> Any:
 
 
 __all__ = [
+    "AgentTreeSpawnHandle",
     "AgentWorkflowHandle",
     "AgentWorkflowTool",
     "DescribeAgentWorkflowStrategyTool",
     "RunAgentWorkflowTool",
     "RunParallelSubagentsTool",
+    "SpawnSubAgentTool",
     "build_agent_workflow_tool",
     "build_describe_agent_workflow_strategy_tool",
     "build_run_agent_workflow_tool",
+    "build_spawn_subagent_tool",
 ]

@@ -25,15 +25,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from core.contracts import EventSink, Tool
 from tools.agent_role_tool import AgentRoleManagerLike, build_agent_role_tools
 from tools.agent_workflow_tool import (
+    AgentTreeSpawnHandle,
     AgentWorkflowHandle,
     build_agent_workflow_tool,
     build_describe_agent_workflow_strategy_tool,
     build_run_agent_workflow_tool,
+    build_spawn_subagent_tool,
 )
 from tools.builtin.file_tool import (
     ListDirTool,
@@ -53,9 +55,17 @@ from tools.runtime.base import BaseBuiltinTool
 from tools.runtime.registry import ToolRegistry
 
 if TYPE_CHECKING:
-    from evolution.store import EvolutionStore
     from infrastructure.config.models import Config
     from scheduler.store import Store
+
+
+class _EvolutionManagerLike(Protocol):
+    def register_write_tool(
+        self,
+        registry: ToolRegistry,
+        *,
+        event_sinks: Sequence[EventSink] = (),
+    ) -> bool: ...
 
 
 def build_default_registry(
@@ -166,7 +176,7 @@ def register_schedule_tool_if_enabled(
         if cfg.scheduler.home is not None
         else (get_kongming_home() / "cron")
     )
-    store = Store(home)
+    store = Store(home, display_timezone=cfg.scheduler.default_timezone)
     # v0.3：把 cfg.scheduler 的默认 timezone / delivery channel 透传给 schedule_tool，
     # 让 LLM 创建任务时不必（也不应）猜时区，dispatcher 也不会因 delivery=None SKIPPED。
     registry.register(
@@ -189,35 +199,16 @@ def register_evolution_write_tool_if_enabled(
     registry: ToolRegistry,
     cfg: Config,
     *,
+    evolution_manager: _EvolutionManagerLike | None = None,
     event_sinks: Sequence[EventSink] = (),
-) -> EvolutionStore | None:
+) -> bool:
     """按 ``cfg.evolution.learning.enabled`` 外部 register evolution_write。"""
     if not cfg.evolution.learning.enabled:
-        return None
+        return False
 
-    from evolution.state_store import EvolutionStateStore
-    from evolution.store import EvolutionStore, resolve_evolution_root
-    from tools.builtin.evolution_write_tool import build_evolution_write_tool
-
-    root_dir = resolve_evolution_root(cfg.evolution.learning.root_path)
-    state_store = EvolutionStateStore(root_dir)
-    store = EvolutionStore(
-        root_dir=root_dir,
-        state_store=state_store,
-        event_sinks=tuple(event_sinks),
-    )
-    registry.register(
-        cast(
-            Tool,
-            build_evolution_write_tool(
-                store,
-                min_confidence=cfg.evolution.learning.nutrient_confidence_threshold,
-                max_nutrients=cfg.evolution.learning.max_nutrients,
-                event_sinks=event_sinks,
-            ),
-        )
-    )
-    return store
+    if evolution_manager is None:
+        return False
+    return evolution_manager.register_write_tool(registry, event_sinks=event_sinks)
 
 
 def register_agent_workflow_tool(
@@ -237,6 +228,22 @@ def register_agent_role_tool(
     """Register agent role list/create tools with a shared manager."""
     for tool in build_agent_role_tools(manager):
         registry.register(cast(Tool, tool))
+
+
+def register_spawn_subagent_tool(
+    registry: ToolRegistry,
+    spawn_handle: AgentTreeSpawnHandle,
+    *,
+    parent_model: str = "",
+) -> None:
+    """Register the agent-tree spawn_subagent tool with a late-bound spawn handle.
+
+    The handle is per-session aware (bind manager by session_id at assembly time);
+    the tool resolves the correct AgentManager from ToolContext.session_id at run.
+    """
+    registry.register(
+        cast(Tool, build_spawn_subagent_tool(spawn_handle, parent_model=parent_model))
+    )
 
 
 def register_task_progress_tool(
@@ -263,6 +270,7 @@ def register_choice_tool(
 __all__ = [
     "AutoAllowApproval",
     "AutoDenyApproval",
+    "AgentTreeSpawnHandle",
     "AgentWorkflowHandle",
     "BaseBuiltinTool",
     "InteractiveApproval",
@@ -277,10 +285,12 @@ __all__ = [
     "build_describe_agent_workflow_strategy_tool",
     "build_file_tools",
     "build_shell_tool",
+    "build_spawn_subagent_tool",
     "register_evolution_write_tool_if_enabled",
     "register_agent_workflow_tool",
     "register_agent_role_tool",
     "register_schedule_tool_if_enabled",
+    "register_spawn_subagent_tool",
     "register_choice_tool",
     "register_task_progress_tool",
 ]

@@ -28,22 +28,47 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any, Literal
 
-from core.contracts import ApprovalAction
+from application.agents import (
+    AgentCell,
+    RootAgentDeliverSink,
+    agent_loop,
+    make_root_agent_cell,
+)
+from application.agents.loop import _purge_stale_internal_mails
+from application.agents.manager import (
+    AgentManager,
+    ChildDeliverSink,
+    SpawnContext,
+)
+from core.clock import now_epoch_ms
+from core.mail import Mail
 from core.message import Message
+from core.result import Result
 from hosts.web.app_support.host_adapter import WebHostAdapter
 from hosts.web.app_support.path_utils import is_absolute_workspace_path
 from hosts.web.integrations.claude_code.jsonl_history import jsonl_path_for
 from hosts.web.integrations.codex.projects_scanner import list_codex_projects
-from hosts.web.protocol import CellEvictedFrame, CellSummaryDTO, EvictReason
-from hosts.web.threads.cell import ThreadCell
+from hosts.web.protocol import (
+    CellEvictedFrame,
+    CellSummaryDTO,
+    EvictReason,
+    PendingInputChangedFrame,
+    PendingInputDTO,
+    PendingInputSnapshotFrame,
+    PendingInputStartedFrame,
+)
+from hosts.web.threads.cell import ThreadCell, ThreadCellStatus
 from hosts.web.threads.errors import ThreadPresetRefreshError
 from hosts.web.threads.metadata import (
     ThreadMetadata,
@@ -65,9 +90,44 @@ from hosts.web.websocket.event_sink import WSEventSink
 from hosts.web.websocket.fanout import WebSocketFanout
 from hosts.web.websocket.thread_status import ThreadStatusEventSink
 from infrastructure.config.models import Config, LLMPresetConfig
+from infrastructure.config.paths import resolve_kongming_path
 from network.network_log import log_network_exception
 
 logger = logging.getLogger(__name__)
+
+MAX_PENDING_INPUTS = 20
+"""单个 thread 在 active run 期间可保留的后续输入上限。"""
+
+PENDING_INPUT_QUEUE_FULL = "pending_input_queue_full"
+"""队列满错误的稳定 reason，WS error 帧和前端草稿恢复共用。"""
+
+
+@dataclass(frozen=True)
+class PendingInputSubmitResult:
+    """普通输入提交结果。
+
+    accepted 表示后端已接收输入；started 表示本次输入已立即启动 run；
+    pending_input 是被接收的队列项或即时启动项；snapshot 是提交后的队列真源快照。
+    error_reason 预留给稳定错误码，当前队列满通过异常路径返回。
+
+    状态归属：结果对象只描述本次提交的判定；队列真源仍在 ``ThreadCell``，
+    前端同步以 snapshot / changed / started WS 帧为准。
+    """
+
+    accepted: bool
+    started: bool
+    pending_input: PendingInputDTO | None
+    snapshot: PendingInputSnapshotFrame
+    error_reason: str | None = None
+
+
+class PendingInputQueueFullError(RuntimeError):
+    """同 thread pending input 队列已满。
+
+    reason 是 WS error 帧使用的稳定错误码，前端据此恢复 Composer 草稿并显示队列满提示。
+    """
+
+    reason = PENDING_INPUT_QUEUE_FULL
 
 
 class ClaudeThreadAlreadyBoundError(ValueError):
@@ -76,6 +136,55 @@ class ClaudeThreadAlreadyBoundError(ValueError):
 
 class ClaudeThreadConflictError(ValueError):
     """claude_thread_id 已被另一 thread 绑定，禁止重复绑定（v0.2 invariant：1:1 绑定）。"""
+
+
+class _EphemeralSessionCell:
+    """临时 session cell，用于非 thread metadata 会话。
+
+    当前用途是定时任务 run history 的人工对话：session_id 来自
+    `ScheduledRun.session_id`，格式通常是 `sched-*`，无法写入
+    `ThreadMetadata.id` 的 `thread-*` 约束。该 cell 只服务当前 WS 连接，
+    断开后由路由关闭 runtime。
+    """
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        preset_id: str,
+        runtime: Any,
+        bridge: Any,
+        adapter: WebHostAdapter,
+        event_sinks: list[Any],
+    ) -> None:
+        self.thread_id = session_id
+        self.metadata = SimpleNamespace(id=session_id, preset_id=preset_id)
+        self.runtime = runtime
+        self.bridge = bridge
+        self.adapter = adapter
+        self.event_sinks = event_sinks
+        self.runtime_preset_id = preset_id
+        self.current_run_task: asyncio.Task[Any] | None = None
+        self.last_active_at = time.time()
+
+    def attach_ws(self, new_ws: Any) -> None:
+        self.adapter.attach_ws(new_ws)
+        for sink in self.event_sinks:
+            attach = getattr(sink, "attach_ws", None)
+            if callable(attach):
+                attach(new_ws)
+
+    def detach_ws(self, ws: Any) -> None:
+        detach = getattr(self.adapter, "detach_ws", None)
+        if callable(detach):
+            detach(ws)
+        for sink in self.event_sinks:
+            detach_sink = getattr(sink, "detach_ws", None)
+            if callable(detach_sink):
+                detach_sink(ws)
+
+    def touch(self) -> None:
+        self.last_active_at = time.time()
 
 
 class _ThreadMetadataReaderImpl:
@@ -154,14 +263,14 @@ class _CodexRolloutLocatorImpl:
 
 
 class _GenericChatSessionLocatorImpl:
-    """``GenericChatSessionLocator`` v2 Protocol 实现 —— 拼 FileSession messages.jsonl
+    """``GenericChatSessionLocator`` v2 Protocol 实现 —— 定位 FileSession JSONL
     路径 + 按 preset_id 决定 provider 厂商。
 
     返回 None：
     - 非 ``backend_kind="generic_chat"``
     - session backend 不是 FileSession（memory / sqlite 不支持派生）
     - 找不到 preset_id 对应的 provider
-    - thread 未跑过（messages.jsonl 未 materialize）
+    - thread 未跑过（session jsonl 未 materialize）
     """
 
     def __init__(self, home: Path, cfg: Config) -> None:
@@ -185,8 +294,28 @@ class _GenericChatSessionLocatorImpl:
         if backend_kind != "file":
             # memory / sqlite backend → 不支持派生
             return None
-        # 拼 FileSession messages.jsonl 路径
-        jsonl_path = self._home / "sessions" / thread_id / "messages.jsonl"
+        # 按 FileSession manifest 的 format 字段定位真实 JSONL 文件名。
+        raw_store_path = (
+            getattr(session_cfg, "file_store_path", ".kongming/sessions")
+            if session_cfg
+            else ".kongming/sessions"
+        )
+        session_root = resolve_kongming_path(raw_store_path, kongming_home=self._home)
+        session_dir = session_root / thread_id
+        manifest_path = session_dir / "manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        format_name = manifest.get("format")
+        if (
+            not isinstance(format_name, str)
+            or not format_name.strip()
+            or "/" in format_name
+            or "\\" in format_name
+        ):
+            return None
+        jsonl_path = session_dir / format_name
         if not jsonl_path.is_file():
             return None
         # 查 preset_id → provider 厂商
@@ -239,6 +368,22 @@ def _now() -> float:
     return time.time()
 
 
+def _now_ms_int() -> int:
+    """返回整数毫秒时间戳，供 pending input DTO 和 WS frame 使用。"""
+    return now_epoch_ms()
+
+
+def _pending_input_preview(text: str, limit: int = 120) -> str:
+    """生成队列列表展示用预览文本。
+
+    输入是完整用户内容；输出是压缩空白后的短文本，持久真源仍是 DTO.content。
+    """
+    normalized = " ".join(text.strip().split())
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[:limit]}..."
+
+
 def _title_from_first_message(text: str) -> str:
     normalized = " ".join(text.strip().split())
     return normalized[:40] or "新会话"
@@ -247,12 +392,57 @@ def _title_from_first_message(text: str) -> str:
 def _resolve_first_message_cwd(cwd: str) -> str:
     normalized = cwd.strip()
     if not normalized:
-        return str(Path.home().resolve())
+        return ""
     if not is_absolute_workspace_path(normalized):
         raise ValueError("cwd must be an absolute path")
     if PurePosixPath(normalized).is_absolute():
         return str(Path(normalized).expanduser().resolve())
     return normalized
+
+
+# ---------------------------------------------------------------------------
+# agent-tree-v0.1（task-4）：cell 级 agent_loop 启动 / mailbox purge helper
+# ---------------------------------------------------------------------------
+#
+# 这两个模块级 helper 把 agent_loop 的 run_fn 闭包封装 + purge 调用集中一处，
+# 避免散落到 ThreadManager 方法里。opt-in 并存：只有 init_root_agent 装配的 cell
+# 才会用到。
+
+
+async def _run_agent_loop_for_cell(cell: ThreadCell, root: AgentCell) -> None:
+    """启动 cell 的常驻 agent_loop，封装 runtime.run 作 run_fn。
+
+    输入为 cell + root AgentCell；输出 None（协程常驻直到 cell 销毁）。run_fn 闭包
+    封装 ``cell.runtime.run``（NativeRuntime.run 恒返回 Result，不经 command service，
+    避免 bridge.run_once 的 ``Result | CommandResult`` 联合类型；session 管理 / event_sinks
+    注入由 runtime.run → runner.run 内部承担），让 agent_loop 只拿 Result 走 Outcome 分发。
+    """
+    runtime = cell.runtime
+
+    async def run_fn(seed: str, **kw: Any) -> Result:
+        # runtime.run 恒返回 Result（runner 收口）；session/event_sinks 在 runtime 内装配。
+        # reasoning_effort / attachments / references 暂不透传（task-4 单 agent 退化
+        # 只验文本输入闭环；结构化输入留 task-5 切换时补）。
+        # agent_id（对抗式审查 P1-2）：透传 root.agent_id，让 Event / ToolContext
+        # 带 agent_id 坐标（否则恒为空串，spawn_subagent 的 ToolContext.agent_id 拿不到父）。
+        return await runtime.run(seed, session_id=root.session_id, agent_id=root.agent_id)
+
+    await agent_loop(
+        root,
+        run_fn=run_fn,
+        registry=cell.registry,
+        current_epoch_getter=lambda: cell.epoch,
+        deliver_sink=RootAgentDeliverSink(),
+    )
+
+
+def _purge_cell_stale_mails(root: AgentCell, current_epoch: int) -> None:
+    """purge cell.root_agent mailbox 内旧世代内部 mail（段1 兜底）。
+
+    user_message 永不过期（purge 不动 user mail）。agent_loop 的 epoch 门卫已是
+    正确性保证，本 purge 只减少静默堆积。直接转发到 loop._purge_stale_internal_mails。
+    """
+    _purge_stale_internal_mails(root, current_epoch)
 
 
 class ThreadManager:
@@ -278,22 +468,36 @@ class ThreadManager:
         kongming_home: Path,
         runtime_factory: RuntimeFactory,
         asset_storage: AssetStorage | None = None,
+        approval_manager: Any | None = None,
     ) -> None:
         """
         Args:
             asset_storage: 可选注入的 :class:`AssetStorage`,用于 ``delete_thread``
                 时同步清理 thread 名下所有上传资产(claude-image-paste-e2e P1 #2
                 R2 boundary fix)。``None`` 时跳过资产清理(CLI / 测试路径常态)。
+            approval_manager: 可选注入的显式审批管理器。generic_chat 的 pending
+                审批状态由该 manager 维护，ThreadManager 只做只读投影。
         """
         self._cfg = cfg
         self._home = kongming_home
         self._runtime_factory = runtime_factory
         self._asset_storage = asset_storage
+        self._approval_manager = approval_manager
         self._cells: dict[str, ThreadCell] = {}
         self._lock = asyncio.Lock()
         self._idle_task: asyncio.Task[None] | None = None
+        # run done callback 不能 await drain，这里保存后台 drain task，shutdown 时统一取消。
+        self._pending_drain_tasks: set[asyncio.Task[Any]] = set()
+        # agent-tree-v0.1（task-4）：每个启用 agent_loop 的 cell 的常驻消费协程。
+        # shutdown 时随 cell 一起 cancel（agent_loop 只随树销毁，永不单独 cancel）。
+        # opt-in 并存：默认不启用，仅显式 init root agent 的 cell 才有 task。
+        self._agent_loop_tasks: set[asyncio.Task[Any]] = set()
         self._started = False
         self._closed = False
+        # agent-tree-v0.1（P0-1 装配修复）：spawn_subagent 工具的共享延迟绑定句柄。
+        # None 时（CLI / 测试路径）init_root_agent 不装配 AgentManager，spawn 副路径
+        # 不通电（仅 root agent + agent_loop 通电）。由 run.py 装配层 set_spawn_handle 注入。
+        self._spawn_handle: Any = None
         # usage-token-v2-bigbang: UsageTokenManager v2 注入——无状态门面。
         # token 真源来自 SDK 写的 jsonl/rollout，由 manager 内部派生器现场算。
         # metadata.json 不再缓存 token（schema v9 已物理删 3 个 token 字段）。
@@ -313,6 +517,75 @@ class ThreadManager:
         set_last_assistant_usage / get_thread_summary 等方法 v2 全部删除。
         """
         return self._usage_manager
+
+    def set_approval_manager(self, approval_manager: Any) -> None:
+        """挂载显式审批管理器，供运行状态投影和 idle eviction 只读查询。"""
+        self._approval_manager = approval_manager
+
+    def set_spawn_handle(self, spawn_handle: Any) -> None:
+        """挂载共享 spawn_subagent 延迟绑定句柄（agent-tree-v0.1 P0-1）。
+
+        装配层（run.py）在注册 spawn_subagent 工具到 ToolRegistry 后注入本句柄；
+        init_root_agent 装配每个 cell 的独立 AgentManager 并按 session_id 绑定到本句柄，
+        让 spawn_subagent 工具运行期能按 ToolContext.session_id 解析对应 manager。
+        """
+        self._spawn_handle = spawn_handle
+
+    def _pending_approval_count(self, thread_id: str) -> int:
+        """从 ApprovalManager 读取当前 thread 的 generic_chat 待审批数量。"""
+        manager = self._approval_manager
+        count_for_thread = getattr(manager, "pending_count_for_thread", None)
+        if not callable(count_for_thread):
+            return 0
+        try:
+            return int(count_for_thread(thread_id, channel="generic_chat"))
+        except Exception:
+            logger.exception(
+                "approval pending count lookup failed for thread=%s",
+                thread_id,
+            )
+            return 0
+
+    def _has_pending_approval(self, thread_id: str) -> bool:
+        """返回当前 thread 是否存在 generic_chat 待审批。"""
+        manager = self._approval_manager
+        has_pending = getattr(manager, "has_pending_for_thread", None)
+        if callable(has_pending):
+            try:
+                return bool(has_pending(thread_id, channel="generic_chat"))
+            except Exception:
+                logger.exception(
+                    "approval pending flag lookup failed for thread=%s",
+                    thread_id,
+                )
+                return True
+        return self._pending_approval_count(thread_id) > 0
+
+    def _cancel_pending_approvals_for_thread(
+        self,
+        thread_id: str,
+        *,
+        reason: str = "cell_evict",
+    ) -> None:
+        """取消当前 thread 名下仍挂起的 ApprovalManager 审批。"""
+        manager = self._approval_manager
+        cancel_by_thread = getattr(manager, "cancel_by_thread", None)
+        if not callable(cancel_by_thread):
+            return
+        try:
+            cancelled = int(cancel_by_thread(thread_id, reason=reason))
+        except Exception:
+            logger.exception(
+                "approval pending cancel failed for thread=%s",
+                thread_id,
+            )
+            return
+        if cancelled > 0:
+            logger.debug(
+                "ThreadManager cancelled %d approval pending for thread=%s",
+                cancelled,
+                thread_id,
+            )
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -343,6 +616,7 @@ class ThreadManager:
         """uvicorn shutdown 钩子。
 
         - cancel idle task
+        - cancel 所有 pending input drain 后台 task
         - 对所有活的 cell 走 ``evict_cell(notify_ws=False, reason=server_shutdown)``
         - 用 ``asyncio.gather + return_exceptions=True`` 避免单个 cell 卡
           住整体 shutdown
@@ -359,6 +633,31 @@ class ThreadManager:
             with suppress(asyncio.CancelledError):
                 await self._idle_task
             self._idle_task = None
+
+        if self._pending_drain_tasks:
+            drain_tasks = list(self._pending_drain_tasks)
+            for task in drain_tasks:
+                task.cancel()
+            await asyncio.gather(*drain_tasks, return_exceptions=True)
+            self._pending_drain_tasks.clear()
+
+        # agent-tree-v0.1（task-4）：随 server shutdown cancel 所有 agent_loop 协程。
+        # agent_loop 永不被单独 cancel（只随树销毁）——server shutdown 是树销毁场景。
+        # 顺序：先 cancel 每个 cell 的 root run_task（registry.cancel_subtree 后序砍 run_task，
+        # 避免 agent_loop 退出时 run_task 成孤儿泄漏挂起），再 cancel agent_loop 协程。
+        # cancel 后 agent_loop 走 finally registry.close_cell 注销。
+        if self._agent_loop_tasks:
+            async with self._lock:
+                booted = list(self._cells.values())
+            for cell in booted:
+                if cell.root_agent is not None:
+                    with suppress(Exception):
+                        await cell.registry.cancel_subtree(cell.root_agent.agent_id)
+            loop_tasks = list(self._agent_loop_tasks)
+            for task in loop_tasks:
+                task.cancel()
+            await asyncio.gather(*loop_tasks, return_exceptions=True)
+            self._agent_loop_tasks.clear()
 
         # 2. 收集当前所有 thread_id（避免迭代时改 dict）
         async with self._lock:
@@ -483,7 +782,7 @@ class ThreadManager:
         text: str,
         preset_id: str,
         cwd: str = "",
-        reasoning_effort: Literal["low", "medium", "high"] | None = None,
+        reasoning_effort: Literal["none", "low", "medium", "high", "max"] | None = None,
     ) -> ThreadMetadata:
         """创建通用频道 thread，并在返回前持久化第一条 user message。
 
@@ -535,41 +834,27 @@ class ThreadManager:
         self,
         cell: ThreadCell,
         *,
-        reasoning_effort: Literal["low", "medium", "high"] | None,
+        reasoning_effort: Literal["none", "low", "medium", "high", "max"] | None,
     ) -> None:
         continue_run = getattr(cell.bridge, "continue_from_last_user_message", None)
         if not callable(continue_run):
             raise RuntimeError("bridge does not expose continue_from_last_user_message")
 
-        task = asyncio.create_task(
+        task: asyncio.Task[Any] = asyncio.create_task(
             continue_run(reasoning_effort=reasoning_effort),
             name=f"web-first-message-run-{cell.thread_id}",
         )
         cell.current_run_task = task
 
-        def _clear_first_message_task(
-            t: asyncio.Task[Any],
+        def _done_callback(
+            finished: asyncio.Task[Any],
             *,
             _cell: ThreadCell = cell,
             _task: asyncio.Task[Any] = task,
         ) -> None:
-            if getattr(_cell, "current_run_task", None) is _task:
-                _cell.current_run_task = None
-            try:
-                t.result()
-            except asyncio.CancelledError:
-                logger.info(
-                    "first message continuation cancelled for thread=%s",
-                    _cell.thread_id,
-                )
-            except Exception as exc:
-                logger.exception(
-                    "first message continuation failed for thread=%s: %s",
-                    _cell.thread_id,
-                    exc,
-                )
+            self._on_pending_run_done(_cell, _task, finished)
 
-        task.add_done_callback(_clear_first_message_task)
+        task.add_done_callback(_done_callback)
 
     @staticmethod
     def _session_for_first_message(cell: ThreadCell) -> Any:
@@ -585,6 +870,498 @@ class ThreadManager:
                 sessions[cell.thread_id] = session
             return session
         raise RuntimeError("runtime does not expose a session factory")
+
+    async def submit_user_input(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        request_id: str | None = None,
+        reasoning_effort: Literal["none", "low", "medium", "high", "max"] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+        references: list[dict[str, Any]] | None = None,
+        source_conn_id: str | None = None,
+    ) -> PendingInputSubmitResult:
+        """提交 Web 普通输入；idle 立即启动，running 入队。
+
+        关键输入是用户文本、reasoning effort、附件、引用和来源连接 ID；关键输出是
+        PendingInputSubmitResult。队列只覆盖 metadata thread，active run 期间最多保留
+        MAX_PENDING_INPUTS 条后续输入。
+        """
+        metadata = {
+            "request_id": request_id,
+            "reasoning_effort": reasoning_effort,
+            "attachments": attachments,
+            "references": references,
+            "source_conn_id": source_conn_id,
+        }
+        return await self._submit_pending_input(
+            thread_id,
+            text,
+            source="user_input",
+            priority="user_message",
+            metadata=metadata,
+        )
+
+    async def submit_choice_result(
+        self,
+        thread_id: str,
+        choice_text: str,
+        *,
+        request_id: str,
+    ) -> PendingInputSubmitResult:
+        """提交 choice 结果；running 时使用 choice_response 优先级入队。
+
+        choice_response 在 drain 时排在普通用户消息前面，避免用户先回答选择题后又发
+        新消息时，结构化回答被普通消息插队。
+        """
+        return await self._submit_pending_input(
+            thread_id,
+            choice_text,
+            source="choice_submit",
+            priority="choice_response",
+            metadata={"request_id": request_id},
+        )
+
+    async def submit_avatar_input(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        request_id: str | None = None,
+        reasoning_effort: Literal["none", "low", "medium", "high", "max"] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+        avatar_run_id: str | None = None,
+    ) -> PendingInputSubmitResult:
+        """提交 Avatar 输入；复用 generic_chat 普通 run gate。
+
+        avatar_run_id 透传到 started 帧，便于前端把 Avatar 触发的一次运行和队列启动
+        事件关联起来。
+        """
+        metadata = {
+            "request_id": request_id,
+            "reasoning_effort": reasoning_effort,
+            "attachments": attachments,
+            "avatar_run_id": avatar_run_id,
+        }
+        return await self._submit_pending_input(
+            thread_id,
+            text,
+            source="avatar",
+            priority="user_message",
+            metadata=metadata,
+        )
+
+    async def cancel_pending_input(
+        self,
+        thread_id: str,
+        pending_input_id: str,
+    ) -> PendingInputSnapshotFrame:
+        """删除尚未启动的 pending input 并广播队列变更。
+
+        只删除仍在队列中的项；已经启动的输入由 current_run_task 接管，本入口不取消
+        正在执行的 run。
+        """
+        cell = await self.boot_or_attach(thread_id)
+        removed = False
+        async with cell.pending_input_lock:
+            before = len(cell.pending_inputs)
+            cell.pending_inputs = [
+                item for item in cell.pending_inputs if item.id != pending_input_id
+            ]
+            if len(cell.pending_inputs) != before:
+                cell.pending_input_version += 1
+                removed = True
+            snapshot = self._pending_input_snapshot_from_cell(cell)
+        if removed:
+            await self._broadcast_pending_input_changed(cell, "removed")
+        return snapshot
+
+    async def update_pending_input(
+        self,
+        thread_id: str,
+        pending_input_id: str,
+        content: str,
+    ) -> PendingInputSnapshotFrame:
+        """编辑尚未启动的 pending input 并广播队列变更。
+
+        content 会先 trim，空内容直接拒绝；只有 status 为 queued 的项会被更新。
+        """
+        normalized = content.strip()
+        if not normalized:
+            raise ValueError("content must not be empty")
+        cell = await self.boot_or_attach(thread_id)
+        updated = False
+        async with cell.pending_input_lock:
+            items: list[PendingInputDTO] = []
+            for item in cell.pending_inputs:
+                if item.id == pending_input_id and item.status == "queued":
+                    item = item.model_copy(
+                        update={
+                            "content": normalized,
+                            "preview": _pending_input_preview(normalized),
+                            "updated_at_ms": _now_ms_int(),
+                        }
+                    )
+                    updated = True
+                items.append(item)
+            cell.pending_inputs = self._ordered_pending_inputs(items)
+            if updated:
+                cell.pending_input_version += 1
+            snapshot = self._pending_input_snapshot_from_cell(cell)
+        if updated:
+            await self._broadcast_pending_input_changed(cell, "updated")
+        return snapshot
+
+    async def reorder_pending_inputs(
+        self,
+        thread_id: str,
+        ordered_ids: list[str],
+    ) -> PendingInputSnapshotFrame:
+        """按拖拽后的完整 ID 顺序重排 queued pending input。
+
+        ordered_ids 必须覆盖当前队列里的全部 item，且不能包含重复或未知 ID。
+        后端仍通过 _ordered_pending_inputs 生成最终快照，保持队列排序真源唯一。
+        """
+        cell = await self.boot_or_attach(thread_id)
+        if not ordered_ids:
+            raise ValueError("ordered_ids must not be empty")
+        async with cell.pending_input_lock:
+            current_items = self._ordered_pending_inputs(cell.pending_inputs)
+            current_ids = [item.id for item in current_items]
+            if len(set(ordered_ids)) != len(ordered_ids):
+                raise ValueError("ordered_ids must not contain duplicates")
+            if set(ordered_ids) != set(current_ids):
+                raise ValueError("ordered_ids must match current pending input ids")
+
+            changed = ordered_ids != current_ids
+            if changed:
+                by_id = {item.id: item for item in current_items}
+                now = _now_ms_int()
+                cell.pending_inputs = [
+                    by_id[item_id].model_copy(update={"sequence": index + 1, "updated_at_ms": now})
+                    for index, item_id in enumerate(ordered_ids)
+                ]
+                cell.pending_input_version += 1
+            snapshot = self._pending_input_snapshot_from_cell(cell)
+        if changed:
+            await self._broadcast_pending_input_changed(cell, "reordered")
+        return snapshot
+
+    async def pending_input_snapshot(self, thread_id: str) -> PendingInputSnapshotFrame:
+        """返回 thread 当前 pending input 队列快照。
+
+        WS 新连接用它补齐后端真源状态；version 随队列变更递增，前端可丢弃旧帧。
+        """
+        cell = await self.boot_or_attach(thread_id)
+        async with cell.pending_input_lock:
+            return self._pending_input_snapshot_from_cell(cell)
+
+    async def _submit_pending_input(
+        self,
+        thread_id: str,
+        content: str,
+        *,
+        source: Literal["user_input", "choice_submit", "avatar"],
+        priority: Literal["choice_response", "user_message"],
+        metadata: dict[str, Any],
+    ) -> PendingInputSubmitResult:
+        """普通输入队列状态机入口。
+
+        content 是已提交的用户输入；source 标记来源，priority 决定 drain 顺序，
+        metadata 透传给 bridge.run_once。函数在同一个 pending_input_lock 内完成
+        "是否已有 active run" 判断和入队/启动，避免并发双启动。
+
+        核心规则：
+        1. active run 已占用执行权时，当前输入进入 pending_inputs。
+        2. drain block 存在时，当前输入进入 pending_inputs，等待阻断原因清除。
+        3. 当前没有 active run 且队列已有输入时，先把当前输入纳入队列，再启动
+           队列头，保证已有输入继续按 priority + sequence 顺序消费。
+        4. 当前没有 active run 且队列为空时，当前输入直接成为 active run。
+
+        新增规则入口：只在下面的锁内分支扩展，并同时声明 owner 字段
+        （current_run_task / pending_inputs / drain_block_reason）、snapshot version
+        增量、实际启动的 pending item、锁外广播帧，以及
+        ``tests/unit/web/test_pending_input_thread_manager.py`` 覆盖用例。
+
+        并发边界：锁内只修改 cell 内存状态和创建 task；WS 广播在锁外执行，
+        保持提交路径短持锁，前端最终以广播快照校准本地状态。
+        """
+        normalized = content.strip()
+        if not normalized:
+            raise ValueError("text must not be empty")
+        cell = await self.boot_or_attach(thread_id)
+        started_pending: PendingInputDTO | None = None
+        started_version: int | None = None
+        broadcast_queue_changed = False
+        async with cell.pending_input_lock:
+            pending = self._create_pending_input(
+                cell,
+                normalized,
+                source=source,
+                priority=priority,
+                metadata=metadata,
+            )
+            # 状态机分支必须保持互斥：一个输入要么留在 pending_inputs，
+            # 要么转交 current_run_task。新增分支需要同步维护 snapshot version
+            # 与锁外广播，避免队列真源、运行 owner 和前端投影漂移。
+            if self._has_active_run(cell) or cell.pending_input_drain_block_reason is not None:
+                if len(cell.pending_inputs) >= MAX_PENDING_INPUTS:
+                    raise PendingInputQueueFullError(PENDING_INPUT_QUEUE_FULL)
+                cell.pending_inputs = self._ordered_pending_inputs([*cell.pending_inputs, pending])
+                cell.pending_input_version += 1
+                snapshot = self._pending_input_snapshot_from_cell(cell)
+                started = False
+            elif cell.pending_inputs:
+                cell.pending_inputs = self._ordered_pending_inputs([*cell.pending_inputs, pending])
+                cell.pending_input_version += 1
+                started_pending = self._pop_next_pending_input(cell)
+                if started_pending is None:
+                    snapshot = self._pending_input_snapshot_from_cell(cell)
+                    started = False
+                else:
+                    started_version = cell.pending_input_version
+                    self._start_pending_input_run(cell, started_pending)
+                    snapshot = self._pending_input_snapshot_from_cell(cell)
+                    started = started_pending.id == pending.id
+                    broadcast_queue_changed = True
+            else:
+                self._start_pending_input_run(cell, pending)
+                snapshot = self._pending_input_snapshot_from_cell(cell)
+                started = True
+        if started_pending is not None:
+            await self._broadcast_pending_input_started(
+                cell,
+                started_pending,
+                started_version if started_version is not None else snapshot.version,
+            )
+        elif started:
+            await self._broadcast_pending_input_started(cell, pending, snapshot.version)
+        if broadcast_queue_changed:
+            await self._broadcast_pending_input_changed(cell, "drained")
+        elif not started:
+            await self._broadcast_pending_input_changed(cell, "added")
+        return PendingInputSubmitResult(
+            accepted=True,
+            started=started,
+            pending_input=pending,
+            snapshot=snapshot,
+        )
+
+    def _create_pending_input(
+        self,
+        cell: ThreadCell,
+        content: str,
+        *,
+        source: Literal["user_input", "choice_submit", "avatar"],
+        priority: Literal["choice_response", "user_message"],
+        metadata: dict[str, Any],
+    ) -> PendingInputDTO:
+        """创建队列项 DTO。
+
+        sequence 是 cell 内单调递增序号，用于同优先级 FIFO；metadata 会过滤 None，
+        保持 WS payload 精简。
+        """
+        cell.pending_input_sequence += 1
+        now = _now_ms_int()
+        return PendingInputDTO(
+            id=f"pin-{secrets.token_hex(6)}",
+            thread_id=cell.thread_id,
+            source=source,
+            priority=priority,
+            content=content,
+            preview=_pending_input_preview(content),
+            status="queued",
+            created_at_ms=now,
+            updated_at_ms=now,
+            sequence=cell.pending_input_sequence,
+            metadata={key: value for key, value in metadata.items() if value is not None},
+        )
+
+    def _start_pending_input_run(self, cell: ThreadCell, pending: PendingInputDTO) -> None:
+        """把一个 pending input 启动为后台 run_once task。
+
+        输入来自已出队或即时提交的 PendingInputDTO；输出是写入 cell.current_run_task
+        的 asyncio task。task 完成后统一回到 _on_pending_run_done drain 下一项。
+
+        状态边界：启动后的输入离开 pending_inputs 列表，由 current_run_task 表示
+        active run；取消、失败和后续 drain 都通过 done callback 收口。
+        """
+        run_once = getattr(cell.bridge, "run_once", None)
+        if not callable(run_once):
+            raise RuntimeError("bridge does not expose run_once")
+        metadata = dict(pending.metadata)
+        task: asyncio.Task[Any] = asyncio.create_task(
+            run_once(
+                pending.content,
+                reasoning_effort=metadata.get("reasoning_effort"),
+                attachments=metadata.get("attachments"),
+                references=metadata.get("references"),
+            ),
+            name=f"web-run-once-{cell.thread_id}",
+        )
+        cell.current_run_task = task
+
+        def _done_callback(
+            finished: asyncio.Task[Any],
+            *,
+            _cell: ThreadCell = cell,
+            _task: asyncio.Task[Any] = task,
+        ) -> None:
+            self._on_pending_run_done(_cell, _task, finished)
+
+        task.add_done_callback(_done_callback)
+
+    def _on_pending_run_done(
+        self,
+        cell: ThreadCell,
+        task: asyncio.Task[Any],
+        finished: asyncio.Task[Any],
+    ) -> None:
+        """run_once 完成回调入口。
+
+        asyncio done callback 不能直接 await，本函数只负责创建 drain task，并把它纳入
+        ThreadManager 关闭时要等待/取消的后台任务集合。
+        """
+        with suppress(RuntimeError):
+            drain_task = asyncio.create_task(
+                self._handle_pending_run_done(cell, task, finished),
+                name=f"pending-input-drain-{cell.thread_id}",
+            )
+            self._pending_drain_tasks.add(drain_task)
+            drain_task.add_done_callback(self._pending_drain_tasks.discard)
+
+    async def _handle_pending_run_done(
+        self,
+        cell: ThreadCell,
+        task: asyncio.Task[Any],
+        finished: asyncio.Task[Any],
+    ) -> None:
+        """处理 run 完成后的队列 drain。
+
+        normal 和 user_interrupt 会继续启动下一项；failed、evicting、runtime refresh
+        failed 等状态会停止 drain，避免在不可靠 runtime 上继续消费用户输入。
+
+        回滚边界：runtime preset 刷新失败会写入 pending_input_drain_block_reason；
+        该标记清除前，已经排队的用户输入保留在队列里，等待下一次可用 runtime。
+        """
+        reason = "normal"
+        try:
+            result = finished.result()
+            status = getattr(result, "status", None)
+            if status == "cancelled":
+                metadata = getattr(result, "metadata", {}) or {}
+                reason = str(metadata.get("cancel_reason") or "user_interrupt")
+            elif status == "failed":
+                reason = "failed"
+        except asyncio.CancelledError:
+            reason = "user_interrupt"
+        except Exception:
+            logger.exception("pending input run failed for thread=%s", cell.thread_id)
+            reason = "failed"
+
+        should_drain = reason in {"normal", "user_interrupt"}
+        async with cell.pending_input_lock:
+            if cell.current_run_task is not task:
+                return
+            cell.current_run_task = None
+            if cell.status is ThreadCellStatus.EVICTING:
+                should_drain = False
+            if cell.pending_input_drain_block_reason is not None:
+                should_drain = False
+            if not should_drain:
+                return
+            next_input = self._pop_next_pending_input(cell)
+            if next_input is None:
+                return
+            version = cell.pending_input_version
+            self._start_pending_input_run(cell, next_input)
+        await self._broadcast_pending_input_started(cell, next_input, version)
+        await self._broadcast_pending_input_changed(cell, "drained")
+
+    def _pop_next_pending_input(self, cell: ThreadCell) -> PendingInputDTO | None:
+        """从队列头取出下一条输入并递增 snapshot version。
+
+        调用方必须已持有 pending_input_lock；返回值已标记为 starting，表示所有权
+        从队列列表转移到 current_run_task。
+        """
+        ordered = self._ordered_pending_inputs(cell.pending_inputs)
+        if not ordered:
+            return None
+        next_input = ordered[0]
+        cell.pending_inputs = ordered[1:]
+        cell.pending_input_version += 1
+        return next_input.model_copy(update={"status": "starting", "updated_at_ms": _now_ms_int()})
+
+    @staticmethod
+    def _has_active_run(cell: ThreadCell) -> bool:
+        """判断当前 cell 是否已有正在执行的普通 run。"""
+        return cell.current_run_task is not None
+
+    @staticmethod
+    def _ordered_pending_inputs(items: list[PendingInputDTO]) -> list[PendingInputDTO]:
+        """按优先级和 sequence 生成稳定队列顺序。"""
+        priority_rank = {"choice_response": 0, "user_message": 1}
+        return sorted(items, key=lambda item: (priority_rank[item.priority], item.sequence))
+
+    def _pending_input_snapshot_from_cell(self, cell: ThreadCell) -> PendingInputSnapshotFrame:
+        """从 cell 内存状态构造 S2C 队列快照帧。
+
+        这是后端队列对前端的完整投影；items 顺序由 _ordered_pending_inputs 统一生成。
+        """
+        return PendingInputSnapshotFrame(
+            timestamp_ms=_now_ms_int(),
+            thread_id=cell.thread_id,
+            items=self._ordered_pending_inputs(cell.pending_inputs),
+            max_items=MAX_PENDING_INPUTS,
+            active_run_id=None,
+            version=cell.pending_input_version,
+        )
+
+    async def _broadcast_pending_input_changed(
+        self,
+        cell: ThreadCell,
+        reason: Literal["added", "updated", "removed", "reordered", "drained", "cleared"],
+    ) -> None:
+        """广播队列内容变化。
+
+        reason 描述变化类型；payload 携带完整 items 快照，前端以服务端状态覆盖本地状态。
+        """
+        snapshot = self._pending_input_snapshot_from_cell(cell)
+        frame = PendingInputChangedFrame(
+            timestamp_ms=_now_ms_int(),
+            thread_id=cell.thread_id,
+            items=snapshot.items,
+            max_items=snapshot.max_items,
+            reason=reason,
+            active_run_id=snapshot.active_run_id,
+            version=snapshot.version,
+        )
+        await cell.adapter._safe_send_json(frame.model_dump())
+
+    async def _broadcast_pending_input_started(
+        self,
+        cell: ThreadCell,
+        pending: PendingInputDTO,
+        version: int,
+    ) -> None:
+        """广播某条 pending input 已启动。
+
+        started 帧用于让前端清除本地队列项、用最终 content 生成聊天气泡并关联
+        运行态；随后 changed/drained 帧会补齐完整队列快照。
+        """
+        started_pending = pending.model_copy(
+            update={"status": "starting", "updated_at_ms": _now_ms_int()}
+        )
+        frame = PendingInputStartedFrame(
+            timestamp_ms=_now_ms_int(),
+            thread_id=cell.thread_id,
+            pending_input_id=started_pending.id,
+            pending_input=started_pending,
+            run_id=str(started_pending.metadata.get("avatar_run_id") or ""),
+            version=version,
+        )
+        await cell.adapter._safe_send_json(frame.model_dump())
 
     async def rename_thread(self, thread_id: str, new_name: str) -> ThreadMetadata:
         """重命名 thread；返回更新后的 metadata。
@@ -682,6 +1459,9 @@ class ThreadManager:
 
         当前 run 已经开始时不热切换 provider；metadata 先落盘，下一次发送前
         ``ensure_cell_runtime_preset_current`` 会重建 runtime。
+
+        回滚边界：runtime 重建失败时恢复旧 metadata，并解除本次失败留下的 drain
+        阻塞标记，让调用方看到提交失败后的可重试状态。
         """
         normalized_preset_id = preset_id.strip()
         if not normalized_preset_id:
@@ -719,19 +1499,28 @@ class ThreadManager:
                 rollback_cell = self._cells.get(thread_id)
                 if rollback_cell is not None:
                     rollback_cell.metadata = meta
+                    if rollback_cell.pending_input_drain_block_reason == "runtime_refresh_failed":
+                        rollback_cell.pending_input_drain_block_reason = None
             raise ThreadPresetRefreshError(
                 f"failed to refresh runtime for preset_id: {normalized_preset_id}"
             )
         return updated
 
     async def ensure_cell_runtime_preset_current(self, thread_id: str) -> bool:
-        """让已启动 cell 的 runtime preset 与 metadata 保持一致。"""
+        """让已启动 cell 的 runtime preset 与 metadata 保持一致。
+
+        返回 True 表示当前提交路径可以继续；返回 False 表示 runtime 重建失败，
+        pending_input_drain_block_reason 会写为 ``runtime_refresh_failed``，done callback
+        停止消费队列，等待后续 preset 回滚或刷新成功。
+        """
         async with self._lock:
             cell = self._cells.get(thread_id)
         if cell is None:
             return True
         async with cell.preset_refresh_lock:
             if cell.runtime_preset_id == cell.metadata.preset_id:
+                if cell.pending_input_drain_block_reason == "runtime_refresh_failed":
+                    cell.pending_input_drain_block_reason = None
                 return True
             run_task = cell.current_run_task
             if run_task is not None and not run_task.done():
@@ -751,10 +1540,15 @@ class ThreadManager:
                     cell.metadata.id,
                     cell.metadata.preset_id,
                 )
+                # refresh 失败时，队列保留在内存中；drain 停止闸门阻止旧 runtime
+                # 继续消费这些输入，REST 回滚成功后再清除该标记。
+                cell.pending_input_drain_block_reason = "runtime_refresh_failed"
                 return False
             cell.runtime = runtime
             cell.bridge = bridge
             cell.runtime_preset_id = cell.metadata.preset_id
+            if cell.pending_input_drain_block_reason == "runtime_refresh_failed":
+                cell.pending_input_drain_block_reason = None
             with suppress(Exception):
                 await old_runtime.aclose()
             return True
@@ -785,7 +1579,12 @@ class ThreadManager:
         async with self._lock:
             cell_exists = thread_id in self._cells
         if cell_exists:
-            await self.evict_cell(thread_id, reason="manual_stop", notify_ws=True)
+            await self.evict_cell(
+                thread_id,
+                reason="manual_stop",
+                notify_ws=True,
+                drain_block_reason="deleted",
+            )
 
         # 删 metadata 目录
         await asyncio.to_thread(
@@ -873,10 +1672,82 @@ class ThreadManager:
             # 5. 真正的 build
             cell = await self._build_cell(meta)
 
+            # agent-tree-v0.1（P0-2 通电修复）：boot 完成即默认装配 root_agent +
+            # 启动 agent_loop + 装配 AgentManager（spawn 主路径门户）。这让 agent_loop
+            # 与 interrupt_agent_tree（tree-aware 副路径）默认通电。WS submit_user_input
+            # 仍走旧 pending_inputs 路径（mailbox 切换延后，见 dev-report 标注）；
+            # agent_loop 此时只 idle 等待（无 user_message 入队），不干扰旧路径。
+            try:
+                self._init_root_agent_for_cell(cell)
+            except Exception:
+                logger.warning(
+                    "init_root_agent failed at boot for thread=%s; "
+                    "agent_loop/spawn 副路径不通电，旧 pending_inputs 路径仍可用",
+                    thread_id,
+                    exc_info=True,
+                )
+
             # 6. 注册到 dict
             async with self._lock:
                 self._cells[thread_id] = cell
             return cell
+
+    async def build_ephemeral_session_cell(
+        self,
+        *,
+        session_id: str,
+        preset_id: str,
+    ) -> Any:
+        """为非 thread metadata session 临时装配 runtime cell。
+
+        用于 cron run history 人工对话。该入口复用同一套 runtime factory，
+        但不会读取或写入 `.kongming/web/threads/<id>/metadata.json`，也不会
+        注册到 `_cells`，生命周期由调用方负责关闭。
+        """
+        fanout = WebSocketFanout()
+        adapter = WebHostAdapter(
+            ws=fanout,
+        )
+        sinks: list[Any] = [WSEventSink(fanout, thread_id=session_id)]
+        runtime, bridge = await self._runtime_factory(
+            session_id,
+            preset_id,
+            adapter,
+            sinks,
+        )
+        return _EphemeralSessionCell(
+            session_id=session_id,
+            preset_id=preset_id,
+            runtime=runtime,
+            bridge=bridge,
+            adapter=adapter,
+            event_sinks=sinks,
+        )
+
+    async def close_ephemeral_session_cell(
+        self,
+        cell: Any,
+        *,
+        reason: str = "session_close",
+    ) -> None:
+        """关闭非 metadata 临时 cell，并取消归属该 session 的待审批。"""
+        thread_id = getattr(cell, "thread_id", None)
+        if isinstance(thread_id, str) and thread_id:
+            self._cancel_pending_approvals_for_thread(thread_id, reason=reason)
+
+        adapter = getattr(cell, "adapter", None)
+        if adapter is not None:
+            with suppress(Exception):
+                await adapter.close()
+
+        runtime = getattr(cell, "runtime", None)
+        if runtime is not None:
+            grant_store = getattr(runtime, "grant_store", None)
+            if grant_store is not None and isinstance(thread_id, str) and thread_id:
+                with suppress(Exception):
+                    grant_store.clear_session(thread_id)
+            with suppress(Exception):
+                await runtime.aclose()
 
     # boot_locks 字典：thread_id → asyncio.Lock（只在 boot_or_attach 路径用）
     # 用 lazy init pattern：__init__ 时声明，第一次访问时 setdefault 创建
@@ -981,10 +1852,6 @@ class ThreadManager:
         fanout = WebSocketFanout()
         adapter = WebHostAdapter(
             ws=fanout,
-            pending_approval_timeout_seconds=float(self._cfg.web.pending_approval_timeout_seconds),
-            # 阶段 1 (smart-approval-manager-v0.5)：传 thread_id 让 close() 能调
-            # ApprovalManager.cancel_by_thread 清 manager 路径的 pending（R10 防护）。
-            thread_id=meta.id,
         )
         ws_sink = WSEventSink(fanout, thread_id=meta.id)
         # usage-token-v2-bigbang: UsagePersistSink 已删除——v2 manager 是无状态门面，
@@ -1012,6 +1879,255 @@ class ThreadManager:
         return cell
 
     # ------------------------------------------------------------------
+    # agent-tree-v0.1（task-4）：mailbox + agent_loop opt-in 接入（并存）
+    # ------------------------------------------------------------------
+    #
+    # 本节是 task-4 的「WS handler 接入 mailbox」 opt-in 副路径，与现有
+    # pending_inputs / current_run_task 生产路径**并存**（README「优先并存降低风险」）。
+    # 默认 _build_cell 不构造 root_agent（保持旧测试不破坏）；显式调
+    # ``init_root_agent`` 才装配 AgentCell + 启动 agent_loop，让新机制可独立验证。
+    # task-5 多 agent 形态时把生产 submit_user_input / interrupt 切到本副路径。
+    #
+    # 关键约束：
+    # - agent_loop 永不被单独 cancel（只随树销毁），见 application/agents/loop.py。
+    # - run_fn 封装 bridge.run_once（复用 session 管理 + event_sinks 注入 + 结果写回）。
+    # - interrupt 副路径用 registry.cancel_subtree + bump_epoch + purge 旧世代内部 mail。
+
+    async def init_root_agent(
+        self,
+        thread_id: str,
+        *,
+        agent_id: str | None = None,
+        skill_names: tuple[str, ...] = (),
+    ) -> AgentCell:
+        """为已 boot 的 cell 装配主 agent（root AgentCell）并启动 agent_loop。
+
+        opt-in 入口：默认 _build_cell 不构造 root_agent；调用本方法才装配
+        AgentCell（从 cell.runtime.agent_spec 取 spec）+ 启动常驻 agent_loop 协程。
+        返回装配后的 root AgentCell。幂等：已装配则直接返回现有 root_agent。
+
+        Args:
+            thread_id: 目标 thread。
+            agent_id: 可选 agent_id；None 自动生成。
+            skill_names: 启用技能名元组。
+
+        Returns:
+            装配后的 root AgentCell。
+
+        Raises:
+            KeyError: thread 未 boot。
+        """
+        # 先确保 cell 已 boot（init_root_agent 是 opt-in 入口，允许在任意时点调用）。
+        cell = await self.boot_or_attach(thread_id)
+        if cell.root_agent is not None:
+            return cell.root_agent
+        return self._init_root_agent_for_cell(
+            cell,
+            skill_names=skill_names,
+            agent_id=agent_id,
+        )
+
+    def _init_root_agent_for_cell(
+        self,
+        cell: ThreadCell,
+        *,
+        skill_names: tuple[str, ...] = (),
+        agent_id: str | None = None,
+    ) -> AgentCell:
+        """为已 boot 的 cell 装配 root AgentCell + 启动 agent_loop + 装配 AgentManager。
+
+        ``init_root_agent``（公共 opt-in 入口）与 ``boot_or_attach`` 默认通电路径
+        共用本核心逻辑，避免 boot→init 递归（init_root_agent 内部调 boot_or_attach）。
+        幂等：cell.root_agent 已存在则直接返回。
+        """
+        if cell.root_agent is not None:
+            return cell.root_agent
+
+        thread_id = cell.thread_id
+        runtime = cell.runtime
+        spec = getattr(runtime, "agent_spec", None)
+        if spec is None:  # pragma: no cover - NativeRuntime 恒有 agent_spec
+            raise RuntimeError("runtime has no agent_spec")
+
+        root = make_root_agent_cell(
+            spec=spec,
+            session_id=thread_id,
+            skill_names=skill_names,
+            agent_id=agent_id,
+        )
+        # boot 路径已在 boot_lock 内串行化（boot_or_attach 持 boot_lock），公共
+        # init_root_agent 走 boot_or_attach→本方法，同样受 boot_lock 保护，故可直接
+        # 同步设 root_agent（无并发双 init 窗口）。
+        cell.root_agent = root
+        live = self._cells.get(thread_id)
+        if live is not None:
+            live.root_agent = root
+
+        # 启动常驻 agent_loop（run_fn 封装 bridge.run_once）。agent_loop 注入：
+        # - current_epoch_getter: 实时读 cell.epoch（cancel_subtree bump 后立即可见）
+        # - deliver_sink: RootAgentDeliverSink（主 agent，Event 已由 bridge 推过）
+        loop_task = asyncio.create_task(
+            _run_agent_loop_for_cell(cell, root),
+            name=f"agent-loop-{thread_id}",
+        )
+        self._agent_loop_tasks.add(loop_task)
+        loop_task.add_done_callback(self._agent_loop_tasks.discard)
+
+        # agent-tree-v0.1（P0-1 装配修复）：装配 per-cell AgentManager（spawn 主路径门户）
+        # 并按 session 绑定到共享 spawn_handle，让 spawn_subagent 工具通电。只在
+        # spawn_handle 已注入（生产 web 路径）时装配；CLI / 测试无 handle 则跳过
+        # （root agent + agent_loop 仍通电，仅 spawn 副路径不通电）。
+        if self._spawn_handle is not None:
+            self._wire_agent_manager(cell, root)
+        return root
+
+    def _wire_agent_manager(self, cell: ThreadCell, root: AgentCell) -> AgentManager:
+        """装配 per-cell AgentManager 并按 session 绑定 spawn_handle（P0-1）。
+
+        构造 SpawnContext（run_fn_builder 封装 runtime.run 透传子 agent_id；
+        deliver_sink_builder 投父 mailbox；epoch_getter 读 cell.epoch；registry 取
+        cell.registry）+ approval_canceller（从 ApprovalManager.cancel_by_agent 取），
+        实例化 AgentManager，把 root AgentCell 登记进 manager 注册表（spawn 用
+        parent_cell.agent_id 查父），最后按 session_id 绑定到共享 spawn_handle。
+        """
+        runtime = cell.runtime
+
+        def run_fn_builder(child: AgentCell) -> Any:
+            """子 agent 的 run_fn 闭包：封装 runtime.run，透传子 agent_id。"""
+
+            async def _run_fn(seed: str, **kw: Any) -> Any:
+                return await runtime.run(seed, session_id=child.session_id, agent_id=child.agent_id)
+
+            return _run_fn
+
+        def deliver_sink_builder(
+            child: AgentCell, task_id: str, parent_mailbox: Any
+        ) -> ChildDeliverSink:
+            return ChildDeliverSink(
+                child=child,
+                task_id=task_id,
+                parent_mailbox=parent_mailbox,
+                parent_agent_id=child.parent_id or root.agent_id,
+            )
+
+        def epoch_getter() -> int:
+            return cell.epoch
+
+        ctx = SpawnContext(
+            run_fn_builder=run_fn_builder,
+            deliver_sink_builder=deliver_sink_builder,
+            current_epoch_getter=epoch_getter,
+            registry=cell.registry,
+        )
+        # approval_canceller：从 ApprovalManager.cancel_by_agent 取（按 agent_id 批量
+        # 取消子树 pending future）。无 approval_manager 时 None（cancel_subtree 跳过）。
+        approval_canceller: Any = None
+        if self._approval_manager is not None:
+            cancel_by_agent = getattr(self._approval_manager, "cancel_by_agent", None)
+            if callable(cancel_by_agent):
+                approval_canceller = cancel_by_agent
+
+        manager = AgentManager(ctx, approval_canceller=approval_canceller)
+        # 把 root AgentCell 登记进 manager 注册表：spawn_subagent 工具从
+        # ToolContext.agent_id（=root.agent_id，P1-2 已透传）查父 cell。
+        manager._cells[root.agent_id] = root
+        self._spawn_handle.bind(manager, session_id=cell.thread_id)
+        logger.debug(
+            "wired AgentManager for thread=%s root_agent=%s",
+            cell.thread_id,
+            root.agent_id,
+        )
+        return manager
+
+    async def enqueue_user_mail(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        request_id: str | None = None,
+    ) -> AgentCell:
+        """把用户消息投进 root_agent mailbox（opt-in 副路径）。
+
+        与生产 submit_user_input 并存：本方法不经 pending_inputs 队列，直接
+        ``root_agent.mailbox.put(Mail(kind=user_message,...))``，由 agent_loop 消费。
+        user_message 的 epoch=0（不过门卫）。需先 init_root_agent。
+
+        Args:
+            thread_id: 目标 thread。
+            text: 用户文本。
+            request_id: 可选请求 id（写入 payload metadata）。
+
+        Returns:
+            root AgentCell（便于断言 state）。
+        """
+        normalized = text.strip()
+        if not normalized:
+            raise ValueError("text must not be empty")
+        async with self._lock:
+            cell = self._cells.get(thread_id)
+        if cell is None or cell.root_agent is None:
+            raise RuntimeError(
+                f"root agent not initialized for thread={thread_id}; call init_root_agent first"
+            )
+        root = cell.root_agent
+        metadata: dict[str, Any] = {}
+        if request_id is not None:
+            metadata["request_id"] = request_id
+        mail = Mail(
+            kind="user_message",
+            sender="user",
+            recipient_agent_id=root.agent_id,
+            task_id="",
+            epoch=0,
+            payload=Message.user(normalized, metadata=metadata),
+        )
+        await root.mailbox.put(mail)
+        cell.touch()
+        return root
+
+    async def interrupt_agent_tree(
+        self,
+        thread_id: str,
+        *,
+        reason: str = "user_interrupt",
+    ) -> bool:
+        """opt-in interrupt 副路径：cancel_subtree + bump_epoch + purge。
+
+        与生产 interrupt（cancel current_run_task）并存。语义：打断只阻止未来——
+        cancel_subtree 砍 run_task（约束16 收口）+ bump_epoch 让旧世代内部投递在
+        消费侧门卫被丢弃 + purge mailbox 旧世代内部 mail（段1 兜底）。已提交 session
+        一律保留（不回滚过去）。user_message 永不过期（purge 不动 user mail）。
+
+        Returns:
+            True=已执行 cancel（root agent 已装配且有在途 run）；False=无需打断
+            （root agent 未装配 / 无在途 run）。
+        """
+        async with self._lock:
+            cell = self._cells.get(thread_id)
+        if cell is None or cell.root_agent is None:
+            return False
+        root = cell.root_agent
+        if root.run_task is None:
+            # 无在途 run，无需 cancel（但仍 bump 以丢弃队列内旧世代内部 mail）。
+            new_epoch = cell.bump_epoch()
+            _purge_cell_stale_mails(root, new_epoch)
+            return False
+
+        # 1. bump epoch（让消费侧门卫丢弃旧世代内部投递）。
+        new_epoch = cell.bump_epoch()
+        # 2. cancel_subtree 砍 run_task（registry 后序 + 关门 + await 收口）。
+        await cell.registry.cancel_subtree(root.agent_id)
+        # 3. purge 队列内旧世代内部 mail（段1 兜底，user_message 保留）。
+        _purge_cell_stale_mails(root, new_epoch)
+        logger.info(
+            "interrupt_agent_tree thread=%s reason=%s new_epoch=%d",
+            thread_id,
+            reason,
+            new_epoch,
+        )
+        return True
+
+    # ------------------------------------------------------------------
     # Eviction
     # ------------------------------------------------------------------
 
@@ -1022,6 +2138,7 @@ class ThreadManager:
         message: str | None = None,
         *,
         notify_ws: bool = True,
+        drain_block_reason: str | None = None,
     ) -> None:
         """主动回收一个 cell。
 
@@ -1030,18 +2147,96 @@ class ThreadManager:
         2. 取 cell 出 dict（防止其他路径再用）
         3. 推 ``CellEvictedFrame``（``notify_ws=False`` 时跳过；shutdown 路径用）
         4. cancel ``current_run_task``（带 5s 超时；超时直接 cancel）
-        5. 关 adapter（cancel pending approvals）
+        5. 取消 ApprovalManager pending，再关 adapter
         6. 关 runtime（``runtime.aclose()`` 释放 httpx pool）
 
         幂等：thread_id 不在 dict 时直接返回；不抛。
+
+        队列边界：evict 会写入 pending_input_drain_block_reason，正在运行的 task
+        即使随后触发 done callback，也会看到该闸门并停止 drain。
         """
-        async with self._lock:
-            cell = self._cells.pop(thread_id, None)
-            self._boot_locks.pop(thread_id, None)
+        cell = await self._pop_cell_for_eviction(
+            thread_id,
+            reason=reason,
+            drain_block_reason=drain_block_reason,
+        )
         if cell is None:
             return
 
-        cell.status = "evicting"
+        await self._finish_evicted_cell(
+            cell,
+            reason=reason,
+            message=message,
+            notify_ws=notify_ws,
+        )
+
+    async def _pop_cell_for_eviction(
+        self,
+        thread_id: str,
+        *,
+        reason: EvictReason,
+        drain_block_reason: str | None = None,
+    ) -> ThreadCell | None:
+        """从活跃表移出 cell，并写入统一的队列 drain 阻断状态。"""
+        async with self._lock:
+            cell = self._cells.pop(thread_id, None)
+            self._boot_locks.pop(thread_id, None)
+        if cell is not None:
+            self._mark_cell_evicting(
+                cell,
+                reason=reason,
+                drain_block_reason=drain_block_reason,
+            )
+        return cell
+
+    @staticmethod
+    def _set_cell_status(cell: ThreadCell, status: ThreadCellStatus) -> None:
+        """cell.status 的唯一写入入口。
+
+        实际只有 ``EVICTING`` 经此写入——它是 task 之外的独立生命周期事实；
+        ``RUNNING`` / ``AWAITING_APPROVAL`` / ``IDLE`` 一律由 :meth:`_effective_status`
+        现算，不再落字段。集中写入便于将来加迁移校验 / 日志而不散点。
+        """
+        cell.status = status
+
+    def _effective_status(self, cell: ThreadCell) -> ThreadCellStatus:
+        """cell 当前状态的唯一现算入口。
+
+        优先级：``EVICTING``（粘性，唯一落字段）> ``AWAITING_APPROVAL``（看 pending
+        approval）> ``RUNNING``（看 ``current_run_task``）> ``IDLE``。投影与 evict
+        判定都只调本方法，保证"是否在跑/待审批"与事实真源永不漂移。
+        """
+        if cell.status is ThreadCellStatus.EVICTING:
+            return ThreadCellStatus.EVICTING
+        if self._has_pending_approval(cell.thread_id):
+            return ThreadCellStatus.AWAITING_APPROVAL
+        if cell.current_run_task is not None:
+            return ThreadCellStatus.RUNNING
+        return ThreadCellStatus.IDLE
+
+    def _mark_cell_evicting(
+        self,
+        cell: ThreadCell,
+        *,
+        reason: EvictReason,
+        drain_block_reason: str | None = None,
+    ) -> None:
+        """统一写入 evicting 状态和 pending input 停止原因。"""
+        self._set_cell_status(cell, ThreadCellStatus.EVICTING)
+        cell.pending_input_drain_block_reason = drain_block_reason or (
+            "shutdown" if reason == "server_shutdown" else "evicted"
+        )
+
+    async def _finish_evicted_cell(
+        self,
+        cell: ThreadCell,
+        *,
+        reason: EvictReason,
+        message: str | None = None,
+        notify_ws: bool = True,
+    ) -> None:
+        """关闭已从活跃表移出的 cell。"""
+        thread_id = cell.thread_id
 
         # 1. 推 cell.evicted 帧（best-effort）
         if notify_ws:
@@ -1069,7 +2264,23 @@ class ThreadManager:
             with suppress(asyncio.CancelledError, Exception):
                 await asyncio.wait_for(run_task, timeout=5.0)
 
-        # 3. 关 adapter（resolve pending approvals 为 False）
+        # 2b. agent-tree-v0.1（task-4）：cancel 该 cell 的 agent_loop 协程（树销毁）。
+        # agent_loop 永不被单独 cancel——cell evict 是树销毁场景，可安全 cancel。
+        # 顺序：先 cancel root.run_task（registry.cancel_subtree 后序砍 run_task，
+        # 避免取消 agent_loop 时 run_task 成孤儿泄漏挂起），再 cancel agent_loop 自身。
+        # 按任务名匹配（name=f"agent-loop-{thread_id}"）；无 root_agent 的 cell 跳过。
+        if cell.root_agent is not None:
+            with suppress(Exception):
+                await cell.registry.cancel_subtree(cell.root_agent.agent_id)
+        for loop_task in [
+            t for t in list(self._agent_loop_tasks) if t.get_name() == f"agent-loop-{thread_id}"
+        ]:
+            loop_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(loop_task, timeout=2.0)
+
+        # 3. 取消 manager 侧待审批，并关闭 adapter
+        self._cancel_pending_approvals_for_thread(thread_id)
         with suppress(Exception):
             await cell.adapter.close()
 
@@ -1085,15 +2296,58 @@ class ThreadManager:
         with suppress(Exception):
             await cell.runtime.aclose()
 
+    def _is_idle_evictable_cell(
+        self,
+        cell: ThreadCell,
+        *,
+        now: float,
+        threshold: float,
+    ) -> bool:
+        """判断 cell 当前是否没有任何 Manager 持有的工作。"""
+        if (now - cell.last_active_at) <= threshold:
+            return False
+        # 现算入口已折叠 evicting / pending approval / active run 三个事实，
+        # 非 IDLE 即说明还有 Manager 持有的运行态工作，不可回收。
+        if self._effective_status(cell) is not ThreadCellStatus.IDLE:
+            return False
+        if cell.pending_inputs:
+            return False
+        return cell.pending_input_drain_block_reason is None
+
+    async def _evict_cell_if_idle(
+        self,
+        thread_id: str,
+        *,
+        now: float,
+        threshold: float,
+    ) -> bool:
+        """最终复核 idle 条件，通过后移出 cell 并执行回收。"""
+        async with self._lock:
+            cell = self._cells.get(thread_id)
+        if cell is None:
+            return False
+
+        async with cell.pending_input_lock:
+            if not self._is_idle_evictable_cell(cell, now=now, threshold=threshold):
+                return False
+            async with self._lock:
+                if self._cells.get(thread_id) is not cell:
+                    return False
+                self._cells.pop(thread_id, None)
+                self._boot_locks.pop(thread_id, None)
+            self._mark_cell_evicting(cell, reason="idle")
+
+        await self._finish_evicted_cell(cell, reason="idle", notify_ws=True)
+        return True
+
     async def _idle_eviction_loop(self) -> None:
         """后台 task：周期扫描 cell 列表，命中空闲阈值的执行 evict。
 
         策略：
         - 每 ``cfg.web.idle_check_interval_seconds`` 秒扫一次
         - 命中条件：``now - cell.last_active_at > cfg.web.idle_timeout_seconds``
-          且 ``not cell.has_pending_approvals``（有待审批不 evict，避免用户
-          回来时发现 thread 没了）
-        - 命中即 ``evict_cell(reason="idle", notify_ws=True)``
+          且该 thread 没有待审批、active run、pending input 或 drain 阻断状态
+        - 命中即走 ``_evict_cell_if_idle`` 做最终复核和回收
         """
         interval = max(1, int(self._cfg.web.idle_check_interval_seconds))
         threshold = float(self._cfg.web.idle_timeout_seconds)
@@ -1110,11 +2364,14 @@ class ThreadManager:
                         cell.thread_id
                         for cell in self._cells.values()
                         if (now - cell.last_active_at) > threshold
-                        and not cell.has_pending_approvals
                     ]
                 for tid in candidates:
                     with suppress(Exception):
-                        await self.evict_cell(tid, reason="idle", notify_ws=True)
+                        await self._evict_cell_if_idle(
+                            tid,
+                            now=now,
+                            threshold=threshold,
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1124,13 +2381,6 @@ class ThreadManager:
     # ------------------------------------------------------------------
     # 查询
     # ------------------------------------------------------------------
-
-    def get_thread(self, thread_id: str) -> ThreadMetadata | None:
-        """按 id 查询单个 thread metadata；优先返回活跃 cell 的内存版本。"""
-        cell = self._cells.get(thread_id)
-        if cell is not None:
-            return cell.metadata
-        return read_thread_metadata(self._home, thread_id)
 
     def list_threads(self) -> list[ThreadMetadata]:
         """REST ``GET /api/threads`` 数据源；含未 boot 的（从扫盘 + dict 联合算）。
@@ -1154,10 +2404,17 @@ class ThreadManager:
         """REST ``GET /api/manage/cells`` 数据源；仅活的 cell。"""
         out: list[CellSummaryDTO] = []
         for cell in self._cells.values():
-            # status 不应出现 evicting（evicting 立即从 dict pop）
-            status = (
-                cell.status if cell.status in ("idle", "running", "awaiting_approval") else "idle"
-            )
+            pending_approval_count = self._pending_approval_count(cell.thread_id)
+            effective = self._effective_status(cell)
+            # 现算结果映射到 wire DTO 允许的三态；evicting cell 已立即从 dict
+            # pop，正常不会出现在这里，防御性兜底成 idle。
+            status: Literal["idle", "running", "awaiting_approval"]
+            if effective is ThreadCellStatus.RUNNING:
+                status = "running"
+            elif effective is ThreadCellStatus.AWAITING_APPROVAL:
+                status = "awaiting_approval"
+            else:
+                status = "idle"
             out.append(
                 CellSummaryDTO(
                     thread_id=cell.thread_id,
@@ -1166,7 +2423,7 @@ class ThreadManager:
                     created_at=cell.metadata.created_at,
                     last_active_at=cell.last_active_at,
                     current_turn=None,  # v0.1.5 不暴露 current_turn 精确值
-                    pending_approval_count=cell.adapter.pending_approval_count,
+                    pending_approval_count=pending_approval_count,
                     status=status,
                 )
             )
@@ -1310,99 +2567,53 @@ class ThreadManager:
         return updated
 
     # ------------------------------------------------------------------
-    # 审批
-    # ------------------------------------------------------------------
-
-    def resolve_approval(self, thread_id: str, call_id: str, action: ApprovalAction | str) -> None:
-        """WS 收到 ``approval.ack`` 时由路由层调用（v0.1.6 三态）。
-
-        thread_id 不存在 / call_id 不存在均静默丢 —— 重放 / 旧请求都吞掉。
-
-        ``action`` 接受 :class:`ApprovalAction` 枚举或字符串字面值
-        （``"accept_once"`` / ``"accept_for_session"`` / ``"reject"``）；
-        路由层 ``ws.py`` 是 app shell 层不允许 import ``core.contracts``，
-        统一在 thread_manager 这一装配层做字符串 → 枚举转换。非法字符串降级
-        为 REJECT（fail-safe）+ 日志告警。
-
-        ``ACCEPT_FOR_SESSION`` 会通过下游 ``InteractiveApproval`` →
-        ``SafetyGatedApproval`` 触发 GrantStore 写入，本 thread 后续同
-        capability 自动 silent_allow。
-        """
-        cell = self._cells.get(thread_id)
-        if cell is None:
-            return
-        if isinstance(action, str):
-            try:
-                action = ApprovalAction(action)
-            except ValueError:
-                logger.warning(
-                    "approval.ack with invalid action=%r; downgrading to REJECT "
-                    "(thread_id=%s call_id=%s)",
-                    action,
-                    thread_id,
-                    call_id,
-                )
-                action = ApprovalAction.REJECT
-        cell.adapter.resolve_approval(call_id, action)
-        cell.touch()
-
-    # ------------------------------------------------------------------
     # Cron 定向投递（v0.4）
     # ------------------------------------------------------------------
 
-    async def append_cron_message(self, thread_id: str, text: str) -> bool:
-        """Append a cron delivery message to an existing thread's session.
+    async def append_cron_message(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        task_id: str,
+        run_id: str,
+        session_id: str,
+        task_name: str = "",
+    ) -> bool:
+        """Broadcast a cron delivery message to an existing thread's websocket fanout.
 
         v0.4 cron-thread-preset：``ThreadTargetSink`` 调此方法把 cron 结果
-        追加到目标 thread 的会话历史里，并通过 WS fanout 通知前端。
+        投递到目标 thread 的实时 WS fanout。cron runner 已经把本次执行写入
+        ``session_id`` 对应的独立 run session；这里只负责实时通知前端，
+        避免依赖 Web cell runtime 的私有 session cache。
 
         策略：
-        - cell 未 boot（idle evicted / 从未启动）→ 返回 False（v0.4 不重建
-          session；后续可考虑 lazy boot 或 enqueue）
-        - cell 已 boot 但 session 不存在（理论不应该；防御性兜底）→ False
-        - 追加成功 → 通知 WS → True
+        - cell 未 boot（idle evicted / 从未启动）→ 返回 False
+        - cell 已 boot → 发送 ``cron.message.appended`` → True
 
         Returns:
-            True if message was appended successfully, False otherwise.
+            True if the target thread cell exists, False otherwise.
         """
         async with self._lock:
             cell = self._cells.get(thread_id)
         if cell is None:
             return False
 
-        # 从 runtime._sessions 获取该 thread 的 session 实例
-        # NativeRuntime._sessions 是 private attr，此处为内部集成跨层访问
-        sessions: dict[str, Any] | None = getattr(cell.runtime, "_sessions", None)
-        if sessions is None:
-            return False
-        session = sessions.get(thread_id)
-        if session is None:
-            return False
-
-        # 追加 assistant 消息
-        msg = Message(role="assistant", content=text)
-        try:
-            await session.append(msg)
-        except Exception as exc:
-            logger.warning(
-                "append_cron_message(%s): session.append failed: %s",
-                thread_id,
-                exc,
-            )
-            return False
-
         # 通知 WS 前端（best-effort）
         try:
             fanout = getattr(cell.adapter, "_ws", None)
             if fanout is not None and hasattr(fanout, "send_json"):
+                from hosts.web.app_support.cron_delivery import make_cron_message_frame
+
                 await fanout.send_json(
-                    {
-                        # protocol-frame-type-unify-v0.2：wire 协议判别字段
-                        # 从 ``kind`` 切到 ``frame_type``。
-                        "frame_type": "cron.message.appended",
-                        "thread_id": thread_id,
-                        "content": text,
-                    }
+                    make_cron_message_frame(
+                        thread_id=thread_id,
+                        task_id=task_id,
+                        run_id=run_id,
+                        session_id=session_id,
+                        content=text,
+                        task_name=task_name,
+                    )
                 )
         except Exception as exc:
             log_network_exception(
