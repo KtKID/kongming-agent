@@ -20,10 +20,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import time
-from collections.abc import Awaitable, Callable, Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
 from typing import Any
 
 from core.agent_spec import AgentSpec
@@ -58,7 +58,24 @@ from core.message import Message, ToolCall
 from core.result import Result
 from core.run_state import RunState
 
-logger = logging.getLogger(__name__)
+_RUN_EVENT_SINKS: ContextVar[tuple[EventSink, ...]] = ContextVar(
+    "_RUN_EVENT_SINKS",
+    default=(),
+)
+"""当前 asyncio task 绑定的单次 run 临时 EventSink 列表。"""
+
+_RUN_AGENT_ID: ContextVar[str] = ContextVar(
+    "_RUN_AGENT_ID",
+    default="",
+)
+"""当前 asyncio task 绑定的单次 run 的 agent 归属（agent-tree-v0.1 模块 G）。
+
+在 :meth:`Runner._run_with_seed` 入口按 run 参数 ``agent_id`` 设置，
+:meth:`Runner._emit` fan-out 前读取并注入到每条 Event 的 ``agent_id`` 坐标
+字段（用 :func:`dataclasses.replace`，因为 Event 是 frozen dataclass）。
+这样 runner 内 20+ emit 点无需逐处透传 ``agent_id``，统一在 ``_emit`` 收口。
+task_id / conversation_id 暂留空字符串，留待 task-3/4 填充。
+"""
 
 
 @dataclass(frozen=True)
@@ -103,6 +120,7 @@ class Runner:
         instruction_origins: Sequence[str] | None = None,
         stream_enabled: bool = False,
         suppress_content_after_tool_call: bool = True,
+        tool_context_metadata: Mapping[str, Any] | None = None,
     ) -> None:
         self._event_sinks: list[EventSink] = list(event_sinks or [])
         self._lifecycle_hooks: list[LifecycleHook] = list(lifecycle_hooks or [])
@@ -123,6 +141,7 @@ class Runner:
         # 工具调用前打印夹带的乱文本）。仅影响事件 emit；message.done 中的
         # content 不受影响（runner 只在事件层做屏蔽，session 仍记录完整 message）。
         self._suppress_content_after_tool_call: bool = suppress_content_after_tool_call
+        self._tool_context_metadata: dict[str, Any] = dict(tool_context_metadata or {})
 
     # ------------------------------------------------------------------
     # 公共入口
@@ -141,7 +160,15 @@ class Runner:
         run_id: str | None = None,
         enabled_tools: Sequence[Tool] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        references: list[dict[str, Any]] | None = None,
         lifecycle_hooks: Sequence[LifecycleHook] | None = None,
+        event_sinks: Sequence[EventSink] | None = None,
+        tool_context_metadata: Mapping[str, Any] | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        timeout_seconds: float | None = None,
+        llm_request_metadata: Mapping[str, Any] | None = None,
+        agent_id: str = "",
     ) -> Result:
         """执行一次完整 run。
 
@@ -162,7 +189,19 @@ class Runner:
                 的 ``metadata["attachments"]``，供 InputAssembler / provider
                 组装多模态输入。CLI 路径默认 None，不影响纯文本对话。
                 详见 ``dev-pipeline/tasks/claude-image-paste-e2e/README.md`` §1 / §4。
+            references: 用户输入 conversation reference 列表。非 None 时写到首条
+                user :class:`Message` 的 ``metadata["conversation_references"]``，
+                供 InputAssembler 注入本轮显式引用上下文。
             lifecycle_hooks: 本次 run 的临时 lifecycle hook，只作用于当前 run。
+            event_sinks: 本次 run 的临时 EventSink，只接收当前 run 发出的事件。
+            max_tokens / temperature / timeout_seconds: 本次 run 的请求级模型参数，
+                写入 LLMRequest 并覆盖 provider 配置默认值。
+            llm_request_metadata: 本次 run 的 provider 元数据，供适配层读取字段映射等
+                provider 级参数。
+            agent_id: 本次 run 的 agent 归属（agent-tree-v0.1 模块 G）。默认 ``""``
+                兼容现有调用；runner 将其写入 :attr:`RunState.agent_id`，各 Event
+                emit 点的坐标字段 ``agent_id`` 和 ToolContext ``agent_id`` 均从此
+                读取。单 agent 场景可由调用方传入固定值（如 ``"main"``）。
 
         Returns:
             :class:`Result`：运行结束的统一结果。
@@ -192,7 +231,12 @@ class Runner:
 
         async def seed_messages(state: RunState) -> None:
             await self._seed_messages(
-                session, agent_spec, user_input, state, attachments=attachments
+                session,
+                agent_spec,
+                user_input,
+                state,
+                attachments=attachments,
+                references=references,
             )
 
         return await self._run_with_seed(
@@ -205,7 +249,14 @@ class Runner:
             effective_max_turns=effective_max_turns,
             enabled_tools=enabled_tools,
             effective_lifecycle_hooks=effective_lifecycle_hooks,
+            event_sinks=event_sinks,
+            tool_context_metadata=tool_context_metadata,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout_seconds=timeout_seconds,
+            llm_request_metadata=llm_request_metadata,
             seed_messages=seed_messages,
+            agent_id=agent_id,
         )
 
     async def continue_from_last_user_message(
@@ -220,6 +271,13 @@ class Runner:
         run_id: str | None = None,
         enabled_tools: Sequence[Tool] | None = None,
         lifecycle_hooks: Sequence[LifecycleHook] | None = None,
+        event_sinks: Sequence[EventSink] | None = None,
+        tool_context_metadata: Mapping[str, Any] | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        timeout_seconds: float | None = None,
+        llm_request_metadata: Mapping[str, Any] | None = None,
+        agent_id: str = "",
     ) -> Result:
         """Drive a run from the existing trailing user message.
 
@@ -227,6 +285,8 @@ class Runner:
         message as the run boundary. It validates that the latest session
         message is a user message, claims a fresh run id, then reuses the same
         turn loop as :meth:`run` without appending another user message.
+
+        ``agent_id`` 语义同 :meth:`run`，透传给 :meth:`_run_with_seed`。
         """
 
         run_id = run_id or ""
@@ -249,7 +309,14 @@ class Runner:
             effective_max_turns=effective_max_turns,
             enabled_tools=enabled_tools,
             effective_lifecycle_hooks=effective_lifecycle_hooks,
+            event_sinks=event_sinks,
+            tool_context_metadata=tool_context_metadata,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            timeout_seconds=timeout_seconds,
+            llm_request_metadata=llm_request_metadata,
             seed_messages=seed_messages,
+            agent_id=agent_id,
         )
 
     async def _run_with_seed(
@@ -264,137 +331,199 @@ class Runner:
         effective_max_turns: int,
         enabled_tools: Sequence[Tool] | None,
         effective_lifecycle_hooks: Sequence[LifecycleHook],
+        event_sinks: Sequence[EventSink] | None,
+        tool_context_metadata: Mapping[str, Any] | None,
+        max_tokens: int | None,
+        temperature: float | None,
+        timeout_seconds: float | None,
+        llm_request_metadata: Mapping[str, Any] | None,
         seed_messages: Callable[[RunState], Awaitable[None]],
+        agent_id: str = "",
     ) -> Result:
         """Run the shared turn loop after a caller-specific seed step."""
 
-        state = RunState(run_id=run_id, session_id=session.session_id)
+        state = RunState(run_id=run_id, session_id=session.session_id, agent_id=agent_id)
         state.mark_running()
+        event_sink_token = _RUN_EVENT_SINKS.set(tuple(event_sinks or ()))
+        # 绑定本次 run 的 agent_id 到当前 asyncio task，供 _emit 统一注入到
+        # 每条 Event 的坐标字段（agent-tree-v0.1 模块 G）。与 _RUN_EVENT_SINKS
+        # 同生命周期，在 finally 里一并 reset。
+        agent_id_token = _RUN_AGENT_ID.set(agent_id)
 
         try:
-            resolved_tools = self._resolve_tools(agent_spec, tools, enabled_tools)
-            await seed_messages(state)
+            try:
+                resolved_tools = self._resolve_tools(agent_spec, tools, enabled_tools)
+                await seed_messages(state)
+                parent_agent = _parent_agent_snapshot(
+                    state=state,
+                    session=session,
+                    agent_spec=agent_spec,
+                    effective_max_turns=effective_max_turns,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    timeout_seconds=timeout_seconds,
+                )
+                effective_tool_context_metadata = self._resolve_tool_context_metadata(
+                    tool_context_metadata,
+                    parent_agent=parent_agent,
+                )
+                await self._emit(
+                    Event(
+                        kind="run.start",
+                        run_id=state.run_id,
+                        payload={
+                            "session_id": session.session_id,
+                            "agent": agent_spec.name,
+                            "model": agent_spec.default_model,
+                            "max_turns": effective_max_turns,
+                            "reasoning_effort": agent_spec.reasoning_effort,
+                            "max_tokens": max_tokens,
+                            "temperature": temperature,
+                            "timeout_seconds": timeout_seconds,
+                        },
+                    )
+                )
+                final_message, accumulated_usage = await self._drive_turns(
+                    state=state,
+                    session=session,
+                    agent_spec=agent_spec,
+                    llm=llm,
+                    tools_by_name={t.name: t for t in resolved_tools},
+                    resolved_tools=resolved_tools,
+                    approval=approval,
+                    max_turns=effective_max_turns,
+                    lifecycle_hooks=effective_lifecycle_hooks,
+                    tool_context_metadata=effective_tool_context_metadata,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    timeout_seconds=timeout_seconds,
+                    llm_request_metadata=llm_request_metadata,
+                )
+                state.mark_completed()
+                result = Result(
+                    run_id=state.run_id,
+                    session_id=session.session_id,
+                    status="completed",
+                    final_message=final_message,
+                    turn_count=state.turn,
+                    metadata={"usage": accumulated_usage} if accumulated_usage else {},
+                )
+            except asyncio.CancelledError:
+                # interrupt-run-v0.1：外部 task.cancel()（典型 = 用户点 Stop）。
+                # 不向外 re-raise，统一收口到 Result(status="cancelled")，与
+                # AgentError / Exception 分支语义对齐（runner 不抛，host 只看 Result）。
+                #
+                # 此前 _execute_tool_calls 已对当前未配对 tool_use 合成占位 tool_result，
+                # 保证 session jsonl 里 tool_use ↔ tool_result 一一对应（Anthropic 协议
+                # 要求）；这里只负责状态机收尾 + emit 事件。
+                state.mark_cancelled()
+                # state.metadata 是 dict[str, str]；空字符串视为"未在 tool 阶段"。
+                _cancelled_id_raw = state.metadata.get("cancelled_tool_call_id", "")
+                cancelled_tool_call_id: str | None = (
+                    _cancelled_id_raw if _cancelled_id_raw else None
+                )
+                cancel_meta: dict[str, object] = {
+                    "cancelled_at_turn": state.turn,
+                    "cancelled_tool_call_id": cancelled_tool_call_id,
+                    "cancel_reason": "user_interrupt",
+                }
+                await self._emit(
+                    Event(
+                        kind="run.cancelled",
+                        run_id=state.run_id,
+                        turn=state.turn,
+                        payload=cancel_meta,
+                    )
+                )
+                result = Result(
+                    run_id=state.run_id,
+                    session_id=session.session_id,
+                    status="cancelled",
+                    final_message=None,
+                    turn_count=state.turn,
+                    error=None,
+                    metadata=cancel_meta,
+                )
+            except AgentError as exc:
+                state.mark_failed(exc)
+                await self._emit(
+                    Event(
+                        kind="error",
+                        run_id=state.run_id,
+                        turn=state.turn,
+                        payload={"type": type(exc).__name__, "message": exc.message},
+                    )
+                )
+                result = Result(
+                    run_id=state.run_id,
+                    session_id=session.session_id,
+                    status="failed",
+                    final_message=None,
+                    turn_count=state.turn,
+                    error=exc,
+                )
+            except Exception as exc:  # pragma: no cover - 意外异常兜底
+                wrapped = AgentError(
+                    f"unexpected error in runner: {exc!r}",
+                    details={"exception_type": type(exc).__name__},
+                )
+                state.mark_failed(wrapped)
+                await self._emit(
+                    Event(
+                        kind="error",
+                        run_id=state.run_id,
+                        turn=state.turn,
+                        payload={"type": "UnexpectedError", "message": str(exc)},
+                    )
+                )
+                result = Result(
+                    run_id=state.run_id,
+                    session_id=session.session_id,
+                    status="failed",
+                    final_message=None,
+                    turn_count=state.turn,
+                    error=wrapped,
+                )
+
+            await self._run_lifecycle_after_run(
+                state=state,
+                session=session,
+                result=result,
+                lifecycle_hooks=effective_lifecycle_hooks,
+            )
             await self._emit(
                 Event(
-                    kind="run.start",
+                    kind="run.end",
                     run_id=state.run_id,
+                    turn=state.turn,
                     payload={
-                        "session_id": session.session_id,
-                        "agent": agent_spec.name,
-                        "model": agent_spec.default_model,
-                        "max_turns": effective_max_turns,
-                        "reasoning_effort": agent_spec.reasoning_effort,
+                        "status": result.status,
+                        "turn_count": result.turn_count,
                     },
                 )
             )
-            final_message, accumulated_usage = await self._drive_turns(
-                state=state,
-                session=session,
-                agent_spec=agent_spec,
-                llm=llm,
-                tools_by_name={t.name: t for t in resolved_tools},
-                resolved_tools=resolved_tools,
-                approval=approval,
-                max_turns=effective_max_turns,
-                lifecycle_hooks=effective_lifecycle_hooks,
-            )
-            state.mark_completed()
-            result = Result(
-                run_id=state.run_id,
-                session_id=session.session_id,
-                status="completed",
-                final_message=final_message,
-                turn_count=state.turn,
-                metadata={"usage": accumulated_usage} if accumulated_usage else {},
-            )
-        except asyncio.CancelledError:
-            # interrupt-run-v0.1：外部 task.cancel()（典型 = 用户点 Stop）。
-            # 不向外 re-raise，统一收口到 Result(status="cancelled")，与
-            # AgentError / Exception 分支语义对齐（runner 不抛，host 只看 Result）。
-            #
-            # 此前 _execute_tool_calls 已对当前未配对 tool_use 合成占位 tool_result，
-            # 保证 session jsonl 里 tool_use ↔ tool_result 一一对应（Anthropic 协议
-            # 要求）；这里只负责状态机收尾 + emit 事件。
-            state.mark_cancelled()
-            # state.metadata 是 dict[str, str]；空字符串视为"未在 tool 阶段"。
-            _cancelled_id_raw = state.metadata.get("cancelled_tool_call_id", "")
-            cancelled_tool_call_id: str | None = _cancelled_id_raw if _cancelled_id_raw else None
-            cancel_meta: dict[str, object] = {
-                "cancelled_at_turn": state.turn,
-                "cancelled_tool_call_id": cancelled_tool_call_id,
-                "cancel_reason": "user_interrupt",
-            }
-            await self._emit(
-                Event(
-                    kind="run.cancelled",
-                    run_id=state.run_id,
-                    turn=state.turn,
-                    payload=cancel_meta,
-                )
-            )
-            result = Result(
-                run_id=state.run_id,
-                session_id=session.session_id,
-                status="cancelled",
-                final_message=None,
-                turn_count=state.turn,
-                error=None,
-                metadata=cancel_meta,
-            )
-        except AgentError as exc:
-            state.mark_failed(exc)
-            await self._emit(
-                Event(
-                    kind="error",
-                    run_id=state.run_id,
-                    turn=state.turn,
-                    payload={"type": type(exc).__name__, "message": exc.message},
-                )
-            )
-            result = Result(
-                run_id=state.run_id,
-                session_id=session.session_id,
-                status="failed",
-                final_message=None,
-                turn_count=state.turn,
-                error=exc,
-            )
-        except Exception as exc:  # pragma: no cover - 意外异常兜底
-            wrapped = AgentError(
-                f"unexpected error in runner: {exc!r}",
-                details={"exception_type": type(exc).__name__},
-            )
-            state.mark_failed(wrapped)
-            await self._emit(
-                Event(
-                    kind="error",
-                    run_id=state.run_id,
-                    turn=state.turn,
-                    payload={"type": "UnexpectedError", "message": str(exc)},
-                )
-            )
-            result = Result(
-                run_id=state.run_id,
-                session_id=session.session_id,
-                status="failed",
-                final_message=None,
-                turn_count=state.turn,
-                error=wrapped,
-            )
-
-        await self._emit(
-            Event(
-                kind="run.end",
-                run_id=state.run_id,
-                turn=state.turn,
-                payload={"status": result.status, "turn_count": result.turn_count},
-            )
-        )
-        return result
+            return result
+        finally:
+            _RUN_EVENT_SINKS.reset(event_sink_token)
+            _RUN_AGENT_ID.reset(agent_id_token)
 
     # ------------------------------------------------------------------
     # 内部流程
     # ------------------------------------------------------------------
+
+    def _resolve_tool_context_metadata(
+        self,
+        override: Mapping[str, Any] | None,
+        *,
+        parent_agent: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """合并装配期和单次 run 的工具上下文 metadata。"""
+        merged = dict(self._tool_context_metadata)
+        if override:
+            merged.update(dict(override))
+        if parent_agent is not None:
+            merged["parent_agent"] = dict(parent_agent)
+        return merged
 
     def _resolve_tools(
         self,
@@ -424,6 +553,7 @@ class Runner:
         state: RunState,
         *,
         attachments: list[dict[str, Any]] | None = None,
+        references: list[dict[str, Any]] | None = None,
     ) -> None:
         """如果 session 里还没有 system 指令，就先把 AgentSpec.instructions 注入。
 
@@ -434,9 +564,9 @@ class Runner:
         1. user message append（必做）
         2. ``session.advance_run_index()`` 拼装 ``state.run_id``（仅当外部未注入 run_id 时）
 
-        ``attachments`` 非 None 时透传到 ``Message.metadata["attachments"]``；
-        全链路保持 dict 形态（``UserInputAttachment.model_dump()`` 输出），
-        避免 provider / assembler 还要处理"原始 BaseModel 还是 dict"两种形态。
+        ``attachments`` / ``references`` 非 None 时透传到 ``Message.metadata``；
+        全链路保持 dict 形态，避免 provider / assembler 处理 BaseModel 与 dict
+        双形态。
         """
         if self._input_assembler is None:
             # 旧路径：由 _seed_messages 自己写 system 消息（兼容 fallback）。
@@ -446,9 +576,14 @@ class Runner:
                 system_msg = Message.system(agent_spec.instructions)
                 await session.append(system_msg)
                 state.record(system_msg)
-        # 始终写入 user 消息。attachments 非 None 时写到 metadata。
-        user_metadata: dict[str, Any] | None = {"attachments": attachments} if attachments else None
-        user_msg = Message.user(user_input, metadata=user_metadata)
+        # 始终写入 user 消息。结构化输入非 None 时写到 metadata。
+        user_metadata: dict[str, Any] = {}
+        if attachments:
+            user_metadata["attachments"] = attachments
+        if references:
+            user_metadata["conversation_references"] = references
+        user_metadata_or_none = user_metadata or None
+        user_msg = Message.user(user_input, metadata=user_metadata_or_none)
         await session.append(user_msg)
         # 紧跟 user message append 调 advance_run_index，把"用户消息入历史"和
         # "run 编号递增"绑到同一时机。
@@ -503,6 +638,11 @@ class Runner:
         approval: ApprovalProvider,
         max_turns: int,
         lifecycle_hooks: Sequence[LifecycleHook],
+        tool_context_metadata: Mapping[str, Any],
+        max_tokens: int | None,
+        temperature: float | None,
+        timeout_seconds: float | None,
+        llm_request_metadata: Mapping[str, Any] | None,
     ) -> tuple[Message | None, dict[str, Any]]:
         """核心 turn 循环。返回 (最终 assistant 消息, 累计 usage)。"""
         final_assistant: Message | None = None
@@ -573,11 +713,17 @@ class Runner:
             # :class:`infrastructure.llm_providers.anthropic_messages.AnthropicMessagesProvider`
             # 还原附件物理路径(``.kongming/web/uploads/images/<thread_id>/<asset_id>.<ext>``)。
             # CLI 路径无 attachments,thread_id 取值不命中 storage,无副作用。
+            request_metadata: dict[str, Any] = {"thread_id": session.session_id}
+            if llm_request_metadata:
+                request_metadata.update(dict(llm_request_metadata))
             llm_request = LLMRequest(
                 model=agent_spec.default_model,
                 messages=tuple(prepared_messages),
                 tools=tuple(resolved_tools),
-                metadata={"thread_id": session.session_id},
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout_seconds=timeout_seconds,
+                metadata=request_metadata,
                 reasoning_effort=agent_spec.reasoning_effort,
             )
             request_payload = {
@@ -671,6 +817,7 @@ class Runner:
                 tool_calls=tool_calls,
                 tools_by_name=tools_by_name,
                 lifecycle_hooks=lifecycle_hooks,
+                tool_context_metadata=tool_context_metadata,
             )
             # 回填后继续下一个 turn
 
@@ -905,6 +1052,7 @@ class Runner:
         tool_calls: Iterable[ToolCall],
         tools_by_name: dict[str, Tool],
         lifecycle_hooks: Sequence[LifecycleHook],
+        tool_context_metadata: Mapping[str, Any],
     ) -> None:
         """串行执行 assistant 消息携带的所有 tool_call，把结果回填到 session。
 
@@ -934,6 +1082,7 @@ class Runner:
                     call=call,
                     tools_by_name=tools_by_name,
                     lifecycle_hooks=lifecycle_hooks,
+                    tool_context_metadata=tool_context_metadata,
                 )
             except asyncio.CancelledError:
                 # 1. 当前 call 占位（覆盖本 call 的任何中间 await 被打断的情形）
@@ -964,6 +1113,7 @@ class Runner:
         call: ToolCall,
         tools_by_name: dict[str, Tool],
         lifecycle_hooks: Sequence[LifecycleHook],
+        tool_context_metadata: Mapping[str, Any],
     ) -> None:
         """执行单个 tool_call。从原 ``_execute_tool_calls`` 循环体抽出。
 
@@ -1017,6 +1167,7 @@ class Runner:
             call_id=call.call_id,
             tool_name=call.tool_name,
             arguments=dict(call.arguments),
+            metadata=dict(tool_context_metadata),
         )
         await self._emit(
             Event(
@@ -1082,6 +1233,8 @@ class Runner:
             session_id=state.session_id,
             turn=state.turn,
             call_id=call.call_id,
+            metadata=dict(tool_context_metadata),
+            agent_id=state.agent_id,
         )
         tool_result, tool_err = await self._safe_tool_execute(tool, call, ctx)
         if tool_err is not None:
@@ -1310,14 +1463,40 @@ class Runner:
             except Exception as exc:  # pragma: no cover - 防御式
                 await self._emit_hook_error("after_tool", exc, state)
 
-    async def _emit_hook_error(self, phase: str, exc: Exception, state: RunState) -> None:
+    async def _run_lifecycle_after_run(
+        self,
+        *,
+        state: RunState,
+        session: Session,
+        result: Result,
+        lifecycle_hooks: Sequence[LifecycleHook],
+    ) -> None:
+        for hook in lifecycle_hooks:
+            after = getattr(hook, "after_run", None)
+            if after is None:
+                continue
+            try:
+                await after(state, session, result)
+            except asyncio.CancelledError as exc:
+                await self._emit_hook_error("after_run", exc, state)
+            except Exception as exc:  # pragma: no cover - 防御式
+                await self._emit_hook_error("after_run", exc, state)
+
+    async def _emit_hook_error(
+        self,
+        phase: str,
+        exc: BaseException,
+        state: RunState,
+        *,
+        source: str = "lifecycle_hook",
+    ) -> None:
         await self._emit(
             Event(
                 kind="error",
                 run_id=state.run_id,
                 turn=state.turn,
                 payload={
-                    "source": "lifecycle_hook",
+                    "source": source,
                     "phase": phase,
                     "type": type(exc).__name__,
                     "message": str(exc),
@@ -1330,27 +1509,23 @@ class Runner:
     # ------------------------------------------------------------------
 
     async def _emit(self, event: Event) -> None:
-        """把事件 fan-out 到所有 sink。sink 异常被吞掉以免污染主链路。"""
-        if not self._event_sinks and event.kind in {"llm.request", "llm.response"}:
-            logger.warning(
-                "llm audit event has no EventSink: kind=%s run_id=%s turn=%s",
-                event.kind,
-                event.run_id,
-                event.turn,
-            )
-            return
-        for sink in self._event_sinks:
+        """把事件 fan-out 到所有 sink。sink 异常被吞掉以免污染主链路。
+
+        agent-tree-v0.1 模块 G：fan-out 前把当前 run 的 ``agent_id``（来自
+        :data:`_RUN_AGENT_ID` ContextVar）注入到 Event 的坐标字段。runner 内
+        20+ emit 点无需逐处透传 ``agent_id``，统一在此收口；Event 自带非空
+        ``agent_id`` 时视为显式覆盖，不覆盖。
+        """
+        run_agent_id = _RUN_AGENT_ID.get()
+        if run_agent_id and not event.agent_id:
+            event = replace(event, agent_id=run_agent_id)
+        sinks = (*tuple(self._event_sinks), *_RUN_EVENT_SINKS.get())
+        for sink in sinks:
             try:
                 await sink.emit(event)
             except Exception:
-                # 观测层故障记录到降级日志，主链路继续执行。
-                logger.exception(
-                    "event sink failed: kind=%s run_id=%s turn=%s sink=%s",
-                    event.kind,
-                    event.run_id,
-                    event.turn,
-                    type(sink).__name__,
-                )
+                # 观测层不允许影响主链路；这里静默忽略，
+                # 未来可以把"sink 自己的错误"落到降级日志。
                 continue
 
     # ------------------------------------------------------------------
@@ -1364,6 +1539,39 @@ class Runner:
     def add_lifecycle_hook(self, hook: LifecycleHook) -> None:
         """动态追加 lifecycle hook。"""
         self._lifecycle_hooks.append(hook)
+
+
+def _parent_agent_snapshot(
+    *,
+    state: RunState,
+    session: Session,
+    agent_spec: AgentSpec,
+    effective_max_turns: int,
+    max_tokens: int | None,
+    temperature: float | None,
+    timeout_seconds: float | None,
+) -> dict[str, Any]:
+    """生成父 agent 快照，输入为当前 run 事实，输出给 ToolContext metadata。"""
+    return {
+        "run_id": state.run_id,
+        "session_id": session.session_id,
+        "agent": agent_spec.name,
+        "model": agent_spec.default_model,
+        "reasoning_effort": agent_spec.reasoning_effort,
+        "effective_max_turns": effective_max_turns,
+        "max_turns": effective_max_turns,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "timeout_seconds": timeout_seconds,
+        "agent_spec": {
+            "name": agent_spec.name,
+            "default_model": agent_spec.default_model,
+            "tool_names": list(agent_spec.tool_names),
+            "max_turns": agent_spec.max_turns,
+            "metadata": dict(agent_spec.metadata),
+            "reasoning_effort": agent_spec.reasoning_effort,
+        },
+    }
 
 
 __all__ = ["Runner"]

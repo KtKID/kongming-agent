@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
+
+from core.clock import now_epoch_ms
 
 # EventSink / Event
 # ---------------------------------------------------------------------------
@@ -103,13 +104,27 @@ class Event:
     runner 在关键节点构造 Event，fan-out 到所有注册的 :class:`EventSink`。
     v1-mini 只有一个 sink：``infrastructure.tracing/trace_sink.py`` 的 ``JsonlTraceSink``。
     v0.2+ 追加 usage / audit sink 时仍然走同一个协议，不新增事件协议。
+
+    三坐标字段（agent-tree-v0.1 模块 G）用于多 agent 场景的事件归属：
+
+    - ``agent_id``：产生该 event 的 agent（单 agent 场景默认 ``""``，由
+      runner 填充真实值）；agent_loop 分发、cancel_subtree 编排、前端归属
+      展示均依赖此字段。
+    - ``task_id``：关联 :class:`TaskRecord`（单 agent 为空，留待 task-3/4 填充）。
+    - ``conversation_id``：= tree_id / thread_id，标识所属会话树。
+
+    三字段默认值均为 ``""``，保证现有构造点（如 ``Event(kind="run.start",
+    run_id=...)``）不报错。
     """
 
     kind: str
     run_id: str
     turn: int | None = None
     payload: dict[str, Any] = field(default_factory=dict)
-    timestamp_ms: int = field(default_factory=lambda: int(time.time() * 1000))
+    timestamp_ms: int = field(default_factory=now_epoch_ms)
+    agent_id: str = ""
+    task_id: str = ""
+    conversation_id: str = ""
 
 
 @runtime_checkable

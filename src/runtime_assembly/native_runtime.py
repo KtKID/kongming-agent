@@ -34,18 +34,17 @@
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
-from core.agent_spec import AgentSpec
+from core.agent_spec import AgentSpec, coerce_reasoning_effort
 from core.contracts import (
     ApprovalDecision,
     ApprovalProvider,
     ApprovalRequest,
-    Event,
+    AssetBytesReader,
     EventSink,
     LLMProvider,
     MessageCompactor,
@@ -54,16 +53,22 @@ from core.contracts import (
     Tool,
     ToolLookup,
 )
+from core.lifecycle import LifecycleHook
 from core.message import Message
 from core.result import Result
 from core.runner import Runner
 from core.session import InMemorySession
 from infrastructure.config.models import Config
+from infrastructure.config.paths import get_kongming_home
 from infrastructure.llm_providers.anthropic_messages import AnthropicMessagesProvider
 from infrastructure.llm_providers.openai_responses import OpenAIResponsesProvider
 from prompting import HistoryCompactor
 from prompting.assembly.input_assembler import InputAssembler
 from prompting.compaction.history_compactor import CompactorConfig
+from prompting.context_sources.conversation_reference_manager import (
+    ConversationReferenceContext,
+    ConversationReferenceManager,
+)
 from prompting.instructions.instruction_loader import InstructionSource
 from safety import (
     CapabilityPolicy,
@@ -71,9 +76,7 @@ from safety import (
     SafetyGatedApproval,
     build_safety_chain,
 )
-
-if TYPE_CHECKING:
-    from evolution import EvolutionStateStore, TranscriptWindow
+from safety.boundaries.resolver import BoundaryResolver
 
 # ---------------------------------------------------------------------------
 # 占位实现
@@ -133,6 +136,16 @@ class _NoopCompactor:
 _NOOP_COMPACTOR = _NoopCompactor()
 
 
+def _metadata_cwd_path(metadata: Mapping[str, Any]) -> Path | None:
+    """从工具上下文 metadata 解析 cwd，输入为 metadata，输出为绝对 Path 或 None。"""
+    raw = metadata.get("cwd")
+    if isinstance(raw, Path):
+        return raw.expanduser().resolve(strict=False)
+    if isinstance(raw, str) and raw.strip():
+        return Path(raw).expanduser().resolve(strict=False)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # NativeRuntime
 # ---------------------------------------------------------------------------
@@ -157,6 +170,8 @@ class NativeRuntime:
         session_factory: Callable[[str], Session],
         event_sinks: list[EventSink],
         agent_spec: AgentSpec,
+        lifecycle_hooks: Sequence[LifecycleHook] | None = None,
+        tool_context_metadata: Mapping[str, Any] | None = None,
     ) -> None:
         self._config = config
         self._runner = runner
@@ -167,11 +182,12 @@ class NativeRuntime:
         self._session_factory = session_factory
         self._event_sinks = list(event_sinks)
         self._agent_spec = agent_spec
+        self._lifecycle_hooks: list[LifecycleHook] = list(lifecycle_hooks or [])
+        self._tool_context_metadata: dict[str, Any] = dict(tool_context_metadata or {})
 
         # 单 agent、单 run loop 语义：运行时开一个 session cache，让外部多次
         # ``run(session_id=same)`` 落到同一个 Session 实例（多轮对话连续性）。
         self._sessions: dict[str, Session] = {}
-        self._pending_review_tasks: dict[str, asyncio.Task[None]] = {}
 
     # ------------------------------------------------------------------
     # 构造方法
@@ -194,7 +210,10 @@ class NativeRuntime:
         message_compactor: MessageCompactor | None = None,
         prompt_debug_sink: PromptDebugSink | None = None,
         instruction_origins: Sequence[str] | None = None,
+        conversation_reference_context: ConversationReferenceContext | None = None,
+        asset_reader: AssetBytesReader | None = None,
         llm_provider: LLMProvider | None = None,
+        tool_context_metadata: Mapping[str, Any] | None = None,
     ) -> NativeRuntime:
         """按 Config 装配一份默认 runtime。
 
@@ -230,6 +249,10 @@ class NativeRuntime:
             prompt_debug_sink: prompt debug 输出 sink；不传则关闭。
             instruction_origins: CLI / host 侧收集到的真实 instruction 来源列表，
                 仅用于 prompt debug dump。
+            conversation_reference_context: Web conversation reference 解析上下文；
+                未传时使用当前进程 ``KONGMING_HOME`` 与工具上下文 cwd。
+            asset_reader: 宿主层注入的附件 bytes 读取器；Web 上传路径传入
+                ``AssetStorage``，CLI / cron 纯文本路径保持 ``None``。
             llm_provider: 显式注入的 LLMProvider。测试和 eval harness 可用它提供
                 确定性 provider；未传时按 Config 构造 provider。
 
@@ -250,6 +273,7 @@ class NativeRuntime:
                 retry_backoff=config.retry.retry_backoff,
                 enable_raw_dump=config.trace.raw_llm,
                 stream_read_timeout=config.stream.read_timeout,
+                asset_reader=asset_reader,
             )
         else:
             llm = OpenAIResponsesProvider(
@@ -272,6 +296,8 @@ class NativeRuntime:
         base_approval: ApprovalProvider = approval or _AllowAllApproval()
 
         resolved_event_sinks: list[EventSink] = list(event_sinks or [])
+        resolved_tool_context_metadata: dict[str, Any] = dict(tool_context_metadata or {})
+        resolved_workspace = _metadata_cwd_path(resolved_tool_context_metadata)
 
         # 把 capability / permission / approval 串成高层安全链；
         # 这是最终传给 runner 的 ApprovalProvider。
@@ -283,6 +309,7 @@ class NativeRuntime:
             interactive_approval=base_approval,
             capability_policy=capability_policy,
             permission_policy=permission_policy,
+            boundary_resolver=BoundaryResolver.from_project_root(resolved_workspace),
             event_sinks=resolved_event_sinks,
         )
 
@@ -339,7 +366,14 @@ class NativeRuntime:
 
         # InputAssembler 复用 resolved_compactor，确保显式传入的 message_compactor
         # 在 assembler 路径下也生效（不另创建新实例）。
-        input_assembler = InputAssembler(compactor=resolved_compactor)
+        resolved_reference_context = conversation_reference_context or ConversationReferenceContext(
+            home=get_kongming_home(),
+            workspace=resolved_workspace or Path.cwd(),
+        )
+        input_assembler = InputAssembler(
+            compactor=resolved_compactor,
+            conversation_reference_manager=ConversationReferenceManager(resolved_reference_context),
+        )
 
         runner = Runner(
             event_sinks=resolved_event_sinks,
@@ -350,6 +384,7 @@ class NativeRuntime:
             instruction_origins=instruction_origins,
             stream_enabled=config.stream.enabled,
             suppress_content_after_tool_call=config.stream.suppress_content_after_tool_call,
+            tool_context_metadata=resolved_tool_context_metadata,
         )
 
         return cls(
@@ -362,6 +397,7 @@ class NativeRuntime:
             session_factory=resolved_session_factory,
             event_sinks=resolved_event_sinks,
             agent_spec=resolved_spec,
+            tool_context_metadata=resolved_tool_context_metadata,
         )
 
     # ------------------------------------------------------------------
@@ -375,52 +411,38 @@ class NativeRuntime:
         session_id: str | None = None,
         reasoning_effort: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        references: list[dict[str, Any]] | None = None,
+        agent_id: str = "",
     ) -> Result:
         """执行一次"输入 → 结果"主链路。
 
         - 同一 ``session_id`` 反复调用会落到同一个 Session 实例上（多轮对话）。
         - ``session_id`` 为 ``None`` 时走匿名新 session。
-        - ``reasoning_effort`` 非 None 时临时覆盖 model_config.reasoning_effort，
-          本次 run 结束后恢复原值。Provider 每次调用都读 model_config，无需改动。
-        - ``attachments`` 是用户输入附件 ref 的 dict 列表（``UserInputAttachment.model_dump()``
-          形态），由 web ws.py 透传过来；CLI 路径默认 None 不影响行为。
+        - ``reasoning_effort`` 非 None 时只覆盖本次 run 的 AgentSpec；
+          Runner 会把该值写入 LLMRequest，provider 按请求级 effort 组装 payload。
+        - ``attachments`` / ``references`` 是用户结构化输入的 dict 列表，
+          由 web ws.py 透传过来；CLI 路径默认 None 不影响行为。
+        - ``agent_id``（agent-tree-v0.1 模块 G）：本次 run 的 agent 归属，默认 ``""``
+          兼容单 agent；runner 写入 RunState.agent_id，各 Event / ToolContext 坐标字段
+          从此取值。子 agent spawn（task-5）由 AgentManager 的 run_fn 闭包透传子 agent_id，
+          让子 agent 的流式帧带正确 agent_id（task-1 已在 _S2CFrameBase 加 agent_id）。
         """
         session = self._get_or_create_session(session_id)
-        result: Result
-
-        if reasoning_effort is not None:
-            saved = self._config.model.reasoning_effort
-            self._config.model.reasoning_effort = reasoning_effort  # type: ignore[assignment]
-            run_spec = replace(self._agent_spec, reasoning_effort=reasoning_effort)
-            try:
-                result = await self._runner.run(
-                    user_input,
-                    session=session,
-                    agent_spec=run_spec,
-                    llm=self._llm,
-                    tools=self._tools,
-                    approval=self._approval,
-                    max_turns=self._config.runner.max_turns,
-                    enabled_tools=self._resolve_enabled_tools(),
-                    attachments=attachments,
-                )
-            finally:
-                self._config.model.reasoning_effort = saved
-        else:
-            result = await self._runner.run(
-                user_input,
-                session=session,
-                agent_spec=self._agent_spec,
-                llm=self._llm,
-                tools=self._tools,
-                approval=self._approval,
-                max_turns=self._config.runner.max_turns,
-                enabled_tools=self._resolve_enabled_tools(),
-                attachments=attachments,
-            )
-
-        await self._maybe_start_evolution_review(session=session, result=result)
-        return result
+        run_spec = self._agent_spec_for_run(reasoning_effort)
+        return await self._runner.run(
+            user_input,
+            session=session,
+            agent_spec=run_spec,
+            llm=self._llm,
+            tools=self._tools,
+            approval=self._approval,
+            max_turns=self._config.runner.max_turns,
+            enabled_tools=self._resolve_enabled_tools(),
+            attachments=attachments,
+            references=references,
+            lifecycle_hooks=self._lifecycle_hooks_snapshot(),
+            agent_id=agent_id,
+        )
 
     async def continue_from_last_user_message(
         self,
@@ -434,37 +456,26 @@ class NativeRuntime:
         assistant run。这里复用 Runner 的继续入口，避免再次 append user message。
         """
         session = self._get_or_create_session(session_id)
-        result: Result
+        run_spec = self._agent_spec_for_run(reasoning_effort)
+        return await self._runner.continue_from_last_user_message(
+            session=session,
+            agent_spec=run_spec,
+            llm=self._llm,
+            tools=self._tools,
+            approval=self._approval,
+            max_turns=self._config.runner.max_turns,
+            enabled_tools=self._resolve_enabled_tools(),
+            lifecycle_hooks=self._lifecycle_hooks_snapshot(),
+        )
 
-        if reasoning_effort is not None:
-            saved = self._config.model.reasoning_effort
-            self._config.model.reasoning_effort = reasoning_effort  # type: ignore[assignment]
-            run_spec = replace(self._agent_spec, reasoning_effort=reasoning_effort)
-            try:
-                result = await self._runner.continue_from_last_user_message(
-                    session=session,
-                    agent_spec=run_spec,
-                    llm=self._llm,
-                    tools=self._tools,
-                    approval=self._approval,
-                    max_turns=self._config.runner.max_turns,
-                    enabled_tools=self._resolve_enabled_tools(),
-                )
-            finally:
-                self._config.model.reasoning_effort = saved
-        else:
-            result = await self._runner.continue_from_last_user_message(
-                session=session,
-                agent_spec=self._agent_spec,
-                llm=self._llm,
-                tools=self._tools,
-                approval=self._approval,
-                max_turns=self._config.runner.max_turns,
-                enabled_tools=self._resolve_enabled_tools(),
-            )
-
-        await self._maybe_start_evolution_review(session=session, result=result)
-        return result
+    def _agent_spec_for_run(self, reasoning_effort: str | None) -> AgentSpec:
+        """返回本次 run 使用的 AgentSpec，保持 runtime 默认 spec 不变。"""
+        if reasoning_effort is None:
+            return self._agent_spec
+        return replace(
+            self._agent_spec,
+            reasoning_effort=coerce_reasoning_effort(reasoning_effort),
+        )
 
     # ------------------------------------------------------------------
     # 访问器（便于 host / cli / tests 观察装配结果）
@@ -522,6 +533,11 @@ class NativeRuntime:
         return list(self._event_sinks)
 
     @property
+    def tool_context_metadata(self) -> dict[str, Any]:
+        """暴露默认工具上下文 metadata 副本，供子 agent / scheduler 显式继承。"""
+        return dict(self._tool_context_metadata)
+
+    @property
     def grant_store(self):  # type: ignore[no-untyped-def]
         """暴露底层 :class:`safety.grants.store.GrantStore`（如有）。
 
@@ -538,6 +554,18 @@ class NativeRuntime:
         self._event_sinks.append(sink)
         self._runner.add_event_sink(sink)
 
+    def add_lifecycle_hook(self, hook: LifecycleHook) -> None:
+        """追加 lifecycle hook，后续 run 按注册顺序触发。"""
+        self._lifecycle_hooks.append(hook)
+
+    def remove_lifecycle_hook(self, hook: LifecycleHook) -> bool:
+        """按对象身份移除 lifecycle hook，返回是否移除成功。"""
+        for index, registered in enumerate(self._lifecycle_hooks):
+            if registered is hook:
+                del self._lifecycle_hooks[index]
+                return True
+        return False
+
     # ------------------------------------------------------------------
     # 生命周期
     # ------------------------------------------------------------------
@@ -548,7 +576,6 @@ class NativeRuntime:
         幂等：provider 自身的 ``aclose`` 已做 None 检查，多次调不会抛。
         由 CLI / SessionBridge 退出路径或测试 finally 触发。
         """
-        await self._drain_pending_reviews()
         aclose = getattr(self._llm, "aclose", None)
         if aclose is not None:
             await aclose()
@@ -556,6 +583,10 @@ class NativeRuntime:
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------
+
+    def _lifecycle_hooks_snapshot(self) -> tuple[LifecycleHook, ...]:
+        """生成单次 run 的 lifecycle hook 快照，运行中保持稳定。"""
+        return tuple(self._lifecycle_hooks)
 
     def _get_or_create_session(self, session_id: str | None) -> Session:
         if session_id is None:
@@ -589,248 +620,6 @@ class NativeRuntime:
                 return None
             resolved.append(self._tools[name])
         return resolved
-
-    async def _maybe_start_evolution_review(self, *, session: Session, result: Result) -> None:
-        if result.status != "completed":
-            return
-        if self._agent_spec.metadata.get("evolution_role") == "reviewer":
-            return
-        learning = getattr(self._config.evolution, "learning", None)
-        if learning is None or not learning.enabled:
-            return
-        if "evolution_write" not in self._tools:
-            return
-
-        from evolution import (
-            EvolutionStateStore,
-            build_transcript_window,
-            count_user_turns,
-            resolve_evolution_root,
-        )
-
-        history = await session.history()
-        user_turn_count = count_user_turns(history)
-        if user_turn_count < learning.min_user_turns:
-            return
-
-        root_dir = resolve_evolution_root(learning.root_path)
-        state_store = EvolutionStateStore(root_dir)
-        session_state = await state_store.record_parent_run(
-            session_id=result.session_id,
-            user_turn_count=user_turn_count,
-        )
-        if session_state.run_count % learning.every_n_runs != 0:
-            return
-
-        window = build_transcript_window(
-            session_id=result.session_id,
-            run_id=result.run_id,
-            history=history,
-            final_message=result.final_message,
-            max_messages=learning.max_history_messages,
-        )
-        review_id = f"evo-review:{result.run_id}"
-        await self._emit_runtime_event(
-            kind="evolution.review.started",
-            run_id=result.run_id,
-            payload={
-                "review_id": review_id,
-                "session_id": result.session_id,
-                "user_turn_count": user_turn_count,
-                "included_turns": list(window.included_turns),
-                "timeout_seconds": learning.review_timeout_seconds,
-            },
-        )
-        task = asyncio.create_task(
-            self._run_evolution_review_task(
-                review_id=review_id,
-                parent_result=result,
-                state_store=state_store,
-                transcript_window=window,
-            ),
-            name=review_id,
-        )
-        self._pending_review_tasks[review_id] = task
-
-    async def _run_evolution_review_task(
-        self,
-        *,
-        review_id: str,
-        parent_result: Result,
-        state_store: EvolutionStateStore,
-        transcript_window: TranscriptWindow,
-    ) -> None:
-        learning = self._config.evolution.learning
-        try:
-            from evolution import run_child_review
-
-            child_outcome = await run_child_review(
-                parent_runtime=self,
-                window=transcript_window,
-                trigger_reason="cadence",
-                timeout_seconds=learning.review_timeout_seconds,
-                max_nutrients=learning.max_nutrients,
-                min_confidence=learning.nutrient_confidence_threshold,
-            )
-            for event in child_outcome.visible_events:
-                await self._emit_runtime_event(
-                    kind=event.kind,
-                    run_id=event.run_id or "",
-                    payload=dict(event.payload or {}),
-                    turn=event.turn,
-                )
-            child_result = child_outcome.result
-            if child_outcome.write_ok:
-                await self._emit_runtime_event(
-                    kind="evolution.review.completed",
-                    run_id=parent_result.run_id,
-                    payload={
-                        "review_id": review_id,
-                        "review_run_id": child_result.run_id,
-                        "session_id": parent_result.session_id,
-                        "write_status": child_outcome.write_status,
-                        "duration_ms": child_outcome.duration_ms,
-                        "timeout_hit": child_outcome.timed_out,
-                        "timeout_seconds": child_outcome.timeout_seconds,
-                        "nutrients_written": child_outcome.write_data.get("nutrients_written")
-                        if isinstance(child_outcome.write_data, dict)
-                        else None,
-                        "written_nutrient_ids": child_outcome.write_data.get("written_nutrient_ids")
-                        if isinstance(child_outcome.write_data, dict)
-                        else None,
-                        "timed_out_after_write": child_outcome.timed_out,
-                    },
-                )
-                return
-            if child_result.status != "completed":
-                child_error = child_result.error
-                child_error_kind = (
-                    type(child_error).__name__ if child_error is not None else "ChildReviewerError"
-                )
-                child_error_message = (
-                    child_error.message
-                    if child_error is not None
-                    else f"child reviewer finished with status={child_result.status}"
-                )
-                await state_store.mark_review_result(
-                    session_id=parent_result.session_id,
-                    run_id=parent_result.run_id,
-                    status="failed",
-                )
-                await self._emit_runtime_event(
-                    kind="evolution.review.failed",
-                    run_id=parent_result.run_id,
-                    payload={
-                        "review_id": review_id,
-                        "review_run_id": child_result.run_id,
-                        "session_id": parent_result.session_id,
-                        "error_kind": child_error_kind,
-                        "message": child_error_message,
-                        "child_status": child_result.status,
-                        "duration_ms": child_outcome.duration_ms,
-                        "timeout_hit": child_outcome.timed_out,
-                        "timeout_seconds": child_outcome.timeout_seconds,
-                    },
-                )
-                return
-            write_error_message = child_outcome.write_error or (
-                f"evolution_write did not succeed status={child_outcome.write_status}"
-            )
-            await state_store.mark_review_result(
-                session_id=parent_result.session_id,
-                run_id=parent_result.run_id,
-                status="failed",
-            )
-            await self._emit_runtime_event(
-                kind="evolution.review.failed",
-                run_id=parent_result.run_id,
-                payload={
-                    "review_id": review_id,
-                    "review_run_id": child_result.run_id,
-                    "session_id": parent_result.session_id,
-                    "error_kind": "EvolutionWriteError",
-                    "message": write_error_message,
-                    "write_status": child_outcome.write_status,
-                    "duration_ms": child_outcome.duration_ms,
-                    "timeout_hit": child_outcome.timed_out,
-                    "timeout_seconds": child_outcome.timeout_seconds,
-                },
-            )
-        except asyncio.CancelledError:
-            await state_store.mark_review_result(
-                session_id=parent_result.session_id,
-                run_id=parent_result.run_id,
-                status="cancelled",
-            )
-            await self._emit_runtime_event(
-                kind="evolution.review.failed",
-                run_id=parent_result.run_id,
-                payload={
-                    "review_id": review_id,
-                    "session_id": parent_result.session_id,
-                    "error_kind": "cancelled",
-                    "timeout_hit": False,
-                },
-            )
-            raise
-        except Exception as exc:
-            await state_store.mark_review_result(
-                session_id=parent_result.session_id,
-                run_id=parent_result.run_id,
-                status="failed",
-            )
-            await self._emit_runtime_event(
-                kind="evolution.review.failed",
-                run_id=parent_result.run_id,
-                payload={
-                    "review_id": review_id,
-                    "session_id": parent_result.session_id,
-                    "error_kind": type(exc).__name__,
-                    "message": str(exc),
-                    "timeout_hit": isinstance(exc, TimeoutError),
-                },
-            )
-        finally:
-            self._pending_review_tasks.pop(review_id, None)
-
-    async def _drain_pending_reviews(self) -> None:
-        if not self._pending_review_tasks:
-            return
-        learning = getattr(self._config.evolution, "learning", None)
-        timeout_seconds = (
-            learning.drain_on_close_seconds if learning is not None and learning.enabled else 0.0
-        )
-        pending_items = list(self._pending_review_tasks.items())
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*(task for _, task in pending_items), return_exceptions=True),
-                timeout=timeout_seconds,
-            )
-        except TimeoutError:
-            await self._emit_runtime_event(
-                kind="evolution.review.drain_timeout",
-                run_id="runtime-close",
-                payload={
-                    "pending_review_ids": [review_id for review_id, _ in pending_items],
-                    "timeout_seconds": timeout_seconds,
-                },
-            )
-            for _, task in pending_items:
-                task.cancel()
-            with contextlib.suppress(Exception):
-                await asyncio.gather(*(task for _, task in pending_items), return_exceptions=True)
-
-    async def _emit_runtime_event(
-        self,
-        *,
-        kind: str,
-        run_id: str,
-        payload: dict[str, object],
-        turn: int | None = None,
-    ) -> None:
-        event = Event(kind=kind, run_id=run_id, turn=turn, payload=payload)
-        for sink in self._event_sinks:
-            await sink.emit(event)
 
 
 __all__ = ["NativeRuntime"]

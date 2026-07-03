@@ -20,6 +20,9 @@ class ToolContext:
         turn: 工具被调用所在的 turn，从 1 开始计数。
         call_id: 对应的 :class:`core.message.ToolCall.call_id`。
         metadata: 装配层注入的额外上下文（例如 cwd、env 快照），core 不解释内容。
+        agent_id: 调用该工具的 agent id（agent-tree-v0.1 模块 G）。单 agent
+            场景默认 ``""``，由 runner 在 ToolContext 构建处填入真实值；工具
+            实现可读 ``ctx.agent_id`` 判断被哪个 agent 调用（不加 epoch）。
     """
 
     run_id: str
@@ -27,6 +30,7 @@ class ToolContext:
     turn: int
     call_id: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    agent_id: str = ""
 
 
 @dataclass(frozen=True)
