@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>kongming-agent 网络架构图</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }
+
+    header {
+      text-align: center;
+      padding: 32px 24px 16px;
+      background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+      border-bottom: 1px solid #334155;
+    }
+
+    header h1 {
+      font-size: 28px;
+      font-weight: 700;
+      background: linear-gradient(135deg, #60a5fa, #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 8px;
+    }
+
+    header p {
+      font-size: 14px;
+      color: #94a3b8;
+    }
+
+    .container {
+      max-width: 1600px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    .diagram-section {
+      background: #1e293b;
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 24px;
+      border: 1px solid #334155;
+    }
+
+    .diagram-section h2 {
+      font-size: 18px;
+      color: #60a5fa;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .diagram-section h2 .badge {
+      font-size: 11px;
+      background: #3b82f6;
+      color: white;
+      padding: 2px 8px;
+      border-radius: 999px;
+    }
+
+    .mermaid {
+      display: flex;
+      justify-content: center;
+    }
+
+    .mermaid svg {
+      max-width: 100%;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      justify-content: center;
+      padding: 16px;
+      background: #1e293b;
+      border-radius: 12px;
+      border: 1px solid #334155;
+      margin-bottom: 24px;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: #94a3b8;
+    }
+
+    .legend-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    footer {
+      text-align: center;
+      padding: 24px;
+      color: #475569;
+      font-size: 12px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <header>
+    <h1>kongming-agent 网络架构图</h1>
+    <p>宿主无关、async-first、可扩展的通用 agent 内核 &mdash; 完整网络拓扑</p>
+  </header>
+
+  <div class="container">
+
+    <!-- 图例 -->
+    <div class="legend">
+      <div class="legend-item">
+        <div class="legend-dot" style="background:#60a5fa"></div> 外部服务
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:#f97316"></div> 接入层 (CLI/Web)
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:#a78bfa"></div> 宿主适配层
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:#34d399"></div> 内核层 (core)
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:#fbbf24"></div> 功能模块
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:#f472b6"></div> 持久化 / 存储
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:#6b7280"></div> 跨切面 (safety/observability)
+      </div>
+    </div>
+
+    <!-- ========== 图 1: 宏观网络拓扑 ========== -->
+    <div class="diagram-section">
+      <h2>宏观网络拓扑 <span class="badge">Overview</span></h2>
+      <pre class="mermaid">
+graph TB
+    subgraph EXT["外部服务"]
+        direction LR
+        LLM_OPENAI["OpenAI-compatible API<br/>(GLM / DeepSeek / Ollama / vLLM)"]
+        LLM_ANTHROPIC["Anthropic Messages API"]
+        CLAUDE_SDK["Claude Agent SDK<br/>(subprocess)"]
+    end
+
+    subgraph USER_LAYER["用户接入层"]
+        direction LR
+        CLI_USER["CLI 用户<br/>(prompt_toolkit REPL)"]
+        BROWSER["浏览器<br/>(React SPA)"]
+    end
+
+    subgraph SERVER["kongming-agent 进程"]
+        direction TB
+        subgraph ENTRY["入口"]
+            CLI_ENTRY["cli/main.py<br/>click 入口"]
+            FASTAPI["FastAPI Server<br/>:8765"]
+        end
+        subgraph SCHEDULER["定时调度"]
+            TICKER["scheduler/ticker.py<br/>1s tick loop"]
+        end
+    end
+
+    BROWSER -- "HTTP REST<br/>WebSocket ×5" --> FASTAPI
+    CLI_USER -- "stdin / stdout" --> CLI_ENTRY
+    CLI_ENTRY --> NATIVE_RT
+    FASTAPI --> NATIVE_RT
+    TICKER --> NATIVE_RT
+
+    subgraph CORE["内核 (core)"]
+        RUNNER["Runner.run()<br/>唯一 run loop"]
+        CONTRACTS["contracts.py<br/>协议真源"]
+    end
+
+    NATIVE_RT["SessionEngine<br/>装配层"] --> RUNNER
+
+    RUNNER -- "httpx.AsyncClient" --> LLM_OPENAI
+    RUNNER -- "httpx.AsyncClient" --> LLM_ANTHROPIC
+    RUNNER -- "asyncio.subprocess" --> CLAUDE_SDK
+
+    style EXT fill:#1e3a5f,stroke:#60a5fa,stroke-width:2px,color:#e2e8f0
+    style USER_LAYER fill:#3d2208,stroke:#f97316,stroke-width:2px,color:#e2e8f0
+    style SERVER fill:#1a1a2e,stroke:#a78bfa,stroke-width:2px,color:#e2e8f0
+    style CORE fill:#0a2e1f,stroke:#34d399,stroke-width:2px,color:#e2e8f0
+    </pre>
+    </div>
+
+    <!-- ========== 图 2: 模块依赖与网络协议 ========== -->
+    <div class="diagram-section">
+      <h2>模块依赖与通信协议 <span class="badge">Protocol</span></h2>
+      <pre class="mermaid">
+graph TB
+    subgraph FRONTEND["前端 React SPA"]
+        direction TB
+        CHAT_PAGE["Chat.tsx<br/>路由分派"]
+        GENERIC["generic_chat<br/>MessageList + Composer"]
+        CLAUDE_VIEW["claude_code<br/>ClaudeCodeView"]
+        WS_LIB["lib/ws.ts<br/>通用 WS 客户端"]
+        CLAUDE_WS["lib/claude-ws.ts"]
+        REST_API["lib/api.ts<br/>REST 客户端"]
+        APPROVAL_UI["ApprovalToastQueue / Card<br/>全局审批 UI"]
+    end
+
+    subgraph FASTAPI_APP["FastAPI 后端"]
+        direction TB
+        AUTH_MW["AuthMiddleware<br/>Cookie + CSRF"]
+        CSRF_MW["CSRFMiddleware"]
+        REST_ROUTER["REST Routers<br/>/api/*"]
+        WS_HANDLER["ws.py<br/>WS endpoint"]
+        CC_ROUTE["claude_code/route.py"]
+        THREAD_MGR["ThreadManager<br/>线程池"]
+        THREAD_CELL["ThreadCell<br/>隔离运行时"]
+    end
+
+    subgraph RUNTIME["SessionEngine 装配层"]
+        direction TB
+        PROVIDER["LLMProvider<br/>(OpenAI / Anthropic)"]
+        SAFETY_CHAIN["SafetyGatedApproval<br/>HardBlock→Boundary→Trust→Consent"]
+        TOOL_REG["ToolRegistry<br/>6+ builtin tools"]
+        SESSION["Session<br/>(Memory / SQLite / File)"]
+        INPUT_ASM["InputAssembler<br/>system 注入 + compact"]
+        EVENT_BUS["EventSink fan-out"]
+    end
+
+    subgraph CORE_MOD["core"]
+        RUNNER2["Runner.run()"]
+        CONTRACTS2["contracts.py"]
+    end
+
+    subgraph OBS["可观测性"]
+        TRACE["JsonlTraceSink<br/>trace.jsonl"]
+        DEBUG["PromptDebugDumpSink"]
+    end
+
+    subgraph STORAGE["持久化"]
+        FS[(".kongming/<br/>sessions.db<br/>trace.jsonl<br/>memory/*.md<br/>cron/tasks.json")]
+    end
+
+    subgraph EXTERNAL_LLM["外部 LLM"]
+        OPENAI_EP["OpenAI-compat<br/>/chat/completions"]
+        ANTHROPIC_EP["Anthropic<br/>/v1/messages"]
+        SDK_PROC["Claude SDK<br/>subprocess"]
+    end
+
+    BROWSER2["浏览器"] -- "HTTP + Cookie" --> CSRF_MW
+    CSRF_MW --> AUTH_MW
+    AUTH_MW --> REST_ROUTER
+    AUTH_MW --> WS_HANDLER
+    AUTH_MW --> CC_ROUTE
+
+    BROWSER2 -- "WS /ws/threads/{id}" --> WS_HANDLER
+    BROWSER2 -- "WS /ws/claude-code" --> CC_ROUTE
+    BROWSER2 -- "WS /ws/thread-status" --> WS_HANDLER
+    BROWSER2 -- "WS /ws/cron" --> WS_HANDLER
+    BROWSER2 -- "WS /ws/workspace-shell" --> WS_HANDLER
+
+    WS_HANDLER --> THREAD_MGR
+    CC_ROUTE --> THREAD_MGR
+    THREAD_MGR --> THREAD_CELL
+    THREAD_CELL --> RUNTIME
+
+    RUNNER2 --> PROVIDER
+    RUNNER2 --> SAFETY_CHAIN
+    RUNNER2 --> TOOL_REG
+    RUNNER2 --> INPUT_ASM
+    RUNNER2 --> EVENT_BUS
+    RUNNER2 --> SESSION
+
+    PROVIDER -- "SSE stream<br/>httpx" --> OPENAI_EP
+    PROVIDER -- "SSE stream<br/>httpx" --> ANTHROPIC_EP
+    CC_ROUTE -- "subprocess" --> SDK_PROC
+
+    EVENT_BUS --> TRACE
+    EVENT_BUS --> WSSINK["WSEventSink → 浏览器"]
+    EVENT_BUS --> MEMSINK["MemoryRefreshSink"]
+
+    SESSION --> FS
+    TRACE --> FS
+    TOOL_REG --> FS
+
+    style FRONTEND fill:#3d2208,stroke:#f97316,stroke-width:2px,color:#e2e8f0
+    style FASTAPI_APP fill:#2d1a4e,stroke:#a78bfa,stroke-width:2px,color:#e2e8f0
+    style RUNTIME fill:#1a1a2e,stroke:#60a5fa,stroke-width:2px,color:#e2e8f0
+    style CORE_MOD fill:#0a2e1f,stroke:#34d399,stroke-width:2px,color:#e2e8f0
+    style OBS fill:#2a2a3e,stroke:#6b7280,stroke-width:1px,color:#e2e8f0
+    style STORAGE fill:#3d1a2e,stroke:#f472b6,stroke-width:2px,color:#e2e8f0
+    style EXTERNAL_LLM fill:#1e3a5f,stroke:#60a5fa,stroke-width:2px,color:#e2e8f0
+    </pre>
+    </div>
+
+    <!-- ========== 图 3: WebSocket 协议详解 ========== -->
+    <div class="diagram-section">
+      <h2>WebSocket 协议矩阵 <span class="badge">WebSocket</span></h2>
+      <pre class="mermaid">
+graph LR
+    subgraph BROWSER3["浏览器"]
+        direction TB
+        CHAT_WS["/ws/threads/{id}<br/>generic_chat"]
+        CC_WS["/ws/claude-code<br/>claude_code"]
+        STATUS_WS["/ws/thread-status<br/>全局线程状态"]
+        CRON_WS["/ws/cron<br/>cron 任务状态"]
+        SHELL_WS["/ws/workspace-shell<br/>PTY shell"]
+    end
+
+    subgraph PROTOCOL["帧协议"]
+        direction TB
+        C2S["Client → Server"]
+        S2C["Server → Client"]
+
+        subgraph C2S_FRAMES["C2S 帧"]
+            USER_INPUT["user.input<br/>text + attachments"]
+            APPROVAL_ACK["approval.inbox.resolve<br/>allow + remember"]
+            PING["ping"]
+        end
+
+        subgraph S2C_FRAMES["S2C 帧"]
+            THREAD_HIST["thread.history"]
+            CONTENT_DELTA["content.delta"]
+            REASON_DELTA["reasoning.delta"]
+            TURN_START["turn.start / turn.end"]
+            TOOL_CALL["tool.call.start / tool.call.end"]
+            APPROVAL_REQ["approval.inbox.add / snapshot / remove<br/>approval.decision"]
+            ERROR_FRAME["error"]
+            CELL_EVICT["cell.evicted"]
+        end
+    end
+
+    BROWSER3 -- "JSON 帧" --> PROTOCOL
+
+    style BROWSER3 fill:#3d2208,stroke:#f97316,stroke-width:2px,color:#e2e8f0
+    style PROTOCOL fill:#1e3a5f,stroke:#60a5fa,stroke-width:2px,color:#e2e8f0
+    style C2S fill:#2d4a2d,stroke:#34d399,stroke-width:1px,color:#e2e8f0
+    style S2C fill:#4a2d2d,stroke:#f97316,stroke-width:1px,color:#e2e8f0
+    style C2S_FRAMES fill:#1a2e1a,stroke:#34d399,stroke-width:1px,color:#e2e8f0
+    style S2C_FRAMES fill:#2e1a1a,stroke:#f97316,stroke-width:1px,color:#e2e8f0
+    </pre>
+    </div>
+
+    <!-- ========== 图 4: 三入口汇聚 ========== -->
+    <div class="diagram-section">
+      <h2>三入口汇聚 Runner <span class="badge">Core</span></h2>
+      <pre class="mermaid">
+graph TB
+    subgraph ENTRY_POINTS["三个入口"]
+        direction LR
+        CLI["CLI<br/>cli/main.py<br/>click + prompt_toolkit"]
+        WEB["Web<br/>FastAPI :8765<br/>WS + REST"]
+        CRON["Scheduler<br/>ticker.py<br/>1s tick loop"]
+    end
+
+    CLI -- "CLIInteractiveLoop + HostDispatcher" --> HOST["HostAdapter<br/>CLIAdapter"]
+    WEB -- "ThreadManager + HostDispatcher" --> WEB_HOST["HostAdapter<br/>WebHostAdapter"]
+    CRON -- "ExecutionBridge" --> CRON_BRIDGE["ExecutionBridge<br/>fresh session"]
+
+    HOST --> NR["SessionEngine"]
+    WEB_HOST --> NR
+    CRON_BRIDGE --> NR
+
+    NR --> R["Runner.run()<br/>唯一 run loop"]
+
+    R --> LOOP["while turn &lt; max_turns:"]
+    LOOP --> ASM["InputAssembler.assemble()"]
+    LOOP --> LLM["LLMProvider.complete()"]
+    LOOP --> TOOL_DEC["tool_calls?"]
+    TOOL_DEC -- "Yes" --> SAFETY["SafetyGatedApproval"]
+    SAFETY --> APPROVED["approved?"]
+    APPROVED -- "Yes" --> EXEC["Tool.execute()"]
+    EXEC --> LOOP
+    APPROVED -- "No" --> REJECT["ToolResult(rejected)"]
+    REJECT --> LOOP
+    TOOL_DEC -- "No" --> DONE["Return Result"]
+
+    style ENTRY_POINTS fill:#3d2208,stroke:#f97316,stroke-width:2px,color:#e2e8f0
+    style R fill:#0a2e1f,stroke:#34d399,stroke-width:3px,color:#e2e8f0
+    style NR fill:#1a1a2e,stroke:#a78bfa,stroke-width:2px,color:#e2e8f0
+    style LOOP fill:#1e293b,stroke:#60a5fa,stroke-width:1px,color:#e2e8f0
+    </pre>
+    </div>
+
+    <!-- ========== 图 5: 安全决策链 ========== -->
+    <div class="diagram-section">
+      <h2>安全决策链 <span class="badge">Safety</span></h2>
+      <pre class="mermaid">
+graph LR
+    CALL["ToolCall<br/>from LLM"] --> HB["HardBlockGuard<br/>硬拒绝危险命令"]
+
+    HB -- "pass" --> BOUNDARY["BoundaryResolver<br/>边界上下文推导"]
+    HB -- "hard_deny" --> REJ1["拒绝"]
+
+    BOUNDARY --> TRUST["TrustResolver<br/>可信路径/授权"]
+    TRUST -- "silent_allow" --> OK1["自动放行"]
+
+    TRUST --> CONSENT["ConsentResolver<br/>交互审批"]
+    CONSENT -- "auto_approval<br/>策略匹配" --> AUTO["自动决策"]
+    CONSENT -- "InteractiveApproval" --> USER["用户审批<br/>CLI: y/n<br/>Web: WS frame"]
+
+    USER -- "accept" --> OK2["放行"]
+    USER -- "reject" --> REJ2["拒绝"]
+
+    style CALL fill:#1e293b,stroke:#60a5fa,stroke-width:2px,color:#e2e8f0
+    style HB fill:#4a1a1a,stroke:#ef4444,stroke-width:2px,color:#e2e8f0
+    style BOUNDARY fill:#3d3a08,stroke:#fbbf24,stroke-width:2px,color:#e2e8f0
+    style TRUST fill:#1a3d2a,stroke:#34d399,stroke-width:2px,color:#e2e8f0
+    style CONSENT fill:#2d1a4e,stroke:#a78bfa,stroke-width:2px,color:#e2e8f0
+    style OK1 fill:#0a3d1a,stroke:#34d399,stroke-width:1px,color:#e2e8f0
+    style OK2 fill:#0a3d1a,stroke:#34d399,stroke-width:1px,color:#e2e8f0
+    style REJ1 fill:#3d0a0a,stroke:#ef4444,stroke-width:1px,color:#e2e8f0
+    style REJ2 fill:#3d0a0a,stroke:#ef4444,stroke-width:1px,color:#e2e8f0
+    </pre>
+    </div>
+
+    <!-- ========== 图 6: 事件扇出 ========== -->
+    <div class="diagram-section">
+      <h2>事件扇出 EventSink Fan-out <span class="badge">Events</span></h2>
+      <pre class="mermaid">
+graph TB
+    EMIT["Runner._emit(event)<br/>30+ EventKind"]
+
+    EMIT --> TRACE_SINK["JsonlTraceSink<br/>→ .kongming/trace.jsonl"]
+    EMIT --> CLI_SINK["CLIEventSink<br/>→ stderr (verbose)"]
+    EMIT --> WS_SINK["WSEventSink<br/>→ 浏览器 WS 帧"]
+    EMIT --> MEM_SINK["MemoryRefreshSink<br/>→ reload memory snapshot"]
+    EMIT --> STATUS_SINK["ThreadStatusEventSink<br/>→ /ws/thread-status 广播"]
+    EMIT --> DEBUG_SINK["PromptDebugDumpSink<br/>→ .kongming/debug/"]
+
+    EVENT_KINDS["EventKind 枚举<br/>run.* / turn.* / llm.* / tool.*<br/>approval.* / memory.* / skill.*<br/>content.delta / reasoning.delta"]
+
+    style EMIT fill:#0a2e1f,stroke:#34d399,stroke-width:3px,color:#e2e8f0
+    style TRACE_SINK fill:#2a2a3e,stroke:#6b7280,stroke-width:1px,color:#e2e8f0
+    style CLI_SINK fill:#2a2a3e,stroke:#6b7280,stroke-width:1px,color:#e2e8f0
+    style WS_SINK fill:#1e3a5f,stroke:#60a5fa,stroke-width:2px,color:#e2e8f0
+    style MEM_SINK fill:#3d1a2e,stroke:#f472b6,stroke-width:1px,color:#e2e8f0
+    style STATUS_SINK fill:#1e3a5f,stroke:#60a5fa,stroke-width:1px,color:#e2e8f0
+    style DEBUG_SINK fill:#2a2a3e,stroke:#6b7280,stroke-width:1px,color:#e2e8f0
+    </pre>
+    </div>
+
+    <!-- ========== 图 7: 存储拓扑 ========== -->
+    <div class="diagram-section">
+      <h2>持久化存储拓扑 <span class="badge">Storage</span></h2>
+      <pre class="mermaid">
+graph TB
+    subgraph KONGMING[".kongming/ 目录"]
+        direction TB
+        SESSIONS["sessions.db<br/>SQLite 会话历史"]
+        SESSION_DIR["sessions/<br/>FileSession JSONL"]
+        TRACE_FILE["trace.jsonl<br/>LLM 追踪"]
+        MEMORY_DIR["memory/<br/>MEMORY.md / USER.md / ERRORS.md"]
+        CRON_DIR["cron/<br/>tasks.json + runs/*.jsonl + audits.jsonl"]
+        WEB_DIR["web/<br/>threads/ + auth hash"]
+        GRANTS["grants.jsonl<br/>安全授权"]
+        UPLOADS["uploads/<br/>媒体资源"]
+        WHITEBOARD["whiteboard/<br/>JSON + markdown cards"]
+        PROMPTS["prompts/<br/>AGENT / TOOLS / USER .md"]
+        DEBUG_DIR["debug/<br/>prompt-debug / raw-llm JSON"]
+        EVOLUTION["evolution/<br/>自我进化产物"]
+    end
+
+    subgraph BACKENDS["会话后端"]
+        direction LR
+        MEM_BACKEND["InMemorySession<br/>进程内存"]
+        SQLITE_BACKEND["SQLiteSession<br/>sessions.db"]
+        FILE_BACKEND["FileSession<br/>sessions/*.jsonl"]
+    end
+
+    MEM_BACKEND --> KONGMING
+    SQLITE_BACKEND --> SESSIONS
+    FILE_BACKEND --> SESSION_DIR
+
+    style KONGMING fill:#3d1a2e,stroke:#f472b6,stroke-width:2px,color:#e2e8f0
+    style BACKENDS fill:#1a1a2e,stroke:#a78bfa,stroke-width:1px,color:#e2e8f0
+    </pre>
+    </div>
+
+  </div>
+
+  <footer>
+    kongming-agent architecture &middot; auto-generated &middot; 2026-05-19
+  </footer>
+
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      themeVariables: {
+        darkMode: true,
+        background: '#1e293b',
+        primaryColor: '#3b82f6',
+        primaryTextColor: '#e2e8f0',
+        primaryBorderColor: '#60a5fa',
+        lineColor: '#94a3b8',
+        secondaryColor: '#334155',
+        tertiaryColor: '#1e293b',
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+        fontSize: '13px',
+        nodeBorder: '#60a5fa',
+        clusterBkg: '#1e293b',
+        clusterBorder: '#475569',
+        titleColor: '#60a5fa',
+        edgeLabelBackground: '#1e293b'
+      },
+      flowchart: {
+        htmlLabels: true,
+        curve: 'basis',
+        padding: 16,
+        nodeSpacing: 30,
+        rankSpacing: 40,
+        useMaxWidth: true
+      }
+    });
+  </script>
+
+</body>
+
+</html>

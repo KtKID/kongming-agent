@@ -9,7 +9,7 @@ description = "宿主无关、最小可运行、可继续扩展成通用 agent �
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "kongming-agent contributors" }]
+authors = [{ name = "KtKID" }]
 keywords = ["agent", "llm", "openai-compatible", "cli"]
 classifiers = [
     "Development Status :: 3 - Alpha",

@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>kongming-agent · 审批流程现状图（5 通道）</title>
+<style>
+  :root {
+    --bg: #FFFFFF;
+    --surface: #F5F5F7;
+    --surface-2: #FAFAFC;
+    --border: #D2D2D7;
+    --hairline: rgba(60,60,67,0.12);
+    --label: #86868B;
+    --text: #1D1D1F;
+    --text-2: #424245;
+    --link: #0071E3;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  .wrap { max-width: 1320px; margin: 56px auto; padding: 0 28px; }
+  h1 { font-size: 32px; font-weight: 600; letter-spacing: -0.022em; margin: 0 0 6px; }
+  h2 { font-size: 22px; font-weight: 600; letter-spacing: -0.018em; margin: 40px 0 12px; }
+  h3 { font-size: 17px; font-weight: 600; margin: 24px 0 8px; color: var(--text); }
+  .meta { color: var(--label); font-size: 14px; margin-bottom: 28px; }
+  .meta a { color: var(--link); text-decoration: none; }
+  .meta a:hover { text-decoration: underline; }
+  blockquote { border-left: 3px solid var(--border); padding: 10px 16px; color: var(--text-2); margin: 16px 0; background: var(--surface-2); border-radius: 0 6px 6px 0; }
+  blockquote strong { color: var(--text); font-weight: 600; }
+  code { background: var(--surface); padding: 2px 7px; border-radius: 4px; font-size: 0.88em; font-family: "SF Mono", Menlo, Consolas, monospace; color: var(--text); }
+  .diagram { background: var(--bg); border: 1px solid var(--hairline); border-radius: 14px; padding: 28px; margin: 18px 0 28px; overflow-x: auto; box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 8px 24px rgba(0,0,0,0.04); }
+  .legend { display: flex; gap: 22px; flex-wrap: wrap; margin: 8px 0 18px; font-size: 13.5px; color: var(--text-2); }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; }
+  .legend .swatch { width: 16px; height: 16px; border-radius: 5px; display: inline-block; border: 1.5px solid; }
+  ul, ol { padding-left: 22px; }
+  li { margin: 5px 0; color: var(--text-2); }
+  li strong { color: var(--text); font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0 28px; font-size: 14px; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--hairline); }
+  th { color: var(--label); font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.04em; }
+  td code { font-size: 12.5px; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {
+      fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif',
+      fontSize: '13px',
+      primaryColor: '#FFFFFF',
+      primaryTextColor: '#1D1D1F',
+      primaryBorderColor: '#D2D2D7',
+      lineColor: '#86868B',
+      tertiaryColor: '#F5F5F7',
+      clusterBkg: '#FAFAFC',
+      clusterBorder: '#D2D2D7'
+    },
+    flowchart: { curve: 'basis', padding: 18, nodeSpacing: 28, rankSpacing: 40 }
+  });
+</script>
+</head>
+<body>
+
+<div class="wrap">
+
+<h1>kongming-agent · 审批流程现状图（5 通道）</h1>
+<p class="meta">更新时间：2026-07-31 · 当前 Web 审批统一通过 ApprovalManager 与全局 inbox</p>
+
+<blockquote>
+<strong>核心洞察</strong>：Web 通道的人工审批统一由 <code>ApprovalManager</code> 持有 pending，
+通过 <code>/ws/thread-status</code> 广播 <code>approval.inbox.*</code>，前端使用右下角全局审批卡片处理。
+</blockquote>
+
+<div class="legend">
+  <span><span class="swatch" style="background:#E5F5E8;border-color:#34C759"></span> 已上线（v1/v2-inbox 已覆盖）</span>
+  <span><span class="swatch" style="background:#FFF4E5;border-color:#FF9500"></span> generic_chat 全局 inbox</span>
+  <span><span class="swatch" style="background:#E8F1FE;border-color:#0071E3"></span> 已上线（auto / CLI 类，不需要 inbox）</span>
+  <span><span class="swatch" style="background:#FAEAFF;border-color:#AF52DE"></span> v0.1 计划改造点</span>
+</div>
+
+<h2>1. claude_code 通道（已上线 v2-inbox）</h2>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+    A1["Claude SDK<br/>tool_use 回调"]:::done
+    A2["ApprovalBridge<br/>(per-ws 实例)<br/>src/hosts/web/integrations/claude_code/approval.py"]:::done
+    A3["AutoApprovalPolicy.classify<br/>24 rules.yaml + 倒计时"]:::done
+    A4["emit permission_request<br/>(per-thread WS, 兼容历史)"]:::done
+    A5["ApprovalInboxBroadcaster.emit_add<br/>src/hosts/web/approvals/global_inbox/"]:::done
+    A6["fan-out → 所有 /ws/thread-status 订阅者"]:::done
+    A7["ApprovalToastQueue<br/>web/src/features/approval-inbox/"]:::done
+    A8["用户点 拒绝/单次/本session"]:::done
+    A9["inbox.resolve 帧 C2S<br/>{threadId, requestId, allow, rememberEntry?}"]:::done
+    A10["broadcaster.resolve<br/>→ bridge.resolve<br/>→ Future.set_result"]:::done
+    A11["PermissionResultAllow / Deny<br/>(可选写 allow_list)"]:::done
+
+    A1 --> A2
+    A2 --> A3 --> A4
+    A2 --> A5
+    A5 --> A6 --> A7 --> A8
+    A8 --> A9 --> A10 --> A11
+
+    classDef done fill:#E5F5E8,stroke:#34C759,stroke-width:1.5px,color:#1D1D1F
+</pre>
+</div>
+
+<h2>2. generic_chat 通道（Web 全局 inbox）</h2>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+    B1["generic_chat Runner<br/>tool dispatch<br/>src/core/runner.py"]:::current
+    B2["SafetyDecisionEngine.decide<br/>src/safety/decision_engine.py"]:::current
+    B3a["hard_block"]:::current
+    B3b["silent_allow"]:::current
+    B3c["explicit_consent<br/>(standard / elevated)"]:::current
+    B4["SafetyGatedApproval<br/>src/safety/chain.py"]:::current
+    B5["ApprovalManager<br/>持有 pending Future"]:::current
+    B6["InboxEventSink<br/>广播 approval.inbox.add"]:::current
+    B7["/ws/thread-status<br/>全局审批通道"]:::current
+    B8["ApprovalToastQueue / Card<br/>右下角卡片列表"]:::current
+    B9["用户点 拒绝 / 允许 / 记住规则"]:::current
+    B10["approval.inbox.resolve"]:::current
+    B11["ApprovalManager.resolve"]:::current
+    B12["PermissionsManager<br/>按 thread 保存规则"]:::current
+    B13["Deny"]:::current
+    B14["Allow"]:::current
+
+    B1 --> B2
+    B2 --> B3a --> B13
+    B2 --> B3b --> B14
+    B2 --> B3c --> B4
+    B4 --> B5 --> B6 --> B7 --> B8 --> B9 --> B10 --> B11 --> B12
+
+    classDef current fill:#FFF4E5,stroke:#FF9500,stroke-width:1.5px,color:#1D1D1F
+</pre>
+</div>
+
+<h2>3. generic_chat 通道 (CLI) — 已上线，不需要 inbox</h2>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+    C1["CLI Runner<br/>src/hosts/cli/main.py"]:::cli
+    C2["SafetyDecisionEngine.decide<br/>(同 web 同一套)"]:::cli
+    C3["explicit_consent<br/>→ SafetyGatedApproval"]:::cli
+    C4["InteractiveApproval<br/>prompt_fn"]:::cli
+    C5["CLI Adapter<br/>prompt_approval<br/>(stdin/tty)"]:::cli
+    C6["用户在终端键入<br/>y / n / s (本session)"]:::cli
+
+    C1 --> C2 --> C3 --> C4 --> C5 --> C6
+
+    classDef cli fill:#E8F1FE,stroke:#0071E3,stroke-width:1.5px,color:#1D1D1F
+</pre>
+</div>
+
+<h2>4. cron 通道 — 已上线，纯 auto</h2>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+    D1["Scheduler tick<br/>src/scheduler/ticker.py"]:::cli
+    D2["ScheduleApprovalProvider<br/>(per-task approval_mode)"]:::cli
+    D3a["trust mode<br/>(默认, cron 预批准)"]:::cli
+    D3b["fail_closed mode<br/>(用户显式 opt-in)"]:::cli
+    D4["auto allow + audit event<br/>approval.cron.auto_allow"]:::cli
+    D5["auto deny"]:::cli
+
+    D1 --> D2
+    D2 --> D3a --> D4
+    D2 --> D3b --> D5
+
+    classDef cli fill:#E8F1FE,stroke:#0071E3,stroke-width:1.5px,color:#1D1D1F
+</pre>
+</div>
+
+<h2>5. evolution / reviewer 通道 — 已上线，纯 auto</h2>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+    E1["Evolution Reviewer Runner<br/>src/evolution/evolution_manager.py"]:::cli
+    E2["AutoAllowApproval<br/>src/tools/runtime/approval.py"]:::cli
+    E3["auto allow all<br/>(reviewer 不可能弹窗)"]:::cli
+
+    E1 --> E2 --> E3
+
+    classDef cli fill:#E8F1FE,stroke:#0071E3,stroke-width:1.5px,color:#1D1D1F
+</pre>
+</div>
+
+<h2>6. v0.1 计划改造点（仅 1 处装配换 prompt_fn）</h2>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+    F1["src/hosts/web/run.py L245-246<br/>generic_chat 装配"]:::plan
+    F2["原：InteractiveApproval(<br/>  prompt_fn=adapter.prompt_approval)"]:::current
+    F3["改：InteractiveApproval(<br/>  prompt_fn=make_inbox_prompt_fn(<br/>    thread_id, get_inbox_broadcaster()<br/>  ))"]:::plan
+    F4["新建 src/hosts/web/approvals/global_inbox/<br/>inbox_prompt_fn.py (~50 行)<br/>· emit_add 到 broadcaster<br/>· await Future 等 resolve<br/>· ApprovalAction 二态映射<br/>  (ACCEPT_FOR_SESSION 在 v0.1 不支持)"]:::plan
+    F5["复用所有 claude_code 已有<br/>ApprovalToastQueue UI 资源"]:::done
+
+    F1 --> F2
+    F2 -.改造.-> F3
+    F3 --> F4
+    F4 --> F5
+
+    classDef plan fill:#FAEAFF,stroke:#AF52DE,stroke-width:1.5px,color:#1D1D1F
+    classDef current fill:#FFF4E5,stroke:#FF9500,stroke-width:1.5px,color:#1D1D1F
+    classDef done fill:#E5F5E8,stroke:#34C759,stroke-width:1.5px,color:#1D1D1F
+</pre>
+</div>
+
+<h2>关键概念对照表（容易混淆，必记）</h2>
+
+<table>
+<thead>
+<tr><th>概念</th><th>claude_code 通道</th><th>generic_chat 通道</th></tr>
+</thead>
+<tbody>
+<tr>
+  <td><strong>策略层</strong></td>
+  <td><code>AutoApprovalPolicy</code><br/>24 条 rules.yaml 通配（如 <code>Bash(rm:*)</code>）</td>
+  <td><code>SafetyDecisionEngine</code><br/>4 层链：HardBlock → Boundary → Trust → Consent</td>
+</tr>
+<tr>
+  <td><strong>决策输出</strong></td>
+  <td>PermissionResult (Allow / Deny)<br/>+ <code>autoApproveAtMs</code> / <code>autoRejectAtMs</code> 倒计时</td>
+  <td><code>ApprovalDecision</code><br/>{hard_block / silent_allow / explicit_consent}<br/>+ severity (standard / elevated)</td>
+</tr>
+<tr>
+  <td><strong>"本 session" 语义</strong></td>
+  <td><code>rememberEntry</code> = 工具名 prefix<br/>写 <code>ApprovalBridge._allow_list: list[str]</code></td>
+  <td><code>ApprovalAction.ACCEPT_FOR_SESSION</code><br/>写 <code>GrantStore</code> 持久 grant<br/><strong>⚠️ 两套语义不可偷渡</strong></td>
+</tr>
+<tr>
+  <td><strong>Bridge / Future 持有者</strong></td>
+  <td><code>ApprovalBridge</code> (per-ws 实例)</td>
+  <td>InboxApprovalProvider 内 Future / closure（v0.1）<br/>或 <code>InteractiveApproval</code> 内（CLI/旧 web）</td>
+</tr>
+<tr>
+  <td><strong>Inbox 帧字段对接</strong></td>
+  <td>全部字段都填（含 autoApprove / autoReject / blockedByRule）</td>
+  <td><code>autoApprove/Reject/blockedByRule = null</code><br/>仅 <code>isElevated</code> 从 metadata.policy_hint 推</td>
+</tr>
+</tbody>
+</table>
+
+<h2>v0.1 的边界 (基于子 agent reviewer 验证)</h2>
+
+<blockquote>
+<strong>✅ v0.1 范围</strong>
+<ul>
+<li>只在 <code>src/hosts/web/run.py</code> 一处装配换 prompt_fn</li>
+<li>generic_chat 在 web chat 触发的 explicit_consent → 浮窗 inbox</li>
+<li>frame schema 复用 v2-inbox（已知字段半数 null，文档化）</li>
+<li>generic_chat 卡片禁用「本 session」按钮（二态 vs 三态错配，下版协议演进解决）</li>
+</ul>
+
+<strong>🚫 v0.1 不动</strong>
+<ul>
+<li>CLI / cron / evolution 装配（一行不动）</li>
+<li>SafetyDecisionEngine / chain 内部</li>
+<li>policy.py / rules.yaml / infrastructure.config schema</li>
+<li>core/contracts/（不抽 Protocol）</li>
+<li>importlinter（0 跨层）</li>
+<li>broadcaster bridge_registry 改名（保留原命名）</li>
+</ul>
+
+<strong>📋 v0.1 真实改动</strong>：4 个文件
+<ol>
+<li>新建 <code>src/hosts/web/approvals/global_inbox/inbox_prompt_fn.py</code> (~50 行)</li>
+<li>改 <code>src/hosts/web/run.py</code> L245-246（generic_chat 装配换 prompt_fn）</li>
+<li>broadcaster 加 <code>register_resolve_target / unregister</code> 轻 API（约 10 行）</li>
+<li>改 <code>web/src/features/approval-inbox/ApprovalToastCard.tsx</code>（按 channel 隐藏第三按钮）</li>
+</ol>
+</blockquote>
+
+<h2>使用本图</h2>
+<ul>
+<li>讨论方案时：先确认"v0.1 改动是否真的只动通道 #2 + 标记 v0.1 计划"——其他通道不动</li>
+<li>讨论协议时：参考"关键概念对照表"避免 claude_code / generic_chat 概念混淆</li>
+<li>未来扩展时：复用本图的"5 通道"骨架；新通道（如 codex）添加 #7 区域</li>
+</ul>
+
+</div>
+</body>
+</html>
