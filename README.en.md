@@ -282,7 +282,7 @@ main agent tool call (run_agent_workflow)
   → AgentWorkflowResult (runs / reports / reports/index.json / result.json)
 ```
 
-For deeper architecture diagrams, dependency directions, and module responsibilities, see [docs/architecture/overview.md](docs/architecture/overview.md) and the [AGENTS.md code map](AGENTS.md).
+For deeper dependency directions and module responsibilities, see the [AGENTS.md code map](AGENTS.md) and the module docs under [docs/modules/](docs/modules/).
 
 ---
 

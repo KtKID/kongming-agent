@@ -296,7 +296,7 @@ CLIInteractiveLoop(host_dispatcher, command_service).run_loop()
   → AgentWorkflowResult（runs / reports / reports/index.json / result.json）
 ```
 
-更深入的架构图、依赖方向和模块职责见 [docs/architecture/overview.md](docs/architecture/overview.md) 与 [AGENTS.md · 代码地图](AGENTS.md)。
+更深入的依赖方向和模块职责见 [AGENTS.md · 代码地图](AGENTS.md) 与 [docs/modules/](docs/modules/) 下各模块文档。
 
 ---
 
