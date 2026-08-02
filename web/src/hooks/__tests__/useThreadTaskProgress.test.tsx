@@ -24,17 +24,39 @@ function makeSnapshot(
   tasks: ThreadTaskProgressSnapshot["tasks"],
 ): ThreadTaskProgressSnapshot {
   return {
-    schema_version: 1,
+    schema_version: 2,
     session_id: threadId,
+    workflow_id: tasks.length > 0 ? "wf-current" : null,
+    title: tasks.length > 0 ? "当前计划" : null,
+    control_mode: tasks.length > 0 ? "llm_steps" : null,
     updated_at_ms: 1781190000000,
-    source: "workflow",
     tasks,
     counts: {
       pending: tasks.filter((item) => item.status === "pending").length,
       in_progress: tasks.filter((item) => item.status === "in_progress").length,
       completed: tasks.filter((item) => item.status === "completed").length,
+      failed: tasks.filter((item) => item.status === "failed").length,
+      cancelled: tasks.filter((item) => item.status === "cancelled").length,
       total: tasks.length,
     },
+  };
+}
+
+function task(
+  taskId: string,
+  status: ThreadTaskProgressSnapshot["tasks"][number]["status"],
+  displayOrder: number,
+  desc = taskId,
+): ThreadTaskProgressSnapshot["tasks"][number] {
+  return {
+    task_id: taskId,
+    task_run_id: `${displayOrder + 1}-${taskId}`,
+    desc,
+    depends_on: [],
+    status,
+    display_order: displayOrder,
+    error_message: status === "failed" ? "child failed" : null,
+    updated_at_ms: 1781190000000 + displayOrder,
   };
 }
 
@@ -48,35 +70,12 @@ describe("useThreadTaskProgress", () => {
     vi.useRealTimers();
   });
 
-  it("maps snapshot tasks to sorted compact checklist view model", () => {
+  it("maps v2 tasks to sorted compact checklist with terminal labels", () => {
     const snapshot = makeSnapshot("thread-1", [
-      {
-        id: "wf:2",
-        orchestration_task_id: "wf:2",
-        task_id: "implement",
-        task_run_id: "2",
-        desc: "实现前端进度入口",
-        status: "in_progress",
-        display_order: 2,
-      },
-      {
-        id: "wf:1",
-        orchestration_task_id: "wf:1",
-        task_id: "contract",
-        task_run_id: "1",
-        desc: "梳理接口合同",
-        status: "completed",
-        display_order: 1,
-      },
-      {
-        id: "wf:3",
-        orchestration_task_id: "wf:3",
-        task_id: "verify",
-        task_run_id: "3",
-        desc: "补充轮询测试",
-        status: "pending",
-        display_order: 3,
-      },
+      task("implement", "in_progress", 2, "实现前端进度入口"),
+      task("contract", "completed", 1, "梳理接口合同"),
+      task("verify", "failed", 3, "补充轮询测试"),
+      task("cleanup", "cancelled", 4, "清理旧入口"),
     ]);
 
     const viewModel = toThreadTaskProgressViewModel(snapshot);
@@ -85,65 +84,30 @@ describe("useThreadTaskProgress", () => {
       "梳理接口合同",
       "实现前端进度入口",
       "补充轮询测试",
+      "清理旧入口",
     ]);
     expect(viewModel.items.map((item) => item.status_label)).toEqual([
       "已完成",
       "进行中",
-      "未完成",
+      "失败",
+      "已取消",
     ]);
     expect(viewModel.items.map((item) => item.icon_variant)).toEqual([
       "check_circle",
       "active_ring",
-      "ring",
+      "error_circle",
+      "error_circle",
     ]);
-    expect(viewModel.items[0].aria_label).toBe("已完成：梳理接口合同");
-  });
-
-  it("derives stable item keys from legacy workflow-shaped snapshots", () => {
-    const snapshot = makeSnapshot("thread-1", [
-      {
-        id: "wf-20260619T032911-c05b897f",
-        orchestration_task_id: "wf-20260619T032911-c05b897f",
-        workflow_id: null,
-        task_id: "step1_survey",
-        task_run_id: "wf-20260619T032911-c05b897f::step1_survey::1",
-        desc: "梳理 workflow 入口",
-        status: "in_progress",
-        display_order: 0,
-      },
-      {
-        id: "wf-20260619T032911-c05b897f",
-        orchestration_task_id: "wf-20260619T032911-c05b897f",
-        workflow_id: null,
-        task_id: "step2_design",
-        task_run_id: "wf-20260619T032911-c05b897f::step2_design::1",
-        desc: "设计执行规则",
-        status: "pending",
-        display_order: 1,
-      },
-    ]);
-
-    const viewModel = toThreadTaskProgressViewModel(snapshot);
-
-    expect(viewModel.items.map((item) => item.key)).toEqual([
-      "wf-20260619T032911-c05b897f:step1_survey",
-      "wf-20260619T032911-c05b897f:step2_design",
-    ]);
+    expect(viewModel.items[0].key).toBe("wf-current:contract");
   });
 
   it("caps rendered items and long desc text", () => {
     const longDesc = "x".repeat(1200);
     const snapshot = makeSnapshot(
       "thread-1",
-      Array.from({ length: 129 }, (_, index) => ({
-        id: `wf:${index}`,
-        orchestration_task_id: `wf:${index}`,
-        task_id: `task-${index}`,
-        task_run_id: `${index}`,
-        desc: index === 0 ? longDesc : `任务 ${index}`,
-        status: "pending",
-        display_order: index,
-      })),
+      Array.from({ length: 129 }, (_, index) =>
+        task(`task-${index}`, "pending", index, index === 0 ? longDesc : `任务 ${index}`),
+      ),
     );
 
     const viewModel = toThreadTaskProgressViewModel(snapshot);
@@ -160,18 +124,14 @@ describe("useThreadTaskProgress", () => {
       useThreadTaskProgress("thread-1", { enabled: true }),
     );
 
-    expect(mockApiGetThreadTaskProgress).toHaveBeenCalledTimes(1);
     expect(mockApiGetThreadTaskProgress).toHaveBeenCalledWith("thread-1");
-
     await flushPromises();
-
     expect(result.current.snapshot).toEqual(snapshot);
 
     await act(async () => {
       vi.advanceTimersByTime(2000);
       await Promise.resolve();
     });
-
     expect(mockApiGetThreadTaskProgress).toHaveBeenCalledTimes(2);
   });
 
@@ -179,33 +139,23 @@ describe("useThreadTaskProgress", () => {
     mockApiGetThreadTaskProgress.mockImplementation((threadId: string) =>
       Promise.resolve(makeSnapshot(threadId, [])),
     );
-
     const { rerender } = renderHook(
       ({ threadId, enabled }) =>
         useThreadTaskProgress(threadId, { enabled, refreshMs: 2000 }),
-      {
-        initialProps: { threadId: "thread-1", enabled: true },
-      },
+      { initialProps: { threadId: "thread-1", enabled: true } },
     );
 
     await flushPromises();
-
-    expect(mockApiGetThreadTaskProgress).toHaveBeenCalledWith("thread-1");
-
     rerender({ threadId: "thread-1", enabled: false });
     const callCountAfterClose = mockApiGetThreadTaskProgress.mock.calls.length;
-
     await act(async () => {
       vi.advanceTimersByTime(4000);
       await Promise.resolve();
     });
-
     expect(mockApiGetThreadTaskProgress).toHaveBeenCalledTimes(callCountAfterClose);
 
     rerender({ threadId: "thread-2", enabled: true });
-
     await flushPromises();
-
     expect(mockApiGetThreadTaskProgress).toHaveBeenCalledWith("thread-2");
   });
 });

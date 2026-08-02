@@ -18,8 +18,7 @@ class SessionBootstrap:
         model_name: 本次会话模型。
         instruction_sources: 指令来源列表（origin 字符串，不含 content）。
         instruction_text_hash: InstructionLoader.render(...) 最终结果的 sha256 哈希。
-        instruction_text: InstructionLoader.render(...) 最终结果文本，供会话记录保留完整指令；
-            None 表示不持久化 system prompt 快照。
+        instruction_text: InstructionLoader.render(...) 最终结果文本，供会话记录保留完整指令。
         created_at: session 逻辑创建时间（time.time() 浮点秒）。
         cwd: 启动目录。
         app_version: 当前程序版本号，可选。
