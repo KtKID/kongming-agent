@@ -113,6 +113,29 @@ describe("sitian manager", () => {
     expect(state.report).toEqual(report);
   });
 
+  it("通用频道分析报告沿用现有报告合同并进入可见状态", async () => {
+    const report = makeReport({
+      summary: "通用频道项目已分析",
+      projects: [makeProject("/workspace/generic-chat")],
+    });
+    mockFetchOnce(
+      new Response(JSON.stringify(report), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    await sitianManager.open();
+
+    const state = useSitianStore.getState();
+    expect(state.isOpen).toBe(true);
+    expect(state.error).toBeNull();
+    expect(state.report?.summary).toBe("通用频道项目已分析");
+    expect(state.report?.projects).toEqual([
+      makeProject("/workspace/generic-chat"),
+    ]);
+  });
+
   it("open() 404 → noReport=true，不写 error", async () => {
     mockFetchOnce(
       new Response(

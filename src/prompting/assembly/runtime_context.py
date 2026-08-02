@@ -19,11 +19,12 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def build_runtime_context_text(*, cwd: Path, kongming_home: Path) -> str:
+def build_runtime_context_text(*, cwd: Path | str, kongming_home: Path) -> str:
     """组装一段供 system prompt 使用的运行时上下文文本。
 
     Args:
-        cwd: 当前工作目录绝对路径（调用方通常传 :meth:`Path.cwd`）。
+        cwd: 当前工作目录绝对路径（调用方通常传 :meth:`Path.cwd`，Web 传已解析的
+            thread cwd 字符串以保持 system prompt 与 session manifest 一致）。
         kongming_home: ``.kongming`` 根目录绝对路径
             （调用方通常传 :func:`infrastructure.config.get_kongming_home` 的返回值）。
 

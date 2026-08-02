@@ -76,3 +76,9 @@ htmlcov/
 web/.npm-cache
 web/node_modules/
 .pip-cache
+
+# zcode CLI 本地会话数据（plans 等，每个 clone 各自维护，不入仓）
+.zcode/
+
+# dev-checklist 工作中的临时状态 flag（带 hash 后缀，跑完即丢弃）
+.dev-checklist.md.flag-*.tmp

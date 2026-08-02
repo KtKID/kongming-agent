@@ -7,7 +7,7 @@ Role:
     并渲染 markdown 摘要。
 
 Owns:
-    - work_item 归并逻辑（claude_workspace per-project 展开；其他 1:1）
+    - work_item 归并逻辑（claude_workspace / generic_chat per-project 展开；其他 1:1）
     - suggestion / blocker / risk 分类规则
     - latest_summary.md 格式
 
@@ -34,7 +34,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sitian.config import SiTianConfig
+from sitian.config import SiTianConfig, SiTianSourceKind
 from sitian.models import (
     JsonValue,
     SiTianObservation,
@@ -77,7 +77,7 @@ def SiTianMaterializeState(
         if runtime_state is not None and runtime_state.status != "error":
             active_sources += 1
 
-        # claude_workspace 展开为 per-project work_items；其他 kind 保持 1:1
+        # 多项目 source 展开为 per-project work_items；其他 kind 保持 1:1
         source_work_items = _expand_source_work_items(
             source_id=source.id,
             source_kind=source.kind,
@@ -200,7 +200,7 @@ def SiTianBuildSummaryMarkdown(
 def _expand_source_work_items(
     *,
     source_id: str,
-    source_kind: str,
+    source_kind: SiTianSourceKind,
     project_path: str,
     observations: list[SiTianObservation],
     runtime_state: SiTianSourceRuntimeState | None,
@@ -208,10 +208,13 @@ def _expand_source_work_items(
 ) -> list[SiTianWorkItem]:
     """按 source kind 展开 work_items。
 
-    claude_workspace → per-project（每个 entity_type=project 独立成一条 work_item）。
+    claude_workspace / generic_chat → per-project（每个 entity_type=project 独立成一条 work_item）。
     其他 kind → 1 source = 1 work_item（保持原行为）。
     """
-    if source_kind == "claude_workspace":
+    if source_kind in (
+        SiTianSourceKind.CLAUDE_WORKSPACE,
+        SiTianSourceKind.GENERIC_CHAT,
+    ):
         return _expand_workspace_work_items(
             source_id=source_id,
             source_kind=source_kind,
@@ -234,12 +237,12 @@ def _expand_source_work_items(
 def _expand_workspace_work_items(
     *,
     source_id: str,
-    source_kind: str,
+    source_kind: SiTianSourceKind,
     observations: list[SiTianObservation],
     runtime_state: SiTianSourceRuntimeState | None,
     updated_at: str,
 ) -> list[SiTianWorkItem]:
-    """claude_workspace 展开：每个 project（按 cwd 去重）对应一个 work_item。
+    """多项目 source 展开：每个 project（按 cwd 去重）对应一个 work_item。
 
     observations.jsonl 是追加式写入，多次扫描会产生同一 cwd 的多条
     project observation。这里按 cwd 分组，取最新一条的 payload 作为
@@ -287,7 +290,7 @@ def _expand_workspace_work_items(
 def _materialize_work_item(
     *,
     source_id: str,
-    source_kind: str,
+    source_kind: SiTianSourceKind,
     project_path: str,
     observations: list[SiTianObservation],
     runtime_state: SiTianSourceRuntimeState | None,
@@ -319,7 +322,7 @@ def _materialize_work_item(
 
     # fileCount=0 只对 generic_channel 判（claude_workspace 没有 fileCount 概念）
     if (
-        source_kind not in ("claude_workspace",)
+        source_kind != SiTianSourceKind.CLAUDE_WORKSPACE
         and latest_status is not None
         and int(latest_status.payload.get("fileCount", 0)) == 0
     ):

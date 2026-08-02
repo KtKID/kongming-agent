@@ -8,7 +8,7 @@ Role:
 
 Owns:
     - _ReverseLineIterator（从文件尾部逐块读，O(1) 内存）
-    - read_claude_session_tail()（取最近 N 条消息文本）
+    - read_claude_session_tail() / read_kongming_session_tail()（取最近 N 条消息文本）
 
 Does not own:
     - 观察记录生成（scanners.py）
@@ -19,7 +19,8 @@ Called by:
     - scanners.py（claude_project 扫描时读取最近活动消息）
 
 Key outputs:
-    - read_claude_session_tail(path, max_chars) → list[str]
+    - read_claude_session_tail(path, max_chars) → dict[str, list[str]]
+    - read_kongming_session_tail(path, max_chars) → dict[str, list[str]]
 
 Change risks:
     - jsonl 行格式变化会破坏消息提取
@@ -32,10 +33,11 @@ import contextlib
 import json
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-__all__ = ["read_claude_session_tail"]
+__all__ = ["read_claude_session_tail", "read_kongming_session_tail"]
 
 _log = logging.getLogger("sitian.session_reader")
 
@@ -60,6 +62,47 @@ def read_claude_session_tail(
 
     文件不存在、OSError、JSON 解析错误均静默跳过，不抛异常。
     """
+
+    return _read_session_tail(
+        jsonl_path,
+        user_count=user_count,
+        assistant_count=assistant_count,
+        max_chars=max_chars,
+        role_for_entry=_claude_entry_role,
+    )
+
+
+def read_kongming_session_tail(
+    jsonl_path: Path,
+    *,
+    user_count: int = 1,
+    assistant_count: int = 1,
+    max_chars: int = 500,
+) -> dict[str, list[str]]:
+    """反向读取 FileSession JSONL 中最近的 user/assistant 正文。
+
+    只接受 ``record_type="message"`` 的记录，并从内层 ``message.role`` 区分角色。
+    返回形态、逆序分块和截断语义与 :func:`read_claude_session_tail` 保持一致。
+    """
+
+    return _read_session_tail(
+        jsonl_path,
+        user_count=user_count,
+        assistant_count=assistant_count,
+        max_chars=max_chars,
+        role_for_entry=_kongming_entry_role,
+    )
+
+
+def _read_session_tail(
+    jsonl_path: Path,
+    *,
+    user_count: int,
+    assistant_count: int,
+    max_chars: int,
+    role_for_entry: Callable[[dict[str, Any]], str | None],
+) -> dict[str, list[str]]:
+    """使用给定角色提取规则反向读取受限消息尾部。"""
 
     if user_count < 0 or assistant_count < 0:
         return {"users": [], "assistants": []}
@@ -88,12 +131,12 @@ def read_claude_session_tail(
                 if not isinstance(entry, dict):
                     continue
 
-                entry_type = entry.get("type")
-                if entry_type == "user" and len(users) < user_count:
+                role = role_for_entry(entry)
+                if role == "user" and len(users) < user_count:
                     text = _extract_message_text(entry)
                     if text is not None:
                         users.append(_finalize_text(text, max_chars))
-                elif entry_type == "assistant" and len(assistants) < assistant_count:
+                elif role == "assistant" and len(assistants) < assistant_count:
                     text = _extract_message_text(entry)
                     if text is not None:
                         assistants.append(_finalize_text(text, max_chars))
@@ -105,6 +148,25 @@ def read_claude_session_tail(
         return {"users": [], "assistants": []}
 
     return {"users": users, "assistants": assistants}
+
+
+def _claude_entry_role(entry: dict[str, Any]) -> str | None:
+    """返回 Claude transcript entry 的 user/assistant 角色。"""
+
+    entry_type = entry.get("type")
+    return entry_type if entry_type in {"user", "assistant"} else None
+
+
+def _kongming_entry_role(entry: dict[str, Any]) -> str | None:
+    """返回 FileSession message record 的 user/assistant 角色。"""
+
+    if entry.get("record_type") != "message":
+        return None
+    message = entry.get("message")
+    if not isinstance(message, dict):
+        return None
+    role = message.get("role")
+    return role if role in {"user", "assistant"} else None
 
 
 def _extract_message_text(entry: dict[str, Any]) -> str | None:

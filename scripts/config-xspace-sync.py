@@ -24,20 +24,16 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import cast
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from infrastructure.config.errors import ConfigLoadError  # noqa: E402
 from infrastructure.config.profile_manager import (  # noqa: E402
     ConfigProfileManager,
-    ProfileDecisionAction,
     format_review_issues,
 )
-from infrastructure.config.writer import ConfigWriterError  # noqa: E402
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -119,7 +115,7 @@ def _cmd_decision(args: argparse.Namespace) -> int:
     manager = _manager_from_args(args)
     manager.write_decision(
         path=args.path,
-        action=cast(ProfileDecisionAction, args.action),
+        action=args.action,  # type: ignore[arg-type]
         reason=args.reason,
     )
     print(f"decision=written path={args.path} action={args.action}")
@@ -145,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_decision(args)
         if args.command == "sync":
             return _cmd_sync(args)
-    except (ConfigLoadError, ConfigWriterError, OSError, ValueError) as exc:
+    except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     parser.error(f"unknown command: {args.command}")

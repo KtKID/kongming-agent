@@ -1,11 +1,35 @@
 #!/usr/bin/env bash
+# PR 自动审核脚本：读取当前 PR 标题、正文和 diff，按 REVIEW_PROVIDER 组装 LLM 请求，
+# 调用配置的审核模型生成审查报告，并通过 gh CLI 回写 PR 评论。关键流程：
+# 1. 使用 gh 收集 PR 元信息和 diff；
+# 2. 根据 REVIEW_PROVIDER 构建 OpenAI-compatible 或 Anthropic 请求；
+# 3. 使用 curl 调用模型 API；
+# 4. 解析模型文本并发布 GitHub PR 评论。
 set -euo pipefail
 
 : "${PR_NUMBER:?PR_NUMBER is required}"
-: "${MINIMAX_API_KEY:?MINIMAX_API_KEY is required}"
-: "${MINIMAX_API_URL:=https://api.minimaxi.com/anthropic}"
-: "${MINIMAX_MODEL:=MiniMax-M3}"
-: "${MINIMAX_MAX_TOKENS:=8192}"
+: "${REVIEW_API_KEY:?REVIEW_API_KEY is required}"
+: "${REVIEW_API_URL:?REVIEW_API_URL is required}"
+: "${REVIEW_MODEL:?REVIEW_MODEL is required}"
+: "${REVIEW_PROVIDER:=openai_compatible}"
+: "${REVIEW_MAX_TOKENS:=131072}"
+: "${REVIEW_CONNECT_TIMEOUT:=15}"
+: "${REVIEW_MAX_TIME:=180}"
+
+if ! [[ "$REVIEW_MAX_TOKENS" =~ ^[0-9]+$ ]]; then
+  echo "::error::REVIEW_MAX_TOKENS must be a valid number, got: ${REVIEW_MAX_TOKENS}"
+  exit 1
+fi
+
+if ! [[ "$REVIEW_CONNECT_TIMEOUT" =~ ^[0-9]+$ ]]; then
+  echo "::error::REVIEW_CONNECT_TIMEOUT must be a valid number, got: ${REVIEW_CONNECT_TIMEOUT}"
+  exit 1
+fi
+
+if ! [[ "$REVIEW_MAX_TIME" =~ ^[0-9]+$ ]]; then
+  echo "::error::REVIEW_MAX_TIME must be a valid number, got: ${REVIEW_MAX_TIME}"
+  exit 1
+fi
 
 MAX_DIFF_CHARS=80000
 
@@ -51,45 +75,80 @@ Diff:
 ${DIFF}
 \`\`\`"
 
-PAYLOAD=$(jq -n \
-  --arg model "$MINIMAX_MODEL" \
-  --arg system "$SYSTEM_PROMPT" \
-  --arg user "$USER_PROMPT" \
-  --argjson max_tokens "$MINIMAX_MAX_TOKENS" \
-  '{
-    model: $model,
-    max_tokens: $max_tokens,
-    system: $system,
-    messages: [
-      {role: "user", content: $user}
-    ]
-  }')
-
 # ── 3. 调用 API ──
 
-HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" \
-  "${MINIMAX_API_URL}/v1/messages" \
-  -H "x-api-key: ${MINIMAX_API_KEY}" \
-  -H "content-type: application/json" \
-  -H "anthropic-version: 2023-06-01" \
-  -d "$PAYLOAD")
+API_BASE="${REVIEW_API_URL%/}"
+
+if [ "$REVIEW_PROVIDER" = "openai_compatible" ]; then
+  PAYLOAD=$(jq -n \
+    --arg model "$REVIEW_MODEL" \
+    --arg system "$SYSTEM_PROMPT" \
+    --arg user "$USER_PROMPT" \
+    --argjson max_tokens "$REVIEW_MAX_TOKENS" \
+    '{
+      model: $model,
+      max_tokens: $max_tokens,
+      messages: [
+        {role: "system", content: $system},
+        {role: "user", content: $user}
+      ]
+    }')
+  HTTP_RESPONSE=$(curl -s \
+    --connect-timeout "$REVIEW_CONNECT_TIMEOUT" \
+    --max-time "$REVIEW_MAX_TIME" \
+    -w "\n%{http_code}" \
+    "${API_BASE}/chat/completions" \
+    -H "Authorization: Bearer ${REVIEW_API_KEY}" \
+    -H "content-type: application/json" \
+    -d "$PAYLOAD")
+elif [ "$REVIEW_PROVIDER" = "anthropic" ]; then
+  PAYLOAD=$(jq -n \
+    --arg model "$REVIEW_MODEL" \
+    --arg system "$SYSTEM_PROMPT" \
+    --arg user "$USER_PROMPT" \
+    --argjson max_tokens "$REVIEW_MAX_TOKENS" \
+    '{
+      model: $model,
+      max_tokens: $max_tokens,
+      system: $system,
+      messages: [
+        {role: "user", content: $user}
+      ]
+    }')
+  HTTP_RESPONSE=$(curl -s \
+    --connect-timeout "$REVIEW_CONNECT_TIMEOUT" \
+    --max-time "$REVIEW_MAX_TIME" \
+    -w "\n%{http_code}" \
+    "${API_BASE}/v1/messages" \
+    -H "x-api-key: ${REVIEW_API_KEY}" \
+    -H "content-type: application/json" \
+    -H "anthropic-version: 2023-06-01" \
+    -d "$PAYLOAD")
+else
+  echo "::error::Unsupported REVIEW_PROVIDER: ${REVIEW_PROVIDER}"
+  exit 1
+fi
 
 HTTP_CODE=$(echo "$HTTP_RESPONSE" | tail -1)
 BODY=$(echo "$HTTP_RESPONSE" | sed '$d')
 
 if [ "$HTTP_CODE" -ne 200 ]; then
-  echo "::error::MiniMax API returned HTTP ${HTTP_CODE}"
+  echo "::error::Review API returned HTTP ${HTTP_CODE}"
   echo "$BODY"
   exit 1
 fi
 
 # ── 4. 解析并发评论 ──
 
-REVIEW=$(echo "$BODY" | jq -r '[.content[]? | select(.type == "text") | .text] | join("\n\n")')
+if [ "$REVIEW_PROVIDER" = "openai_compatible" ]; then
+  REVIEW=$(echo "$BODY" | jq -r '.choices[0].message.content // ""')
+else
+  REVIEW=$(echo "$BODY" | jq -r '[.content[]? | select(.type == "text") | .text] | join("\n\n")')
+fi
 
 if [ -z "$REVIEW" ]; then
-  STOP_REASON=$(echo "$BODY" | jq -r '.stop_reason // "unknown"')
-  CONTENT_TYPES=$(echo "$BODY" | jq -r '[.content[]?.type] | unique | join(", ")')
+  STOP_REASON=$(echo "$BODY" | jq -r 'if .choices then (.choices[0].finish_reason // "unknown") else (.stop_reason // "unknown") end')
+  CONTENT_TYPES=$(echo "$BODY" | jq -r 'if .choices then "choices" else ([.content[]?.type] | unique | join(", ")) end')
   COMMENT="## 🤖 LLM Code Review
 
 自动审查没有生成可发布的文本内容。
@@ -97,10 +156,10 @@ if [ -z "$REVIEW" ]; then
 - stop_reason: ${STOP_REASON}
 - content_types: ${CONTENT_TYPES:-none}
 
-请检查 MiniMax 响应预算或 thinking/text 输出配置。
+请检查审核模型响应预算或 thinking/text 输出配置。
 
 ---
-<sub>Reviewed by MiniMax (${MINIMAX_MODEL}) · PR #${PR_NUMBER}</sub>"
+<sub>Reviewed by ${REVIEW_PROVIDER} (${REVIEW_MODEL}) · PR #${PR_NUMBER}</sub>"
 
   gh pr comment "$PR_NUMBER" --body "$COMMENT"
   echo "::error::API response has no text content"
@@ -113,7 +172,7 @@ COMMENT="## 🤖 LLM Code Review
 ${REVIEW}
 
 ---
-<sub>Reviewed by MiniMax (${MINIMAX_MODEL}) · PR #${PR_NUMBER}</sub>"
+<sub>Reviewed by ${REVIEW_PROVIDER} (${REVIEW_MODEL}) · PR #${PR_NUMBER}</sub>"
 
 gh pr comment "$PR_NUMBER" --body "$COMMENT"
 echo "Review posted to PR #${PR_NUMBER}"

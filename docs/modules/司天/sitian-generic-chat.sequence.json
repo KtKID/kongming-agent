@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "SiTian Generic Chat Analysis",
+    "subtitle": "修正版：现有 SiTianRunOnce 批量收集，扩展现有 session_reader，复用 Analyzer 与前端 SitianManager",
+    "output": "docs/modules/司天/sitian-generic-chat.html",
+    "viewBox": [1200, 1160]
+  },
+  "participants": [
+    { "id": "cli", "type": "external", "label": "SiTian CLI", "sublabel": "run-once / loop" },
+    { "id": "service", "type": "backend", "label": "SiTianRun", "sublabel": "SiTianRunOnce" },
+    { "id": "scanner", "type": "backend", "label": "GenericScan", "sublabel": "scanners + global" },
+    { "id": "meta", "type": "database", "label": "ThreadMeta", "sublabel": "channel membership" },
+    { "id": "sessions", "type": "database", "label": "SessionStore", "sublabel": "content + cwd truth" },
+    { "id": "reader", "type": "backend", "label": "SessionRead", "sublabel": "existing module" },
+    { "id": "records", "type": "database", "label": "RecordsStore", "sublabel": "observations/report" },
+    { "id": "analyzer", "type": "cloud", "label": "Analyzer", "sublabel": "existing rules + LLM" },
+    { "id": "ui", "type": "frontend", "label": "SitianMgr", "sublabel": "existing TS manager" },
+    { "id": "api", "type": "backend", "label": "Report API", "sublabel": "GET /api/sitian/report" }
+  ],
+  "segments": [
+    { "from": 150, "to": 610, "label": "01 批量收集通用频道" },
+    { "from": 630, "to": 885, "label": "02 复用现有分析" },
+    { "from": 905, "to": 1080, "label": "03 现有报告展示" }
+  ],
+  "messages": [
+    { "from": "cli", "to": "service", "y": 180, "label": "run-once / loop", "variant": "emphasis" },
+    { "from": "service", "to": "scanner", "y": 220, "label": "scan kind=generic_chat", "variant": "emphasis" },
+    { "from": "scanner", "to": "meta", "y": 260, "label": "列出 thread metadata", "variant": "default" },
+    { "from": "meta", "to": "scanner", "y": 300, "label": "generic_chat + chat", "variant": "return" },
+    { "from": "scanner", "to": "sessions", "y": 340, "label": "按 thread_id 关联", "variant": "default" },
+    { "from": "sessions", "to": "scanner", "y": 380, "label": "manifest + jsonl path", "variant": "return" },
+    { "from": "scanner", "to": "reader", "y": 420, "label": "读取最近消息尾部", "variant": "emphasis" },
+    { "from": "reader", "to": "sessions", "y": 460, "label": "逆序分块读取 JSONL", "variant": "default" },
+    { "from": "sessions", "to": "reader", "y": 500, "label": "user / assistant records", "variant": "return" },
+    { "from": "reader", "to": "scanner", "y": 540, "label": "recent message tails", "variant": "return" },
+    { "from": "scanner", "to": "records", "y": 580, "label": "append project + thread obs", "variant": "emphasis" },
+    { "from": "service", "to": "records", "y": 660, "label": "load observations", "variant": "default" },
+    { "from": "records", "to": "service", "y": 700, "label": "project + thread obs", "variant": "return" },
+    { "from": "service", "to": "analyzer", "y": 740, "label": "analyze normalized sessions", "variant": "emphasis" },
+    { "from": "analyzer", "to": "service", "y": 780, "label": "SiTianReport", "variant": "return" },
+    { "from": "service", "to": "records", "y": 820, "label": "save report + hash", "variant": "default" },
+    { "from": "records", "to": "service", "y": 860, "label": "run complete", "variant": "return" },
+    { "from": "ui", "to": "api", "y": 940, "label": "GET /api/sitian/report", "variant": "emphasis" },
+    { "from": "api", "to": "records", "y": 980, "label": "load sitian_report.json", "variant": "default" },
+    { "from": "records", "to": "api", "y": 1020, "label": "report JSON", "variant": "return" },
+    { "from": "api", "to": "ui", "y": 1060, "label": "render report", "variant": "return" }
+  ],
+  "activations": [
+    { "participant": "service", "from": 174, "to": 868, "type": "backend" },
+    { "participant": "scanner", "from": 214, "to": 590, "type": "backend" },
+    { "participant": "meta", "from": 254, "to": 306, "type": "database" },
+    { "participant": "sessions", "from": 334, "to": 506, "type": "database" },
+    { "participant": "reader", "from": 414, "to": 548, "type": "backend" },
+    { "participant": "records", "from": 570, "to": 590, "type": "database" },
+    { "participant": "records", "from": 650, "to": 868, "type": "database" },
+    { "participant": "analyzer", "from": 732, "to": 788, "type": "cloud" },
+    { "participant": "ui", "from": 932, "to": 1068, "type": "frontend" },
+    { "participant": "api", "from": 934, "to": 1068, "type": "backend" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "现有所有权",
+      "items": [
+        "SiTianRunOnce 继续负责后端收集与分析编排",
+        "现有前端 SitianManager 负责打开、刷新和报告展示",
+        "Analyzer 与 SiTianRecordsStore 合同原样复用"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Reader 决策",
+      "items": [
+        "在现有 sitian/session_reader.py 增加 read_kongming_session_tail",
+        "批量扫描链复用现有模块，仅增加尾部读取函数",
+        "SessionEngine.read_session_history 保持在线已知会话查询门户"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "真源关联",
+      "items": [
+        "新增 generic_chat source；现有 generic_channel 继续扫描工作区文件",
+        "ThreadMetadata 提供频道归属、thread kind 与标题",
+        "Session manifest + JSONL 提供 cwd、时间和消息正文",
+        "以 thread_id 关联两侧，并在读取正文前排除 scheduled_task"
+      ]
+    }
+  ]
+}

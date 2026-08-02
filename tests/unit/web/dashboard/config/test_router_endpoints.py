@@ -59,7 +59,7 @@ router_mod = import_module("hosts.web.dashboard.config.router")
 #   pydantic 抱怨）
 # - 含 evolution.memory.enabled（restart_required=True 字段，用于测试 9）
 # - 含 model.timeout（测试注释保留）
-# - **不含** runner.max_turns，让它走 pydantic 默认值 = 10
+# - **不含** runner.max_turns，让它走 pydantic 默认值 = 50
 _BASE_YAML = """\
 # kongming-agent test config — integration tests
 model:
@@ -166,14 +166,14 @@ def client(app_with_manager: FastAPI) -> TestClient:
 
 
 def test_get_schema_returns_fields_and_groups(client: TestClient) -> None:
-    """GET /schema → 200，body 含非空 fields + 5 个 groups。"""
+    """GET /schema → 200，body 含非空 fields + 7 个 groups。"""
     resp = client.get("/api/manage/config/schema")
     assert resp.status_code == 200
     payload = resp.json()
     assert isinstance(payload.get("fields"), list)
     assert len(payload["fields"]) > 0, "schema fields 应非空"
     assert isinstance(payload.get("groups"), list)
-    assert len(payload["groups"]) == 5
+    assert len(payload["groups"]) == 7
     # group 形态：{"id": ..., "label": ...}
     for g in payload["groups"]:
         assert "id" in g
@@ -202,14 +202,14 @@ def test_get_effective_yaml_source(client: TestClient) -> None:
 def test_get_effective_default_source(client: TestClient) -> None:
     """yaml 没写 runner.max_turns → pydantic 默认值 + sources='default'。
 
-    RunnerConfig.max_turns 默认 = 10（与 :mod:`test_manager` 断言一致；
+    RunnerConfig.max_turns 默认 = 50（与 config manager 单测断言一致；
     若 pydantic 模型默认改了，此处会一起捕到漂移）。
     """
     resp = client.get("/api/manage/config/effective")
     assert resp.status_code == 200
     payload = resp.json()
     assert "runner.max_turns" in payload["values"]
-    assert payload["values"]["runner.max_turns"] == 10
+    assert payload["values"]["runner.max_turns"] == 50
     assert payload["sources"]["runner.max_turns"] == "default"
 
 

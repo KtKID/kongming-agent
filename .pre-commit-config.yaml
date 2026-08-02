@@ -54,7 +54,7 @@ repos:
       # ----- pre-commit 阶段：架构边界（轻，必须每次 commit 守门） -----
       - id: lint-imports
         name: lint-imports (架构边界合约)
-        entry: uv run lint-imports --config .importlinter
+        entry: uv run python -X utf8 -c "import sys; from importlinter.cli import lint_imports_command; sys.argv=['lint-imports','--config','.importlinter']; lint_imports_command()"
         language: system
         pass_filenames: false
         files: \.py$

@@ -96,11 +96,7 @@ def _install_router_before_catch_all(app: Any) -> None:
 def _make_cfg(*, output_subdir: str | None = None) -> Config:
     return Config.model_validate(
         {
-            "model": {
-                "name": "fake",
-                "base_url": "http://127.0.0.1:1234/v1",
-                "api_key": "",
-            },
+            "model": {"preset_id": "fake-model"},
             "web": {
                 "enabled": True,
                 "dev_mode": True,

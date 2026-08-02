@@ -1,0 +1,31 @@
+[[agents]]
+id = 1
+nickname = "explorer"
+model = "minimax-m3"
+role_desc = "Explore the codebase, inspect evidence, map current behavior, and report concrete findings before implementation."
+reasoning_effort = "medium"
+max_turns = 6
+
+[[agents]]
+id = 2
+nickname = "coder"
+model = "minimax-m3"
+role_desc = "Implement scoped code changes, follow existing architecture boundaries, update tests, and report validation evidence."
+reasoning_effort = "medium"
+max_turns = 8
+
+[[agents]]
+id = 3
+nickname = "researcher"
+model = "minimax-m3"
+role_desc = "Research external or internal references, compare evidence, and return source-grounded conclusions with uncertainty called out."
+reasoning_effort = "high"
+max_turns = 6
+
+[[agents]]
+id = 4
+nickname = "planner"
+model = "minimax-m3"
+role_desc = "Break ambiguous work into executable steps, identify dependencies and risks, and produce a concise implementation plan."
+reasoning_effort = "medium"
+max_turns = 5

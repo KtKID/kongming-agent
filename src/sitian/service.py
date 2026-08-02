@@ -220,7 +220,7 @@ async def _run_llm_analysis(
     analyzer_duration_ms = int((time.perf_counter() - analyzer_start) * 1000)
 
     await records.save_sitian_report(report.to_dict())
-    await records.save_latest_summary(report_to_markdown(report))
+    await records.save_latest_analysis(report_to_markdown(report))
 
     if current_hash is not None:
         await records.save_observations_hash(current_hash)
@@ -272,12 +272,14 @@ async def SiTianReadState(
     workspace_state = await records.load_workspace_state()
     suggestions = await records.load_latest_suggestions()
     summary = await records.load_latest_summary()
+    analysis = await records.load_latest_analysis()
     return {
         "rootDir": str(records.root_dir),
         "runtimeStates": [state.to_dict() for state in runtime_states],
         "workspaceState": None if workspace_state is None else workspace_state.to_dict(),
         "latestSuggestions": suggestions,
         "latestSummary": summary,
+        "latestAnalysis": analysis,
     }
 
 

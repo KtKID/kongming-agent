@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from sitian.session_reader import read_claude_session_tail
+from sitian.session_reader import read_claude_session_tail, read_kongming_session_tail
 
 
 def _make_jsonl(tmp_path: Path, entries: list[dict[str, Any]]) -> Path:
@@ -39,6 +39,16 @@ def _user(text: str) -> dict[str, Any]:
 
 def _assistant(text: str) -> dict[str, Any]:
     return {"type": "assistant", "message": {"role": "assistant", "content": text}}
+
+
+def _kongming_message(role: str, content: str | None) -> dict[str, Any]:
+    return {
+        "record_type": "message",
+        "message": {
+            "role": role,
+            "content": content,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -235,3 +245,81 @@ def test_skips_non_chat_types(tmp_path: Path) -> None:
     result = read_claude_session_tail(path, user_count=2, assistant_count=2)
     assert result["users"] == ["u1"]
     assert result["assistants"] == ["a1"]
+
+
+# ---------------------------------------------------------------------------
+# Kongming FileSession 格式
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_reads_kongming_tail_with_role_filter_and_bounds(tmp_path: Path) -> None:
+    """FileSession JSONL 只返回受限 user/assistant 正文。"""
+
+    path = _make_jsonl(
+        tmp_path,
+        [
+            _kongming_message("user", "u-old"),
+            _kongming_message("assistant", "a-old"),
+            _kongming_message("system", "system prompt"),
+            _kongming_message("tool", "tool result"),
+            {"record_type": "message", "message": {"role": "user", "content": ""}},
+            _kongming_message("assistant", "assistant-latest"),
+            _kongming_message("user", "user-latest"),
+        ],
+    )
+
+    result = read_kongming_session_tail(path, user_count=2, assistant_count=1, max_chars=5)
+
+    assert result == {
+        "users": ["user-…", "u-old"],
+        "assistants": ["assis…"],
+    }
+
+
+@pytest.mark.unit
+def test_kongming_tail_skips_corrupted_and_non_message_records(tmp_path: Path) -> None:
+    """损坏行和非 FileSession message record 不影响有效尾部读取。"""
+
+    path = tmp_path / "session.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps(_kongming_message("user", "u-old")),
+                "{invalid json",
+                json.dumps({"record_type": "system_prompt", "content": "ignored"}),
+                json.dumps(_kongming_message("assistant", "a-latest")),
+                json.dumps(_kongming_message("user", "u-latest")),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = read_kongming_session_tail(path, user_count=2, assistant_count=1)
+
+    assert result == {
+        "users": ["u-latest", "u-old"],
+        "assistants": ["a-latest"],
+    }
+
+
+@pytest.mark.unit
+def test_kongming_tail_requires_explicit_message_record_type(tmp_path: Path) -> None:
+    """缺失 record_type 的未知 JSON 行不能作为 FileSession 聊天正文。"""
+
+    path = _make_jsonl(
+        tmp_path,
+        [
+            _kongming_message("user", "accepted-user"),
+            _kongming_message("assistant", "accepted-assistant"),
+            {"message": {"role": "user", "content": "unknown-record-body"}},
+        ],
+    )
+
+    result = read_kongming_session_tail(path, user_count=1, assistant_count=1)
+
+    assert result == {
+        "users": ["accepted-user"],
+        "assistants": ["accepted-assistant"],
+    }

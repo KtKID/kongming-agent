@@ -1,24 +1,11 @@
-"""系统指令 / 规则 / 静态说明加载器。
+"""系统指令 / 规则 / 动态能力说明加载器。
 
-v1-mini 的职责边界：
+本脚本负责统一装配父 LLM 的 system prompt。关键执行流程：物化基础
+prompts → 注入 runtime → 注入 workflow catalog → 读取额外文件与环境变量 →
+注入可选 sitian → 注入 skills 与 memory。
 
-- 接 agent_spec 的 ``instructions`` 字段
-- 接可选的额外 markdown 文件（由装配层显式传入）
-- 接一个预留的环境变量 ``KONGMING_EXTRA_INSTRUCTIONS``
-
-**不做**的事：
-
-- 不读 ``.claude/CLAUDE.md`` / ``.cursorrules`` 等 coding-agent 专有文件——v1-mini
-  定位是宿主无关通用 agent，coding project 语义是 v0.2+ 的事（参考
-  ``docs/kongming-agent-v1-minimal/11-v1-file-layout.md`` 里对 ``instruction_loader``
-  的说明）
-- 不做 skill / tool-specific instruction 分层——那是 ``skill_loader.py`` 的事，明确
-  留到 v0.2+（11-v1-file-layout.md 已列出 not-in-v1 的 ``prompting/skill_loader.py``）
-
-渲染策略：
-
-- 多来源合并为一段文本，每段前加 ``# <origin>`` 标注，便于排查"这条规则是哪里来的"
-- 空白 / 空文件忽略，不产出空段
+关键函数：``load_instruction_sources`` 收集结构化来源，``assemble_instructions``
+返回最终文本与 origin 列表，``InstructionLoader.render`` 负责稳定渲染。
 """
 
 from __future__ import annotations
@@ -34,7 +21,7 @@ from pathlib import Path
 class InstructionSource:
     """单条指令来源记录。
 
-    Attributes:
+    属性：
         origin: 来源标识，例如 ``"agent_spec"`` / ``"file:rules.md"`` /
             ``"env:KONGMING_EXTRA_INSTRUCTIONS"``。渲染和排查时都靠它。
         content: 原始文本，不做语义解析。
@@ -45,6 +32,8 @@ class InstructionSource:
 
 
 _ENV_VAR_NAME = "KONGMING_EXTRA_INSTRUCTIONS"
+_SKILLS_ORIGIN = "skills"
+_MEMORY_ORIGIN = "memory"
 
 
 class InstructionLoader:
@@ -54,7 +43,7 @@ class InstructionLoader:
 
     - 构造时只存额外文件路径和开关，实际 I/O 推迟到 :meth:`load` 的 async 调用
     - 文件读取走 ``asyncio.to_thread``，同当前项目的其它 I/O 约定一致
-    - :meth:`render` 是纯函数（同步），方便上层在已经拿到 sources 后直接拼字符串
+    - :meth:`render` 是纯函数（同步），方便上层在已经拿到来源列表后直接拼字符串
     """
 
     def __init__(
@@ -66,8 +55,8 @@ class InstructionLoader:
     ) -> None:
         """初始化。
 
-        Args:
-            extra_files: 额外的 markdown / 文本文件列表，按顺序追加到 sources。
+        参数：
+            extra_files: 额外的 Markdown / 文本文件列表，按顺序追加到来源列表。
                 不存在的文件会被静默跳过（第一版不做强制存在校验）。
             include_env: 是否读取环境变量作为一个来源；测试或需要隔离环境时可关闭。
             env_var_name: 环境变量名，默认 ``KONGMING_EXTRA_INSTRUCTIONS``。
@@ -79,11 +68,11 @@ class InstructionLoader:
     async def load(self, agent_instructions: str | None) -> list[InstructionSource]:
         """收集所有来源的指令。
 
-        Args:
+        参数：
             agent_instructions: 来自 :class:`core.agent_spec.AgentSpec` 的 instructions
                 字段；为空或空白时跳过该来源。
 
-        Returns:
+        返回：
             按 ``agent_spec → files → env`` 顺序的 :class:`InstructionSource` 列表。
         """
         sources: list[InstructionSource] = []
@@ -127,7 +116,7 @@ class InstructionLoader:
 
     @staticmethod
     def render(sources: Sequence[InstructionSource]) -> str:
-        """把多来源指令合并成一段 system 文本，带 origin 标注。
+        """把多来源指令合并成一段系统文本，带 origin 标注。
 
         空 list 返回空字符串；单来源也带标注，保持格式统一。
         """
@@ -152,31 +141,64 @@ __all__ = [
 ]
 
 
+def _source_from_text(origin: str, content: str | None) -> InstructionSource | None:
+    """把非空文本转成指令来源，输入为 origin 与文本，输出可选 source。"""
+    if content and content.strip():
+        return InstructionSource(origin=origin, content=content)
+    return None
+
+
+def _memory_source(
+    *,
+    memory_store: object | None,
+    inject_memory: bool,
+) -> InstructionSource | None:
+    """从已加载 memory store 生成来源，输入为 store 与注入开关，输出可选 source。"""
+    if not inject_memory or memory_store is None:
+        return None
+    snapshot = getattr(memory_store, "snapshot", None)
+    if snapshot is None:
+        return None
+    render_prompt = getattr(snapshot, "render_prompt", None)
+    if not callable(render_prompt):
+        return None
+    prompt = render_prompt()
+    return _source_from_text(_MEMORY_ORIGIN, prompt)
+
+
 async def load_instruction_sources(
     *,
     kongming_home: Path,
     extra_files: Sequence[str | Path] = (),
     pre_file_sources: Sequence[InstructionSource] = (),
-    cwd: Path | None = None,
+    workflow_catalog: str = "",
+    skill_listing: str = "",
+    memory_store: object | None = None,
+    inject_memory: bool = False,
+    cwd: Path | str | None = None,
     sitian_root: Path | None = None,
 ) -> list[InstructionSource]:
-    """Load ordered instruction sources from prompts + extra files + env + runtime context text.
+    """按顺序加载提示模板、动态能力说明、记忆和运行时上下文等指令来源。
 
-    Shared by CLI and web host. Extracts the core instruction assembly logic
-    (prompts materialization, InstructionLoader, runtime context injection)
-    without host-specific concerns like memory loading.
+    CLI 和 Web 宿主共享该装配逻辑：物化提示模板，调用 InstructionLoader，
+    注入运行时上下文，统一收口 workflow、skills、memory 三类动态来源。
 
-    Args:
-        kongming_home: Path to the ``.kongming/`` directory.
-        extra_files: Additional instruction file paths (e.g. from CLI ``--instructions-file``).
-        pre_file_sources: Instruction sources injected after runtime context and before
-            materialized prompts, extra files, env, and optional context sources.
-        cwd: Working directory for runtime context text. Defaults to ``Path.cwd()``.
-        sitian_root: Optional sitian project root. When set, appends sitian context
-            (core-flow, suggestions, etc.) as an ``"sitian"`` origin instruction source.
+    参数：
+        kongming_home: ``.kongming/`` 目录路径。
+        extra_files: 额外指令文件路径，例如 CLI 的 ``--instructions-file``。
+        pre_file_sources: 注入到运行时上下文之后、物化提示模板 / 额外文件 / 环境变量 /
+            可选上下文来源之前的指令来源。
+        workflow_catalog: 已由 workflow manager/formatter 生成的短 listing。
+        skill_listing: 已由 skill loader 生成的短 listing。
+        memory_store: 已加载的 MemoryStore 或兼容对象。
+        inject_memory: 是否把 memory 冻结快照注入 prompt。
+        cwd: 构建运行时上下文文本时使用的工作目录，默认 ``Path.cwd()``；
+            字符串输入会原样进入渲染后的运行时提示。
+        sitian_root: 可选的司天项目根目录；传入后追加 core-flow、suggestions 等司天
+            上下文，来源标识为 ``"sitian"``。
 
-    Returns:
-        Ordered instruction sources ready for rendering.
+    返回：
+        已按渲染顺序排列的指令来源列表。
     """
     from prompting.assembly.runtime_context import build_runtime_context_text
     from prompting.instructions.prompts_loader import materialize_and_load_prompts
@@ -184,12 +206,16 @@ async def load_instruction_sources(
     base = await materialize_and_load_prompts(kongming_home)
 
     loader = InstructionLoader(extra_files=extra_files, include_env=True)
+    runtime_cwd = Path(cwd) if isinstance(cwd, str) else (cwd or Path.cwd())
     runtime_text = build_runtime_context_text(
-        cwd=cwd or Path.cwd(),
+        cwd=runtime_cwd,
         kongming_home=kongming_home,
     )
     sources = [InstructionSource(origin="runtime", content=runtime_text)]
     sources.extend(source for source in pre_file_sources if source.content.strip())
+    workflow_source = _source_from_text("workflow_catalog", workflow_catalog)
+    if workflow_source is not None:
+        sources.append(workflow_source)
     sources.extend(await loader.load(agent_instructions=base))
 
     if sitian_root is not None:
@@ -199,6 +225,17 @@ async def load_instruction_sources(
         if sitian_text:
             sources.append(InstructionSource(origin="sitian", content=sitian_text))
 
+    skill_source = _source_from_text(_SKILLS_ORIGIN, skill_listing)
+    if skill_source is not None:
+        sources.append(skill_source)
+
+    memory_source = _memory_source(
+        memory_store=memory_store,
+        inject_memory=inject_memory,
+    )
+    if memory_source is not None:
+        sources.append(memory_source)
+
     return sources
 
 
@@ -207,32 +244,44 @@ async def assemble_instructions(
     kongming_home: Path,
     extra_files: Sequence[str | Path] = (),
     pre_file_sources: Sequence[InstructionSource] = (),
-    cwd: Path | None = None,
+    workflow_catalog: str = "",
+    skill_listing: str = "",
+    memory_store: object | None = None,
+    inject_memory: bool = False,
+    cwd: Path | str | None = None,
     sitian_root: Path | None = None,
 ) -> tuple[str, list[str]]:
-    """Assemble base agent instructions from prompts + extra files + env + runtime context text.
+    """把基础 agent 指令和动态来源装配为系统提示词文本和来源标签列表。
 
-    Shared by CLI and web host. Extracts the core instruction assembly logic
-    (prompts materialization, InstructionLoader, runtime context injection)
-    without host-specific concerns like memory loading.
+    CLI 和 Web 宿主共享该装配逻辑：物化提示模板，调用 InstructionLoader，
+    注入运行时上下文，统一收口 workflow、skills、memory 三类动态来源。
 
-    Args:
-        kongming_home: Path to the ``.kongming/`` directory.
-        extra_files: Additional instruction file paths (e.g. from CLI ``--instructions-file``).
-        pre_file_sources: Instruction sources injected after runtime context and before
-            materialized prompts, extra files, env, and optional context sources.
-        cwd: Working directory for runtime context text. Defaults to ``Path.cwd()``.
-        sitian_root: Optional sitian project root. When set, appends sitian context
-            (core-flow, suggestions, etc.) as an ``"sitian"`` origin instruction source.
+    参数：
+        kongming_home: ``.kongming/`` 目录路径。
+        extra_files: 额外指令文件路径，例如 CLI 的 ``--instructions-file``。
+        pre_file_sources: 注入到运行时上下文之后、物化提示模板 / 额外文件 / 环境变量 /
+            可选上下文来源之前的指令来源。
+        workflow_catalog: 已由 workflow manager/formatter 生成的短 listing。
+        skill_listing: 已由 skill loader 生成的短 listing。
+        memory_store: 已加载的 MemoryStore 或兼容对象。
+        inject_memory: 是否把 memory 冻结快照注入 prompt。
+        cwd: 构建运行时上下文文本时使用的工作目录，默认 ``Path.cwd()``；
+            字符串输入会原样进入渲染后的运行时提示。
+        sitian_root: 可选的司天项目根目录；传入后追加 core-flow、suggestions 等司天
+            上下文，来源标识为 ``"sitian"``。
 
-    Returns:
-        ``(rendered_text, origins)`` — merged system prompt text and origin label list.
+    返回：
+        ``(rendered_text, origins)``，分别是合并后的系统提示词文本和来源标签列表。
     """
     loader = InstructionLoader(extra_files=extra_files, include_env=True)
     sources = await load_instruction_sources(
         kongming_home=kongming_home,
         extra_files=extra_files,
         pre_file_sources=pre_file_sources,
+        workflow_catalog=workflow_catalog,
+        skill_listing=skill_listing,
+        memory_store=memory_store,
+        inject_memory=inject_memory,
         cwd=cwd,
         sitian_root=sitian_root,
     )

@@ -5,8 +5,8 @@ Role:
     所有磁盘读写的唯一入口。asyncio.Lock 保证并发安全；
     原子写（tempfile + os.replace）防止半写损坏。
     管理 observations.jsonl / runtime_state.json / workspace_state.json /
-    latest_suggestions.json / latest_summary.md / work_items/ / scans/ /
-    config.snapshot.json / sitian_report.json / last_observations_hash 等
+    latest_suggestions.json / latest_summary.md / latest_analysis.md / work_items/ /
+    scans/ / config.snapshot.json / sitian_report.json / last_observations_hash 等
     主要产物文件。
 
 Owns:
@@ -60,6 +60,7 @@ _RUNTIME_STATE_FILENAME = "runtime_state.json"
 _WORKSPACE_STATE_FILENAME = "workspace_state.json"
 _LATEST_SUGGESTIONS_FILENAME = "latest_suggestions.json"
 _LATEST_SUMMARY_FILENAME = "latest_summary.md"
+_LATEST_ANALYSIS_FILENAME = "latest_analysis.md"
 _WORK_ITEMS_DIRNAME = "work_items"
 _SCANS_DIRNAME = "scans"
 _SITIAN_REPORT_FILENAME = "sitian_report.json"
@@ -84,6 +85,7 @@ class SiTianRecordsStore:
         self._workspace_state_path = self._root_dir / _WORKSPACE_STATE_FILENAME
         self._latest_suggestions_path = self._root_dir / _LATEST_SUGGESTIONS_FILENAME
         self._latest_summary_path = self._root_dir / _LATEST_SUMMARY_FILENAME
+        self._latest_analysis_path = self._root_dir / _LATEST_ANALYSIS_FILENAME
         self._config_snapshot_path = self._root_dir / _CONFIG_SNAPSHOT_FILENAME
         self._work_items_dir = self._root_dir / _WORK_ITEMS_DIRNAME
         self._scans_dir = self._root_dir / _SCANS_DIRNAME
@@ -223,6 +225,22 @@ class SiTianRecordsStore:
     async def load_latest_summary(self) -> str | None:
         async with self._lock:
             return await asyncio.to_thread(self._read_text_optional_sync, self._latest_summary_path)
+
+    async def save_latest_analysis(self, analysis_markdown: str) -> Path:
+        async with self._lock:
+            await asyncio.to_thread(self._ensure_layout_sync)
+            await asyncio.to_thread(
+                self._atomic_write_text_sync,
+                self._latest_analysis_path,
+                analysis_markdown,
+            )
+            return self._latest_analysis_path
+
+    async def load_latest_analysis(self) -> str | None:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._read_text_optional_sync, self._latest_analysis_path
+            )
 
     async def save_sitian_report(self, report_dict: dict[str, JsonValue]) -> Path:
         async with self._lock:
