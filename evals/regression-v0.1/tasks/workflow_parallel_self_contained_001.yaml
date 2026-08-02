@@ -1,0 +1,504 @@
+id: workflow_parallel_self_contained_001
+category: arch_refactor
+source: real_commit:97cf954d
+provenance:
+  source_fix_report: reports/fix/fix-report-20260701-170000.md
+  buggy_commit: 97cf954d^
+  fix_commit: 97cf954d
+  bug_summary: ParallelWorkflowStrategy 持有 AgentWorkflowManager 引用并通过 self._manager.run_parallel_specs() 反向调用，strategy → manager 反向依赖；manager 认识具体 parallel 类型（遗留 run_parallel / run_parallel_specs 方法）。
+  fix_summary: 引入 WorkflowRuntime Protocol（依赖倒置），ParallelWorkflowStrategy 不再持有 manager，所有引擎层能力经 context.runtime 借用。
+  extraction_note: 从真实 workflow 短链路（manager + parallel strategy + subagent）摘出最小可运行骨架，保留真实 buggy 机制（strategy 持有 manager、run() 转调 manager.run_parallel_specs），剥离 provider / network / IO / session / 审计落盘等无关实现。base_files 内 context.py / subagents.py / manager.py 是真实代码的精简骨架，strategies/parallel.py 保留真实 buggy 逻辑。
+prompt: |
+  下面是一个 workflow 引擎的最小骨架（从真实项目摘录）。当前存在一个架构异味：
+
+  `ParallelWorkflowStrategy` 在构造时接收并持有 `AgentWorkflowManager` 实例（`self._manager`），
+  并且在 `run()` 里通过 `self._manager.run_parallel_specs(...)` 把整个执行体反向委托回 manager。
+  这造成两个问题：
+  1. **strategy → manager 反向依赖**：本应是 manager 调用 strategy（门户调实现），
+     实际反过来 strategy 持有并调用 manager；
+  2. **manager 认识具体策略类型**：manager 里残留了 parallel 专属的 `run_parallel` /
+     `run_parallel_specs` 方法，而其它策略都不在 manager 留下类型专属方法。
+
+  修复目标（依赖倒置）：
+  - 在 `context.py` 新增 `WorkflowRuntime` Protocol，定义 strategy 向引擎层借用的能力契约
+    （至少包含 `prepare_subagent_tasks` 和 `run_subagent_task`）；
+  - `WorkflowExecutionContext` 增加 `runtime: WorkflowRuntime` 字段（注意：无默认值字段必须
+    排在有默认值字段之前）；
+  - `ParallelWorkflowStrategy` 不再接收/持有 manager，构造函数无参数；
+  - `run()` 通过 `context.runtime.prepare_subagent_tasks(...)` 和
+    `context.runtime.run_subagent_task(...)` 借用引擎层能力，完成 fan-out 编排；
+  - `manager.py` 删除 `run_parallel` / `run_parallel_specs` 方法。
+
+  仓库当前文件：
+
+  `context.py`：
+  ```python
+  from __future__ import annotations
+  from collections.abc import Mapping
+  from dataclasses import dataclass
+  from pathlib import Path
+  from typing import Any
+
+
+  @dataclass(frozen=True)
+  class WorkflowExecutionContext:
+      workflow_id: str
+      parent_session_id: str
+      mode: str
+      workflow_dir: Path
+      started_at: str
+      desc: str | None
+      audit_writer: Any
+      parent_agent: Mapping[str, object] | None = None
+  ```
+
+  `subagents.py`：
+  ```python
+  from __future__ import annotations
+  from dataclasses import dataclass, field
+  from typing import Any
+
+
+  @dataclass(frozen=True)
+  class SubAgentTask:
+      task_id: str
+      task_name: str
+      prompt: str
+      context: str = ""
+      tool_names: tuple[str, ...] = ()
+      metadata: dict[str, Any] = field(default_factory=dict)
+
+
+  @dataclass(frozen=True)
+  class SubAgentRun:
+      task_id: str
+      status: str
+
+
+  @dataclass(frozen=True)
+  class SubAgentOutcome:
+      run: SubAgentRun
+      report: dict[str, Any]
+  ```
+
+  `strategies/parallel.py`：
+  ```python
+  from __future__ import annotations
+  from collections.abc import Mapping
+  from typing import Any
+
+  from context import WorkflowExecutionContext
+  from description import WorkflowStrategyCatalogEntry, WorkflowStrategyDescription
+
+
+  class ParallelWorkflowStrategy:
+      """通过 AgentWorkflowManager 执行并行子 agent fan-out。"""
+
+      mode = "parallel"
+
+      def __init__(self, manager: Any) -> None:
+          self._manager = manager
+
+      def catalog_entry(self) -> WorkflowStrategyCatalogEntry:
+          return self.describe().catalog_entry()
+
+      def describe(self) -> WorkflowStrategyDescription:
+          return WorkflowStrategyDescription(mode=self.mode, title="并行子任务")
+
+      async def run(self, context: WorkflowExecutionContext, payload: Mapping[str, object]) -> Any:
+          raw_task_specs = payload.get("task_specs", payload.get("tasks"))
+          if not isinstance(raw_task_specs, list) or not raw_task_specs:
+              raise ValueError("parallel strategy requires non-empty task_specs")
+          return await self._manager.run_parallel_specs(
+              parent_session_id=context.parent_session_id,
+              task_specs=raw_task_specs,
+              parent_agent=context.parent_agent,
+              desc=context.desc,
+          )
+  ```
+
+  `manager.py`：
+  ```python
+  from __future__ import annotations
+  from typing import Any
+
+
+  class AgentWorkflowManager:
+      """workflow 引擎门户：装配策略、创建 context、驱动执行。"""
+
+      def __init__(self) -> None:
+          self._strategies: dict[str, Any] = {}
+
+      def register_strategy(self, strategy: Any) -> None:
+          self._strategies[strategy.mode] = strategy
+
+      async def run_parallel(
+          self,
+          *,
+          parent_session_id: str,
+          task_specs: list[object],
+          parent_agent: object,
+          desc: object,
+      ) -> Any:
+          """parallel 专属执行体：fan-out 子 agent 并汇总（遗留，应删除）。"""
+          raise NotImplementedError
+
+      async def run_parallel_specs(
+          self,
+          *,
+          parent_session_id: str,
+          task_specs: list[object],
+          parent_agent: object,
+          desc: object,
+      ) -> Any:
+          """parallel 专属执行体：转交实际 fan-out（遗留，应删除）。"""
+          raise NotImplementedError
+  ```
+
+  只输出一个 unified diff（git diff 格式，以 `diff --git` 或 `---` 开头），
+  不要输出任何解释或 Markdown 说明文字。
+scoring:
+  type: swebench_diff
+  timeout_seconds: 30
+  base_files:
+    context.py: |
+      from __future__ import annotations
+      from collections.abc import Mapping
+      from dataclasses import dataclass
+      from pathlib import Path
+      from typing import Any
+
+
+      @dataclass(frozen=True)
+      class WorkflowExecutionContext:
+          workflow_id: str
+          parent_session_id: str
+          mode: str
+          workflow_dir: Path
+          started_at: str
+          desc: str | None
+          audit_writer: Any
+          parent_agent: Mapping[str, object] | None = None
+    subagents.py: |
+      from __future__ import annotations
+      from dataclasses import dataclass, field
+      from typing import Any
+
+
+      @dataclass(frozen=True)
+      class SubAgentTask:
+          task_id: str
+          task_name: str
+          prompt: str
+          context: str = ""
+          tool_names: tuple[str, ...] = ()
+          metadata: dict[str, Any] = field(default_factory=dict)
+
+
+      @dataclass(frozen=True)
+      class SubAgentRun:
+          task_id: str
+          status: str
+
+
+      @dataclass(frozen=True)
+      class SubAgentOutcome:
+          run: SubAgentRun
+          report: dict[str, Any]
+    strategies/__init__.py: ""
+    description.py: |
+      from __future__ import annotations
+      from dataclasses import dataclass
+
+
+      @dataclass(frozen=True)
+      class WorkflowStrategyDescription:
+          mode: str
+          title: str
+
+
+      @dataclass(frozen=True)
+      class WorkflowStrategyCatalogEntry:
+          mode: str
+          title: str
+    strategies/parallel.py: |
+      from __future__ import annotations
+      from collections.abc import Mapping
+      from typing import Any
+
+      from context import WorkflowExecutionContext
+      from description import WorkflowStrategyCatalogEntry, WorkflowStrategyDescription
+
+
+      class ParallelWorkflowStrategy:
+          """通过 AgentWorkflowManager 执行并行子 agent fan-out。"""
+
+          mode = "parallel"
+
+          def __init__(self, manager: Any) -> None:
+              self._manager = manager
+
+          def catalog_entry(self) -> WorkflowStrategyCatalogEntry:
+              return self.describe().catalog_entry()
+
+          def describe(self) -> WorkflowStrategyDescription:
+              return WorkflowStrategyDescription(mode=self.mode, title="并行子任务")
+
+          async def run(self, context: WorkflowExecutionContext, payload: Mapping[str, object]) -> Any:
+              raw_task_specs = payload.get("task_specs", payload.get("tasks"))
+              if not isinstance(raw_task_specs, list) or not raw_task_specs:
+                  raise ValueError("parallel strategy requires non-empty task_specs")
+              return await self._manager.run_parallel_specs(
+                  parent_session_id=context.parent_session_id,
+                  task_specs=raw_task_specs,
+                  parent_agent=context.parent_agent,
+                  desc=context.desc,
+              )
+    manager.py: |
+      from __future__ import annotations
+      from typing import Any
+
+
+      class AgentWorkflowManager:
+          """workflow 引擎门户：装配策略、创建 context、驱动执行。"""
+
+          def __init__(self) -> None:
+              self._strategies: dict[str, Any] = {}
+
+          def register_strategy(self, strategy: Any) -> None:
+              self._strategies[strategy.mode] = strategy
+
+          async def run_parallel(
+              self,
+              *,
+              parent_session_id: str,
+              task_specs: list[object],
+              parent_agent: object,
+              desc: object,
+          ) -> Any:
+              """parallel 专属执行体：fan-out 子 agent 并汇总（遗留，应删除）。"""
+              raise NotImplementedError
+
+          async def run_parallel_specs(
+              self,
+              *,
+              parent_session_id: str,
+              task_specs: list[object],
+              parent_agent: object,
+              desc: object,
+          ) -> Any:
+              """parallel 专属执行体：转交实际 fan-out（遗留，应删除）。"""
+              raise NotImplementedError
+  test_files:
+    tests/__init__.py: ""
+    tests/test_parallel_self_contained.py: |
+      from __future__ import annotations
+      import asyncio
+      import inspect
+      from pathlib import Path
+      from unittest.mock import MagicMock
+
+      from context import WorkflowExecutionContext
+      from strategies.parallel import ParallelWorkflowStrategy
+
+
+      def _ctx(runtime):
+          return WorkflowExecutionContext(
+              workflow_id="wf-1", parent_session_id="s-1", mode="parallel",
+              workflow_dir=Path("/tmp/wf"), started_at="2026-07-01T00:00:00Z",
+              desc="d", audit_writer=object(), runtime=runtime,
+          )
+
+
+      class _AsyncMock:
+          """让 MagicMock 的 async 调用返回真正的 coroutine。"""
+          def __init__(self):
+              self.calls = []
+              self.return_value = MagicMock()
+
+          async def __call__(self, *args, **kwargs):
+              self.calls.append((args, kwargs))
+              return self.return_value
+
+
+      class TestStrategySelfContained:
+          def test_init_takes_no_manager(self):
+              sig = inspect.signature(ParallelWorkflowStrategy.__init__)
+              params = [p for p in sig.parameters if p != "self"]
+              assert "manager" not in params
+
+          def test_strategy_does_not_reference_manager(self):
+              import strategies.parallel as pm
+              source = inspect.getsource(pm)
+              assert "_manager" not in source
+              assert "AgentWorkflowManager" not in source
+
+          def test_context_has_runtime_field(self):
+              sig = inspect.signature(WorkflowExecutionContext)
+              assert "runtime" in sig.parameters
+
+
+      class TestParallelRunUsesRuntime:
+          def test_run_borrows_runtime_not_manager(self):
+              runtime = MagicMock()
+              runtime.prepare_subagent_tasks.return_value = [MagicMock(task_id="agent-1")]
+              runtime.run_subagent_task = _AsyncMock()
+              strategy = ParallelWorkflowStrategy()
+              payload = {"task_specs": [{"task_name": "t", "prompt": "p"}]}
+              asyncio.run(strategy.run(_ctx(runtime), payload))
+              runtime.prepare_subagent_tasks.assert_called_once()
+              assert len(runtime.run_subagent_task.calls) == 1
+
+
+      class TestManagerDropsParallelMethods:
+          def test_manager_no_longer_has_parallel_methods(self):
+              import manager as mm
+              assert not hasattr(mm.AgentWorkflowManager, "run_parallel")
+              assert not hasattr(mm.AgentWorkflowManager, "run_parallel_specs")
+
+      class TestDescribePreserved:
+          def test_describe_returns_title(self):
+              """describe 方法不依赖 manager，修复前后行为必须一致（回归保护）。"""
+              from strategies.parallel import ParallelWorkflowStrategy
+              from unittest.mock import MagicMock
+              # 修复后构造无参数；兼容性：若仍接收 manager，用 MagicMock 喂入
+              import inspect
+              sig = inspect.signature(ParallelWorkflowStrategy.__init__)
+              if "manager" in sig.parameters:
+                  strategy = ParallelWorkflowStrategy(MagicMock())
+              else:
+                  strategy = ParallelWorkflowStrategy()
+              desc = strategy.describe()
+              assert desc.mode == "parallel"
+              assert desc.title == "并行子任务"
+  fail_to_pass:
+    - tests/test_parallel_self_contained.py::TestStrategySelfContained::test_init_takes_no_manager
+    - tests/test_parallel_self_contained.py::TestStrategySelfContained::test_strategy_does_not_reference_manager
+    - tests/test_parallel_self_contained.py::TestStrategySelfContained::test_context_has_runtime_field
+    - tests/test_parallel_self_contained.py::TestParallelRunUsesRuntime::test_run_borrows_runtime_not_manager
+    - tests/test_parallel_self_contained.py::TestManagerDropsParallelMethods::test_manager_no_longer_has_parallel_methods
+  pass_to_pass:
+    - tests/test_parallel_self_contained.py::TestDescribePreserved::test_describe_returns_title
+fixture_response: |
+  ```diff
+  diff --git a/context.py b/context.py
+  index 4d13e10..23f2978 100644
+  --- a/context.py
+  +++ b/context.py
+  @@ -2,7 +2,27 @@ from __future__ import annotations
+   from collections.abc import Mapping
+   from dataclasses import dataclass
+   from pathlib import Path
+  -from typing import Any
+  +from typing import Any, Protocol
+  +
+  +
+  +class WorkflowRuntime(Protocol):
+  +    """引擎层注入到策略的运行时能力协议。"""
+  +
+  +    def prepare_subagent_tasks(
+  +        self,
+  +        *,
+  +        workflow_dir: Path,
+  +        tasks: list[Any],
+  +        parent_agent: Mapping[str, object] | None = None,
+  +    ) -> list[Any]: ...
+  +
+  +    async def run_subagent_task(
+  +        self,
+  +        *,
+  +        context: "WorkflowExecutionContext",
+  +        task: Any,
+  +        display_order: int,
+  +    ) -> Any: ...
+   
+   
+   @dataclass(frozen=True)
+  @@ -14,4 +34,5 @@ class WorkflowExecutionContext:
+       started_at: str
+       desc: str | None
+       audit_writer: Any
+  +    runtime: WorkflowRuntime
+       parent_agent: Mapping[str, object] | None = None
+  diff --git a/manager.py b/manager.py
+  index 6eb3b2f..93513db 100644
+  --- a/manager.py
+  +++ b/manager.py
+  @@ -10,25 +10,3 @@ class AgentWorkflowManager:
+   
+       def register_strategy(self, strategy: Any) -> None:
+           self._strategies[strategy.mode] = strategy
+  -
+  -    async def run_parallel(
+  -        self,
+  -        *,
+  -        parent_session_id: str,
+  -        task_specs: list[object],
+  -        parent_agent: object,
+  -        desc: object,
+  -    ) -> Any:
+  -        """parallel 专属执行体：fan-out 子 agent 并汇总（遗留，应删除）。"""
+  -        raise NotImplementedError
+  -
+  -    async def run_parallel_specs(
+  -        self,
+  -        *,
+  -        parent_session_id: str,
+  -        task_specs: list[object],
+  -        parent_agent: object,
+  -        desc: object,
+  -    ) -> Any:
+  -        """parallel 专属执行体：转交实际 fan-out（遗留，应删除）。"""
+  -        raise NotImplementedError
+  diff --git a/strategies/parallel.py b/strategies/parallel.py
+  index 9efd65d..35b8852 100644
+  --- a/strategies/parallel.py
+  +++ b/strategies/parallel.py
+  @@ -1,4 +1,5 @@
+   from __future__ import annotations
+  +import asyncio
+   from collections.abc import Mapping
+   from typing import Any
+   
+  @@ -7,12 +8,12 @@ from description import WorkflowStrategyCatalogEntry, WorkflowStrategyDescriptio
+   
+   
+   class ParallelWorkflowStrategy:
+  -    """通过 AgentWorkflowManager 执行并行子 agent fan-out。"""
+  +    """通过注入的 WorkflowRuntime 执行并行子 agent fan-out（self-contained）。"""
+   
+       mode = "parallel"
+   
+  -    def __init__(self, manager: Any) -> None:
+  -        self._manager = manager
+  +    def __init__(self) -> None:
+  +        pass
+   
+       def catalog_entry(self) -> WorkflowStrategyCatalogEntry:
+           return self.describe().catalog_entry()
+  @@ -24,9 +25,20 @@ class ParallelWorkflowStrategy:
+           raw_task_specs = payload.get("task_specs", payload.get("tasks"))
+           if not isinstance(raw_task_specs, list) or not raw_task_specs:
+               raise ValueError("parallel strategy requires non-empty task_specs")
+  -        return await self._manager.run_parallel_specs(
+  -            parent_session_id=context.parent_session_id,
+  -            task_specs=raw_task_specs,
+  +        runtime = context.runtime
+  +        tasks = [
+  +            {"task_id": f"agent-{i}", **spec}
+  +            for i, spec in enumerate(raw_task_specs, 1)
+  +            if isinstance(spec, dict)
+  +        ]
+  +        assigned = runtime.prepare_subagent_tasks(
+  +            workflow_dir=context.workflow_dir,
+  +            tasks=tasks,
+               parent_agent=context.parent_agent,
+  -            desc=context.desc,
+  +        )
+  +        await asyncio.gather(
+  +            *[
+  +                runtime.run_subagent_task(context=context, task=t, display_order=i)
+  +                for i, t in enumerate(assigned, 1)
+  +            ]
+           )
+  ```

@@ -1,0 +1,5 @@
+# 真题 eval 运行产物（session / debug dump / trajectory）不入库，
+# 只保留题目定义（tasks/*.yaml）和溯源（PROVENANCE.md）。
+# 如需把某次 run 作为证据保留，参考 harness-runtime-v0.1/runs/ 的索引做法另建 findings/。
+*
+!.gitignore

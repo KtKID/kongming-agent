@@ -1,9 +1,18 @@
+# 可选 pricing 块（每 MTok 单价，报表据此换算成本；不配置则只报 token 量，不臆造单价）。
+# 在任一 environment 下按需填写，单价以 provider 官方计费页为准：
+#   pricing:
+#     currency: USD              # 必填：币种标识
+#     input_per_mtok: 1.0        # 必填：未命中 prompt 单价（每百万 token）
+#     output_per_mtok: 4.0       # 必填：completion 单价
+#     cache_read_per_mtok: 0.1   # 可选：缺省 = input_per_mtok（按无缓存折扣保守口径）
+#     cache_write_per_mtok: 1.25 # 可选：缺省 = input_per_mtok
 environments:
   fixture-baseline:
     suite: evals/harness-runtime-v0.1
     mode: fixture
     profile: baseline-min
     approval_mode: auto_allow
+    repeat: 1
     runner:
       max_turns: 50
     artifacts:
@@ -14,6 +23,7 @@ environments:
     mode: fixture
     profile: full
     approval_mode: auto_allow
+    repeat: 1
     runner:
       max_turns: 50
     artifacts:
@@ -25,6 +35,7 @@ environments:
     preset: minimax-m3
     profile: full
     approval_mode: auto_allow
+    repeat: 4
     runner:
       max_turns: 50
     artifacts:
@@ -36,6 +47,7 @@ environments:
     preset: minimax-m3
     profile: baseline-min
     approval_mode: auto_allow
+    repeat: 4
     runner:
       max_turns: 50
     artifacts:

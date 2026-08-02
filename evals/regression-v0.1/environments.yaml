@@ -1,0 +1,22 @@
+environments:
+  fixture-full:
+    suite: evals/regression-v0.1
+    mode: fixture
+    profile: full
+    approval_mode: auto_allow
+    repeat: 1
+    runner:
+      max_turns: 50
+    artifacts:
+      output_dir: evals/regression-v0.1/runs
+
+  fixture-baseline:
+    suite: evals/regression-v0.1
+    mode: fixture
+    profile: baseline-min
+    approval_mode: auto_allow
+    repeat: 1
+    runner:
+      max_turns: 50
+    artifacts:
+      output_dir: evals/regression-v0.1/runs

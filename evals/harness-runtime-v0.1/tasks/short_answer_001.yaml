@@ -11,3 +11,18 @@ scoring:
   case_sensitive: false
 fixture_response: |
   3
+known_failure_modes:
+  # 详细归因见 evals/harness-runtime-v0.1/findings/v1-system-prompt-side-effect.md
+  - id: one_token_burst_under_agent_system_prompt
+    description: |
+      在 full profile（带 "你是 ... 被测 agent，需要使用工具时必须通过真实 tool_call 调用" 这段
+      system prompt）下，MiniMax-M3 把纯算术题误判为"应秒答简单题"，直接 emit 1 个数字 token
+      就 stop（output_tokens=1, reasoning_chars=0, tool_calls=0），跳过链式推理。两次重跑
+      输出不同数字（11 / 4）但 token 形态完全一致，证明这不是采样方差。
+    observed_in_runs:
+      - v1-minimax-full   # 输出 "11"
+      - v2-minimax-full   # 输出 "4"
+    not_observed_in:
+      - v1-minimax-baseline  # baseline-min 无 agent system prompt，正常推理输出 "3"
+    diagnostic_signal:
+      - "output_tokens == 1 同时 reasoning_chars == 0 且 tool_call_count == 0"
