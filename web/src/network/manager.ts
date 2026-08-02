@@ -46,7 +46,7 @@ export type SocketState =
 /**
  * 频道种类标识。
  */
-export type ChannelKind = "claude" | "generic";
+export type ChannelKind = "claude" | "generic" | "cron-run";
 
 /**
  * `openChannel` 返回的业务侧句柄。
@@ -95,6 +95,8 @@ const MAX_RETRY = 10;
  * 把 ChannelKind 映射到后端 WS URL path：
  * - "claude" → "/ws/claude-code?thread_id=..."
  * - "generic" → "/ws/threads/{threadId}"
+ * - "cron-run" → "/ws/cron/tasks/{taskId}/runs/{runId}"，threadId 形如
+ *   "{taskId}:{runId}"
  */
 function pathForKind(kind: ChannelKind, threadId: string): string {
   switch (kind) {
@@ -102,6 +104,12 @@ function pathForKind(kind: ChannelKind, threadId: string): string {
       return `/ws/claude-code?thread_id=${encodeURIComponent(threadId)}`;
     case "generic":
       return `/ws/threads/${encodeURIComponent(threadId)}`;
+    case "cron-run": {
+      const separator = threadId.indexOf(":");
+      const taskId = separator >= 0 ? threadId.slice(0, separator) : threadId;
+      const runId = separator >= 0 ? threadId.slice(separator + 1) : "";
+      return `/ws/cron/tasks/${encodeURIComponent(taskId)}/runs/${encodeURIComponent(runId)}`;
+    }
   }
 }
 

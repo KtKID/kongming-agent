@@ -44,10 +44,16 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from pydantic import ValidationError
 
 from hosts.web.auth.middleware import SESSION_COOKIE_NAME, verify_session_cookie
 from hosts.web.integrations.codex.service import CodexService
-from hosts.web.protocol.rest_models import UserInputAttachment
+from hosts.web.protocol import (
+    CodexC2SAdapter,
+    CodexCommandFrame,
+    CodexS2CAdapter,
+    SessionStatusFrame,
+)
 from hosts.web.shared.reconnectable_writer import ReconnectableWebSocketWriter
 from hosts.web.shared.session_manager import SessionManager
 from network.network_log import log_network_event, log_network_exception
@@ -179,24 +185,35 @@ async def _dispatch(
 ) -> None:
     """单条入站帧分发。"""
     msg_type = data.get("frame_type") if isinstance(data, dict) else None
+    try:
+        frame = CodexC2SAdapter.validate_python(data)
+    except ValidationError:
+        if msg_type == "codex-command" and not isinstance(data.get("command"), str):
+            await _send_error(writer, "codex-command.command must be string")
+            return
+        if msg_type == "abort-session" and not isinstance(data.get("sessionId"), str):
+            await _send_error(writer, "abort-session.sessionId required")
+            return
+        if msg_type == "check-session-status" and not isinstance(data.get("sessionId"), str):
+            await _send_error(writer, "check-session-status.sessionId required")
+            return
+        await _send_error(writer, f"unknown command type: {msg_type!r}")
+        return
 
-    if msg_type == "codex-command":
+    if frame.frame_type == "codex-command":
         await _handle_codex_command(
             writer,
-            data,
+            frame,
             service,
             bg_tasks,
             thread_id=thread_id,
         )
         return
 
-    if msg_type == "abort-session":
-        session_id = data.get("sessionId")
-        if not isinstance(session_id, str):
-            await _send_error(writer, "abort-session.sessionId required")
-            return
+    if frame.frame_type == "abort-session":
+        session_id = frame.sessionId
         await service.abort(session_id)
-        await writer.send_json(
+        complete_frame = CodexS2CAdapter.validate_python(
             {
                 "frame_type": "complete",
                 "provider": "codex",
@@ -204,32 +221,27 @@ async def _dispatch(
                 "aborted": True,
             },
         )
+        await writer.send_json(CodexS2CAdapter.dump_python(complete_frame))
         return
 
-    if msg_type == "check-session-status":
-        session_id = data.get("sessionId")
-        if not isinstance(session_id, str):
-            await _send_error(writer, "check-session-status.sessionId required")
-            return
+    if frame.frame_type == "check-session-status":
+        session_id = frame.sessionId
         active = sessions.is_active(session_id)
         if active:
             # 重连：把 SessionManager 里旧 writer 绑定到底层新 ws
             await sessions.replace_writer(session_id, websocket)
         await writer.send_json(
-            {
-                "frame_type": "session-status",
-                "sessionId": session_id,
-                "isProcessing": active,
-            },
+            SessionStatusFrame(
+                sessionId=session_id,
+                isProcessing=active,
+            ).model_dump(),
         )
         return
-
-    await _send_error(writer, f"unknown command type: {msg_type!r}")
 
 
 async def _handle_codex_command(
     writer: WebSocketWriter,
-    data: dict[str, Any],
+    frame: CodexCommandFrame,
     service: CodexService,
     bg_tasks: set[asyncio.Task[Any]],
     *,
@@ -246,45 +258,20 @@ async def _handle_codex_command(
     - ``resume``          True 时必须配真实 ``sessionId``
     - ``sessionId``       resume=True 必填；否则可空，本端生成 ``pending-XXX``
     """
-    command = data.get("command", "")
-    if not isinstance(command, str):
-        await _send_error(writer, "codex-command.command must be string")
-        return
+    # codex-channel-image-paste：attachments 已在 CodexCommandFrame 校验完成。
+    # 字段缺失 / None / 空 list → attachments=None 走纯文本路径。
+    parsed_attachments = list(frame.attachments) if frame.attachments else None
+    options = frame.options
 
-    # codex-channel-image-paste §3：解 attachments 字段（前端 CodexView 粘贴图片
-    # 后发上来）。容错：
-    # - 字段缺失 / None / 非 list / 空 list → attachments=None 走原纯文本路径
-    # - 单条 dict 校验失败由 pydantic 抛 ValidationError，捕获后 fallback 到 None
-    raw_attachments = data.get("attachments")
-    parsed_attachments: list[UserInputAttachment] | None = None
-    if isinstance(raw_attachments, list) and raw_attachments:
-        try:
-            parsed_attachments = [
-                UserInputAttachment.model_validate(item) for item in raw_attachments
-            ]
-        except Exception:
-            logger.warning(
-                "codex-command attachments parse failed; falling back to text-only",
-                exc_info=True,
-            )
-            parsed_attachments = None
-
-    raw_options = data.get("options")
-    options: dict[str, Any] = raw_options if isinstance(raw_options, dict) else {}
-
-    cwd_opt = options.get("cwd")
-    cwd = cwd_opt if isinstance(cwd_opt, str) and cwd_opt else _default_cwd()
-
-    permission_mode_opt = options.get("permissionMode", "default")
-    permission_mode = permission_mode_opt if isinstance(permission_mode_opt, str) else "default"
-
-    model_opt = options.get("model")
-    model = model_opt if isinstance(model_opt, str) and model_opt else None
-
-    resume = bool(options.get("resume"))
-
-    incoming_sid = options.get("sessionId")
-    real_sid = incoming_sid if isinstance(incoming_sid, str) and incoming_sid else None
+    cwd = options.cwd if options is not None and options.cwd else _default_cwd()
+    permission_mode = (
+        options.permissionMode
+        if options is not None and options.permissionMode is not None
+        else "default"
+    )
+    model = options.model if options is not None and options.model else None
+    resume = bool(options.resume) if options is not None else False
+    real_sid = options.sessionId if options is not None and options.sessionId else None
 
     if resume and real_sid is None:
         await _send_error(writer, "codex-command.resume=true requires sessionId")
@@ -296,7 +283,7 @@ async def _handle_codex_command(
     task = asyncio.create_task(
         service.query(
             session_id=sid,
-            command=command,
+            command=frame.command,
             cwd=cwd,
             permission_mode=permission_mode,
             model=model,

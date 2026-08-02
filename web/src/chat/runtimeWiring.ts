@@ -10,12 +10,12 @@
  */
 import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { ChatTimelineStore } from "@/chat/ChatTimelineStore";
+import { disposeChatDeltaLogs } from "@/chat/logger";
 import type {
   NetworkHandle,
   ChatTimelineStoreApi,
   ChatTimelineState,
 } from "@/chat/types";
-import { useThreadStatusStore } from "@/stores/threadStatus";
 
 /**
  * 把一个「发送函数」包成 NetworkHandle。
@@ -53,6 +53,10 @@ const TIMELINE_REFCOUNT = new Map<string, number>();
  */
 const EMPTY_TIMELINE_THREAD_ID = "__empty__";
 
+export function makeCronTimelineKey(threadId: string, runId: string): string {
+  return `${threadId}:cron:${runId}`;
+}
+
 /** 取（或惰性创建）指定 thread 的时间线状态机。 */
 export function getTimelineStore(threadId: string): ChatTimelineStoreApi {
   let store = TIMELINE_STORES.get(threadId);
@@ -71,8 +75,10 @@ export function getTimelineStore(threadId: string): ChatTimelineStoreApi {
  */
 export function disposeTimelineStore(threadId: string): void {
   if (threadId === EMPTY_TIMELINE_THREAD_ID) return;
+  TIMELINE_STORES.get(threadId)?.dispose();
   TIMELINE_STORES.delete(threadId);
   TIMELINE_REFCOUNT.delete(threadId);
+  disposeChatDeltaLogs(threadId);
 }
 
 /** 订阅者 +1（useChatTimeline 挂载 / threadId 切入时）。 */
@@ -81,15 +87,29 @@ function retainTimelineStore(threadId: string): void {
   TIMELINE_REFCOUNT.set(threadId, (TIMELINE_REFCOUNT.get(threadId) ?? 0) + 1);
 }
 
-/** 订阅者 -1（useChatTimeline 卸载 / threadId 切走时）；归零则释放 store。 */
-function releaseTimelineStore(threadId: string): void {
+/**
+ * 订阅者 -1，并在当前微任务结束后释放归零的 store。
+ *
+ * React StrictMode 会在开发期执行 effect setup → cleanup → setup。延迟一个微任务
+ * 让第二次 setup 有机会恢复引用计数，避免历史帧写入新 store、视图仍订阅旧 store。
+ */
+function releaseTimelineStore(
+  threadId: string,
+  store: ChatTimelineStoreApi,
+): void {
   if (threadId === EMPTY_TIMELINE_THREAD_ID) return;
-  const next = (TIMELINE_REFCOUNT.get(threadId) ?? 0) - 1;
-  if (next <= 0) {
-    disposeTimelineStore(threadId);
-  } else {
-    TIMELINE_REFCOUNT.set(threadId, next);
-  }
+  if (TIMELINE_STORES.get(threadId) !== store) return;
+  const next = Math.max(0, (TIMELINE_REFCOUNT.get(threadId) ?? 0) - 1);
+  TIMELINE_REFCOUNT.set(threadId, next);
+  if (next > 0) return;
+  queueMicrotask(() => {
+    if (
+      TIMELINE_REFCOUNT.get(threadId) === 0 &&
+      TIMELINE_STORES.get(threadId) === store
+    ) {
+      disposeTimelineStore(threadId);
+    }
+  });
 }
 
 /** 当前缓存的 store 数量（测试 / 诊断用）。`excludeEmpty` 排除空 sentinel。 */
@@ -132,24 +152,9 @@ export function useChatTimeline(threadId: string | undefined): ChatTimelineState
   useEffect(() => {
     retainTimelineStore(effectiveId);
     return () => {
-      releaseTimelineStore(effectiveId);
+      releaseTimelineStore(effectiveId, store);
     };
-  }, [effectiveId]);
+  }, [effectiveId, store]);
 
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-}
-
-/**
- * chat-running-state-unify #6：用户发送瞬间预设 phase=responding。
- *
- * 解决「LLM 回复前无法打断」+「发送即停止状态」两个需求：让 isRunning 立即为 true
- * （不必等后端 turn.start 到达），三频道按钮立即变停止。后端真实 phase（responding
- * → complete/error/idle）会**幂等覆盖** —— turn.end 到达时 phase=complete 复位，
- * 按停止按钮立即触发 `provider.interrupt`（claude 后端 SDK 已自动**递归打断**子 agent
- * 树 + Bash subprocess，见 `src/web/claude_code/service.py::abort` 注释）。
- *
- * 集中放 ChatManager 内一处调用——三频道自动一致，符合 task "一处真源"原则。
- */
-export function markThreadRunning(threadId: string): void {
-  useThreadStatusStore.getState().setStatus(threadId, "responding");
 }

@@ -4,7 +4,7 @@
 覆盖：
 
 1. ``ThreadManager.set_archived(tid, True)`` 写盘后 ``read_thread_metadata``
-   读出 ``is_archived=True`` + ``schema_version=11``。
+   读出 ``is_archived=True`` + ``schema_version=13``。
 2. ``set_archived(tid, False)`` 反向往返还原。
 3. ``set_archived`` 对不存在 thread_id 抛 ``KeyError``。
 4. ``set_archived`` 后已 boot cell 的 ``cell.metadata`` 同步更新。
@@ -29,14 +29,34 @@ from tests.unit.test_web_app_lifespan import _seed_password
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 
 
-def _make_cfg() -> Config:
+def _make_cfg(tmp_path: Path) -> Config:
+    """写入当前模型目录真源并返回测试配置。"""
+    (tmp_path / "model-providers.yaml").write_text(
+        """\
+version: 2
+providers:
+  - provider_id: archive-test
+    default_preset_id: p1
+    display_name: Archive Test
+    region_label: Local
+    description: archive fixture
+    logo_text: A
+    protocol: openai
+    default_base_url: http://127.0.0.1:1234/v1
+    request_defaults: {}
+    models:
+      - preset_id: p1
+        display_name: P1
+        model: fake
+      - preset_id: preset-1
+        display_name: Preset 1
+        model: fake
+""",
+        encoding="utf-8",
+    )
     return Config.model_validate(
         {
-            "model": {
-                "name": "fake",
-                "base_url": "http://127.0.0.1:1234/v1",
-                "api_key": "",
-            },
+            "model": {"preset_id": "p1"},
             "web": {
                 "enabled": True,
                 "dev_mode": True,
@@ -57,10 +77,10 @@ async def _fake_factory(tid: str, pid: str, adapter: Any, sinks: list[Any]) -> t
 
 @pytest.mark.asyncio
 async def test_set_archived_true_roundtrip(tmp_path: Path) -> None:
-    """set_archived(tid, True) 写盘后 read 拿到 is_archived=True + schema v11。"""
+    """set_archived(tid, True) 写盘后 read 拿到 is_archived=True + schema v13。"""
     from hosts.web.threads.manager import ThreadManager
 
-    cfg = _make_cfg()
+    cfg = _make_cfg(tmp_path)
     tm = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=_fake_factory)
     meta = await tm.create_thread("t1", "preset-1")
     assert meta.is_archived is False
@@ -69,13 +89,13 @@ async def test_set_archived_true_roundtrip(tmp_path: Path) -> None:
     assert updated.is_archived is True
     assert updated.id == meta.id
     assert updated.name == meta.name
-    assert updated.schema_version == 11
+    assert updated.schema_version == 13
 
     # 重新读盘确认持久化
     on_disk = read_thread_metadata(tmp_path, meta.id)
     assert on_disk is not None
     assert on_disk.is_archived is True
-    assert on_disk.schema_version == 11
+    assert on_disk.schema_version == 13
 
 
 @pytest.mark.asyncio
@@ -83,7 +103,7 @@ async def test_set_archived_false_reverse_roundtrip(tmp_path: Path) -> None:
     """set_archived(tid, False) 反向往返还原。"""
     from hosts.web.threads.manager import ThreadManager
 
-    cfg = _make_cfg()
+    cfg = _make_cfg(tmp_path)
     tm = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=_fake_factory)
     meta = await tm.create_thread("t1", "preset-1")
 
@@ -104,7 +124,7 @@ async def test_set_archived_unknown_thread_raises_keyerror(tmp_path: Path) -> No
     """set_archived 对不存在 thread_id 抛 KeyError。"""
     from hosts.web.threads.manager import ThreadManager
 
-    cfg = _make_cfg()
+    cfg = _make_cfg(tmp_path)
     tm = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=_fake_factory)
 
     with pytest.raises(KeyError, match="thread not found"):
@@ -116,7 +136,7 @@ async def test_set_archived_updates_booted_cell_metadata(tmp_path: Path) -> None
     """set_archived 后若 cell 已 boot，cell.metadata 同步刷新。"""
     from hosts.web.threads.manager import ThreadManager
 
-    cfg = _make_cfg()
+    cfg = _make_cfg(tmp_path)
     tm = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=_fake_factory)
     meta = await tm.create_thread("t1", "preset-1")
 
@@ -126,7 +146,7 @@ async def test_set_archived_updates_booted_cell_metadata(tmp_path: Path) -> None
         thread_id=meta.id,
         metadata=meta,
         runtime=object(),  # type: ignore[arg-type]
-        bridge=object(),  # type: ignore[arg-type]
+        host_dispatcher=object(),  # type: ignore[arg-type]
         adapter=object(),  # type: ignore[arg-type]
         event_sinks=[],
     )
@@ -146,7 +166,7 @@ async def test_set_archived_preserves_other_fields(tmp_path: Path) -> None:
     """set_archived 不破坏 name / is_pinned / claude_thread_id 等其它字段。"""
     from hosts.web.threads.manager import ThreadManager
 
-    cfg = _make_cfg()
+    cfg = _make_cfg(tmp_path)
     tm = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=_fake_factory)
     meta = await tm.create_thread("hello-name", "preset-1")
 
@@ -185,7 +205,7 @@ def _login_client_with_real_tm(tmp_path: Path) -> tuple[TestClient, Any]:
     from hosts.web.threads.manager import ThreadManager
 
     _seed_password(tmp_path, "pwd")
-    cfg = _make_cfg()
+    cfg = _make_cfg(tmp_path)
     tm = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=_fake_factory)
     app = create_app(cfg, tm, home_dir=tmp_path)
     client = TestClient(app)
@@ -223,7 +243,7 @@ def test_patch_thread_is_archived_true_returns_dto(tmp_path: Path) -> None:
         body = resp.json()
         assert body["id"] == thread_id
         assert body["is_archived"] is True
-        assert body["schema_version"] == 11
+        assert body["schema_version"] == 13
     finally:
         client.__exit__(None, None, None)
 

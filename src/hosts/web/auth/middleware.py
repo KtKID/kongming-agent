@@ -34,6 +34,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
+from typing_extensions import override
 
 from hosts.web.protocol import ErrorResponseDTO
 
@@ -60,6 +61,8 @@ CSRF_HEADER_VALUE = "XMLHttpRequest"
 CSRF_PROTECTED_METHODS = frozenset({"POST", "PATCH", "DELETE", "PUT"})
 _MOBILE_PAIRING_PUBLIC_POST_SUFFIXES = frozenset({"claim", "exchange"})
 _MOBILE_LOGIN_QR_PUBLIC_POST_SUFFIXES = frozenset({"claim", "exchange"})
+_AVATAR_APPROVAL_PREFIX = "/api/avatar/v1/approvals/"
+_AVATAR_APPROVAL_RESOLVE_SUFFIX = "/resolve"
 
 
 # ---------------------------------------------------------------------------
@@ -285,8 +288,14 @@ def _is_avatar_api_allowlisted(path: str) -> bool:
     """判断 Avatar API 是否交给 Router 做 Bearer/cookie 鉴权。
 
     关键输入：HTTP path。
-    关键输出：Avatar v1 API 放行 Auth/CSRF middleware，最终权限由 Router 校验。
+    关键输出：Avatar v1 联调 API 放行 Auth/CSRF middleware；审批决策回写
+    保留 Web 会话和 CSRF 边界。
     """
+    normalized = path.rstrip("/")
+    if normalized.startswith(_AVATAR_APPROVAL_PREFIX) and normalized.endswith(
+        _AVATAR_APPROVAL_RESOLVE_SUFFIX
+    ):
+        return False
     return path.startswith("/api/avatar/v1/")
 
 
@@ -304,6 +313,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self._allow_docs = allow_docs
 
+    @override
     async def dispatch(
         self,
         request: Request,
@@ -349,6 +359,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
     - **WS 升级**：starlette WS handshake 走 GET，自然豁免
     """
 
+    @override
     async def dispatch(
         self,
         request: Request,

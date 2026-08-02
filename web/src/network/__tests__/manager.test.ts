@@ -164,6 +164,17 @@ describe("NetworkManager", () => {
     handle.close();
   });
 
+  it("cron_run_channel_uses_task_and_run_path", () => {
+    const m = makeManager();
+    m.configure(CONFIG);
+    const handle = m.openChannel("cron-run", "task 1:run/1");
+    expect(FakeWebSocket.instances.length).toBe(1);
+    const ws = FakeWebSocket.instances[0]!;
+    expect(ws.url).toContain("/ws/cron/tasks/task%201/runs/run%2F1");
+    expect(handle.connId).toMatch(/^cron-run:task 1:run\/1:[0-9a-f]{8}$/);
+    handle.close();
+  });
+
   it("generic_channel_reuses_same_kind_and_thread_record", () => {
     const m = makeManager();
     m.configure(CONFIG);

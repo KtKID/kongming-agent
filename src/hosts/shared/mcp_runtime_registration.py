@@ -18,7 +18,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from application.web_search import WebSearchManager, build_web_search_tool
+from application.web_search import (
+    WebSearchManager,
+    build_missing_web_search_tool,
+    build_web_search_tool,
+)
 from core.contracts import Event, EventSink, Tool
 from infrastructure.config import Config
 from infrastructure.mcp import McpManager
@@ -87,26 +91,9 @@ class McpRuntimeRegistrationManager:
         """注册 MCP 与 Web Search 工具，输入 registry，输出注册结果。"""
         mcp_cfg = self._config.mcp
         diagnostics: dict[str, Any] = {
-            "mcp_enabled": mcp_cfg.enabled,
+            "mcp_server_count": len(mcp_cfg.servers),
             "web_search_enabled": self._config.web_search.enabled,
         }
-        if not mcp_cfg.enabled:
-            web_search_diagnostics = _register_web_search_tool(
-                registry,
-                web_search_cfg=self._config.web_search,
-            )
-            result = self._finish_result(
-                registry,
-                registered_tools=_registered_web_search_tools(web_search_diagnostics),
-                diagnostics={
-                    **diagnostics,
-                    "reason": "mcp_disabled",
-                    "web_search": web_search_diagnostics,
-                },
-                excluded_tool_names=excluded_tool_names,
-            )
-            await self._emit("mcp.registration.skipped", result.diagnostics)
-            return result
         if not mcp_cfg.servers:
             web_search_diagnostics = _register_web_search_tool(
                 registry,
@@ -339,10 +326,21 @@ def _register_web_search_tool(
 
     search_tool_name, search_tool = _resolve_search_tool(registry, web_search_cfg)
     if search_tool is None or search_tool_name is None:
+        candidate_tool_names = _candidate_search_tool_names(web_search_cfg)
+        registry.register(
+            cast(
+                Tool,
+                build_missing_web_search_tool(
+                    provider_name=str(getattr(web_search_cfg, "provider_name", "web_search")),
+                    candidate_tool_names=candidate_tool_names,
+                ),
+            )
+        )
         return {
             "enabled": True,
             "reason": "search_tool_missing",
-            "candidate_tool_names": _candidate_search_tool_names(web_search_cfg),
+            "candidate_tool_names": candidate_tool_names,
+            "registered_tool_name": _WEB_SEARCH_TOOL_NAME,
         }
 
     manager = WebSearchManager(

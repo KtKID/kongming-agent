@@ -24,4 +24,4 @@ export type {
   ApprovalInboxRemoveFrame,
   ApprovalInboxResolveFrame,
   ApprovalInboxSnapshotFrame,
-} from "./types";
+} from "@/protocol";

@@ -13,12 +13,15 @@ import pytest
 
 from scheduler.domain import (
     DeliveryChannel,
+    RunFailureReason,
+    RunStatus,
     ScheduleDelivery,
+    ScheduledRun,
     ScheduledTask,
     ScheduleTrigger,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
@@ -68,8 +71,7 @@ def _make_task(task_id: str = "task-1") -> ScheduledTask:
     return ScheduledTask(
         task_id=task_id,
         name="weekly summary",
-        enabled=True,
-        state=TaskState.SCHEDULED,
+        lifecycle=TaskLifecycleState.SCHEDULED,
         origin=TaskOrigin.WEB,
         trigger=ScheduleTrigger(
             trigger_type=TriggerType.CRON,
@@ -124,8 +126,7 @@ async def test_create_task_with_thread_can_use_separate_thread_preset(
     task = ScheduledTask(
         task_id=task.task_id,
         name=task.name,
-        enabled=task.enabled,
-        state=task.state,
+        lifecycle=task.lifecycle,
         origin=task.origin,
         trigger=task.trigger,
         policy=task.policy,
@@ -177,3 +178,35 @@ async def test_create_task_with_thread_rolls_back_thread_on_bind_failure(
 
     assert provisioner.created
     assert provisioner.deleted == ["bad-thread-id:False"]
+
+
+def test_recover_stale_runs_on_startup_uses_store_recovery(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    task = store.create_task(_make_task("task-stale"))
+    store.append_run(
+        ScheduledRun(
+            run_id="run-stale",
+            task_id=task.task_id,
+            status=RunStatus.RUNNING,
+            scheduled_for=task.next_run_at or task.created_at,
+            started_at=task.created_at,
+            finished_at=None,
+            session_id="session-stale",
+            result_status=None,
+            final_message_excerpt=None,
+            error_message=None,
+            failure_reason=None,
+            delivery_error=None,
+            silent_suppressed=False,
+            thread_id="thread-aaaaaaaaaaaa",
+        )
+    )
+    manager = SchedulerManager(store)
+
+    recovered = manager.recover_stale_runs_on_startup()
+
+    latest = store.get_latest_run(task.task_id)
+    assert recovered == 1
+    assert latest is not None
+    assert latest.status is RunStatus.ABANDONED
+    assert latest.failure_reason is RunFailureReason.ABANDONED_ON_RESTART

@@ -10,6 +10,8 @@ export interface HoverAction {
   icon: LucideIcon;
   label: string;
   variant?: "default" | "destructive";
+  disabled?: boolean;
+  loading?: boolean;
   onClick: () => void;
 }
 
@@ -64,7 +66,7 @@ export function SidebarSessionRow({
 
   if (editing && editSlot) {
     return (
-      <div className="flex items-center gap-2 rounded-[1.4rem] border border-border/70 bg-card/76 px-3 py-2 shadow-sm">
+      <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-card/76 px-3 py-2 shadow-sm">
         {leading}
         <div className="min-w-0 flex-1">{editSlot}</div>
       </div>
@@ -89,10 +91,10 @@ export function SidebarSessionRow({
           : undefined
       }
       className={cn(
-        "group relative flex h-[46px] w-full items-center gap-2 overflow-hidden rounded-[1.4rem] border px-3 text-left text-sm transition-[border-color,background-color,box-shadow,transform] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/22 focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+        "group relative flex h-[46px] w-full items-center gap-2 overflow-hidden rounded-lg border px-3 text-left text-sm transition-[border-color,background-color,box-shadow,transform] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/22 focus-visible:ring-offset-2 focus-visible:ring-offset-background",
         selected
-          ? "border-primary/20 bg-primary/10 text-foreground shadow-sm"
-          : "border-border/70 bg-card/76 text-foreground/92 shadow-sm hover:border-primary/18 hover:bg-card/92 hover:-translate-y-[1px]",
+          ? "border-primary/22 bg-primary/10 text-foreground shadow-sm"
+          : "border-transparent bg-transparent text-foreground/92 shadow-none hover:-translate-y-[1px] hover:border-border/70 hover:bg-card/80 hover:shadow-sm",
       )}
     >
       <div
@@ -133,8 +135,10 @@ export function SidebarSessionRow({
                 type="button"
                 aria-label={action.label}
                 title={action.label}
+                disabled={action.disabled}
                 className={cn(
                   "inline-flex h-6 w-6 items-center justify-center rounded-full border border-transparent bg-background/80 text-muted-foreground transition-colors",
+                  action.disabled && "cursor-not-allowed opacity-45",
                   action.variant === "destructive"
                     ? "hover:border-destructive/20 hover:bg-destructive/12 hover:text-destructive"
                     : "hover:border-primary/16 hover:bg-background hover:text-foreground",
@@ -142,10 +146,12 @@ export function SidebarSessionRow({
                 onClick={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  action.onClick();
+                  if (!action.disabled) action.onClick();
                 }}
               >
-                <action.icon className="h-3.5 w-3.5" />
+                <action.icon
+                  className={cn("h-3.5 w-3.5", action.loading && "animate-spin")}
+                />
               </button>
             ))}
           </div>

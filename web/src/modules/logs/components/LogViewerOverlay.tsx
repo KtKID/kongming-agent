@@ -22,6 +22,8 @@ import { formatLogLines } from "../formatter";
 import type { LogSource } from "../types";
 import { LogContentPane } from "./LogContentPane";
 
+const SESSION_CONVERSATION_TYPE = "session_conversation";
+
 function formatBytes(bytes: number | null | undefined): string {
   if (bytes == null) return "--";
   if (bytes < 1024) return `${bytes} B`;
@@ -70,7 +72,11 @@ function SourceTab({ source, selected, onClick }: SourceTabProps) {
   );
 }
 
-export function LogViewerOverlay() {
+interface LogViewerOverlayProps {
+  activeThreadId?: string | null;
+}
+
+export function LogViewerOverlay({ activeThreadId = null }: LogViewerOverlayProps) {
   const isOpen = useLogViewerStore((s) => s.isOpen);
   const close = useLogViewerStore((s) => s.close);
   const sources = useLogViewerStore((s) => s.sources);
@@ -99,6 +105,14 @@ export function LogViewerOverlay() {
     () => sources.find((s) => s.type === selectedType) ?? null,
     [sources, selectedType],
   );
+  const logFileSources = useMemo(
+    () => sources.filter((s) => s.type !== SESSION_CONVERSATION_TYPE),
+    [sources],
+  );
+  const sessionSources = useMemo(
+    () => sources.filter((s) => s.type === SESSION_CONVERSATION_TYPE),
+    [sources],
+  );
 
   const loadContent = useCallback(
     async (type: string) => {
@@ -108,6 +122,7 @@ export function LogViewerOverlay() {
         const resp = await fetchLogRead({
           type,
           tail_lines: tailLines,
+          threadId: activeThreadId,
         });
         setLines(resp.lines);
         setTruncated(resp.truncated);
@@ -121,6 +136,7 @@ export function LogViewerOverlay() {
     },
     [
       tailLines,
+      activeThreadId,
       setLines,
       setTruncated,
       setReadMeta,
@@ -139,7 +155,7 @@ export function LogViewerOverlay() {
       setLoadingSources(true);
       setError(null);
       try {
-        const srcs = await fetchLogSources();
+        const srcs = await fetchLogSources({ threadId: activeThreadId });
         if (cancelled) return;
         setSources(srcs);
 
@@ -168,6 +184,7 @@ export function LogViewerOverlay() {
     setLoadingSources,
     setError,
     loadContent,
+    activeThreadId,
   ]);
 
   const handleTabClick = useCallback(
@@ -187,7 +204,9 @@ export function LogViewerOverlay() {
 
   const viewModels = useMemo(() => {
     if (!selectedSource) return [];
-    return formatLogLines(lines, selectedSource.format);
+    return formatLogLines(lines, selectedSource.format, {
+      sourceType: selectedSource.type,
+    });
   }, [lines, selectedSource]);
 
   const currentFormat = selectedSource?.format ?? "plain";
@@ -216,7 +235,7 @@ export function LogViewerOverlay() {
             ) : (
               <ScrollArea className="flex-1">
                 <div className="space-y-0.5 px-2 pb-2">
-                  {sources.map((src) => (
+                  {logFileSources.map((src) => (
                     <SourceTab
                       key={src.type}
                       source={src}
@@ -224,6 +243,21 @@ export function LogViewerOverlay() {
                       onClick={() => handleTabClick(src.type)}
                     />
                   ))}
+                  {sessionSources.length > 0 && (
+                    <>
+                      <div className="px-1 pt-3 pb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                        Session
+                      </div>
+                      {sessionSources.map((src) => (
+                        <SourceTab
+                          key={src.type}
+                          source={src}
+                          selected={src.type === selectedType}
+                          onClick={() => handleTabClick(src.type)}
+                        />
+                      ))}
+                    </>
+                  )}
                 </div>
               </ScrollArea>
             )}

@@ -1,15 +1,160 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { MessageList } from "@/components/MessageList";
 import { useChatStore } from "@/stores/chat";
 import * as debugMod from "@/lib/debug";
 import * as apiMod from "@/lib/api";
+import { __setMarkdownParserForTest, parseBlocks } from "@/lib/markdown";
 
 beforeEach(() => {
   useChatStore.setState({ itemsByThread: {} });
+  __setMarkdownParserForTest(null);
 });
 
 describe("MessageList", () => {
+  it("在 fork 复制终点气泡后插入续接入口，后续消息保持在入口之后", () => {
+    render(
+      <MemoryRouter>
+        <MessageList
+          threadId="t1"
+          forkLineage={{
+            parentThreadId: "thread-aaaaaaaaaaaa",
+            historyIndex: 3,
+          }}
+          items={[
+            {
+              id: "a-boundary",
+              kind: "assistant",
+              threadId: "t1",
+              turn: 1,
+              runId: "run-1",
+              content: "分叉前最后回复",
+              reasoning: "",
+              timestampMs: 1,
+              streaming: false,
+              forkHistoryIndex: 3,
+            },
+            {
+              id: "u-after-fork",
+              kind: "user",
+              threadId: "t1",
+              content: "分叉后的新消息",
+              timestampMs: 2,
+            },
+          ]}
+        />
+      </MemoryRouter>,
+    );
+
+    const lineage = screen.getByTestId("fork-lineage-navigation");
+    expect(screen.getByRole("link", { name: "续接自任务" })).toHaveAttribute(
+      "href",
+      "/chat/thread-aaaaaaaaaaaa",
+    );
+    expect(lineage.previousElementSibling).toHaveTextContent("分叉前最后回复");
+    expect(lineage.nextElementSibling).toHaveTextContent("分叉后的新消息");
+  });
+
+  it("只在完成态 assistant 气泡下显示从此回复分叉，工具卡片不显示", () => {
+    const onForkAssistant = vi.fn();
+    render(
+      <MessageList
+        threadId="t1"
+        onForkAssistant={onForkAssistant}
+        items={[
+          {
+            id: "a-forkable",
+            kind: "assistant",
+            threadId: "t1",
+            turn: 1,
+            runId: "run-1",
+            content: "可分叉回复",
+            reasoning: "",
+            timestampMs: 1,
+            streaming: false,
+            forkHistoryIndex: 3,
+          },
+          {
+            id: "a-streaming",
+            kind: "assistant",
+            threadId: "t1",
+            turn: 2,
+            runId: "run-2",
+            content: "仍在输出",
+            reasoning: "",
+            timestampMs: 2,
+            streaming: true,
+            forkHistoryIndex: 5,
+          },
+          {
+            id: "tool-1",
+            kind: "tool",
+            threadId: "t1",
+            turn: 1,
+            runId: "run-1",
+            toolName: "read_file",
+            callId: "call-1",
+            arguments: {},
+            ok: true,
+            timestampMs: 3,
+          },
+        ]}
+      />,
+    );
+
+    const forkButton = screen.getByRole("button", { name: "从此回复分叉" });
+    expect(screen.getAllByRole("button", { name: "从此回复分叉" })).toHaveLength(1);
+    fireEvent.click(forkButton);
+    expect(onForkAssistant).toHaveBeenCalledWith(3);
+    expect(forkButton.closest('[data-testid="message-hover-meta"]')).not.toBeNull();
+  });
+
+  it("streaming 使用纯文本，completed 只按文本解析一次", () => {
+    const parser = vi.fn(parseBlocks);
+    __setMarkdownParserForTest(parser);
+    const assistant = {
+      id: "assistant-1",
+      kind: "assistant" as const,
+      threadId: "t1",
+      turn: 1,
+      runId: "run-1",
+      content: "# 未完成标题\n**纯文本**",
+      reasoning: "",
+      timestampMs: 1,
+    };
+    const { rerender } = render(
+      <MessageList threadId="t1" items={[{ ...assistant, streaming: true }]} />,
+    );
+    expect(parser).toHaveBeenCalledTimes(0);
+    expect(screen.getByTestId("streaming-assistant-text")).toHaveTextContent("# 未完成标题");
+
+    rerender(<MessageList threadId="t1" items={[{ ...assistant, streaming: false }]} />);
+    expect(parser).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <MessageList
+        threadId="t1"
+        items={[
+          { ...assistant, streaming: false },
+          {
+            id: "tool-1",
+            kind: "tool",
+            threadId: "t1",
+            turn: 1,
+            runId: "run-1",
+            toolName: "read_file",
+            callId: "call-1",
+            arguments: {},
+            ok: true,
+            timestampMs: 2,
+          },
+        ]}
+      />,
+    );
+    expect(parser).toHaveBeenCalledTimes(1);
+  });
+
   it("无 threadId → 显示提示", () => {
     render(<MessageList threadId={undefined} />);
     expect(screen.getByText(/在左侧选择/)).toBeInTheDocument();
@@ -80,16 +225,6 @@ describe("MessageList", () => {
             timestampMs: 3,
           },
           {
-            id: "ap1",
-            kind: "approval",
-            threadId: "t1",
-            turn: 1,
-            callId: "c2",
-            toolName: "Web",
-            arguments: {},
-            timestampMs: 4,
-          },
-          {
             id: "e1",
             kind: "error",
             threadId: "t1",
@@ -109,12 +244,81 @@ describe("MessageList", () => {
     expect(screen.getByText("已写入 1")).toBeInTheDocument();
     expect(screen.getByText("已命中 1")).toBeInTheDocument();
     expect(screen.getByText("Consistent Short Response Cadence")).toBeInTheDocument();
-    expect(screen.getByText(/需要审批：Web/)).toBeInTheDocument();
     expect(screen.getByTestId("error-banner")).toHaveTextContent("boom");
     const footer = screen.getByTestId("assistant-usage-footer");
     expect(footer).toHaveTextContent("120");
     expect(footer).toHaveTextContent("30");
     expect(footer).toHaveTextContent("150");
+  });
+
+  it("渲染立即发送插队标记", () => {
+    render(
+      <MessageList
+        threadId="t1"
+        items={[
+          {
+            id: "u-steered",
+            kind: "user",
+            threadId: "t1",
+            content: "插队消息",
+            deliveryStatus: "steered",
+            timestampMs: 1,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("插队消息")).toBeInTheDocument();
+    expect(screen.getByTestId("user-message-delivery-status")).toHaveTextContent("已插队");
+  });
+
+  it("assistant 只有 reasoning 时不渲染正文气泡和流式光标", () => {
+    render(
+      <MessageList
+        threadId="t1"
+        items={[
+          {
+            id: "a-reasoning-only",
+            kind: "assistant",
+            threadId: "t1",
+            turn: 1,
+            runId: "run-1",
+            content: "",
+            reasoning: "正在分析",
+            timestampMs: 1,
+            streaming: true,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "reasoning" })).toBeInTheDocument();
+    expect(screen.queryByTestId("message-bubble-frame")).toBeNull();
+    expect(screen.queryByLabelText("streaming")).toBeNull();
+  });
+
+  it("assistant 正文到来前的空 streaming 项不渲染可见行", () => {
+    render(
+      <MessageList
+        threadId="t1"
+        items={[
+          {
+            id: "a-empty-streaming",
+            kind: "assistant",
+            threadId: "t1",
+            turn: 1,
+            runId: "run-1",
+            content: "",
+            reasoning: "",
+            timestampMs: 1,
+            streaming: true,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.queryByTestId("message-bubble-frame")).toBeNull();
+    expect(screen.queryByLabelText("streaming")).toBeNull();
   });
 
   it("鼠标进入气泡时显示复制和配置时区时间", () => {
@@ -147,6 +351,77 @@ describe("MessageList", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "复制消息" }));
     expect(writeText).toHaveBeenCalledWith("hover-copy");
+  });
+
+  it("渲染 user message 的 reference chip", () => {
+    render(
+      <MessageList
+        threadId="t1"
+        items={[
+          {
+            id: "u-ref",
+            kind: "user",
+            threadId: "t1",
+            content: "",
+            timestampMs: 1,
+            references: [
+              {
+                id: "ref-1",
+                kind: "skill",
+                ref: "skill:skill-creator",
+                label: "Skill Creator",
+                activation: "inject_context",
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByTestId("message-reference-chip")).toHaveTextContent(
+      "Skill Creator",
+    );
+    expect(
+      screen.getByRole("button", { name: "复制引用 Skill Creator" }),
+    ).toBeInTheDocument();
+  });
+
+  it("sets user and assistant bubble frames to 80 percent width", () => {
+    render(
+      <MessageList
+        threadId="t1"
+        items={[
+          {
+            id: "u-width",
+            kind: "user",
+            threadId: "t1",
+            content: "user message ".repeat(30),
+            timestampMs: 1,
+          },
+          {
+            id: "a-width",
+            kind: "assistant",
+            threadId: "t1",
+            turn: 1,
+            runId: "run-width",
+            content: "assistant message ".repeat(30),
+            reasoning: "",
+            timestampMs: 2,
+            streaming: false,
+          },
+        ]}
+      />,
+    );
+
+    const frames = screen.getAllByTestId("message-bubble-frame");
+    expect(frames).toHaveLength(2);
+    expect(frames[0]).toHaveClass("w-full");
+    expect(frames[1]).toHaveClass("w-full");
+    expect(screen.getByTestId("message-viewport-content")).toHaveClass("p-4");
+
+    const bubbles = screen.getAllByTestId("message-bubble");
+    expect(bubbles[0]).toHaveClass("max-w-full");
+    expect(bubbles[1]).toHaveClass("max-w-full");
   });
 
   it("系统提示卡片使用独立样式并显示失败原因", () => {

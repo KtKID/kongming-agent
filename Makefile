@@ -7,7 +7,7 @@ SHELL := /usr/bin/env bash
 
 .PHONY: help install install-hooks fmt fmt-check lint typecheck \
         precommit prepush-test test test-unit test-e2e nightly-local smoke cli clean \
-        web-build web-dev web-test web
+        web-build web-dev web-test web-protocol-generate web-protocol-check web
 
 help:
 	@echo "kongming-agent Makefile"
@@ -26,6 +26,8 @@ help:
 	@echo "  make test          test-unit + test-e2e"
 	@echo "  make smoke         最小启动 smoke test"
 	@echo "  make cli           启动 CLI（MiniMax M3 默认）"
+	@echo "  make web-protocol-generate  生成 Pydantic → TypeScript Web 协议"
+	@echo "  make web-protocol-check     检查 Web 协议生成产物漂移"
 	@echo "  make clean         清理缓存产物"
 
 install:
@@ -88,6 +90,12 @@ web-dev:
 
 web-test:
 	uv run python scripts/run_with_timing.py --label web-test --cwd web -- npm run test:unit
+
+web-protocol-generate:
+	cd web && npm run protocol:generate:thread-status
+
+web-protocol-check:
+	cd web && npm run protocol:check
 
 # web：启动 uvicorn web 后端（v0.1.5 web-app-shell）。
 # 前置：

@@ -82,6 +82,19 @@ _THREAD_ID_RE: re.Pattern[str] = re.compile(r"^thread-[a-f0-9]{12}$")
 WS_CLOSE_POLICY_VIOLATION = 1008
 
 
+def _workspace_fallback_root(app: Any) -> Path:
+    state = getattr(app, "state", None)
+    raw_root = getattr(state, "workspace_root", None)
+    if raw_root:
+        return Path(raw_root).expanduser().resolve(strict=False)
+    raw_home = getattr(state, "kongming_home", None)
+    if raw_home:
+        return Path(raw_home).expanduser().resolve(strict=False)
+    from infrastructure.config.paths import get_kongming_home
+
+    return get_kongming_home()
+
+
 async def _bind_new_claude_session_when_detected(
     *,
     tm: ThreadManagerProtocol,
@@ -154,7 +167,10 @@ async def workspace_shell_ws(
             await websocket.send_json(frame)
 
     try:
-        root = require_workspace_root(meta)
+        root = require_workspace_root(
+            meta,
+            fallback_to=_workspace_fallback_root(websocket.app),
+        )
     except WorkspaceError as exc:
         await send_frame({"type": "shell-error", "detail": str(exc)})
         try:

@@ -2,12 +2,11 @@
 
 本脚本验证 `/ws/avatar/v1/threads/{threadId}` 的真实 TestClient 链路。关键流程是
 用 FakeThreadManager/FakeBridge 替代真实 LLM runtime，连接 Avatar channel 后验证
-thread.history、user.input、普通 S2C frame、approval.ack 三态和非法 thread。
+thread.history、user.input、普通 S2C frame、approval.ack 退役保护和非法 thread。
 """
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +51,7 @@ class _FakeBridge:
         *,
         reasoning_effort: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        references: list[dict[str, Any]] | None = None,
     ) -> None:
         """记录用户输入并发出普通 generic_chat S2C 事件。
 
@@ -276,8 +276,8 @@ def test_avatar_ws_user_input_runs_generic_bridge_and_streams_frames(tmp_path: P
         client.__exit__(None, None, None)
 
 
-def test_avatar_ws_approval_ack_routes_three_actions(tmp_path: Path) -> None:
-    """验证 approval.ack 三态均透传到 ThreadManager.resolve_approval。"""
+def test_avatar_ws_approval_ack_is_retired(tmp_path: Path) -> None:
+    """验证 approval.ack 不再透传到 ThreadManager.resolve_approval。"""
     tm = _AvatarWSFakeTM()
     client = _client(tmp_path, tm)
     try:
@@ -291,13 +291,11 @@ def test_avatar_ws_approval_ack_routes_three_actions(tmp_path: Path) -> None:
                         "action": action,
                     }
                 )
-            time.sleep(0.1)
+                error = ws.receive_json()
+                assert error["frame_type"] == "error"
+                assert "approval.ack" in error["message"]
 
-        assert tm.resolve_calls == [
-            (THREAD_ID, "call-accept_once", "accept_once"),
-            (THREAD_ID, "call-accept_for_session", "accept_for_session"),
-            (THREAD_ID, "call-reject", "reject"),
-        ]
+        assert tm.resolve_calls == []
     finally:
         client.__exit__(None, None, None)
 

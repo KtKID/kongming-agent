@@ -186,10 +186,7 @@ class ThreadArtifactManager:
         self, path: Path, relative_path: str
     ) -> tuple[Any | None, list[ThreadArtifactDiagnosticDTO]]:
         try:
-            payload = json.loads(path.read_text("utf-8"))
-            if relative_path == "system_prompt.json" and isinstance(payload, dict):
-                return _redact_system_prompt_payload(payload), []
-            return payload, []
+            return json.loads(path.read_text("utf-8")), []
         except (OSError, json.JSONDecodeError) as exc:
             return None, [self._read_error(relative_path, exc)]
 
@@ -301,17 +298,6 @@ def _count_nonempty_lines(path: Path) -> int:
             if line.strip():
                 count += 1
     return count
-
-
-def _redact_system_prompt_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """移除 system prompt 正文，保留审计定位所需元数据。"""
-    redacted = dict(payload)
-    content = redacted.pop("content", None)
-    if content is not None:
-        redacted["content_redacted"] = True
-        if isinstance(content, str):
-            redacted["content_chars"] = len(content)
-    return redacted
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

@@ -10,10 +10,23 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { ChatTimelineStore } from "../ChatTimelineStore";
-import type { ChatEvent, ChatHistoryBatch } from "../types";
+import type {
+  ChatEvent,
+  ChatHistoryBatch,
+  ConversationReferenceDTO,
+  StreamingRenderScheduler,
+  StreamingVisibilitySource,
+} from "../types";
 import type { NormalizedMessage } from "@/protocol";
 
 const T = "t1";
+const skillReference: ConversationReferenceDTO = {
+  id: "ref-1",
+  kind: "skill",
+  ref: "skill:skill-creator",
+  label: "Skill Creator",
+  activation: "inject_context",
+};
 
 function ev(partial: Partial<ChatEvent> & Pick<ChatEvent, "kind">): ChatEvent {
   return {
@@ -24,6 +37,68 @@ function ev(partial: Partial<ChatEvent> & Pick<ChatEvent, "kind">): ChatEvent {
     payload: partial.payload ?? {},
     ...partial,
   };
+}
+
+class FakeStreamingScheduler implements StreamingRenderScheduler {
+  private foregroundCallbacks: Array<{ cancelled: boolean; callback: () => void; delayMs: number }> = [];
+  private backgroundCallbacks: Array<{ cancelled: boolean; callback: () => void; delayMs: number }> = [];
+
+  scheduleForeground(delayMs: number, callback: () => void) {
+    return this.schedule(this.foregroundCallbacks, delayMs, callback);
+  }
+
+  scheduleBackground(delayMs: number, callback: () => void) {
+    return this.schedule(this.backgroundCallbacks, delayMs, callback);
+  }
+
+  flushForeground(): void {
+    this.flush(this.foregroundCallbacks);
+  }
+
+  flushBackground(): void {
+    this.flush(this.backgroundCallbacks);
+  }
+
+  scheduledForegroundCount(): number {
+    return this.foregroundCallbacks.filter((entry) => !entry.cancelled).length;
+  }
+
+  scheduledBackgroundCount(): number {
+    return this.backgroundCallbacks.filter((entry) => !entry.cancelled).length;
+  }
+
+  nextForegroundDelayMs(): number | undefined {
+    return this.foregroundCallbacks.find((entry) => !entry.cancelled)?.delayMs;
+  }
+
+  nextBackgroundDelayMs(): number | undefined {
+    return this.backgroundCallbacks.find((entry) => !entry.cancelled)?.delayMs;
+  }
+
+  private schedule(
+    target: Array<{ cancelled: boolean; callback: () => void; delayMs: number }>,
+    delayMs: number,
+    callback: () => void,
+  ) {
+    const entry = { cancelled: false, callback, delayMs };
+    target.push(entry);
+    return { cancel: () => { entry.cancelled = true; } };
+  }
+
+  private flush(target: Array<{ cancelled: boolean; callback: () => void; delayMs: number }>): void {
+    let entry = target.shift();
+    while (entry?.cancelled) entry = target.shift();
+    if (entry) entry.callback();
+  }
+}
+
+function makeStreamingStore(): { store: ChatTimelineStore; scheduler: FakeStreamingScheduler } {
+  const scheduler = new FakeStreamingScheduler();
+  const visibility: StreamingVisibilitySource = {
+    isHidden: () => false,
+    subscribe: () => () => {},
+  };
+  return { store: new ChatTimelineStore(T, { scheduler, visibility, now: () => 0 }), scheduler };
 }
 
 describe("ChatTimelineStore · subscribe / 响应式", () => {
@@ -79,13 +154,294 @@ describe("ChatTimelineStore · 批量 notify 合并", () => {
   });
 });
 
+describe("ChatTimelineStore · 流式有界合批", () => {
+  it("200 个同步 delta 在 callback 前 0 次 notify，flush 后只通知一次", () => {
+    const { store, scheduler } = makeStreamingStore();
+    const listener = vi.fn();
+    store.subscribe(listener);
+    for (let index = 0; index < 200; index += 1) {
+      store.applyEvent(ev({ kind: "assistant_message_delta", payload: { delta: "x" } }));
+    }
+
+    expect(listener).toHaveBeenCalledTimes(0);
+    expect(scheduler.scheduledForegroundCount()).toBe(1);
+    scheduler.flushForeground();
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    const id = store.getSnapshot().orderedMessageIds[0]!;
+    expect(store.getSnapshot().messagesById[id]?.parts).toEqual([{ type: "text", text: "x".repeat(200) }]);
+  });
+
+  it("第 256 个 delta emergency flush，第 257 个重新调度", () => {
+    const { store, scheduler } = makeStreamingStore();
+    const listener = vi.fn();
+    store.subscribe(listener);
+    for (let index = 0; index < 256; index += 1) {
+      store.applyEvent(ev({ kind: "assistant_message_delta", payload: { delta: "x" } }));
+    }
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(scheduler.scheduledForegroundCount()).toBe(0);
+    store.applyEvent(ev({ kind: "assistant_message_delta", payload: { delta: "y" } }));
+    expect(scheduler.scheduledForegroundCount()).toBe(1);
+    scheduler.flushForeground();
+
+    const id = store.getSnapshot().orderedMessageIds[0]!;
+    expect(store.getSnapshot().messagesById[id]?.parts).toEqual([{ type: "text", text: `${"x".repeat(256)}y` }]);
+  });
+
+  it("以 60 delta/s 累积 2000 个分片时保持文本完整，通知次数受 20 FPS 合批约束", () => {
+    const scheduler = new FakeStreamingScheduler();
+    let now = 0;
+    const store = new ChatTimelineStore(T, {
+      scheduler,
+      now: () => now,
+      visibility: { isHidden: () => false, subscribe: () => () => {} },
+    });
+    const listener = vi.fn();
+    store.subscribe(listener);
+    const deltaCount = 2000;
+    const elapsedMs = (deltaCount / 60) * 1000;
+
+    for (let index = 0; index < deltaCount; index += 1) {
+      store.applyEvent(
+        ev({
+          kind: "assistant_message_delta",
+          payload: index % 2 === 0 ? { delta: "x" } : { reasoningDelta: "r" },
+        }),
+      );
+      now += 1000 / 60;
+      if ((index + 1) % 3 === 0) scheduler.flushForeground();
+    }
+    store.applyEvent(ev({ kind: "turn_completed" }));
+
+    const id = store.getSnapshot().orderedMessageIds[0]!;
+    const message = store.getSnapshot().messagesById[id]!;
+    expect(message.parts).toEqual([{ type: "text", text: "x".repeat(1000) }]);
+    expect(message.reasoning).toBe("r".repeat(1000));
+    expect(message.status).toBe("completed");
+    expect(store.getSnapshot().activeStreamingTurnId).toBeNull();
+    expect(listener).toHaveBeenCalledTimes(Math.ceil(elapsedMs / 50));
+  });
+
+  it("Store 总 events 达到 2048 时 emergency flush 全部 turn", () => {
+    const { store } = makeStreamingStore();
+    const listener = vi.fn();
+    store.subscribe(listener);
+    for (let turn = 0; turn < 16; turn += 1) {
+      for (let index = 0; index < 128; index += 1) {
+        store.applyEvent(ev({ kind: "assistant_message_delta", turnId: `turn-${turn}`, payload: { delta: "x" } }));
+      }
+    }
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(store.getSnapshot().orderedMessageIds).toHaveLength(16);
+  });
+
+  it("前台使用 50ms，visibility 切后台后改为单个 100ms timer", () => {
+    const scheduler = new FakeStreamingScheduler();
+    let hidden = false;
+    const visibilityListeners: Array<() => void> = [];
+    const store = new ChatTimelineStore(T, {
+      scheduler,
+      now: () => 0,
+      visibility: {
+        isHidden: () => hidden,
+        subscribe: (listener) => {
+          visibilityListeners.push(listener);
+          return () => {
+            const index = visibilityListeners.indexOf(listener);
+            if (index >= 0) visibilityListeners.splice(index, 1);
+          };
+        },
+      },
+    });
+
+    store.applyEvent(ev({ kind: "assistant_message_delta", payload: { delta: "x" } }));
+    expect(scheduler.nextForegroundDelayMs()).toBe(50);
+    hidden = true;
+    visibilityListeners[0]?.();
+
+    expect(scheduler.scheduledForegroundCount()).toBe(0);
+    expect(scheduler.scheduledBackgroundCount()).toBe(1);
+    expect(scheduler.nextBackgroundDelayMs()).toBe(100);
+    scheduler.flushBackground();
+    expect(store.getSnapshot().orderedMessageIds).toHaveLength(1);
+  });
+
+  it("terminal 同步提交所有 pending，并在同一 snapshot 完成目标 turn", () => {
+    const { store } = makeStreamingStore();
+    const listener = vi.fn();
+    store.subscribe(listener);
+    store.applyEvent(ev({ kind: "assistant_message_delta", payload: { delta: "尾部" } }));
+    store.applyEvent(ev({ kind: "turn_completed" }));
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    const id = store.getSnapshot().orderedMessageIds[0]!;
+    expect(store.getSnapshot().messagesById[id]).toMatchObject({ status: "completed", parts: [{ type: "text", text: "尾部" }] });
+    expect(store.getSnapshot().activeStreamingTurnId).toBeNull();
+  });
+
+  it("纯重复 terminal 保持 snapshot 引用稳定且不额外 notify", () => {
+    const { store } = makeStreamingStore();
+    store.applyEvent(ev({ kind: "assistant_message_delta", payload: { delta: "done" } }));
+    store.applyEvent(ev({ kind: "turn_completed" }));
+    const snapshot = store.getSnapshot();
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    store.applyEvent(ev({ kind: "turn_completed" }));
+
+    expect(listener).not.toHaveBeenCalled();
+    expect(store.getSnapshot()).toBe(snapshot);
+  });
+
+  it("tool ordering boundary 先提交 assistant 前言，再写工具卡片", () => {
+    const { store } = makeStreamingStore();
+    store.applyEvent(ev({ kind: "assistant_message_delta", payload: { delta: "我先看文件。" } }));
+    store.applyEvent(ev({ kind: "tool_call_started", toolCallId: "call-1", payload: { toolName: "read_file", arguments: {} } }));
+
+    expect(store.getSnapshot().orderedMessageIds).toEqual(["r1:assistant", "call-1"]);
+  });
+
+  it("llm_error 丢弃不完整 assistant，同时提交其它 turn pending", () => {
+    const { store } = makeStreamingStore();
+    store.applyEvent(ev({ kind: "assistant_message_delta", turnId: "turn-B", payload: { delta: "保留" } }));
+    store.applyEvent(ev({ kind: "assistant_message_delta", turnId: "turn-A", payload: { delta: "残缺" } }));
+    store.applyEvent(ev({ kind: "error", turnId: "turn-A", payload: { errorCode: "llm_error", message: "断开" } }));
+
+    const records = Object.values(store.getSnapshot().messagesById);
+    expect(records.some((record) => record.role === "assistant" && record.turnId === "turn-A")).toBe(false);
+    expect(records.some((record) => record.role === "assistant" && record.turnId === "turn-B")).toBe(true);
+    expect(records.some((record) => record.role === "error" && record.error?.errorCode === "llm_error")).toBe(true);
+  });
+
+  it("dispose 取消旧 callback，释放后不产生幽灵 notify", () => {
+    const { store, scheduler } = makeStreamingStore();
+    const listener = vi.fn();
+    store.subscribe(listener);
+    store.applyEvent(ev({ kind: "assistant_message_delta", payload: { delta: "x" } }));
+    store.dispose();
+    scheduler.flushForeground();
+    expect(listener).toHaveBeenCalledTimes(0);
+    expect(store.getSnapshot().orderedMessageIds).toEqual([]);
+  });
+});
+
+describe("ChatTimelineStore · conversation references", () => {
+  it("user_message 携带 references 时落到 user record", () => {
+    const store = new ChatTimelineStore(T);
+    store.applyEvent(
+      ev({
+        kind: "user_message",
+        payload: { text: "hi", references: [skillReference] },
+      }),
+    );
+    const state = store.getSnapshot();
+    const record = state.messagesById[state.orderedMessageIds[0]];
+    expect(record.references).toEqual([skillReference]);
+  });
+});
+
+describe("ChatTimelineStore · 消息时序", () => {
+  it("assistant_message_started 只创建 turn 状态，不创建可见 assistant 消息", () => {
+    const store = new ChatTimelineStore(T);
+    store.applyEvent(
+      ev({
+        kind: "assistant_message_started",
+        turnId: "run-1:turn-2",
+        runId: "run-1",
+        turn: 2,
+        createdAt: 200,
+      }),
+    );
+
+    const state = store.getSnapshot();
+    expect(state.orderedMessageIds).toEqual([]);
+    expect(state.turnsById["run-1:turn-2"]).toMatchObject({
+      runId: "run-1",
+      turn: 2,
+      phase: "streaming",
+    });
+  });
+
+  it("较早创建的用户消息晚到时保持到达顺序", () => {
+    const store = new ChatTimelineStore(T);
+    store.applyEvent(
+      ev({
+        kind: "assistant_message_completed",
+        messageId: "assistant-1",
+        turnId: "run-1:turn-2",
+        runId: "run-1",
+        turn: 2,
+        createdAt: 200,
+        payload: { content: "收到" },
+      }),
+    );
+    store.applyEvent(
+      ev({
+        kind: "user_message",
+        messageId: "pin-1",
+        turnId: "run-1:turn-2",
+        runId: "run-1",
+        turn: 2,
+        createdAt: 150,
+        payload: { text: "插队功能2" },
+      }),
+    );
+
+    const state = store.getSnapshot();
+    expect(state.orderedMessageIds).toEqual(["assistant-1", "pin-1"]);
+  });
+
+  it("同一毫秒内保持到达顺序", () => {
+    const store = new ChatTimelineStore(T);
+    store.applyEvent(
+      ev({
+        kind: "assistant_message_completed",
+        messageId: "assistant-1",
+        turnId: "run-1:turn-2",
+        runId: "run-1",
+        turn: 2,
+        createdAt: 200,
+        payload: { content: "收到" },
+      }),
+    );
+    store.applyEvent(
+      ev({
+        kind: "user_message",
+        messageId: "pin-1",
+        turnId: "run-1:turn-2",
+        runId: "run-1",
+        turn: 2,
+        createdAt: 200,
+        payload: { text: "插队功能2" },
+      }),
+    );
+    store.applyEvent(
+      ev({
+        kind: "user_message",
+        messageId: "pin-2",
+        turnId: "run-1:turn-2",
+        runId: "run-1",
+        turn: 2,
+        createdAt: 200,
+        payload: { text: "插队功能3" },
+      }),
+    );
+
+    const state = store.getSnapshot();
+    expect(state.orderedMessageIds).toEqual(["assistant-1", "pin-1", "pin-2"]);
+  });
+});
+
 describe("ChatTimelineStore · reasoning 分轨", () => {
   it("reasoningDelta 累加到 reasoning 字段，不污染正文 text part", () => {
-    const store = new ChatTimelineStore(T);
+    const { store, scheduler } = makeStreamingStore();
     store.applyEvent(ev({ kind: "assistant_message_started" }));
     store.applyEvent(ev({ kind: "assistant_message_delta", payload: { reasoningDelta: "想了" } }));
     store.applyEvent(ev({ kind: "assistant_message_delta", payload: { reasoningDelta: "一下" } }));
     store.applyEvent(ev({ kind: "assistant_message_delta", payload: { delta: "答案" } }));
+    scheduler.flushForeground();
     const state = store.getSnapshot();
     const id = state.orderedMessageIds[0];
     const msg = state.messagesById[id];
@@ -94,8 +450,9 @@ describe("ChatTimelineStore · reasoning 分轨", () => {
   });
 
   it("纯 reasoningDelta（无正文）也能建消息且正文 text part 为空", () => {
-    const store = new ChatTimelineStore(T);
+    const { store, scheduler } = makeStreamingStore();
     store.applyEvent(ev({ kind: "assistant_message_delta", payload: { reasoningDelta: "纯思考" } }));
+    scheduler.flushForeground();
     const state = store.getSnapshot();
     const msg = state.messagesById[state.orderedMessageIds[0]];
     expect(msg.reasoning).toBe("纯思考");
@@ -428,6 +785,63 @@ describe("ChatTimelineStore · history / realtime 幂等去重", () => {
     expect(state.messagesById[state.orderedMessageIds[0]].role).toBe("user");
   });
 
+  it("history user metadata.conversation_references 还原到 user record", () => {
+    const store = new ChatTimelineStore(T);
+    store.applyHistory(
+      historyBatch([
+        {
+          id: "history-ref-user",
+          provider: "generic_chat",
+          timestamp: "2026-06-04T00:00:00.000Z",
+          frame_type: "text",
+          role: "user",
+          content: "",
+          metadata: {
+            conversation_references: [skillReference],
+          },
+        },
+      ]),
+    );
+    const state = store.getSnapshot();
+    const record = state.messagesById[state.orderedMessageIds[0]];
+    expect(record.references).toEqual([skillReference]);
+  });
+
+  it("history user metadata.attachments 还原为 attachment parts", () => {
+    const store = new ChatTimelineStore(T);
+    const attachment = {
+      asset_id: "b".repeat(32),
+      kind: "image" as const,
+      mime_type: "image/png",
+      size_bytes: 68,
+      width: 1,
+      height: 1,
+      duration_ms: null,
+      preview_url: `/api/uploads/${"b".repeat(32)}`,
+      status: "ready" as const,
+    };
+    store.applyHistory(
+      historyBatch([
+        {
+          id: "history-attachment-user",
+          provider: "generic_chat",
+          timestamp: "2026-06-04T00:00:00.000Z",
+          frame_type: "text",
+          role: "user",
+          content: "看图",
+          metadata: { attachments: [attachment] },
+        },
+      ]),
+    );
+
+    const state = store.getSnapshot();
+    const record = state.messagesById[state.orderedMessageIds[0]];
+    expect(record.parts).toEqual([
+      { type: "text", text: "看图" },
+      { type: "attachment", attachment },
+    ]);
+  });
+
   it("已有 streaming assistant 时，history 同 messageId 的 assistant 被跳过保留实时版本", () => {
     const store = new ChatTimelineStore(T);
     const turnId = "live-turn";
@@ -440,7 +854,6 @@ describe("ChatTimelineStore · history / realtime 幂等去重", () => {
         payload: { delta: "实时版本" },
       }),
     );
-    expect(store.getSnapshot().orderedMessageIds).toHaveLength(1);
     store.applyHistory(
       historyBatch([
         {
@@ -509,6 +922,7 @@ describe("ChatTimelineStore · history / realtime 幂等去重", () => {
         payload: { delta: "追加" },
       }),
     );
+    store.applyEvent(ev({ kind: "turn_completed", turnId: "live-turn" }));
     const state = store.getSnapshot();
     expect(state.orderedMessageIds).toHaveLength(1);
     const msg = state.messagesById[state.orderedMessageIds[0]];

@@ -21,9 +21,16 @@ import {
   toClaudeRenderItems,
   toCodexRenderItems,
 } from "../ChatRenderAdapter";
-import type { ChatEvent } from "../types";
+import type { ChatEvent, ConversationReferenceDTO } from "../types";
 
 const T = "t1";
+const skillReference: ConversationReferenceDTO = {
+  id: "ref-1",
+  kind: "skill",
+  ref: "skill:skill-creator",
+  label: "Skill Creator",
+  activation: "inject_context",
+};
 
 function ev(partial: Partial<ChatEvent> & Pick<ChatEvent, "kind">): ChatEvent {
   return {
@@ -50,7 +57,12 @@ describe("toViewModel · user 消息", () => {
   it("user_message 投影成 kind=message / role=user / content 取 text part", () => {
     const store = new ChatTimelineStore(T);
     store.applyEvent(
-      ev({ kind: "user_message", turnId: `${T}-turn-1`, payload: { text: "你好" } }),
+      ev({
+        kind: "user_message",
+        turnId: `${T}-turn-1`,
+        turn: 1,
+        payload: { text: "你好", references: [skillReference] },
+      }),
     );
     const view = toViewModel(store.getSnapshot());
     expect(view.items).toHaveLength(1);
@@ -59,6 +71,7 @@ describe("toViewModel · user 消息", () => {
     if (item.kind === "message") {
       expect(item.role).toBe("user");
       expect(item.content).toBe("你好");
+      expect(item.references).toEqual([skillReference]);
       expect(item.turn).toBe(1);
       expect(item.runId).toBe("");
     }
@@ -68,25 +81,34 @@ describe("toViewModel · user 消息", () => {
 describe("toViewModel · assistant 含 reasoning + usage", () => {
   it("assistant content / reasoning / usage / streaming 全投影", () => {
     const store = new ChatTimelineStore(T);
-    store.applyEvent(ev({ kind: "assistant_message_started", turnId: "r5" }));
     store.applyEvent(
-      ev({ kind: "assistant_message_delta", turnId: "r5", payload: { reasoningDelta: "想一下" } }),
+      ev({ kind: "assistant_message_started", turnId: "r5:turn-0", runId: "r5", turn: 0 }),
     );
     store.applyEvent(
-      ev({ kind: "assistant_message_delta", turnId: "r5", payload: { delta: "答案" } }),
+      ev({
+        kind: "assistant_message_delta",
+        turnId: "r5:turn-0",
+        runId: "r5",
+        turn: 0,
+        payload: { reasoningDelta: "想一下" },
+      }),
     );
-    // streaming 中：先断言 streaming=true
-    const streamingView = toViewModel(store.getSnapshot());
-    const sItem = streamingView.items[0];
-    expect(sItem.kind).toBe("message");
-    if (sItem.kind === "message") {
-      expect(sItem.streaming).toBe(true);
-    }
-    // 完成
+    store.applyEvent(
+      ev({
+        kind: "assistant_message_delta",
+        turnId: "r5:turn-0",
+        runId: "r5",
+        turn: 0,
+        payload: { delta: "答案" },
+      }),
+    );
+    // terminal 同步 flush pending，投影直接得到完整完成态。
     store.applyEvent(
       ev({
         kind: "assistant_message_completed",
-        turnId: "r5",
+        turnId: "r5:turn-0",
+        runId: "r5",
+        turn: 0,
         payload: { content: "答案", usage: { prompt: 10, completion: 5, total: 15 } },
       }),
     );
@@ -182,6 +204,7 @@ describe("toViewModel · system notice 载荷", () => {
       ev({
         kind: "status",
         turnId: "r9",
+        runId: "r9",
         payload: {
           noticeKey: "compact.start",
           source: "compactor",
@@ -231,6 +254,13 @@ describe("toViewModel · 顺序 + isStreaming", () => {
     store.applyEvent(ev({ kind: "user_message", turnId: `${T}-turn-1`, payload: { text: "Q" } }));
     store.applyEvent(ev({ kind: "assistant_message_started", turnId: `${T}-turn-1` }));
     store.applyEvent(
+      ev({
+        kind: "assistant_message_delta",
+        turnId: `${T}-turn-1`,
+        payload: { delta: "A" },
+      }),
+    );
+    store.applyEvent(
       ev({ kind: "tool_call_started", turnId: `${T}-turn-1`, toolCallId: "c1", payload: { toolName: "x", arguments: {} } }),
     );
     const state = store.getSnapshot();
@@ -254,7 +284,11 @@ describe("toGenericRenderItems · 与现状 ChatItem 逐字段等价", () => {
   it("user 项翻成 GenericChatItem user kind", () => {
     const store = new ChatTimelineStore(T);
     store.applyEvent(
-      ev({ kind: "user_message", turnId: `${T}-turn-2`, payload: { text: "嗨" } }),
+      ev({
+        kind: "user_message",
+        turnId: `${T}-turn-2`,
+        payload: { text: "嗨", references: [skillReference] },
+      }),
     );
     const items = toGenericRenderItems(toViewModel(store.getSnapshot()));
     expect(items).toHaveLength(1);
@@ -262,6 +296,7 @@ describe("toGenericRenderItems · 与现状 ChatItem 逐字段等价", () => {
     expect(it.kind).toBe("user");
     if (it.kind === "user") {
       expect(it.content).toBe("嗨");
+      expect(it.references).toEqual([skillReference]);
       expect(it.threadId).toBe(T);
       expect(typeof it.timestampMs).toBe("number");
     }
@@ -269,14 +304,24 @@ describe("toGenericRenderItems · 与现状 ChatItem 逐字段等价", () => {
 
   it("assistant 项翻成 GenericChatItem assistant kind（turn/runId/reasoning/usage/streaming）", () => {
     const store = new ChatTimelineStore(T);
-    store.applyEvent(ev({ kind: "assistant_message_started", turnId: "r7" }));
     store.applyEvent(
-      ev({ kind: "assistant_message_delta", turnId: "r7", payload: { reasoningDelta: "思考" } }),
+      ev({ kind: "assistant_message_started", turnId: "r7:turn-0", runId: "r7", turn: 0 }),
+    );
+    store.applyEvent(
+      ev({
+        kind: "assistant_message_delta",
+        turnId: "r7:turn-0",
+        runId: "r7",
+        turn: 0,
+        payload: { reasoningDelta: "思考" },
+      }),
     );
     store.applyEvent(
       ev({
         kind: "assistant_message_completed",
-        turnId: "r7",
+        turnId: "r7:turn-0",
+        runId: "r7",
+        turn: 0,
         payload: { content: "结论", usage: { prompt: 1, completion: 2, total: 3 } },
       }),
     );
@@ -290,6 +335,34 @@ describe("toGenericRenderItems · 与现状 ChatItem 逐字段等价", () => {
       expect(it.streaming).toBe(false);
       expect(it.runId).toBe("r7");
       expect(it.turn).toBe(0);
+    }
+  });
+
+  it("assistant 项使用结构化 runId/turn 字段", () => {
+    const store = new ChatTimelineStore(T);
+    store.applyEvent(
+      ev({
+        kind: "assistant_message_started",
+        turnId: "opaque-turn-key",
+        runId: "r7",
+        turn: 3,
+      }),
+    );
+    store.applyEvent(
+      ev({
+        kind: "assistant_message_completed",
+        turnId: "opaque-turn-key",
+        runId: "r7",
+        turn: 3,
+        payload: { content: "第三轮" },
+      }),
+    );
+    const items = toGenericRenderItems(toViewModel(store.getSnapshot()));
+    const it = items[0];
+    expect(it.kind).toBe("assistant");
+    if (it.kind === "assistant") {
+      expect(it.runId).toBe("r7");
+      expect(it.turn).toBe(3);
     }
   });
 
@@ -329,6 +402,7 @@ describe("toGenericRenderItems · 与现状 ChatItem 逐字段等价", () => {
       ev({
         kind: "status",
         turnId: "r3",
+        runId: "r3",
         payload: {
           noticeKey: "k1",
           source: "src",
@@ -373,6 +447,13 @@ describe("toGenericRenderItems · 与现状 ChatItem 逐字段等价", () => {
     const store = new ChatTimelineStore(T);
     store.applyEvent(ev({ kind: "user_message", turnId: `${T}-turn-1`, payload: { text: "Q" } }));
     store.applyEvent(ev({ kind: "assistant_message_started", turnId: `${T}-turn-1` }));
+    store.applyEvent(
+      ev({
+        kind: "assistant_message_delta",
+        turnId: `${T}-turn-1`,
+        payload: { delta: "A" },
+      }),
+    );
     store.applyEvent(
       ev({ kind: "tool_call_started", turnId: `${T}-turn-1`, toolCallId: "c1", payload: { toolName: "x", arguments: {} } }),
     );

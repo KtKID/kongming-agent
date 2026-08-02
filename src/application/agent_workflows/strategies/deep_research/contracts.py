@@ -136,7 +136,7 @@ class DeepResearchLimits:
 
 @dataclass(frozen=True)
 class DeepResearchSourcePolicy:
-    """来源策略，输入来自 payload.source_policy，输出给 strategy 选择 provider。"""
+    """来源策略，输入来自 payload.source_policy，输出检索偏好和兼容字段。"""
 
     # 来源语言偏好。
     language: str = "zh-CN"
@@ -148,7 +148,7 @@ class DeepResearchSourcePolicy:
     blocked_domains: tuple[str, ...] = ()
     # 是否优先一手来源。
     prefer_primary_sources: bool = True
-    # 当前支持 fake/internal，默认使用 runtime 注入 provider。
+    # 兼容旧 payload 的 provider 标签；运行来源由 runtime 注入 provider 决定。
     provider: str = "internal"
 
 
@@ -486,7 +486,7 @@ def _parse_source_policy(raw: Mapping[str, object]) -> DeepResearchSourcePolicy:
     """解析来源策略，输入为原始映射，输出为来源策略对象。"""
     provider = _text(raw.get("provider")) or "internal"
     if provider not in {"fake", "internal"}:
-        raise DeepResearchContractError("source_policy.provider must be fake or internal")
+        provider = "internal"
     return DeepResearchSourcePolicy(
         language=_text(raw.get("language")) or "zh-CN",
         freshness_days=_optional_int(raw.get("freshness_days")),

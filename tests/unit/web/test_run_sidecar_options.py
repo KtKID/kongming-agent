@@ -56,7 +56,7 @@ def test_resolve_runtime_options_cli_wins(tmp_path: Path, monkeypatch) -> None:
     """CLI 参数优先于环境变量，并写回 home / dist env。"""
     monkeypatch.setenv("KONGMING_WEB_HOST", "0.0.0.0")
     monkeypatch.setenv("KONGMING_WEB_PORT", "8080")
-    monkeypatch.setenv("KONGMING_WEB_SERVER_ORIGIN", "http://10.0.0.10:8080")
+    monkeypatch.setenv("KONGMING_WEB_SERVER_ORIGIN", "https://kongming.example.com")
     monkeypatch.setenv("KONGMING_WEB_HOST_ENVIRONMENT", "xspace")
     monkeypatch.setenv("KONGMING_HOME", str(tmp_path / "env-home"))
     monkeypatch.setenv("KONGMING_CONFIG", str(tmp_path / "env.yaml"))

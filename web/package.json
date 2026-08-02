@@ -12,7 +12,10 @@
     "lint": "eslint .",
     "test:unit": "vitest run",
     "test:unit:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:e2e:thread-fork": "playwright test --config playwright.thread-fork.config.ts",
+    "protocol:generate:thread-status": "uv run python ../scripts/export_thread_status_frame_schema.py && json2ts --input src/protocol/generated/thread-status-frame.schema.json --output src/protocol/generated/thread-status-frame.ts && json2ts --input src/protocol/generated/thread-status-snapshot-frame.schema.json --output src/protocol/generated/thread-status-snapshot-frame.ts",
+    "protocol:check": "uv run python ../scripts/check_thread_status_frame_codegen.py"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.0",
@@ -57,6 +60,7 @@
     "eslint-plugin-react-refresh": "^0.4.14",
     "globals": "^15.12.0",
     "jsdom": "^25.0.0",
+    "json-schema-to-typescript": "15.0.4",
     "msw": "^2.13.6",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.14",

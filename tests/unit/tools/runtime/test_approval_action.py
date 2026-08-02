@@ -7,7 +7,7 @@
 2. 接受 ``PromptActionFn`` (action-aware) 时 4 种 action 全映射
 3. ACCEPT_FOR_SESSION → metadata.grant_scope = "session"
 4. ACCEPT_PERSIST → metadata.grant_scope = "config"
-5. elevated policy_hint + confirm_token 透传到 metadata
+5. elevated policy_hint 透传到 metadata
 6. ``mark_action_aware`` 装饰器与裸函数注解探测两种声明方式
 """
 
@@ -135,24 +135,22 @@ class TestActionPrompt:
 
 
 class TestElevatedMetadata:
-    async def test_policy_hint_and_token_passthrough(self) -> None:
+    async def test_policy_hint_passthrough(self) -> None:
         captured: dict[str, Any] = {}
 
         @mark_action_aware
         async def prompt(req: ApprovalRequest) -> ApprovalAction:
             captured["policy_hint"] = req.metadata.get("policy_hint")
-            captured["confirm_token"] = req.metadata.get("confirm_token")
             return ApprovalAction.ACCEPT_ONCE
 
         provider = InteractiveApproval(prompt)
-        request = _make_request(metadata={"policy_hint": "elevated", "confirm_token": "abc12345"})
+        request = _make_request(metadata={"policy_hint": "elevated"})
         decision = await provider.decide(request)
 
         # prompt_fn 收到原始 metadata
-        assert captured == {"policy_hint": "elevated", "confirm_token": "abc12345"}
+        assert captured == {"policy_hint": "elevated"}
         # decision.metadata 也透传 elevated 字段，便于 trace 审计
         assert decision.metadata.get("policy_hint") == "elevated"
-        assert decision.metadata.get("confirm_token") == "abc12345"
 
     async def test_standard_request_does_not_carry_elevated_keys(self) -> None:
         @mark_action_aware
@@ -163,7 +161,6 @@ class TestElevatedMetadata:
         decision = await provider.decide(_make_request())
 
         assert "policy_hint" not in decision.metadata
-        assert "confirm_token" not in decision.metadata
 
 
 # ---------------------------------------------------------------------------

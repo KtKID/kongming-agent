@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 // 「配置」走 /manage/config → /manage/config/model 兜底。路由表见 lib/router.tsx。
 const TABS: ReadonlyArray<{ to: string; label: string }> = [
   { to: "/manage/config", label: "配置" },
+  { to: "/manage/plugins", label: "插件" },
   { to: "/manage/model-providers", label: "模型服务商" },
   { to: "/manage/network", label: "网络" },
 ];

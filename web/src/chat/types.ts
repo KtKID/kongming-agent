@@ -26,13 +26,14 @@
 
 import type {
   ChoiceSubmitFrame,
+  ConversationReferenceDTO,
   UserInputAttachment,
 } from "@/protocol";
 import type { ReasoningEffort } from "@/components/Composer";
 
 // 复用既有真源，转手 re-export，让 chat/* 其它模块从本文件统一 import，
 // 而不是各自去够 `@/components/Composer`。
-export type { UserInputAttachment, ReasoningEffort };
+export type { ConversationReferenceDTO, UserInputAttachment, ReasoningEffort };
 
 // ---------------------------------------------------------------------------
 // 基础枚举
@@ -54,6 +55,8 @@ export interface CommonSendInput {
    * 本地上传临时态属于 UI-only 数据，需要时另起 `DraftAttachment`，不占用本类型。
    */
   attachments?: UserInputAttachment[];
+  /** Slash catalog 选择后生成的对话引用。 */
+  references?: ConversationReferenceDTO[];
   /** 思考等级，属于跨频道公共能力。 */
   reasoningEffort?: ReasoningEffort | null;
   /** 当前工作目录，便于 provider 侧执行或 resume。 */
@@ -234,8 +237,12 @@ export interface ChatEvent {
   provider: ChatProviderKind;
   /** 当前线程 id。 */
   threadId: string;
-  /** 当前 turn id，用于把同一轮 user / assistant / tool 归并。 */
+  /** 当前 turn 内部 key，用于把同一轮 user / assistant / tool 归并。 */
   turnId: string;
+  /** 当前 run id，历史 / 无 run 场景为空串。 */
+  runId?: string;
+  /** 当前 run 内 turn 序号；历史或未知场景可为空。 */
+  turn?: number | null;
   /** 当前消息 id，文本和状态消息都可用。 */
   messageId?: string;
   /** 当前工具调用 id，仅工具事件使用。 */
@@ -244,6 +251,47 @@ export interface ChatEvent {
   createdAt: number;
   /** 事件正文，结构由 kind 决定。 */
   payload: Record<string, unknown>;
+}
+
+/**
+ * 流式渲染的固定资源预算。它属于运行时内部 policy，不进入用户配置或 Web wire。
+ */
+export interface StreamingRenderPolicy {
+  readonly foregroundFlushIntervalMs: number;
+  readonly backgroundFlushIntervalMs: number;
+  readonly maxBufferedEventsPerTurn: number;
+  readonly maxBufferedCharsPerTurn: number;
+  readonly maxBufferedTurnsPerStore: number;
+  readonly maxBufferedEventsPerStore: number;
+  readonly maxBufferedCharsPerStore: number;
+}
+
+/** 单个可取消的 Store 私有调度回调。 */
+export interface StreamingCancelHandle {
+  cancel(): void;
+}
+
+/**
+ * 流式提交调度器。前台实现负责在延迟结束后对齐下一帧绘制，后台使用 timer。
+ * 测试可注入确定性 fake，避免依赖真实 rAF / timer。
+ */
+export interface StreamingRenderScheduler {
+  scheduleForeground(delayMs: number, callback: () => void): StreamingCancelHandle;
+  scheduleBackground(delayMs: number, callback: () => void): StreamingCancelHandle;
+}
+
+/** 当前页面可见性来源；订阅仅由 TimelineStore 持有一次。 */
+export interface StreamingVisibilitySource {
+  isHidden(): boolean;
+  subscribe(listener: () => void): () => void;
+}
+
+/** ChatTimelineStore 的可注入运行时依赖。 */
+export interface ChatTimelineStoreDependencies {
+  policy?: StreamingRenderPolicy;
+  now?: () => number;
+  scheduler?: StreamingRenderScheduler;
+  visibility?: StreamingVisibilitySource;
 }
 
 /** 历史批量：loadHistory 产出，最终与实时 event 进入同一个时间线状态机。 */
@@ -350,6 +398,10 @@ export interface ChatMessageRecord {
   threadId: string;
   /** 所属 turn。 */
   turnId: string;
+  /** 所属 run id，历史 / 无 run 场景为空串。 */
+  runId: string;
+  /** 所属 turn 序号；历史或未知场景为 null。 */
+  turn: number | null;
   /** 消息角色。 */
   role: ChatMessageRole;
   /** provider 来源。 */
@@ -365,6 +417,12 @@ export interface ChatMessageRecord {
   reasoning?: string;
   /** assistant token 用量页脚。 */
   usage?: ChatMessageUsage;
+  /** 可 fork assistant 在 Session.history() 中的服务端零基位置。 */
+  forkHistoryIndex?: number;
+  /** user 消息携带的对话引用。 */
+  references?: ConversationReferenceDTO[];
+  /** user 消息由立即发送插入当前活跃 run。 */
+  deliveryStatus?: "steered";
   /** role="system" 时的通知载荷。 */
   notice?: ChatNoticePayload;
   /** role="error" 时的错误载荷。 */
@@ -388,6 +446,10 @@ export interface ChatToolRecord {
   threadId: string;
   /** 所属 turn。 */
   turnId: string;
+  /** 所属 run id，历史 / 无 run 场景为空串。 */
+  runId: string;
+  /** 所属 turn 序号；历史或未知场景为 null。 */
+  turn: number | null;
   /** 工具名。 */
   toolName: string;
   /** 工具状态。 */
@@ -432,6 +494,10 @@ export interface ChatPendingTool {
   threadId: string;
   /** 所属 turn。 */
   turnId: string;
+  /** 所属 run id，历史 / 无 run 场景为空串。 */
+  runId: string;
+  /** 所属 turn 序号；历史或未知场景为 null。 */
+  turn: number | null;
   /** 已累积的原始 input JSON 文本。 */
   partialInput: string;
   /** 占位创建时间（ms）。 */
@@ -444,6 +510,10 @@ export interface ChatTurnState {
   id: string;
   /** 所属线程。 */
   threadId: string;
+  /** 所属 run id，历史 / 无 run 场景为空串。 */
+  runId: string;
+  /** 当前 run 内 turn 序号；历史或未知场景为 null。 */
+  turn: number | null;
   /** provider 来源。 */
   provider: ChatProviderKind;
   /** 当前轮次阶段。 */
@@ -497,8 +567,7 @@ export interface ChatTimelineState {
  * - `kind:"notice"` —— system 通知（对应 stores/chat.ts system kind）。
  * - `kind:"error"` —— 错误（对应 stores/chat.ts error kind）。
  *
- * 每项都带 `turn` / `runId`，让适配层无损翻出 GenericChatItem 的复合 key
- * （turnId 形如 `${threadId}-turn-${turn}` 解出 turn；否则 turnId = run_id）。
+ * 每项都带结构化 `turn` / `runId`，让适配层无损翻出 GenericChatItem 的复合 key。
  */
 export type ChatViewItem =
   | {
@@ -520,8 +589,14 @@ export type ChatViewItem =
       reasoning?: string;
       /** assistant token 用量页脚。 */
       usage?: ChatMessageUsage;
+      /** 可 fork assistant 在 Session.history() 中的服务端零基位置。 */
+      forkHistoryIndex?: number;
       /** 用户附件（从 attachment part 还原）。 */
       attachments?: UserInputAttachment[];
+      /** 用户对话引用。 */
+      references?: ConversationReferenceDTO[];
+      /** user 消息由立即发送插入当前活跃 run。 */
+      deliveryStatus?: "steered";
       /** 是否流式进行中（status==="streaming"）。 */
       streaming: boolean;
       /** 创建时间（ms）。 */
@@ -686,4 +761,6 @@ export interface ChatTimelineStoreApi {
   subscribe(listener: () => void): () => void;
   /** 清理指定 thread 的临时流式状态。 */
   resetThread(threadId: string): void;
+  /** 释放 scheduler、visibility 订阅和未提交缓冲；释放后 callback 必须成为 no-op。 */
+  dispose(): void;
 }

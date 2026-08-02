@@ -112,6 +112,23 @@ def test_parse_deep_research_spec_accepts_mimo_budget_caps() -> None:
     assert _field(limits, "fact_cap") == 25
 
 
+def test_parse_deep_research_spec_ignores_legacy_source_policy_provider() -> None:
+    """验证 legacy provider 字段，输入为 web，输出为默认检索偏好。"""
+    spec = _parser().parse(
+        {
+            "topic": "ok",
+            "source_policy": {
+                "provider": "web",
+                "language": "zh-CN",
+            },
+        }
+    )
+
+    source_policy = _field(spec, "source_policy")
+    assert _field(source_policy, "provider") == "internal"
+    assert _field(source_policy, "language") == "zh-CN"
+
+
 @pytest.mark.parametrize("output_contract", ["", "   ", None, 123, "other_contract"])
 def test_parse_deep_research_spec_rejects_invalid_output_contract(
     output_contract: object,

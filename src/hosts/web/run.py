@@ -14,11 +14,14 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from evolution.evolution_manager import EvolutionManager
 
 _WEB_HOST_ENVIRONMENT_ENV = "KONGMING_WEB_HOST_ENVIRONMENT"
 WebHostEnvironment = Literal["browser", "xspace"]
@@ -67,7 +70,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dist-dir", type=Path, help="Frontend dist directory.")
     parser.add_argument(
         "--server-origin",
-        help="Server origin used by mobile login QR, pairing QR, copy, and handoff URLs.",
+        help="Server origin used by mobile QR/copy/handoff URLs.",
     )
     parser.add_argument(
         "--host-environment",
@@ -605,22 +608,27 @@ def main(argv: list[str] | None = None) -> int:
             host_environment=options.host_environment,
         )
 
-        runtime_factory = _make_runtime_factory(cfg)
-        progress.report("factory")
-
-        # claude-image-paste-e2e P1 #2:注入 AssetStorage 让 ThreadManager.delete_thread
-        # 同步清理 thread 名下上传资产(images / videos / files),否则 thread 删除留孤儿磁盘。
+        # Web 上传资产存储由宿主层创建，供 provider 多模态读取和 thread 删除清理共用。
         from hosts.web.uploads.storage import AssetStorage
+        from infrastructure.config.model_catalog_manager import ModelCatalogManager
 
-        asset_storage = AssetStorage()
+        asset_storage = AssetStorage(base_dir=home / "web" / "uploads")
+        model_catalog_manager = ModelCatalogManager(user_path=home / "model-providers.yaml")
+
+        runtime_factory = _make_runtime_factory(
+            cfg,
+            asset_reader=asset_storage,
+            model_catalog_manager=model_catalog_manager,
+        )
+        progress.report("factory")
 
         tm = ThreadManager(
             cfg,
             kongming_home=home,
             runtime_factory=runtime_factory,  # type: ignore[arg-type]
             asset_storage=asset_storage,
+            model_catalog_manager=model_catalog_manager,
         )
-
         try:
             from sessions import SessionTaskProgressManager
 
@@ -632,6 +640,8 @@ def main(argv: list[str] | None = None) -> int:
                     runtime_factory, "_scheduler_runtime_factory", None
                 ),
                 task_progress_manager=SessionTaskProgressManager.from_config(cfg),
+                asset_storage=asset_storage,
+                model_catalog_manager=model_catalog_manager,
             )
         except Exception as exc:
             runtime_socket.close()
@@ -639,14 +649,10 @@ def main(argv: list[str] | None = None) -> int:
             _write_startup_error(home, str(exc))
             sys.stderr.write(f"create_app failed: {exc}\n")
             return 1
-        # smart-approval-generic-chat-autoallow task #6：把 app 引用回挂给
-        # runtime_factory，让 generic_chat 通道装配时（lazy / per-thread）能从
-        # ``app.state.auto_approval_policy.config_store`` 取**同一份** ConfigStore
-        # 注入 :class:`ApprovalRules`，实现 "用户 UI 一处 toggle 即时生效于所有通道"。
-        # 此处 attr 设置而非 factory 入参修改：ThreadManager 调用签名
-        # ``factory(thread_id, preset_id, adapter, sinks)`` 不可破坏。
-        setattr(runtime_factory, "_app", app)  # noqa: B010
-        app.state.runtime_factory = runtime_factory
+        # 把 app 引用回挂给 runtime_factory，供 generic_chat lazy/per-thread
+        # 装配复用 ApprovalManager、ThreadManager 和应用级状态。
+        # TODO(auto-mode): v0.6 保持旧 cwd 倒计时 policy 注入断开。
+        _attach_runtime_factory_to_app_state(app, runtime_factory)
         progress.report("app")
 
         log_level = cfg.logging.level.lower()
@@ -682,44 +688,51 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _build_manager_and_inbox_sink(*, app: Any) -> Any:
-    """构造或获取 ApprovalManager 单例，幂等注入 InboxEventSink + AutoApprovalPolicy。
+    """构造或获取 ApprovalManager 单例，幂等注入 InboxEventSink。
 
-    approval-rules-unified（破坏性改造）：
-
-    - 删除 ``default_timeout_ms`` 参数。manager 走默认 60s 即可（与
-      :attr:`web.app_support.host_adapter.WebHostAdapter._timeout` 默认对齐）；
-      ``cfg.web.pending_approval_timeout_seconds`` 仍归 host_adapter 用，
-      不再串通到 manager / ApprovalRules。
-    - :class:`ApprovalRules` 注入 ``app.state.auto_approval_policy`` 完整实例
-      （而非仅 ``config_store``）——让 generic_chat 通道完全复用 claude_code
-      的 24 条规则 + per-cwd 总开关 + audit 评估快照（同一份真源）。
-    - policy 缺失（test 环境 / lifespan 漂移）→ ``ApprovalRules`` fail-closed
-      走默认 ask + 60s（不抛错）；正常生产路径 policy 必就绪（由
-      ``create_app`` lifespan 装配；见 ``src/hosts/web/app.py`` 真源）。
-
-    阶段 1 (smart-approval-manager-v0.5)：generic_chat 通道默认走 manager 路径，
-    无 feature flag；回滚 = git revert factory 内的 prompt_fn 装配。
-    manager 是 per-process 单例（``get_approval_manager``）；
+    generic_chat 通道默认走 ApprovalManager。manager 是 app 级单例，
     InboxEventSink 用 sink 类型判定幂等，多 cell 装配只注入一次。
+    TODO(auto-mode): v0.6 保持旧 cwd 倒计时 policy 注入断开。
 
     Args:
-        app: FastAPI app 实例（lazy；首次装配时 ``app.state.auto_approval_policy``
-            必须已就绪，由 create_app lifespan 装配；缺失时 policy=None，
-            fail-safe 降级到「所有 cwd 默认 ask + 60s」行为）。
+        app: FastAPI app 实例，用于复用 app 级 ApprovalManager 和关联门户。
     """
     from hosts.web.approvals.global_inbox import get_inbox_broadcaster
     from hosts.web.avatar import AvatarManager
     from hosts.web.avatar.approval_sink import AvatarApprovalSink
-    from safety.approval.manager import get_approval_manager
-    from safety.approval.rules import ApprovalRules
+    from infrastructure.config.paths import get_kongming_home
+    from safety.approval.llm_reviewer import build_approval_llm_reviewer
+    from safety.approval.manager import ApprovalManager
+    from safety.approval.permissions_manager import PermissionsManager
+    from safety.auto_approval.manager import AutoApprovalManager
     from safety.inbox.event_sink import InboxEventSink
 
     broadcaster = get_inbox_broadcaster()
     avatar_manager = getattr(app.state, "avatar_manager", None) if app is not None else None
-    policy = getattr(app.state, "auto_approval_policy", None) if app is not None else None
-    manager = get_approval_manager(
-        rules=ApprovalRules(policy=policy),
-    )
+    existing = getattr(app.state, "approval_manager", None) if app is not None else None
+    if isinstance(existing, ApprovalManager):
+        manager = existing
+    else:
+        permissions_manager = (
+            getattr(app.state, "permissions_manager", None) if app is not None else None
+        )
+        if not isinstance(permissions_manager, PermissionsManager):
+            permissions_manager = PermissionsManager(get_kongming_home())
+        policy = getattr(app.state, "auto_approval_policy", None) if app is not None else None
+        if policy is None:
+            policy = AutoApprovalManager.build(get_kongming_home()).policy
+        config = getattr(app.state, "config", None) if app is not None else None
+        manager = ApprovalManager(
+            permissions_manager=permissions_manager,
+            auto_approval_policy=policy,
+            llm_reviewer=build_approval_llm_reviewer(config) if config is not None else None,
+        )
+    if app is not None:
+        app.state.approval_manager = manager
+        thread_manager = getattr(app.state, "thread_manager", None)
+        set_approval_manager = getattr(thread_manager, "set_approval_manager", None)
+        if callable(set_approval_manager):
+            set_approval_manager(manager)
     # 幂等：只在首次装配时注入 InboxEventSink；按 sink 类型判定
     has_inbox_sink = any(isinstance(s, InboxEventSink) for s in manager._event_sinks)
     if not has_inbox_sink:
@@ -732,40 +745,30 @@ def _build_manager_and_inbox_sink(*, app: Any) -> Any:
     return manager
 
 
+def _cwd_string(path: Path) -> str:
+    return path.expanduser().resolve(strict=False).as_posix()
+
+
+def _configured_workspace_root(app: Any | None) -> Path:
+    """解析 Web 默认 workspace root，优先使用 app.state，再使用 kongming_home。"""
+    if app is not None:
+        state = getattr(app, "state", None)
+        raw_root = getattr(state, "workspace_root", None)
+        if raw_root:
+            return Path(raw_root).expanduser().resolve(strict=False)
+        raw_home = getattr(state, "kongming_home", None)
+        if raw_home:
+            return Path(raw_home).expanduser().resolve(strict=False)
+    from infrastructure.config.paths import get_kongming_home
+
+    return get_kongming_home()
+
+
 def _resolve_default_cwd_for_thread(app: Any, thread_id: str) -> str:
-    """解析 thread 装配时的默认 cwd（thread-cwd-fallback 任务 #4）。
-
-    优先级：
-
-    1. 通过 ``app.state.thread_manager.list_threads()`` 反查 metadata，
-       命中后走 :func:`web.workspace.model.resolve_workspace_cwd`：
-       ``meta.cwd`` 非空直接返回，空时 fallback 到 server 启动目录
-       （``app.state.workspace_root``）。
-    2. ``app`` 未注入 / thread_manager 缺失 / list_threads 抛错 / metadata
-       查不到 → **显式降级**到 ``app.state.workspace_root`` 字符串；
-       连 workspace_root 也拿不到时退到当前进程 cwd。
-
-    用户心智：未绑 cwd 的纯聊天 thread，审批默认走 server 启动目录的 cwd 配置
-    （而不是空字符串导致命中不到任何 ProjectConfig）。
-
-    Args:
-        app: FastAPI app 实例；可能为 ``None``（main() 装配链尚未把 app 回挂到
-            runtime_factory 时）。
-        thread_id: 待装配 cell 对应的 thread id。
-
-    Returns:
-        非空字符串：thread.cwd / server cwd / 进程 cwd 三级兜底。
-    """
+    """解析 thread 装配默认 cwd：thread.cwd 优先，空值使用配置 workspace root。"""
     from hosts.web.workspace.model import resolve_workspace_cwd
 
-    def _cwd_string(path: Path) -> str:
-        return path.as_posix()
-
-    server_workspace_root: Path
-    if app is not None:
-        server_workspace_root = Path(getattr(app.state, "workspace_root", Path.cwd()))
-    else:
-        server_workspace_root = Path.cwd()
+    server_workspace_root = _configured_workspace_root(app)
 
     if app is None:
         return _cwd_string(server_workspace_root)
@@ -786,31 +789,52 @@ def _resolve_default_cwd_for_thread(app: Any, thread_id: str) -> str:
 
     meta = next((m for m in metas if m.id == thread_id), None)
     if meta is None:
-        # 装配链上 thread metadata 通常已写盘（先 create_thread → metadata.json
-        # → 再调 factory）。拿不到属异常路径，显式降级到 server cwd 而非
-        # silently 走空字符串。
+        # 装配链上 thread metadata 通常已写盘；异常路径降级到配置 workspace root。
         return _cwd_string(server_workspace_root)
 
     return resolve_workspace_cwd(meta, server_workspace_root)
 
 
-def _make_runtime_factory(cfg: object) -> object:
+def _attach_runtime_factory_to_app_state(app: Any, runtime_factory: Any) -> None:
+    """把 Web runtime factory 绑定到 app.state。"""
+    setattr(runtime_factory, "_app", app)  # noqa: B010
+    app.state.runtime_factory = runtime_factory
+
+
+def _make_runtime_factory(
+    cfg: object,
+    *,
+    asset_reader: Any = None,
+    model_catalog_manager: object | None = None,
+) -> object:
     """Build a runtime factory for web thread cells and cron runs."""
+    from application.agent_workflows.prompt_catalog import build_default_workflow_prompt_listing
+    from core.contracts import ApprovalProvider
+    from evolution.evolution_manager import EvolutionManager
+    from hosts.shared.host_dispatcher import (
+        HostDispatcher,
+        build_scheduled_run_dispatcher_factory,
+    )
     from hosts.shared.mcp_runtime_registration import McpRuntimeRegistrationManager
-    from hosts.shared.session_bridge import SessionBridge
-    from infrastructure.config.models import Config, LLMPresetConfig
-    from infrastructure.config.paths import get_kongming_home
+    from hosts.web.plugin_management import PluginManagementManager
+    from infrastructure.config.model_catalog_manager import ModelCatalogManager
+    from infrastructure.config.models import Config, ModelSelectionConfig
+    from infrastructure.config.paths import get_kongming_home, resolve_kongming_path
     from infrastructure.tracing import JsonlTraceSink
+    from memory import MemoryStore
+    from prompting.context_sources.conversation_reference_manager import (
+        ConversationReferenceContext,
+    )
     from prompting.skills.skill_loader import format_skill_listing, load_skill_specs
-    from runtime_assembly.native_runtime import NativeRuntime
+    from runtime_assembly.session_engine import SessionEngine
     from safety.approval.manager import make_manager_prompt_fn
+    from scheduler.domain import ScheduledTask
     from sessions import SessionBootstrap, build_session
     from tools import (
         ToolRegistry,
         build_default_approval,
         build_default_registry,
         register_choice_tool,
-        register_evolution_write_tool_if_enabled,
         register_schedule_tool_if_enabled,
         register_task_progress_tool,
     )
@@ -818,9 +842,14 @@ def _make_runtime_factory(cfg: object) -> object:
     assert isinstance(cfg, Config)
     real_cfg: Config = cfg
     home = get_kongming_home()
+    resolved_catalog_manager = (
+        model_catalog_manager
+        if isinstance(model_catalog_manager, ModelCatalogManager)
+        else ModelCatalogManager(user_path=home / "model-providers.yaml")
+    )
 
-    def _current_preset_map() -> dict[str, LLMPresetConfig]:
-        return {p.id: p for p in real_cfg.web.llm_presets}
+    def _current_preset_ids() -> tuple[str, ...]:
+        return tuple(model.preset_id for model in resolved_catalog_manager.list_models())
 
     _registry_cache: list[ToolRegistry | None] = [None]
     _enabled_tools_cache: list[list[str] | None] = [None]
@@ -828,33 +857,73 @@ def _make_runtime_factory(cfg: object) -> object:
     _agent_role_manager_cache: list[Any | None] = [None]
     _instructions_cache: list[str | None] = [None]
     _origins_cache: list[list[str] | None] = [None]
-    _workflow_prompt_cache_key: list[object | None] = [None]
+    _instructions_cache_key: list[str | None] = [None]
     _scheduler_runtime_factory_cache: list[object | None] = [None]
     _mcp_runtime_registration_cache: list[McpRuntimeRegistrationManager | None] = [None]
+    _memory_store_cache: list[MemoryStore | None] = [None]
     _cache_lock = asyncio.Lock()
+
+    # agent-tree-v0.1（P0-1 装配修复）：spawn_subagent 工具的 runtime router。
+    # per-session 分桶：每个 Web thread 的 HostDispatcher 首次 ensure_started 时
+    # 绑定自身；工具运行期按 ToolContext.session_id 解析同一棵 agent tree。
+    # router 本身无状态，可共享单例注册进 ToolRegistry（同 AgentWorkflowHandle）。
+    from tools.agent_workflow_tool import AgentTreeRuntimeRouter
+
+    _agent_tree_runtime_router = AgentTreeRuntimeRouter()
 
     def _prompt_hash(text: str) -> str:
         return f"sha256:{hashlib.sha256(text.encode()).hexdigest()}"
 
-    def _workflow_prompt_cache_matches(cache_key: object | None, candidate: object) -> bool:
-        return (
-            cache_key is not None
-            and getattr(cache_key, "base_instructions_hash", None)
-            == getattr(candidate, "base_instructions_hash", None)
-            and getattr(cache_key, "workflow_template_version", None)
-            == getattr(candidate, "workflow_template_version", None)
-            and getattr(cache_key, "workflow_listing_hash", None)
-            == getattr(candidate, "workflow_listing_hash", None)
+    def _plugin_manager_for_factory() -> PluginManagementManager | None:
+        app_ref = getattr(factory, "_app", None)
+        manager = getattr(getattr(app_ref, "state", None), "plugin_management_manager", None)
+        if isinstance(manager, PluginManagementManager):
+            return manager
+        return None
+
+    def _evolution_manager_for_factory() -> EvolutionManager | None:
+        app_ref = getattr(factory, "_app", None)
+        manager = getattr(getattr(app_ref, "state", None), "evolution_manager", None)
+        return cast("EvolutionManager | None", manager)
+
+    def _base_enabled_tool_names(
+        registry: ToolRegistry,
+        *,
+        lifecycle_bound: bool = True,
+    ) -> list[str]:
+        evolution_manager = _evolution_manager_for_factory()
+        if evolution_manager is None:
+            return EvolutionManager.filter_runtime_tool_names(
+                registry.names(),
+                lifecycle_bound=lifecycle_bound,
+            )
+        return evolution_manager.enabled_tool_names(
+            registry.names(),
+            lifecycle_bound=lifecycle_bound,
         )
 
-    async def _build_workflow_prompt_cache_candidate(
+    def _enabled_tool_names_for_session(
+        registry: ToolRegistry,
         *,
-        workflow_render: Any,
-        sitian_root: Path | None,
-    ) -> tuple[object, list[Any]]:
-        from application.agent_workflows.prompt_catalog import (
-            build_workflow_prompt_cache_key,
+        lifecycle_bound: bool = True,
+    ) -> list[str]:
+        plugin_manager = _plugin_manager_for_factory()
+        base_names = _base_enabled_tool_names(
+            registry,
+            lifecycle_bound=lifecycle_bound,
         )
+        if plugin_manager is None:
+            return base_names
+        return plugin_manager.enabled_tool_names(base_names)
+
+    async def _load_instruction_sources_with_hash(
+        *,
+        cwd: Path | str,
+        sitian_root: Path | None,
+        workflow_catalog: str,
+        skill_listing: str,
+        memory_store: MemoryStore | None,
+    ) -> tuple[str, list[Any], str]:
         from prompting.instructions.instruction_loader import (
             InstructionLoader,
             load_instruction_sources,
@@ -862,71 +931,95 @@ def _make_runtime_factory(cfg: object) -> object:
 
         base_sources = await load_instruction_sources(
             kongming_home=home,
+            cwd=cwd,
             sitian_root=sitian_root,
+            workflow_catalog=workflow_catalog,
+            skill_listing=skill_listing,
+            memory_store=memory_store,
+            inject_memory=real_cfg.evolution.memory.inject_prompt,
         )
         base_rendered = InstructionLoader.render(base_sources)
-        return (
-            build_workflow_prompt_cache_key(
-                base_instructions_hash=_prompt_hash(base_rendered),
-                render=workflow_render,
-            ),
-            base_sources,
-        )
+        return _prompt_hash(base_rendered), base_sources, base_rendered
 
-    def _insert_workflow_prompt_source(
+    async def _ensure_shared_assets(
+        sinks: object,
         *,
-        base_sources: list[Any],
-        workflow_render: Any,
-    ) -> list[Any]:
-        from prompting.instructions.instruction_loader import InstructionSource
-
-        if not getattr(workflow_render, "text", "").strip():
-            return [*base_sources]
-        workflow_source = InstructionSource(
-            origin=workflow_render.origin,
-            content=workflow_render.text,
-        )
-        insert_at = 1 if base_sources and base_sources[0].origin == "runtime" else 0
-        return [*base_sources[:insert_at], workflow_source, *base_sources[insert_at:]]
-
-    async def _ensure_shared_assets(sinks: object) -> None:
-        from application.agent_workflows.prompt_catalog import (
-            build_default_workflow_prompt_listing,
-        )
-        from prompting.instructions.instruction_loader import InstructionLoader
-
+        runtime_cwd: str,
+        workspace_root: Path,
+    ) -> tuple[
+        str,
+        list[str],
+        MemoryStore | None,
+        ToolRegistry,
+        list[str],
+        Any,
+        Any,
+        object | None,
+        McpRuntimeRegistrationManager | None,
+    ]:
         sitian_raw = os.environ.get("SITIAN_PROMPT_ROOT", "").strip()
         sitian_root = Path(sitian_raw).expanduser().resolve() if sitian_raw else None
+        resolved_workspace_root = workspace_root.expanduser().resolve(strict=False)
 
         async with _cache_lock:
-            workflow_render = build_default_workflow_prompt_listing()
-            workflow_cache_key, base_sources = await _build_workflow_prompt_cache_candidate(
-                workflow_render=workflow_render,
-                sitian_root=sitian_root,
-            )
-            if _instructions_cache[0] is not None and _workflow_prompt_cache_matches(
-                _workflow_prompt_cache_key[0],
-                workflow_cache_key,
-            ):
-                return
-
             sink_list = list(sinks) if sinks else []  # type: ignore[call-overload]
+            memory_cfg = real_cfg.evolution.memory
+            memory_store = _memory_store_cache[0] if memory_cfg.enabled else None
+            if memory_cfg.enabled:
+                if memory_store is None:
+                    memory_store = MemoryStore(
+                        memory_dir=resolve_kongming_path(
+                            memory_cfg.root_path,
+                            kongming_home=home,
+                        ),
+                        read_max_chars=memory_cfg.read_max_chars,
+                    )
+                    _memory_store_cache[0] = memory_store
+                await memory_store.load_from_disk()
             skill_specs_list = await load_skill_specs(
                 home,
-                workspace=Path.cwd(),
+                workspace=resolved_workspace_root,
                 event_sinks=sink_list,
             )
-            listing = format_skill_listing(skill_specs_list)
-            sources = _insert_workflow_prompt_source(
-                base_sources=base_sources,
-                workflow_render=workflow_render,
+            skill_listing = format_skill_listing(skill_specs_list)
+            workflow_listing = build_default_workflow_prompt_listing().text
+            candidate_hash, base_sources, rendered = await _load_instruction_sources_with_hash(
+                cwd=runtime_cwd,
+                sitian_root=sitian_root,
+                workflow_catalog=workflow_listing,
+                skill_listing=skill_listing,
+                memory_store=memory_store,
             )
-            rendered = InstructionLoader.render(sources)
-            origins = [source.origin for source in sources]
-            if listing:
-                rendered = rendered + f"\n\n# skills\n{listing}"
-                origins = [*origins, "skills"]
-
+            if _instructions_cache_key[0] == candidate_hash:
+                factory._instructions_cache_key = candidate_hash  # type: ignore[attr-defined]
+                instructions = _instructions_cache[0]
+                origins = _origins_cache[0]
+                registry = _registry_cache[0]
+                enabled_tool_names = _enabled_tools_cache[0]
+                agent_workflow_handle = _agent_workflow_handle_cache[0]
+                agent_role_manager = _agent_role_manager_cache[0]
+                scheduler_runtime_factory = _scheduler_runtime_factory_cache[0]
+                mcp_runtime_registration = _mcp_runtime_registration_cache[0]
+                assert instructions is not None
+                assert origins is not None
+                assert registry is not None
+                assert enabled_tool_names is not None
+                assert agent_workflow_handle is not None
+                assert agent_role_manager is not None
+                return (
+                    instructions,
+                    origins,
+                    memory_store,
+                    registry,
+                    enabled_tool_names,
+                    agent_workflow_handle,
+                    agent_role_manager,
+                    scheduler_runtime_factory,
+                    mcp_runtime_registration,
+                )
+            origins = [source.origin for source in base_sources]
+            _instructions_cache_key[0] = candidate_hash
+            factory._instructions_cache_key = candidate_hash  # type: ignore[attr-defined]
             skill_specs = {spec.name: spec for spec in skill_specs_list}
             registry = build_default_registry(
                 file_enabled=real_cfg.tool.file.enabled,
@@ -938,52 +1031,124 @@ def _make_runtime_factory(cfg: object) -> object:
                 skill_specs=skill_specs or None,
                 skill_event_sinks=sink_list,
             )
+            if memory_store is not None:
+                from tools.builtin.memory_tool import build_memory_tool
+
+                registry.register(
+                    build_memory_tool(
+                        memory_store,
+                        view_max_chars=real_cfg.evolution.memory.view_max_chars,
+                        event_sinks=sink_list,
+                    )
+                )
+            from infrastructure.config.paths import materialize_kongming_home_agent_config
+
             agent_role_manager, agent_workflow_handle = _register_agent_workflow_tools(
                 registry,
                 role_dir=home / "agent_roles",
+                agent_config_path=materialize_kongming_home_agent_config(home),
+                agent_tree_runtime_router=_agent_tree_runtime_router,
             )
 
             app_ref = getattr(factory, "_app", None)
             thread_manager = getattr(getattr(app_ref, "state", None), "thread_manager", None)
             cron_dispatcher = None
+            cron_web_sink = None
             if real_cfg.scheduler.enabled:
                 from hosts.web.app_support.cron_delivery import ThreadTargetSink, WebDeliverySink
                 from hosts.web.websocket.cron import get_broker
                 from scheduler.delivery import DeliveryDispatcher
 
+                cron_web_sink = WebDeliverySink(get_broker())
                 cron_dispatcher = DeliveryDispatcher(
-                    web_sink=WebDeliverySink(get_broker()),
+                    web_sink=cron_web_sink,
                     target_sink=ThreadTargetSink(thread_manager)
                     if thread_manager is not None
                     else None,
                 )
 
-            def _scheduler_runtime_factory(store):  # type: ignore[no-untyped-def]
-                from scheduler.runtime_factory import build_cron_execution_bridge
+            def _thread_id_for_scheduler_task(task: ScheduledTask) -> str:
+                if task.thread_id:
+                    return task.thread_id
+                target = task.delivery.target if task.delivery is not None else None
+                if isinstance(target, str) and target.startswith("thread:"):
+                    return target[len("thread:") :]
+                return ""
 
-                return build_cron_execution_bridge(
+            def _scheduler_interactive_approval_factory(
+                task: ScheduledTask,
+            ) -> ApprovalProvider | None:
+                thread_id = _thread_id_for_scheduler_task(task)
+                if real_cfg.approval.mode != "interactive" or not thread_id:
+                    return None
+                current_app = getattr(factory, "_app", None)
+                manager = _build_manager_and_inbox_sink(app=current_app)
+                prompt_fn = make_manager_prompt_fn(
+                    manager,
+                    thread_id,
+                    default_cwd=_resolve_default_cwd_for_thread(current_app, thread_id),
+                )
+                base_approval = build_default_approval(
+                    real_cfg.approval.mode,
+                    prompt_fn=prompt_fn,
+                )
+                return base_approval
+
+            def _scheduler_tool_context_metadata_factory(
+                task: ScheduledTask,
+            ) -> dict[str, str]:
+                thread_id = _thread_id_for_scheduler_task(task)
+                current_app = getattr(factory, "_app", None)
+                return {"cwd": _resolve_default_cwd_for_thread(current_app, thread_id)}
+
+            def _scheduler_runtime_factory(store):  # type: ignore[no-untyped-def]
+                from scheduler.runtime_factory import build_scheduled_run_manager
+
+                return build_scheduled_run_manager(
                     real_cfg,
                     store,
+                    dispatcher_factory_builder=build_scheduled_run_dispatcher_factory,
                     event_sinks=sink_list,
                     tools=registry,
-                    enabled_tool_names=enabled_tool_names,
-                    instructions=_instructions_cache[0],
+                    enabled_tool_names=_enabled_tool_names_for_session(
+                        registry,
+                        lifecycle_bound=False,
+                    ),
+                    instructions=rendered,
                     dispatcher=cron_dispatcher,
-                    preset_map=_current_preset_map(),
+                    model_catalog_manager=resolved_catalog_manager,
+                    lifecycle_sink=cron_web_sink,
+                    interactive_approval_factory=_scheduler_interactive_approval_factory,
+                    tool_context_metadata={"cwd": _cwd_string(resolved_workspace_root)},
+                    tool_context_metadata_factory=_scheduler_tool_context_metadata_factory,
                 )
+
+            def _scheduled_run_manager_factory(store):  # type: ignore[no-untyped-def]
+                current_app = getattr(factory, "_app", None)
+                app_state = getattr(current_app, "state", None)
+                scheduled_run_manager = getattr(
+                    app_state,
+                    "scheduled_run_manager",
+                    None,
+                )
+                scheduled_store = getattr(app_state, "scheduler_store", None)
+                if scheduled_run_manager is None or scheduled_store is not store:
+                    raise RuntimeError("ScheduledRunManager is not ready")
+                return scheduled_run_manager
 
             register_schedule_tool_if_enabled(
                 registry,
                 real_cfg,
-                runtime_factory_fn=_scheduler_runtime_factory,
-                default_preset_id=next(iter(_current_preset_map()), ""),
+                runtime_factory_fn=_scheduled_run_manager_factory,
+                default_preset_id=real_cfg.model.preset_id,
                 thread_provisioner=thread_manager,
             )
-            register_evolution_write_tool_if_enabled(
-                registry,
-                real_cfg,
-                event_sinks=sink_list,
-            )
+            evolution_manager = _evolution_manager_for_factory()
+            if evolution_manager is not None:
+                evolution_manager.register_runtime_tools(
+                    registry,
+                    event_sinks=sink_list,
+                )
             register_choice_tool(registry, event_sinks=sink_list)
             register_task_progress_tool(registry, real_cfg)
             mcp_runtime_registration = McpRuntimeRegistrationManager(
@@ -992,9 +1157,16 @@ def _make_runtime_factory(cfg: object) -> object:
             )
             await mcp_runtime_registration.register(
                 registry,
-                excluded_tool_names=("evolution_write",),
+                excluded_tool_names=(
+                    tuple(evolution_manager.private_tool_names)
+                    if evolution_manager is not None
+                    else tuple(EvolutionManager.runtime_private_tool_names())
+                ),
             )
-            enabled_tool_names = [name for name in registry.names() if name != "evolution_write"]
+            plugin_manager = _plugin_manager_for_factory()
+            if plugin_manager is not None:
+                plugin_manager.sync_mcp_tools(registry)
+            enabled_tool_names = _base_enabled_tool_names(registry)
 
             _registry_cache[0] = registry
             _enabled_tools_cache[0] = enabled_tool_names
@@ -1004,7 +1176,17 @@ def _make_runtime_factory(cfg: object) -> object:
             _origins_cache[0] = origins
             _scheduler_runtime_factory_cache[0] = _scheduler_runtime_factory
             _mcp_runtime_registration_cache[0] = mcp_runtime_registration
-            _workflow_prompt_cache_key[0] = workflow_cache_key
+            return (
+                rendered,
+                origins,
+                memory_store,
+                registry,
+                enabled_tool_names,
+                agent_workflow_handle,
+                agent_role_manager,
+                _scheduler_runtime_factory,
+                mcp_runtime_registration,
+            )
 
     async def factory(
         thread_id: str,
@@ -1014,15 +1196,15 @@ def _make_runtime_factory(cfg: object) -> object:
     ) -> tuple[Any, Any]:
         from infrastructure.config.paths import resolve_kongming_path
 
-        preset = _current_preset_map().get(preset_id)
-        if preset is None:
+        if preset_id not in _current_preset_ids():
             raise ValueError(f"unknown preset_id: {preset_id!r}")
 
         if isinstance(sinks, list):
-            trace_path = resolve_kongming_path(real_cfg.trace.output_path, kongming_home=home)
-            stem = trace_path.stem
-            suffix = trace_path.suffix
-            per_thread_path = trace_path.with_name(f"{stem}.{thread_id}{suffix}")
+            session_root = resolve_kongming_path(
+                real_cfg.session.file_store_path,
+                kongming_home=home,
+            )
+            per_thread_path = session_root / thread_id / "trace.jsonl"
             sinks.append(
                 JsonlTraceSink(
                     per_thread_path,
@@ -1030,58 +1212,51 @@ def _make_runtime_factory(cfg: object) -> object:
                 )
             )
 
-        api_key = os.environ.get(preset.api_key_env, "") if preset.api_key_env else ""
-        model_overrides: dict[str, Any] = {
-            "name": preset.model,
-            "base_url": preset.base_url,
-            "api_key": api_key,
-        }
-        if preset.provider is not None:
-            model_overrides["provider"] = preset.provider
-        if preset.reasoning_effort is not None:
-            model_overrides["reasoning_effort"] = preset.reasoning_effort
-        preset_model = real_cfg.model.model_copy(update=model_overrides)
-        preset_cfg = real_cfg.model_copy(update={"model": preset_model})
+        selection = ModelSelectionConfig(
+            preset_id=preset_id,
+            reasoning_effort=None,
+        )
+        preset_cfg = real_cfg.model_copy(update={"model": selection})
+        resolved_model = resolved_catalog_manager.resolve_runtime(
+            real_cfg.model,
+            preset_id=preset_id,
+        )
 
-        await _ensure_shared_assets(sinks)
-        factory._workflow_prompt_cache_key = _workflow_prompt_cache_key[0]  # type: ignore[attr-defined]
-        factory._scheduler_runtime_factory = _scheduler_runtime_factory_cache[0]  # type: ignore[attr-defined]
-        factory._mcp_runtime_registration = _mcp_runtime_registration_cache[0]  # type: ignore[attr-defined]
-        instructions = _instructions_cache[0]
-        assert instructions is not None
-        origins = _origins_cache[0] or []
-        registry = _registry_cache[0]
-        assert registry is not None
-        enabled_tool_names = _enabled_tools_cache[0] or []
-        agent_workflow_handle = _agent_workflow_handle_cache[0]
-        agent_role_manager = _agent_role_manager_cache[0]
-        assert agent_workflow_handle is not None
-        assert agent_role_manager is not None
-
+        app_ref = getattr(factory, "_app", None)
+        default_cwd = _resolve_default_cwd_for_thread(app_ref, thread_id)
+        (
+            instructions,
+            origins,
+            memory_store,
+            registry,
+            enabled_tool_names,
+            agent_workflow_handle,
+            agent_role_manager,
+            scheduler_runtime_factory,
+            mcp_runtime_registration,
+        ) = await _ensure_shared_assets(
+            sinks,
+            runtime_cwd=default_cwd,
+            workspace_root=Path(default_cwd),
+        )
+        enabled_tool_names = _enabled_tool_names_for_session(registry)
+        factory._scheduler_runtime_factory = scheduler_runtime_factory  # type: ignore[attr-defined]
+        factory._mcp_runtime_registration = mcp_runtime_registration  # type: ignore[attr-defined]
         # 阶段 1 (smart-approval-manager-v0.5)：generic_chat 通道走 ApprovalManager
         # 路径（无 feature flag；回滚 = git revert）。manager + InboxEventSink 是
         # per-process 单例，首次装配时注入 sink；后续 cell 装配复用已有单例（幂等）。
-        # 老路径（adapter.prompt_approval 推 per-thread modal）已被 v2-inbox 全局
-        # 浮窗替代，prompt_fn 现在通过 manager.request 调度，前端通过
-        # /ws/thread-status 收 approval.inbox.add 帧。
+        # prompt_fn 通过 manager.request 调度，前端通过 /ws/thread-status 接收
+        # approval.inbox.add 帧并显示全局审批卡片。
         #
         # task #6：app 引用从 _make_runtime_factory 调用方（main()）通过 attr 回挂
         # （``setattr(runtime_factory, "_app", app)``）；首次 factory 调用时已就绪。
-        # 注入 ConfigStore 让 generic_chat 通道能查 cwd 自动通过配置。
-        #
-        # approval-rules-unified：
-        # - manager 默认 timeout 60s（与 host_adapter 默认对齐），不再读 cfg
-        #   ``pending_approval_timeout_seconds``（仍归 host_adapter 用）。
-        # - ApprovalRules 直接拿 ``app.state.auto_approval_policy`` 完整实例，
-        #   走 24 规则 + per-cwd 总开关统一真源。
+        # TODO(auto-mode): v0.6 保持旧 ConfigStore / 倒计时 policy 注入断开。
         #
         # task #4 (thread-cwd-fallback)：
         # - ``default_cwd`` 由 thread metadata 解析：thread.cwd 非空直接用，
         #   空时 fallback 到 server 启动目录（``app.state.workspace_root``），
         #   交给 prompt_fn 作为 ``req.metadata.cwd`` 空时的兜底——保证 generic_chat
         #   通道在「纯聊天 thread 未绑 cwd」场景下仍能命中 cwd 自动通过规则。
-        app_ref = getattr(factory, "_app", None)
-        default_cwd = _resolve_default_cwd_for_thread(app_ref, thread_id)
         manager = _build_manager_and_inbox_sink(app=app_ref)
         prompt_fn = (
             make_manager_prompt_fn(
@@ -1096,7 +1271,7 @@ def _make_runtime_factory(cfg: object) -> object:
 
         bootstrap = SessionBootstrap(
             agent_name="kongming-agent",
-            model_name=preset_cfg.model.name,
+            model_name=resolved_model.name,
             instruction_sources=origins,
             instruction_text_hash=f"sha256:{hashlib.sha256(instructions.encode()).hexdigest()}",
             created_at=time.time(),
@@ -1107,15 +1282,46 @@ def _make_runtime_factory(cfg: object) -> object:
         def session_factory(sid: str) -> Any:
             return build_session(preset_cfg, sid, bootstrap=bootstrap)
 
-        runtime = NativeRuntime.build(
+        runtime_event_sinks = list(sinks) if sinks else []  # type: ignore[call-overload]
+        if memory_store is not None:
+            from hosts.shared.memory_refresh_sink import MemoryRefreshSink
+
+            runtime_event_sinks.append(
+                MemoryRefreshSink(
+                    memory_store=memory_store,
+                    downstream_sinks=runtime_event_sinks,
+                )
+            )
+
+        runtime = SessionEngine.build(
             preset_cfg,
-            event_sinks=list(sinks) if sinks else [],  # type: ignore[call-overload]
+            event_sinks=runtime_event_sinks,
             approval=approval,
             tools=registry,
             enabled_tool_names=enabled_tool_names,
             session_factory=session_factory,
             instructions=instructions,
+            conversation_reference_context=ConversationReferenceContext(
+                home=get_kongming_home(),
+                workspace=Path(default_cwd),
+                thread_id=thread_id,
+            ),
+            asset_reader=asset_reader,
+            tool_context_metadata={"cwd": default_cwd},
+            permissions_manager=manager.permissions_manager,
+            disposition_resolver=getattr(
+                getattr(app_ref, "state", None),
+                "auto_approval_policy",
+                None,
+            ),
+            model_catalog_manager=resolved_catalog_manager,
+            model_config=resolved_model,
         )
+        evolution_manager = getattr(getattr(app_ref, "state", None), "evolution_manager", None)
+        if evolution_manager is not None:
+            from evolution.lifecycle import register_evolution_lifecycle_hook
+
+            register_evolution_lifecycle_hook(runtime=runtime, manager=evolution_manager)
         _bind_agent_workflow_manager(
             handle=agent_workflow_handle,
             thread_id=thread_id,
@@ -1124,30 +1330,68 @@ def _make_runtime_factory(cfg: object) -> object:
             workspace_root=Path(default_cwd),
             role_manager=agent_role_manager,
             tool_registry=registry,
+            thread_manager=getattr(getattr(app_ref, "state", None), "thread_manager", None),
         )
-        bridge = SessionBridge(
+        host_dispatcher = HostDispatcher(
             runtime=runtime,
-            adapter=adapter,  # type: ignore[arg-type]
             session_id=thread_id,
-            echo_final_content=False,
+            queued_result_handler=adapter.render_result,  # type: ignore[attr-defined]
+            agent_tree_runtime_router=_agent_tree_runtime_router,
+            approval_canceller=getattr(
+                getattr(getattr(app_ref, "state", None), "approval_manager", None),
+                "cancel_by_agent",
+                None,
+            ),
         )
-        return runtime, bridge
+        return runtime, host_dispatcher
+
+    async def _sync_plugin_tools_for_management() -> None:
+        """为管理页预同步 MCP 插件工具，输入为空，输出为插件 store 已刷新。"""
+        app_ref = getattr(factory, "_app", None)
+        state = getattr(app_ref, "state", None)
+        raw_workspace_root = getattr(state, "workspace_root", Path.cwd())
+        workspace_root = Path(raw_workspace_root).expanduser().resolve(strict=False)
+        runtime_cwd = _cwd_string(workspace_root)
+        await _ensure_shared_assets(
+            [],
+            runtime_cwd=runtime_cwd,
+            workspace_root=workspace_root,
+        )
 
     factory._scheduler_runtime_factory = _scheduler_runtime_factory_cache[0]  # type: ignore[attr-defined]
     factory._mcp_runtime_registration = _mcp_runtime_registration_cache[0]  # type: ignore[attr-defined]
+    # agent-tree-v0.1（P0-1）：暴露共享 runtime router 给测试和诊断路径。
+    factory._agent_tree_runtime_router = _agent_tree_runtime_router  # type: ignore[attr-defined]
+    factory.sync_plugin_tools_for_management = _sync_plugin_tools_for_management  # type: ignore[attr-defined]
     return factory
 
 
-def _register_agent_workflow_tools(registry: Any, *, role_dir: Path) -> tuple[Any, Any]:
-    """注册 Web generic_chat 的 agent workflow 工具，输入为 registry 和角色目录，输出角色 manager 与 workflow handle。"""
+def _register_agent_workflow_tools(
+    registry: Any,
+    *,
+    role_dir: Path,
+    agent_config_path: Path | None = None,
+    agent_tree_runtime_router: Any | None = None,
+) -> tuple[Any, Any]:
+    """注册 Web generic_chat 的 agent workflow 工具，输入为 registry 和角色目录，输出角色 manager 与 workflow handle。
+
+    agent_tree_runtime_router（agent-tree-v0.1 P0-1）：可选的
+    :class:`AgentTreeRuntimeRouter`，有值时把 ``spawn_subagent`` 工具一并注册进
+    registry（per-session 延迟绑定，工具运行期按 ``ToolContext.session_id``
+    解析对应 thread 的 agent tree）。
+    """
     from application.agent_roles import AgentRoleManager
     from tools import register_agent_role_tool, register_agent_workflow_tool
     from tools.agent_workflow_tool import AgentWorkflowHandle
 
-    role_manager = AgentRoleManager(role_dir=role_dir)
+    role_manager = AgentRoleManager(role_dir=role_dir, config_path=agent_config_path)
     workflow_handle = AgentWorkflowHandle()
     register_agent_role_tool(registry, role_manager)
     register_agent_workflow_tool(registry, workflow_handle)
+    if agent_tree_runtime_router is not None:
+        from tools import register_spawn_subagent_tool
+
+        register_spawn_subagent_tool(registry, agent_tree_runtime_router)
     return role_manager, workflow_handle
 
 
@@ -1160,10 +1404,10 @@ def _bind_agent_workflow_manager(
     workspace_root: Path,
     role_manager: Any,
     tool_registry: Any,
+    thread_manager: Any | None = None,
 ) -> None:
     """把当前 Web thread runtime 绑定到 workflow handle，输入为运行时和工作区，输出为可执行 workflow manager。"""
     from application.agent_workflows.manager import AgentWorkflowManager
-    from application.subagents.manager import SubAgentManager
     from hosts.web.research_source_provider import WebResearchSourceProviderFactory
 
     source_provider_result = WebResearchSourceProviderFactory(config).build(tool_registry)
@@ -1184,15 +1428,34 @@ def _bind_agent_workflow_manager(
 
     handle.bind(
         AgentWorkflowManager(
-            subagents=SubAgentManager(runtime),
             config=config,
             workspace_root=workspace_root,
             role_manager=role_manager,
+            runtime=runtime,
+            model_catalog_manager=runtime.model_catalog_manager,
+            agent_manager_getter=lambda: _agent_manager_for_thread(thread_manager, thread_id),
             deep_research_source_provider=source_provider_result.provider,
             deep_research_source_diagnostics=diagnostics,
         ),
         session_id=thread_id,
     )
+
+
+def _agent_manager_for_thread(thread_manager: Any | None, thread_id: str) -> Any | None:
+    """读取 Web thread 的 AgentManager，输入为 thread manager 和 id，输出可选 manager。"""
+    if thread_manager is None:
+        return None
+    get_cell = getattr(thread_manager, "get_cell", None)
+    if not callable(get_cell):
+        return None
+    try:
+        cell = get_cell(thread_id)
+    except Exception:
+        return None
+    if cell is None:
+        return None
+    dispatcher = getattr(cell, "host_dispatcher", None)
+    return getattr(dispatcher, "agent_manager", None)
 
 
 if __name__ == "__main__":

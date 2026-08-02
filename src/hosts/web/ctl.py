@@ -8,14 +8,17 @@
 
 关键执行流程：
     1. 解析 `--home`，定位运行时目录。
-    2. 读取 `server.json` 或配置文件得到 host / port / pid。
-    3. 通过端口、pid 文件和 HTTP runtime-status 判断服务状态。
-    4. start / stop / restart / log 围绕同一运行时目录操作。
+    2. 将仓库 `.env` 的运行时变量合并到 `KONGMING_HOME/.env`。
+    3. start 读取配置态 host / port，stop/status 读取运行态 host / port / pid。
+    4. 通过端口、pid 文件和 HTTP runtime-status 判断服务状态。
+    5. start / stop / restart / log 围绕同一运行时目录操作。
 
 关键函数：
     `_resolve_home`：解析运行时 home，并写入 `KONGMING_HOME`。
     `_read_server_info`：读取 `<home>/web/server.json`。
-    `_read_port` / `_read_host`：解析控制命令使用的端口和 host。
+    `_sync_repo_dotenv_to_home`：把仓库 `.env` 中的运行时变量合并进 home `.env`。
+    `_read_configured_port` / `_read_configured_host`：解析 start 使用的配置态端口和 host。
+    `_read_port` / `_read_host`：解析 stop/status 使用的运行态端口和 host。
     `main`：console script 入口。
 """
 
@@ -38,14 +41,16 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import click
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 logger = logging.getLogger(__name__)
+_ENTRYPOINT_ENV_KEYS = ("KONGMING_HOME", "KONGMING_CONFIG")
+_RUNTIME_ENV_EXCLUDED_KEYS = frozenset(_ENTRYPOINT_ENV_KEYS)
 
 
 def _dotenv_skip_enabled() -> bool:
-    """判断当前进程是否显式禁用仓库 dotenv 自动加载。"""
+    """判断当前进程是否显式禁用 dotenv 引导。"""
     return os.environ.get("KONGMING_SKIP_DOTENV", "").lower() in {
         "1",
         "true",
@@ -56,22 +61,43 @@ def _dotenv_skip_enabled() -> bool:
     }
 
 
-def _load_repo_dotenv() -> None:
-    """按配置加载仓库根 .env，pre-push / 单测隔离场景可通过环境变量跳过。"""
+def _read_repo_dotenv_values() -> dict[str, str]:
+    """读取仓库 `.env` 中的字符串键值。"""
     if _dotenv_skip_enabled():
-        logger.debug("ctl: skipping repo .env due to KONGMING_SKIP_DOTENV")
-        return
+        logger.debug("ctl: skipping repo dotenv due to KONGMING_SKIP_DOTENV")
+        return {}
     env_path = _REPO_ROOT / ".env"
     if not env_path.exists():
         logger.debug("ctl: repo .env not present at %s", env_path)
-        return
+        return {}
     try:
-        load_dotenv(env_path)
+        values = dotenv_values(env_path)
     except OSError as exc:
-        logger.warning("ctl: failed to load repo .env at %s: %s", env_path, exc)
+        logger.warning("ctl: failed to read repo dotenv at %s: %s", env_path, exc)
+        return {}
+    return {key: value for key, value in values.items() if isinstance(value, str)}
 
 
-_load_repo_dotenv()
+def _load_repo_entrypoint_env() -> None:
+    """从仓库 `.env` 只读取入口级 env。
+
+    仓库 `.env` 仅负责把 ctl 指向目标 runtime home 或显式配置文件；provider key
+    与 Web 可写配置统一由 `KONGMING_HOME/.env` 和 YAML 读取。
+    """
+    if _dotenv_skip_enabled():
+        logger.debug("ctl: skipping repo entrypoint env due to KONGMING_SKIP_DOTENV")
+        return
+    values = _read_repo_dotenv_values()
+    if not values:
+        return
+    for key in _ENTRYPOINT_ENV_KEYS:
+        value = values.get(key)
+        if isinstance(value, str) and value.strip() and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_repo_entrypoint_env()
+
 
 from hosts.web.app_support.startup_progress import StartupProgress  # noqa: E402
 from hosts.web.auth.middleware import (  # noqa: E402
@@ -136,6 +162,57 @@ def _ensure_dirs(home: Path) -> None:
     (home / "web").mkdir(parents=True, exist_ok=True)
 
 
+def _is_runtime_env_key(key: str) -> bool:
+    """判断一个 `.env` key 是否适合复制到运行时 home。"""
+    if key in _RUNTIME_ENV_EXCLUDED_KEYS:
+        return False
+    if not key:
+        return False
+    first = key[0]
+    if not (first.isalpha() or first == "_"):
+        return False
+    return all(ch.isupper() or ch.isdigit() or ch == "_" for ch in key)
+
+
+def _sync_repo_dotenv_to_home(home: Path) -> list[str]:
+    """把仓库 `.env` 的运行时变量合并进 `<home>/.env`。
+
+    已存在且非空的 home 变量保持不变；仓库 `.env` 中的入口指针和非法 key 不复制。
+    """
+    repo_values = _read_repo_dotenv_values()
+    if not repo_values:
+        return []
+
+    home_env = home / ".env"
+    try:
+        existing_values = dotenv_values(home_env) if home_env.exists() else {}
+    except OSError as exc:
+        logger.warning("ctl: failed to read home dotenv at %s: %s", home_env, exc)
+        existing_values = {}
+
+    updates: dict[str, str] = {}
+    for key, value in repo_values.items():
+        if not _is_runtime_env_key(key) or not value.strip():
+            continue
+        existing_value = existing_values.get(key)
+        if isinstance(existing_value, str) and existing_value.strip():
+            continue
+        updates[key] = value
+
+    if not updates:
+        return []
+
+    from infrastructure.config.env_writer import write_env_values
+
+    result = write_env_values(home_env, updates)
+    logger.info(
+        "ctl: synced repo dotenv keys to %s: %s",
+        result.path,
+        ", ".join(result.updated_keys),
+    )
+    return result.updated_keys
+
+
 def _read_server_info(home: Path) -> dict[str, Any] | None:
     """读取 sidecar ready 写入的 server.json。
 
@@ -194,7 +271,7 @@ def _read_port(home: Path) -> int:
     port = _server_info_int(_read_server_info(home), "port")
     if port is not None:
         return port
-    return int(load_config(_resolve_config_path(home)).web.port)
+    return _read_configured_port(home)
 
 
 def _read_host(home: Path) -> str:
@@ -202,6 +279,16 @@ def _read_host(home: Path) -> str:
     host = _server_info_str(_read_server_info(home), "host")
     if host is not None:
         return host
+    return _read_configured_host(home)
+
+
+def _read_configured_port(home: Path) -> int:
+    """读取配置态 Web 端口，供 start 选择目标端口。"""
+    return int(load_config(_resolve_config_path(home)).web.port)
+
+
+def _read_configured_host(home: Path) -> str:
+    """读取配置态 Web host，供 start 选择目标监听地址。"""
     return str(load_config(_resolve_config_path(home)).web.host)
 
 
@@ -234,7 +321,17 @@ def _fetch_runtime_status(port: int, *, home: Path) -> dict[str, Any] | None:
     return result if isinstance(result, dict) else None
 
 
+def _port_probe_host(host: str) -> str:
+    """把监听 host 转成本机可连接地址，输入监听地址，输出探测地址。"""
+    if host in {"0.0.0.0", ""}:
+        return "127.0.0.1"
+    if host == "::":
+        return "::1"
+    return host
+
+
 def _is_port_listening(port: int, host: str = "127.0.0.1") -> bool:
+    host = _port_probe_host(host)
     try:
         addr_infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except (OSError, socket.gaierror):
@@ -264,11 +361,16 @@ def _find_pid_by_port_win32(port: int) -> int | None:
             ["netstat", "-ano", "-p", "TCP"],
             capture_output=True,
             text=True,
+            # 中文 Windows 的 netstat 输出为系统 ANSI 代码页（GBK/CP936），
+            # 含非 UTF-8 字节会让默认 text reader 线程抛 UnicodeDecodeError，
+            # 进而 out.stdout 变成 None。errors="replace" 保证不崩，而 IP/端口/PID/
+            # LISTENING 关键字段均为 ASCII，解析不受影响。
+            errors="replace",
             timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
-    if out.returncode != 0:
+    if out.returncode != 0 or out.stdout is None:
         return None
     for line in out.stdout.splitlines():
         parts = line.split()
@@ -308,11 +410,15 @@ def _pid_alive(pid: int) -> bool:
                 ["tasklist", "/FI", f"PID eq {pid}"],
                 capture_output=True,
                 text=True,
+                # 中文 Windows 的 tasklist 输出为系统 ANSI 代码页（GBK/CP936），
+                # 含非 UTF-8 字节会让默认 text reader 线程抛 UnicodeDecodeError，
+                # 进而 out.stdout 变成 None。errors="replace" 保证不崩。
+                errors="replace",
                 timeout=3,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
-        return out.returncode == 0 and str(pid) in out.stdout
+        return out.returncode == 0 and out.stdout is not None and str(pid) in out.stdout
     try:
         os.kill(pid, 0)
         return True
@@ -442,9 +548,10 @@ def start(rebuild: bool, home: Path | None) -> None:
     _ensure_dirs(runtime_home)
     progress = StartupProgress(runtime_home)
     progress.report("env")
+    _sync_repo_dotenv_to_home(runtime_home)
 
-    port = _read_port(runtime_home)
-    host = _read_host(runtime_home)
+    port = _read_configured_port(runtime_home)
+    host = _read_configured_host(runtime_home)
 
     existing = _find_pid_by_port(port)
     if existing is not None:

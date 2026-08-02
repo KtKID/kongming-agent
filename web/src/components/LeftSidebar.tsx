@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import type { JSX } from "react";
-import { ChevronRight, PanelLeftClose } from "lucide-react";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 import { ThreadList } from "@/components/ThreadList";
 import { useThreadsStore } from "@/stores/threads";
@@ -40,21 +40,22 @@ export function LeftSidebar({
         />
       ) : null}
       <aside
-      className={cn(
-        "obsidian-panel obsidian-hairline relative z-20 flex h-full shrink-0 flex-col rounded-xl transition-[width,min-width,transform] duration-300 ease-out",
-        compactMode ? "absolute inset-y-0 left-0 shadow-xl" : "shadow-none",
-        isOpen
-          ? mobileMode
-            ? "w-[min(20rem,calc(100vw-2rem))] min-w-0 overflow-hidden"
-            : compactMode
-            ? "w-[min(20rem,calc(100vw-5.5rem))] min-w-0"
-            : "w-80 min-w-[18rem]"
-          : mobileMode
-            ? "w-0 min-w-0 overflow-visible border-r-0"
-            : "w-[4.5rem] min-w-[4.5rem] overflow-hidden",
-        mobileMode && isOpen ? "translate-x-0" : "",
-      )}
-    >
+        className={cn(
+          "relative z-20 flex h-full shrink-0 flex-col transition-[width,min-width,transform] duration-300 ease-out",
+          isOpen
+            ? "obsidian-panel obsidian-hairline rounded-xl"
+            : "absolute inset-y-0 left-0 overflow-visible",
+          isOpen && (compactMode ? "absolute inset-y-0 left-0 shadow-xl" : "shadow-none"),
+          isOpen
+            ? mobileMode
+              ? "w-[min(20rem,calc(100vw-2rem))] min-w-0 overflow-hidden"
+              : compactMode
+                ? "w-[min(20rem,calc(100vw-5.5rem))] min-w-0"
+                : "w-80 min-w-[18rem]"
+            : "w-0 min-w-0 border-0 bg-transparent shadow-none",
+          mobileMode && isOpen ? "translate-x-0" : "",
+        )}
+      >
       {isOpen && !mobileMode ? (
         <button
           type="button"
@@ -79,7 +80,7 @@ export function LeftSidebar({
       </div>
       <div
         className={cn(
-          "absolute inset-0 transition-[opacity,transform] duration-300 ease-out",
+          "absolute inset-y-0 left-0 w-0 overflow-visible transition-[opacity,transform] duration-300 ease-out",
           isOpen
             ? "pointer-events-none -translate-x-6 opacity-0"
             : "translate-x-0 opacity-100",
@@ -91,13 +92,11 @@ export function LeftSidebar({
           aria-label="展开左侧栏"
           data-testid="left-edge-handle"
           className={cn(
-            "inline-flex items-center justify-center border border-border/80 bg-card/90 text-foreground shadow-glass backdrop-blur-xl transition-colors hover:bg-card",
-            mobileMode
-              ? "absolute left-0 top-4 h-16 w-5 rounded-r-lg border-l-0"
-              : "mt-4 ml-2 h-8 w-8 rounded-lg",
+            "pointer-events-auto absolute left-3 top-4 inline-flex h-9 w-9 items-center justify-center rounded-xl border border-border/80 bg-card/92 text-foreground shadow-glass backdrop-blur-xl transition-colors hover:bg-card",
+            mobileMode ? "left-2" : "",
           )}
         >
-          <ChevronRight className={cn(mobileMode ? "h-4 w-4" : "h-4.5 w-4.5")} />
+          <PanelLeftOpen className="h-4.5 w-4.5" />
         </button>
       </div>
     </aside>

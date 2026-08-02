@@ -80,6 +80,22 @@ describe("stores/threads", () => {
     ]);
   });
 
+  it("cold start normalizes provider ids missing from an old cache", async () => {
+    const cached = makeThread({ id: "thread-legacy-cache" });
+    const legacyCached = { ...cached } as Partial<ThreadMetadataDTO>;
+    delete legacyCached.claude_thread_id;
+    delete legacyCached.codex_thread_id;
+    localStorage.setItem(THREADS_CACHE_KEY, JSON.stringify([legacyCached]));
+
+    const useThreadsStore = await loadStore();
+
+    expect(useThreadsStore.getState().threads[0]).toMatchObject({
+      id: "thread-legacy-cache",
+      claude_thread_id: "",
+      codex_thread_id: "",
+    });
+  });
+
   it("fetchThreads dedupes concurrent requests and writes sorted cache", async () => {
     const response = deferred<ThreadMetadataDTO[]>();
     apiMocks.apiGet.mockReturnValue(response.promise);
@@ -172,7 +188,18 @@ describe("stores/threads", () => {
 
   it("startPendingGenericThread enters generic pending state and clears initial message", async () => {
     const useThreadsStore = await loadStore();
-    useThreadsStore.setState({ initialMessage: "stale" });
+    useThreadsStore.setState({
+      initialMessage: {
+        text: "stale",
+        reasoningEffort: null,
+        restoreDraft: {
+          text: "stale",
+          reasoningEffort: null,
+          attachments: [],
+          references: [],
+        },
+      },
+    });
 
     useThreadsStore.getState().startPendingGenericThread();
 
@@ -218,6 +245,57 @@ describe("stores/threads", () => {
     expect(useThreadsStore.getState().pendingNewSession).toBeNull();
   });
 
+  it("forkThread posts fork endpoint and persists returned lineage", async () => {
+    const useThreadsStore = await loadStore();
+    const source = makeThread({
+      id: "thread-aaaaaaaaaaaa",
+      name: "source",
+      updated_at: 100,
+    });
+    const forked = makeThread({
+      id: "thread-bbbbbbbbbbbb",
+      name: "source（分支）",
+      forked_from_id: source.id,
+      forked_from_history_index: 3,
+      updated_at: 200,
+      schema_version: 13,
+    });
+    useThreadsStore.setState({ threads: [source] });
+    apiMocks.apiPost.mockResolvedValueOnce(forked);
+
+    const result = await useThreadsStore.getState().forkThread(source.id, 3);
+
+    expect(apiMocks.apiPost).toHaveBeenCalledWith(
+      "/api/threads/thread-aaaaaaaaaaaa/fork",
+      { history_index: 3 },
+    );
+    expect(result).toEqual(forked);
+    expect(useThreadsStore.getState().threads).toEqual([forked, source]);
+    expect(
+      JSON.parse(localStorage.getItem(THREADS_CACHE_KEY) ?? "[]")[0]
+        .forked_from_id,
+    ).toBe(source.id);
+    expect(
+      JSON.parse(localStorage.getItem(THREADS_CACHE_KEY) ?? "[]")[0]
+        .forked_from_history_index,
+    ).toBe(3);
+  });
+
+  it("按 thread 和 preset 保存 reasoning 选择", async () => {
+    const useThreadsStore = await loadStore();
+
+    useThreadsStore
+      .getState()
+      .setThreadReasoningSelection("thread-aaaaaaaaaaaa", "preset-a", "none");
+
+    expect(
+      useThreadsStore.getState().reasoningSelectionByThread["thread-aaaaaaaaaaaa"],
+    ).toEqual({
+      presetId: "preset-a",
+      effort: "none",
+    });
+  });
+
   it("updateThreadPreset patches preset endpoint and updates cached thread", async () => {
     const useThreadsStore = await loadStore();
     const original = makeThread({
@@ -231,6 +309,9 @@ describe("stores/threads", () => {
       updated_at: 20,
     };
     useThreadsStore.setState({ threads: [original] });
+    useThreadsStore
+      .getState()
+      .setThreadReasoningSelection(original.id, "preset-a", "none");
     localStorage.setItem(THREADS_CACHE_KEY, JSON.stringify([original]));
     apiMocks.apiPatch.mockResolvedValueOnce(updated);
 
@@ -244,6 +325,9 @@ describe("stores/threads", () => {
     );
     expect(result.preset_id).toBe("preset-b");
     expect(useThreadsStore.getState().threads[0].preset_id).toBe("preset-b");
+    expect(
+      useThreadsStore.getState().reasoningSelectionByThread[original.id],
+    ).toBeUndefined();
     expect(JSON.parse(localStorage.getItem(THREADS_CACHE_KEY) ?? "[]")[0].preset_id).toBe(
       "preset-b",
     );

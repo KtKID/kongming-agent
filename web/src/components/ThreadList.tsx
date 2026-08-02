@@ -79,8 +79,8 @@ export function ThreadList() {
   const renderThread = (t: (typeof threads)[number]) => {
     const active = params.thread_id === t.id;
     const isEditing = editing && editingId === t.id;
-
-    const actions: HoverAction[] = [
+    const actions: HoverAction[] = [];
+    actions.push(
       {
         icon: t.is_pinned ? PinOff : Pin,
         label: t.is_pinned ? "取消置顶" : "置顶",
@@ -102,7 +102,7 @@ export function ThreadList() {
         variant: "destructive",
         onClick: () => void onDelete(t.id),
       },
-    ];
+    );
 
     return (
       <SidebarSessionRow
@@ -119,7 +119,7 @@ export function ThreadList() {
             />
             <PhaseIndicator
               phase={statuses[t.id]?.phase}
-              toolName={statuses[t.id]?.toolName}
+              toolName={statuses[t.id]?.toolName ?? undefined}
             />
           </>
         }
@@ -159,6 +159,7 @@ export function ThreadList() {
             navigate("/chat");
           }}
           aria-label="新建对话"
+          data-testid="new-generic-thread-button"
         >
           <Plus className="h-4 w-4" />
           新建对话

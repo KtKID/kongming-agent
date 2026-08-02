@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 
 from hosts.web.app import create_app
 from hosts.web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
+from hosts.web.threads.errors import ThreadForkConflictError
 from hosts.web.threads.metadata import ThreadMetadata
 from infrastructure.config.models import Config
 from tests.unit.test_web_app_lifespan import _seed_password
@@ -48,6 +49,10 @@ class FakeTM:
     def __init__(self) -> None:
         self._threads: dict[str, ThreadMetadata] = {}
         self.delete_calls: list[str] = []
+        self.fork_calls: list[tuple[str, int | None]] = []
+        self.first_message_calls: list[dict[str, Any]] = []
+        self.fork_conflict = False
+        self.fork_value_error = False
         self._started = False
         self._closed = False
         # task#3.3：router ``_to_dto`` 通过 ``tm.usage_manager.get_thread_summary``
@@ -100,9 +105,16 @@ class FakeTM:
         cwd: str = "",
         reasoning_effort: str | None = None,
     ) -> ThreadMetadata:
-        del reasoning_effort
         if preset_id == "missing":
             raise ValueError("unknown preset_id: 'missing'")
+        self.first_message_calls.append(
+            {
+                "text": text,
+                "preset_id": preset_id,
+                "cwd": cwd,
+                "reasoning_effort": reasoning_effort,
+            }
+        )
         idx = len(self._threads)
         thread_id = f"thread-{'b' * 11}{idx}"
         meta = ThreadMetadata(
@@ -114,6 +126,35 @@ class FakeTM:
             created_at=1.0,
             updated_at=2.0,
             message_count=1,
+        )
+        self._threads[thread_id] = meta
+        return meta
+
+    async def fork_thread(
+        self,
+        source_thread_id: str,
+        *,
+        history_index: int | None = None,
+    ) -> ThreadMetadata:
+        if self.fork_conflict:
+            raise ThreadForkConflictError("source thread is active")
+        if self.fork_value_error:
+            raise ValueError("full fork currently supports generic_chat threads")
+        source = self._threads.get(source_thread_id)
+        if source is None:
+            raise KeyError(source_thread_id)
+        self.fork_calls.append((source_thread_id, history_index))
+        thread_id = f"thread-{'c' * 11}{len(self._threads)}"
+        meta = source.model_copy(
+            update={
+                "id": thread_id,
+                "name": f"{source.name}（分支）",
+                "forked_from_id": source.id,
+                "forked_from_history_index": history_index,
+                "created_at": 3.0,
+                "updated_at": 3.0,
+                "is_pinned": False,
+            }
         )
         self._threads[thread_id] = meta
         return meta
@@ -227,9 +268,7 @@ def _make_cfg() -> Config:
     return Config.model_validate(
         {
             "model": {
-                "name": "fake",
-                "base_url": "http://127.0.0.1:1234/v1",
-                "api_key": "",
+                "preset_id": "local-gemma-4-e4b-it",
             },
             "web": {
                 "enabled": True,
@@ -303,6 +342,14 @@ def test_create_generic_thread_from_first_message_returns_thread(tmp_path: Path)
         assert body["thread"]["preset_id"] == "p1"
         assert body["thread"]["message_count"] == 1
         assert body["thread"]["cwd"] == str(tmp_path)
+        assert tm.first_message_calls == [
+            {
+                "text": "hello",
+                "preset_id": "p1",
+                "cwd": str(tmp_path),
+                "reasoning_effort": "low",
+            }
+        ]
     finally:
         client.__exit__(None, None, None)
 
@@ -320,6 +367,108 @@ def test_create_generic_thread_from_first_message_manager_value_error_returns_40
         )
         assert resp.status_code == 400
         assert "unknown preset_id" in resp.text
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_fork_thread_returns_201_with_lineage(tmp_path: Path) -> None:
+    """REST 入口命中 Manager 关键 source_thread_id 并返回 lineage DTO。"""
+    tm = FakeTM()
+    client = _login_client(tmp_path, tm)
+    try:
+        created = client.post(
+            "/api/threads",
+            json={"name": "source", "preset_id": "p1"},
+            headers=CSRF_HEADERS,
+        )
+        source_id = created.json()["id"]
+
+        response = client.post(
+            f"/api/threads/{source_id}/fork",
+            json={"history_index": 3},
+            headers=CSRF_HEADERS,
+        )
+
+        assert response.status_code == 201
+        payload = response.json()
+        assert payload["id"] != source_id
+        assert payload["name"] == "source（分支）"
+        assert payload["forked_from_id"] == source_id
+        assert payload["forked_from_history_index"] == 3
+        assert tm.fork_calls == [(source_id, 3)]
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_fork_thread_active_source_returns_409(tmp_path: Path) -> None:
+    """Manager 的完整快照冲突稳定映射为 HTTP 409。"""
+    tm = FakeTM()
+    client = _login_client(tmp_path, tm)
+    try:
+        created = client.post(
+            "/api/threads",
+            json={"name": "source", "preset_id": "p1"},
+            headers=CSRF_HEADERS,
+        )
+        tm.fork_conflict = True
+        response = client.post(
+            f"/api/threads/{created.json()['id']}/fork",
+            headers=CSRF_HEADERS,
+        )
+        assert response.status_code == 409
+        assert "source thread is active" in response.text
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_fork_thread_missing_source_returns_404(tmp_path: Path) -> None:
+    """缺失 source_thread_id 稳定映射为 HTTP 404。"""
+    tm = FakeTM()
+    client = _login_client(tmp_path, tm)
+    try:
+        response = client.post(
+            "/api/threads/thread-ffffffffffff/fork",
+            headers=CSRF_HEADERS,
+        )
+        assert response.status_code == 404
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_fork_thread_invalid_source_id_returns_422_before_manager(
+    tmp_path: Path,
+) -> None:
+    """非法 path 参数在 Manager 前被拒绝，避免创建任何目标 runtime。"""
+    tm = FakeTM()
+    client = _login_client(tmp_path, tm)
+    try:
+        response = client.post(
+            "/api/threads/not-a-thread/fork",
+            headers=CSRF_HEADERS,
+        )
+        assert response.status_code == 422
+        assert tm.fork_calls == []
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_fork_thread_unsupported_channel_returns_400(tmp_path: Path) -> None:
+    """Provider 专属历史边界稳定映射为 HTTP 400。"""
+    tm = FakeTM()
+    client = _login_client(tmp_path, tm)
+    try:
+        created = client.post(
+            "/api/threads",
+            json={"name": "source", "preset_id": "p1"},
+            headers=CSRF_HEADERS,
+        )
+        tm.fork_value_error = True
+        response = client.post(
+            f"/api/threads/{created.json()['id']}/fork",
+            headers=CSRF_HEADERS,
+        )
+        assert response.status_code == 400
+        assert "generic_chat" in response.text
     finally:
         client.__exit__(None, None, None)
 
@@ -379,6 +528,103 @@ def test_delete_thread(tmp_path: Path) -> None:
         )
         assert resp.status_code == 204
         assert thread_id in tm.delete_calls
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_thread_permissions_get_put_and_revision_conflict(tmp_path: Path) -> None:
+    """GET/PUT 走真实 PermissionsManager，stale revision 返回 409。"""
+    tm = FakeTM()
+    client = _login_client(tmp_path, tm)
+    try:
+        created = client.post(
+            "/api/threads",
+            json={"name": "permissions", "preset_id": "p1"},
+            headers=CSRF_HEADERS,
+        )
+        thread_id = created.json()["id"]
+
+        empty = client.get(f"/api/threads/{thread_id}/permissions")
+        assert empty.status_code == 200
+        assert empty.json() == {
+            "schema_version": 2,
+            "thread_id": thread_id,
+            "revision": 0,
+            "allow": [],
+            "deny": [],
+            "updated_at": None,
+            "migration_summary": None,
+        }
+
+        saved = client.put(
+            f"/api/threads/{thread_id}/permissions",
+            json={
+                "thread_id": thread_id,
+                "revision": 0,
+                "allow": [{"expression": "read_file", "scope_cwd": None}],
+                "deny": [{"expression": "run_shell(curl:*)", "scope_cwd": None}],
+            },
+            headers=CSRF_HEADERS,
+        )
+        assert saved.status_code == 200
+        assert saved.json()["revision"] == 1
+
+        conflict = client.put(
+            f"/api/threads/{thread_id}/permissions",
+            json={
+                "thread_id": thread_id,
+                "revision": 0,
+                "allow": [{"expression": "list_dir", "scope_cwd": None}],
+                "deny": [],
+            },
+            headers=CSRF_HEADERS,
+        )
+        assert conflict.status_code == 409
+        assert conflict.json()["detail"]["code"] == "permissions_revision_conflict"
+
+        unchanged = client.get(f"/api/threads/{thread_id}/permissions")
+        assert unchanged.json()["revision"] == 1
+        assert unchanged.json()["allow"] == [{"expression": "read_file", "scope_cwd": None}]
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_thread_permissions_rejects_cross_thread_and_unknown_field(tmp_path: Path) -> None:
+    """path/body 身份错位和未知字段均在路由合同层拒绝。"""
+    tm = FakeTM()
+    client = _login_client(tmp_path, tm)
+    try:
+        created = client.post(
+            "/api/threads",
+            json={"name": "permissions", "preset_id": "p1"},
+            headers=CSRF_HEADERS,
+        )
+        thread_id = created.json()["id"]
+        mismatch = client.put(
+            f"/api/threads/{thread_id}/permissions",
+            json={
+                "thread_id": "thread-bbbbbbbbbbbb",
+                "revision": 0,
+                "allow": [],
+                "deny": [],
+            },
+            headers=CSRF_HEADERS,
+        )
+        assert mismatch.status_code == 422
+        assert mismatch.json()["detail"]["code"] == "thread_id_mismatch"
+
+        unknown = client.put(
+            f"/api/threads/{thread_id}/permissions",
+            json={
+                "thread_id": thread_id,
+                "revision": 0,
+                "allow": [],
+                "deny": [],
+                "scope": "global",
+            },
+            headers=CSRF_HEADERS,
+        )
+        assert unknown.status_code == 422
     finally:
         client.__exit__(None, None, None)
 

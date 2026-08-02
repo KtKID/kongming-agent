@@ -2,14 +2,13 @@
 
 本脚本实现 AvatarAssistantManager，把 XSpace Avatar chat 请求接入现有
 generic_chat thread 运行链路。关键流程是校验或创建 thread，复用
-ThreadManager.boot_or_attach 与 bridge.run_once 启动普通对话，再返回 REST
+ThreadManager 的 submit_avatar_input 入口启动普通对话，再返回 REST
 accepted 响应。关键函数职责：capabilities 输出能力声明，chat 处理 REST 首发
-和已有 thread 消息，approval 仍由 Avatar WS 透传给 ThreadManager。
+和已有 thread 消息，approval 由全局 ApprovalManager 与 Avatar approval API 处理。
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import secrets
 from datetime import UTC, datetime
@@ -25,7 +24,7 @@ class AvatarAssistantManager:
     """Avatar 对话 Manager。
 
     职责：提供 AvatarChat 能力声明，并把 Avatar 输入提交到 generic_chat
-    ThreadManager/SessionBridge 链路。
+    ThreadManager 链路。
     关键输入：ThreadManagerProtocol 兼容对象和 AvatarChatRequest。
     关键输出：AvatarCapabilities 或 AvatarChatAccepted。
     """
@@ -56,26 +55,28 @@ class AvatarAssistantManager:
         metadata = await self._resolve_thread(tm, request)
         thread_id = str(getattr(metadata, "id", request.thread_id or ""))
 
+        await self._ensure_runtime_current(tm, thread_id)
+        attachments = self._attachments_to_dicts(request)
+        run_id = self._new_run_id(thread_id)
         try:
-            cell = await tm.boot_or_attach(thread_id)
+            await tm.submit_avatar_input(
+                thread_id,
+                request.text,
+                request_id=request.client_message_id,
+                reasoning_effort=request.reasoning_effort,
+                attachments=attachments,
+                avatar_run_id=run_id,
+            )
         except KeyError as exc:
             raise errors.thread_not_found(thread_id) from exc
         except errors.AvatarMessageError:
             raise
         except Exception as exc:
-            logger.exception("avatar boot_or_attach failed for thread_id=%s", thread_id)
-            raise errors.run_failed(f"avatar boot failed: {type(exc).__name__}") from exc
-
-        await self._ensure_runtime_current(tm, thread_id)
-        attachments = self._attachments_to_dicts(request)
-        run_id = self._new_run_id(thread_id)
-        self._start_run_task(
-            cell,
-            request.text,
-            run_id=run_id,
-            reasoning_effort=request.reasoning_effort,
-            attachments=attachments,
-        )
+            reason = str(getattr(exc, "reason", "") or "")
+            if reason == "pending_input_queue_full":
+                raise errors.invalid_request("pending_input_queue_full") from exc
+            logger.exception("avatar submit failed for thread_id=%s", thread_id)
+            raise errors.run_failed(f"avatar submit failed: {type(exc).__name__}") from exc
         return AvatarChatAccepted(
             thread_id=thread_id,
             run_id=run_id,
@@ -170,75 +171,6 @@ class AvatarAssistantManager:
         关键输出：fake-friendly 的短 run id 字符串。
         """
         return f"avatar-{thread_id}-{secrets.token_hex(4)}"
-
-    def _start_run_task(
-        self,
-        cell: Any,
-        text: str,
-        *,
-        run_id: str,
-        reasoning_effort: str | None,
-        attachments: list[dict[str, Any]] | None,
-    ) -> None:
-        """启动后台 generic_chat run_once task。
-
-        关键输入：ThreadCell、用户文本、run_id、reasoning effort 和附件。
-        关键输出：cell.current_run_task 被设置为新 task。
-        """
-        run_once = getattr(cell.bridge, "run_once", None)
-        if not callable(run_once):
-            raise errors.run_failed("avatar bridge does not expose run_once")
-
-        task = asyncio.create_task(
-            self._run_once_safely(
-                cell,
-                text,
-                reasoning_effort=reasoning_effort,
-                attachments=attachments,
-            ),
-            name=f"avatar-run-once-{getattr(cell, 'thread_id', 'unknown')}",
-        )
-        cell.current_run_task = task
-
-        def _clear_run_task(
-            finished: asyncio.Task[None],
-            *,
-            _cell: Any = cell,
-            _task: asyncio.Task[None] = task,
-            _run_id: str = run_id,
-        ) -> None:
-            if getattr(_cell, "current_run_task", None) is _task:
-                _cell.current_run_task = None
-            try:
-                finished.result()
-            except asyncio.CancelledError:
-                logger.info("avatar run cancelled: run_id=%s", _run_id)
-            except Exception:
-                logger.exception("avatar run failed after accepted: run_id=%s", _run_id)
-
-        task.add_done_callback(_clear_run_task)
-
-    async def _run_once_safely(
-        self,
-        cell: Any,
-        text: str,
-        *,
-        reasoning_effort: str | None,
-        attachments: list[dict[str, Any]] | None,
-    ) -> None:
-        """执行 bridge.run_once 并把异常留在后台 task 日志中。
-
-        关键输入：ThreadCell、文本、reasoning effort 和附件。
-        关键输出：普通 generic_chat run 完成；异常由 task callback 记录。
-        """
-        await cell.bridge.run_once(
-            text,
-            reasoning_effort=reasoning_effort,
-            attachments=attachments,
-        )
-        touch = getattr(cell, "touch", None)
-        if callable(touch):
-            touch()
 
 
 __all__ = ["AvatarAssistantManager"]

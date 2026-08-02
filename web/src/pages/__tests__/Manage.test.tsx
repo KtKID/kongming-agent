@@ -10,6 +10,7 @@ describe("ManagePage", () => {
         <Routes>
           <Route path="/manage" element={<ManagePage />}>
             <Route path="network" element={<div>Runtime Child</div>} />
+            <Route path="plugins" element={<div>Plugins Child</div>} />
             <Route path="model-providers" element={<div>Providers Child</div>} />
           </Route>
         </Routes>
@@ -18,13 +19,33 @@ describe("ManagePage", () => {
     expect(screen.getByText("运行管理")).toBeInTheDocument();
 
     const configTab = screen.getByRole("tab", { name: "配置" });
+    const pluginsTab = screen.getByRole("tab", { name: "插件" });
     const providersTab = screen.getByRole("tab", { name: "模型服务商" });
     const networkTab = screen.getByRole("tab", { name: "网络" });
     expect(configTab).toHaveAttribute("href", "/manage/config");
+    expect(pluginsTab).toHaveAttribute("href", "/manage/plugins");
     expect(providersTab).toHaveAttribute("href", "/manage/model-providers");
     expect(networkTab).toHaveAttribute("href", "/manage/network");
 
     expect(screen.getByText("Runtime Child")).toBeInTheDocument();
+  });
+
+  it("/manage/plugins 渲染插件子页面", () => {
+    render(
+      <MemoryRouter initialEntries={["/manage/plugins"]}>
+        <Routes>
+          <Route path="/manage" element={<ManagePage />}>
+            <Route path="plugins" element={<div>Plugins Child</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("tab", { name: "插件" })).toHaveAttribute(
+      "href",
+      "/manage/plugins",
+    );
+    expect(screen.getByText("Plugins Child")).toBeInTheDocument();
   });
 
   it("/manage/model-providers 渲染模型服务商子页面", () => {

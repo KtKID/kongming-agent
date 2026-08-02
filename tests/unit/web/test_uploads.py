@@ -804,7 +804,6 @@ class TestThreadManagerDeleteThreadCleansAssets:
                     "enabled": True,
                     "idle_timeout_seconds": 1800,
                     "idle_check_interval_seconds": 60,
-                    "pending_approval_timeout_seconds": 60,
                 },
             }
         )
@@ -892,7 +891,6 @@ class TestThreadManagerDeleteThreadCleansAssets:
                     "enabled": True,
                     "idle_timeout_seconds": 1800,
                     "idle_check_interval_seconds": 60,
-                    "pending_approval_timeout_seconds": 60,
                 },
             }
         )

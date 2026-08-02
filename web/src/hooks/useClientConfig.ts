@@ -3,6 +3,8 @@ import { apiGet } from "@/lib/api";
 import type { HeartbeatConfig } from "@/hooks/useThreadStatusWS";
 
 interface ClientConfigDTO {
+  host_environment?: string | null;
+  capabilities?: ClientCapabilitiesDTO | null;
   ws_heartbeat_interval_ms: number;
   ws_heartbeat_background_interval_ms: number;
   ws_heartbeat_timeout_ms: number;
@@ -11,7 +13,21 @@ interface ClientConfigDTO {
   timezone?: string | null;
 }
 
+interface ClientCapabilitiesDTO {
+  xspace_host?: boolean | null;
+  native_file_dialog?: boolean | null;
+}
+
+export type WebHostEnvironment = "browser" | "xspace";
+
+export interface WebShellCapabilities {
+  xspaceHost: boolean;
+  nativeFileDialog: boolean;
+}
+
 export interface ClientRuntimeConfig {
+  hostEnvironment: WebHostEnvironment;
+  capabilities: WebShellCapabilities;
   heartbeat: Required<HeartbeatConfig>;
   dashboardPollIntervalSeconds: number;
   timezone: string;
@@ -25,6 +41,11 @@ const DEFAULT_HEARTBEAT_CONFIG: Required<HeartbeatConfig> = {
 };
 
 const DEFAULT_CLIENT_CONFIG: ClientRuntimeConfig = {
+  hostEnvironment: "browser",
+  capabilities: {
+    xspaceHost: false,
+    nativeFileDialog: false,
+  },
   heartbeat: DEFAULT_HEARTBEAT_CONFIG,
   dashboardPollIntervalSeconds: 5,
   timezone: "UTC",
@@ -48,8 +69,34 @@ function normalizeTimezone(value: string | null | undefined): string {
   }
 }
 
-function normalizeClientConfig(dto: ClientConfigDTO): ClientRuntimeConfig {
+function normalizeHostEnvironment(
+  value: string | null | undefined,
+): WebHostEnvironment {
+  return value === "xspace" ? "xspace" : "browser";
+}
+
+function normalizeCapabilities(
+  dto: ClientConfigDTO,
+  hostEnvironment: WebHostEnvironment,
+): WebShellCapabilities {
+  const defaultValue = hostEnvironment === "xspace";
   return {
+    xspaceHost:
+      typeof dto.capabilities?.xspace_host === "boolean"
+        ? dto.capabilities.xspace_host
+        : defaultValue,
+    nativeFileDialog:
+      typeof dto.capabilities?.native_file_dialog === "boolean"
+        ? dto.capabilities.native_file_dialog
+        : defaultValue,
+  };
+}
+
+function normalizeClientConfig(dto: ClientConfigDTO): ClientRuntimeConfig {
+  const hostEnvironment = normalizeHostEnvironment(dto.host_environment);
+  return {
+    hostEnvironment,
+    capabilities: normalizeCapabilities(dto, hostEnvironment),
     heartbeat: {
       intervalMs: positiveFiniteOrDefault(
         dto.ws_heartbeat_interval_ms,
@@ -102,6 +149,8 @@ export function useClientConfig(): ClientRuntimeConfig | undefined {
 
 export const __clientConfigTest = {
   DEFAULT_CLIENT_CONFIG,
+  normalizeCapabilities,
   normalizeClientConfig,
+  normalizeHostEnvironment,
   normalizeTimezone,
 };

@@ -39,16 +39,119 @@ import type {
   ChatTurnState,
   ChatMessageUsage,
   ChatProviderKind,
+  ConversationReferenceDTO,
   UserInputAttachment,
+  ChatTimelineStoreDependencies,
+  StreamingCancelHandle,
+  StreamingRenderPolicy,
+  StreamingRenderScheduler,
+  StreamingVisibilitySource,
 } from "@/chat/types";
 import type { NormalizedMessage } from "@/protocol";
+
+/** 流式渲染的默认资源预算；数值同时受 capability spec 覆盖。 */
+export const DEFAULT_STREAMING_RENDER_POLICY: StreamingRenderPolicy = Object.freeze({
+  foregroundFlushIntervalMs: 50,
+  backgroundFlushIntervalMs: 100,
+  maxBufferedEventsPerTurn: 256,
+  maxBufferedCharsPerTurn: 32 * 1024,
+  maxBufferedTurnsPerStore: 32,
+  maxBufferedEventsPerStore: 2048,
+  maxBufferedCharsPerStore: 256 * 1024,
+});
+
+type TurnKey = string;
+
+interface PendingTurn {
+  readonly threadId: string;
+  readonly runId: string;
+  readonly turnId: string;
+  readonly turn: number | null;
+  readonly provider: ChatProviderKind;
+  readonly messageId?: string;
+  readonly createdAt: number;
+  contentParts: string[];
+  reasoningParts: string[];
+  eventCount: number;
+  charCount: number;
+  lastCreatedAt: number;
+}
+
+interface ScheduledFlush {
+  readonly generation: number;
+  readonly handle: StreamingCancelHandle;
+}
+
+const browserScheduler: StreamingRenderScheduler = {
+  scheduleForeground(delayMs, callback) {
+    let cancelled = false;
+    let frame: number | null = null;
+    const timeout = globalThis.setTimeout(() => {
+      if (cancelled) return;
+      if (typeof requestAnimationFrame === "function") {
+        frame = requestAnimationFrame(() => {
+          if (!cancelled) callback();
+        });
+        return;
+      }
+      callback();
+    }, delayMs);
+    return {
+      cancel() {
+        cancelled = true;
+        globalThis.clearTimeout(timeout);
+        if (frame !== null && typeof cancelAnimationFrame === "function") {
+          cancelAnimationFrame(frame);
+        }
+      },
+    };
+  },
+  scheduleBackground(delayMs, callback) {
+    let cancelled = false;
+    const timeout = globalThis.setTimeout(() => {
+      if (!cancelled) callback();
+    }, delayMs);
+    return {
+      cancel() {
+        cancelled = true;
+        globalThis.clearTimeout(timeout);
+      },
+    };
+  },
+};
+
+const browserVisibility: StreamingVisibilitySource = {
+  isHidden: () => typeof document !== "undefined" && document.hidden,
+  subscribe(listener) {
+    if (typeof document === "undefined") return () => {};
+    document.addEventListener("visibilitychange", listener);
+    return () => document.removeEventListener("visibilitychange", listener);
+  },
+};
 
 export class ChatTimelineStore implements ChatTimelineStoreApi {
   private state: ChatTimelineState;
   private listeners = new Set<() => void>();
+  private readonly policy: StreamingRenderPolicy;
+  private readonly now: () => number;
+  private readonly scheduler: StreamingRenderScheduler;
+  private readonly visibility: StreamingVisibilitySource;
+  private readonly unsubscribeVisibility: () => void;
+  private readonly pendingByTurn = new Map<TurnKey, PendingTurn>();
+  private totalPendingEvents = 0;
+  private totalPendingChars = 0;
+  private scheduledFlush: ScheduledFlush | null = null;
+  private schedulerGeneration = 0;
+  private lastVisibleCommitAt: number | null = null;
+  private disposed = false;
 
-  constructor(threadId: string) {
+  constructor(threadId: string, dependencies: ChatTimelineStoreDependencies = {}) {
     this.state = ChatTimelineStore.emptyState(threadId);
+    this.policy = Object.freeze({ ...DEFAULT_STREAMING_RENDER_POLICY, ...dependencies.policy });
+    this.now = dependencies.now ?? Date.now;
+    this.scheduler = dependencies.scheduler ?? browserScheduler;
+    this.visibility = dependencies.visibility ?? browserVisibility;
+    this.unsubscribeVisibility = this.visibility.subscribe(() => this.handleVisibilityChange());
   }
 
   static emptyState(threadId: string): ChatTimelineState {
@@ -92,42 +195,86 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
   }
 
   resetThread(threadId: string): void {
+    this.cancelScheduledFlush();
+    this.clearPending();
     this.state = ChatTimelineStore.emptyState(threadId);
     this.notify();
   }
 
   applyHistory(batch: ChatHistoryBatch): void {
-    // 历史批量：逐条复用 applyEventSilent（不 notify），全部处理完末尾单次 notify。
+    if (this.disposed) return;
+    const before = this.state;
+    this.cancelScheduledFlush();
+    this.flushAllPendingSilent("history");
+    // 历史批量绝不建调度：delta 直接写入累积消息，其他事件复用静默归并。
     for (const event of batch.events) {
-      this.applyEventSilent(event);
+      this.applyHistoryEventSilent(event);
     }
     this.state = { ...this.state, historyLoaded: true };
-    this.notify();
+    if (this.state !== before) this.notify();
   }
 
   applyEvent(event: ChatEvent): void {
-    // 单次实时事件：内部 helper 全静默写 state，末尾单次 notify。
-    this.applyEventSilent(event);
-    this.notify();
+    if (this.disposed) return;
+    const category = classifyEvent(event);
+    switch (category) {
+      case "delta":
+        this.bufferAssistantDelta(event);
+        return;
+      case "terminal":
+        this.applyTerminal(event);
+        return;
+      case "ordering":
+        this.applyOrderingBoundary(event);
+        return;
+      case "stream-failure":
+        this.applyStreamFailure(event);
+        return;
+      case "history":
+        this.applyHistoryBoundary(event);
+        return;
+      case "immediate":
+        this.applyImmediate(event);
+        return;
+      default: {
+        const _exhaustive: never = category;
+        return _exhaustive;
+      }
+    }
   }
 
-  /** 实际归并逻辑：写 `this.state`，**不 notify**。 */
-  private applyEventSilent(event: ChatEvent): void {
+  /** 取消全部异步资源并丢弃尚未提交的流式分片；不再通知订阅者。 */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.cancelScheduledFlush();
+    this.clearPending();
+    this.unsubscribeVisibility();
+    this.listeners.clear();
+  }
+
+  /** 普通事件归并：写 `this.state`，不调度、不通知。 */
+  private applyImmediateEventSilent(event: ChatEvent): void {
     switch (event.kind) {
       case "history_batch_loaded":
         this.expandHistory(event);
         return;
       case "user_message":
-        this.upsertMessage(event, "user", "completed", String(event.payload.text ?? ""));
+        this.upsertMessage(
+          event,
+          "user",
+          "completed",
+          String(event.payload.text ?? ""),
+        );
         this.attachUserAttachments(event);
+        this.attachUserReferences(event);
         return;
       case "assistant_message_started":
         this.ensureTurn(event);
-        this.upsertMessage(event, "assistant", "streaming", "");
         this.state = { ...this.state, activeStreamingTurnId: event.turnId };
         return;
       case "assistant_message_delta":
-        this.appendAssistantDelta(event);
+        this.appendAssistantDeltaCommitted(event);
         return;
       case "assistant_message_completed":
         this.completeAssistant(event);
@@ -151,8 +298,58 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
         this.upsertError(event);
         return;
       default:
-        return;
+        return assertNever(event.kind);
     }
+  }
+
+  /** history 批量入口的静默归并；历史 delta 直接落已提交状态，绝不创建 scheduler。 */
+  private applyHistoryEventSilent(event: ChatEvent): void {
+    this.applyImmediateEventSilent(event);
+  }
+
+  private applyImmediate(event: ChatEvent): void {
+    const before = this.state;
+    this.applyImmediateEventSilent(event);
+    if (this.state !== before) this.notify();
+  }
+
+  private applyHistoryBoundary(event: ChatEvent): void {
+    const before = this.state;
+    this.cancelScheduledFlush();
+    this.flushAllPendingSilent("history");
+    this.applyHistoryEventSilent(event);
+    this.state = { ...this.state, historyLoaded: true };
+    if (this.state !== before) this.notify();
+  }
+
+  private applyTerminal(event: ChatEvent): void {
+    const before = this.state;
+    this.cancelScheduledFlush();
+    this.flushAllPendingSilent("terminal");
+    if (event.kind === "assistant_message_completed") {
+      this.completeAssistant(event);
+    } else {
+      this.completeTurn(event);
+    }
+    if (this.state !== before) this.notify();
+  }
+
+  private applyOrderingBoundary(event: ChatEvent): void {
+    const before = this.state;
+    this.cancelScheduledFlush();
+    this.flushAllPendingSilent("ordering");
+    this.applyImmediateEventSilent(event);
+    if (this.state !== before) this.notify();
+  }
+
+  private applyStreamFailure(event: ChatEvent): void {
+    const before = this.state;
+    this.cancelScheduledFlush();
+    const failedTurnId = this.state.activeStreamingTurnId ?? event.turnId;
+    this.clearFailedTurn(failedTurnId);
+    this.flushAllPendingSilent("stream-error");
+    this.upsertError(event);
+    if (this.state !== before) this.notify();
   }
 
   // ---- turn 归并 ----
@@ -163,6 +360,8 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
     const turn: ChatTurnState = {
       id: event.turnId,
       threadId: event.threadId,
+      runId: eventRunId(event),
+      turn: eventTurn(event),
       provider: event.provider as ChatProviderKind,
       phase: "streaming",
       toolCallIds: [],
@@ -196,22 +395,30 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
   ): void {
     const id = this.messageKey(event, role);
     const prev = this.state.messagesById[id];
+    const incomingRunId = eventRunId(event);
+    const incomingTurn = eventTurn(event);
+    const hasIncomingTurnIdentity = Boolean(incomingRunId) || incomingTurn !== null;
+    const turnId = hasIncomingTurnIdentity ? event.turnId : (prev?.turnId ?? event.turnId);
     const record: ChatMessageRecord = {
       id,
       threadId: event.threadId,
-      turnId: event.turnId,
+      turnId,
+      runId: incomingRunId || prev?.runId || "",
+      turn: incomingTurn ?? prev?.turn ?? null,
       role,
       provider: event.provider as ChatProviderKind,
       parts: [{ type: "text", text }],
       reasoning: prev?.reasoning,
       usage: prev?.usage,
       status,
+      deliveryStatus:
+        role === "user" && event.payload.deliveryStatus === "steered" ? "steered" : undefined,
       createdAt: prev?.createdAt ?? event.createdAt,
       updatedAt: event.createdAt,
     };
     this.writeMessage(id, record, !prev);
-    if (role === "user") this.patchTurn(event.turnId, { userMessageId: id });
-    if (role === "assistant") this.patchTurn(event.turnId, { assistantMessageId: id });
+    if (role === "user") this.patchTurn(turnId, { userMessageId: id });
+    if (role === "assistant") this.patchTurn(turnId, { assistantMessageId: id });
   }
 
   /**
@@ -235,6 +442,16 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
     this.patchMessage(id, { parts: [...textParts, ...attachmentParts] });
   }
 
+  /** 把 user_message 事件携带的 conversation references 落到 user record。 */
+  private attachUserReferences(event: ChatEvent): void {
+    const references = conversationReferencesFromValue(event.payload.references);
+    if (!references) return;
+    const id = this.messageKey(event, "user");
+    const prev = this.state.messagesById[id];
+    if (!prev) return;
+    this.patchMessage(id, { references });
+  }
+
   /** 写入消息 + 维护 orderedMessageIds（首见追加，已存在原位更新）。 */
   private writeMessage(id: string, record: ChatMessageRecord, isNew: boolean): void {
     const orderedMessageIds = isNew
@@ -247,7 +464,57 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
     };
   }
 
-  private appendAssistantDelta(event: ChatEvent): void {
+  /**
+   * 实时 delta 只进入私有 pending buffer。这里允许建立 turn 状态，禁止可见 notify；
+   * 真正的 assistant record 在 scheduler / 边界 flush 中统一提交。
+   */
+  private bufferAssistantDelta(event: ChatEvent): void {
+    this.ensureTurn(event);
+    if (this.state.activeStreamingTurnId !== event.turnId) {
+      this.state = { ...this.state, activeStreamingTurnId: event.turnId };
+    }
+    const key = turnKey(event);
+    let pending = this.pendingByTurn.get(key);
+    if (!pending) {
+      pending = {
+        threadId: event.threadId,
+        runId: eventRunId(event),
+        turnId: event.turnId,
+        turn: eventTurn(event),
+        provider: event.provider as ChatProviderKind,
+        messageId: event.messageId,
+        createdAt: event.createdAt,
+        contentParts: [],
+        reasoningParts: [],
+        eventCount: 0,
+        charCount: 0,
+        lastCreatedAt: event.createdAt,
+      };
+      this.pendingByTurn.set(key, pending);
+    }
+    const delta = stringPayload(event.payload.delta);
+    const reasoningDelta = stringPayload(event.payload.reasoningDelta);
+    if (delta) pending.contentParts.push(delta);
+    if (reasoningDelta) pending.reasoningParts.push(reasoningDelta);
+    const chars = delta.length + reasoningDelta.length;
+    pending.eventCount += 1;
+    pending.charCount += chars;
+    pending.lastCreatedAt = event.createdAt;
+    this.totalPendingEvents += 1;
+    this.totalPendingChars += chars;
+
+    if (this.hasReachedPendingLimit(pending)) {
+      const before = this.state;
+      this.cancelScheduledFlush();
+      this.flushAllPendingSilent("emergency-size");
+      if (this.state !== before) this.notify();
+      return;
+    }
+    this.ensureScheduledFlush();
+  }
+
+  /** 把一个 delta 直接写入已提交 state，仅用于 history 批量或 flush。 */
+  private appendAssistantDeltaCommitted(event: ChatEvent): void {
     const id = this.messageKey(event, "assistant");
     const prev = this.state.messagesById[id];
     const delta = String(event.payload.delta ?? "");
@@ -267,6 +534,84 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
     this.patchMessage(id, patch);
   }
 
+  /** scheduler、terminal、ordering、history 共享的全 Store 静默提交入口。 */
+  private flushAllPendingSilent(
+    _reason: "interval" | "emergency-size" | "terminal" | "ordering" | "history" | "stream-error",
+  ): boolean {
+    if (this.pendingByTurn.size === 0) return false;
+    const pendingTurns = [...this.pendingByTurn.values()];
+    this.clearPending();
+    for (const pending of pendingTurns) {
+      const event: ChatEvent = {
+        kind: "assistant_message_delta",
+        provider: pending.provider,
+        threadId: pending.threadId,
+        turnId: pending.turnId,
+        runId: pending.runId,
+        turn: pending.turn,
+        messageId: pending.messageId,
+        createdAt: pending.lastCreatedAt,
+        payload: {
+          delta: pending.contentParts.join(""),
+          reasoningDelta: pending.reasoningParts.join(""),
+        },
+      };
+      this.appendAssistantDeltaCommitted(event);
+    }
+    return true;
+  }
+
+  private ensureScheduledFlush(): void {
+    if (this.scheduledFlush || this.pendingByTurn.size === 0 || this.disposed) return;
+    const generation = ++this.schedulerGeneration;
+    const callback = () => {
+      if (this.disposed || generation !== this.schedulerGeneration) return;
+      this.scheduledFlush = null;
+      const before = this.state;
+      this.flushAllPendingSilent("interval");
+      if (!this.visibility.isHidden()) this.lastVisibleCommitAt = this.now();
+      if (this.state !== before) this.notify();
+    };
+    const handle = this.visibility.isHidden()
+      ? this.scheduler.scheduleBackground(this.policy.backgroundFlushIntervalMs, callback)
+      : this.scheduler.scheduleForeground(this.foregroundDelayMs(), callback);
+    this.scheduledFlush = { generation, handle };
+  }
+
+  private foregroundDelayMs(): number {
+    if (this.lastVisibleCommitAt === null) return this.policy.foregroundFlushIntervalMs;
+    return Math.max(0, this.policy.foregroundFlushIntervalMs - (this.now() - this.lastVisibleCommitAt));
+  }
+
+  private handleVisibilityChange(): void {
+    if (this.disposed || this.pendingByTurn.size === 0) return;
+    this.cancelScheduledFlush();
+    this.ensureScheduledFlush();
+  }
+
+  private cancelScheduledFlush(): void {
+    const scheduled = this.scheduledFlush;
+    this.schedulerGeneration += 1;
+    this.scheduledFlush = null;
+    scheduled?.handle.cancel();
+  }
+
+  private clearPending(): void {
+    this.pendingByTurn.clear();
+    this.totalPendingEvents = 0;
+    this.totalPendingChars = 0;
+  }
+
+  private hasReachedPendingLimit(pending: PendingTurn): boolean {
+    return (
+      pending.eventCount >= this.policy.maxBufferedEventsPerTurn ||
+      pending.charCount >= this.policy.maxBufferedCharsPerTurn ||
+      this.pendingByTurn.size >= this.policy.maxBufferedTurnsPerStore ||
+      this.totalPendingEvents >= this.policy.maxBufferedEventsPerStore ||
+      this.totalPendingChars >= this.policy.maxBufferedCharsPerStore
+    );
+  }
+
   private completeAssistant(event: ChatEvent): void {
     const id = this.messageKey(event, "assistant");
     const prev = this.state.messagesById[id];
@@ -278,20 +623,26 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
       if (usage) this.patchMessage(id, { usage });
     } else {
       // assistant.final 带完整内容时以它为准，否则保留已累计的 delta。
-      const parts =
-        typeof finalText === "string" && finalText.length > 0
-          ? [{ type: "text" as const, text: finalText }]
-          : prev.parts;
-      const patch: Partial<ChatMessageRecord> = {
-        parts,
-        status: "completed",
-        updatedAt: event.createdAt,
-      };
-      if (usage) patch.usage = usage;
-      this.patchMessage(id, patch);
+      const finalChangesText =
+        typeof finalText === "string" &&
+        finalText.length > 0 &&
+        textPartsOf(prev.parts) !== finalText;
+      const usageChanges = usage !== undefined && !sameUsage(prev.usage, usage);
+      if (prev.status !== "completed" || finalChangesText || usageChanges) {
+        const patch: Partial<ChatMessageRecord> = {
+          status: "completed",
+          updatedAt: event.createdAt,
+        };
+        if (finalChangesText) patch.parts = [{ type: "text", text: finalText as string }];
+        if (usageChanges) patch.usage = usage;
+        this.patchMessage(id, patch);
+      }
     }
     if (this.state.activeStreamingTurnId === event.turnId) {
       this.state = { ...this.state, activeStreamingTurnId: null };
+    }
+    if (this.state.turnsById[event.turnId]?.phase !== "completed") {
+      this.patchTurn(event.turnId, { phase: "completed" });
     }
   }
 
@@ -331,6 +682,8 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
         id,
         threadId: event.threadId,
         turnId: event.turnId,
+        runId: eventRunId(event),
+        turn: eventTurn(event),
         partialInput: "",
         startedAt: event.createdAt,
       };
@@ -351,6 +704,8 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
       id,
       threadId: event.threadId,
       turnId: event.turnId,
+      runId: eventRunId(event),
+      turn: eventTurn(event),
       toolName: String(event.payload.toolName ?? "unknown"),
       status: "running",
       inputText:
@@ -384,6 +739,8 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
           id,
           threadId: event.threadId,
           turnId: event.turnId,
+          runId: eventRunId(event),
+          turn: eventTurn(event),
           role: "tool",
           provider: event.provider as ChatProviderKind,
           parts: [],
@@ -429,6 +786,8 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
           id,
           threadId: event.threadId,
           turnId: event.turnId,
+          runId: eventRunId(event),
+          turn: eventTurn(event),
           partialInput: partialDelta,
           startedAt: event.createdAt,
         };
@@ -488,10 +847,74 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
   }
 
   private completeTurn(event: ChatEvent): void {
-    this.ensureTurn(event);
-    this.patchTurn(event.turnId, { phase: "completed" });
+    const turn = this.ensureTurn(event);
+    if (turn.phase !== "completed") this.patchTurn(event.turnId, { phase: "completed" });
+    if (turn.assistantMessageId) {
+      const message = this.state.messagesById[turn.assistantMessageId];
+      if (message) {
+        const historyIndex = event.payload.historyIndex;
+        const forkHistoryIndex =
+          event.payload.hasToolCalls !== true &&
+          typeof historyIndex === "number"
+            ? historyIndex
+            : undefined;
+        this.patchMessage(turn.assistantMessageId, {
+          status: "completed",
+          updatedAt: event.createdAt,
+          forkHistoryIndex,
+        });
+      }
+    }
     if (this.state.activeStreamingTurnId === event.turnId) {
       this.state = { ...this.state, activeStreamingTurnId: null };
+    }
+  }
+
+  /**
+   * llm_error 的失败收口：失败 turn 的未完成 assistant 与 pending 全部丢弃，
+   * 同 Store 其它 turn 仍由调用方继续 flush，避免遗留孤儿 callback/分片。
+   */
+  private clearFailedTurn(turnId: string): void {
+    for (const [key, pending] of this.pendingByTurn) {
+      if (pending.turnId === turnId) {
+        this.totalPendingEvents -= pending.eventCount;
+        this.totalPendingChars -= pending.charCount;
+        this.pendingByTurn.delete(key);
+      }
+    }
+
+    const messageIdsToDelete = Object.values(this.state.messagesById)
+      .filter((record) => record.turnId === turnId && record.role === "assistant" && record.status !== "completed")
+      .map((record) => record.id);
+    const messageIdSet = new Set(messageIdsToDelete);
+    const messagesById = { ...this.state.messagesById };
+    for (const id of messageIdsToDelete) delete messagesById[id];
+    const currentTurn = this.state.turnsById[turnId];
+    const turnsById = currentTurn
+      ? {
+          ...this.state.turnsById,
+          [turnId]: {
+            ...currentTurn,
+            phase: "failed" as const,
+            assistantMessageId: null,
+          },
+        }
+      : this.state.turnsById;
+    const activeStreamingTurnId =
+      this.state.activeStreamingTurnId === turnId ? null : this.state.activeStreamingTurnId;
+
+    if (
+      messageIdsToDelete.length > 0 ||
+      turnsById !== this.state.turnsById ||
+      activeStreamingTurnId !== this.state.activeStreamingTurnId
+    ) {
+      this.state = {
+        ...this.state,
+        messagesById,
+        orderedMessageIds: this.state.orderedMessageIds.filter((id) => !messageIdSet.has(id)),
+        turnsById,
+        activeStreamingTurnId,
+      };
     }
   }
 
@@ -520,6 +943,8 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
       id,
       threadId: event.threadId,
       turnId: event.turnId,
+      runId: eventRunId(event),
+      turn: eventTurn(event),
       role: "system",
       provider: event.provider as ChatProviderKind,
       parts: [],
@@ -543,6 +968,8 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
       id,
       threadId: event.threadId,
       turnId: event.turnId,
+      runId: eventRunId(event),
+      turn: eventTurn(event),
       role: "error",
       provider: event.provider as ChatProviderKind,
       parts: [],
@@ -572,7 +999,14 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
       const roleKey = normalizedHistoryRole(m);
       if (roleKey === "user" && lastRole && lastRole !== "user") turnIndex += 1;
       const turnId = `${event.threadId}-history-${turnIndex}`;
-      this.expandHistoryMessage(event.provider as ChatProviderKind, event.threadId, turnId, m, event.createdAt);
+      this.expandHistoryMessage(
+        event.provider as ChatProviderKind,
+        event.threadId,
+        turnId,
+        turnIndex,
+        m,
+        event.createdAt,
+      );
       lastRole = roleKey;
     }
   }
@@ -581,6 +1015,7 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
     provider: ChatProviderKind,
     threadId: string,
     turnId: string,
+    turnIndex: number,
     m: NormalizedMessage,
     fallbackAt: number,
   ): void {
@@ -589,17 +1024,30 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
 
     if (m.frame_type === "text" && m.role === "user") {
       if (this.state.messagesById[id]) return; // 已有同源 → 幂等跳过
-      this.ensureHistoryTurn(provider, threadId, turnId);
+      this.ensureHistoryTurn(provider, threadId, turnId, turnIndex);
       const parts: ChatMessagePart[] = [{ type: "text", text: String(m.content ?? "") }];
+      const attachments = attachmentsFromMetadata(m.metadata);
+      if (attachments) {
+        parts.push(
+          ...attachments.map((attachment) => ({
+            type: "attachment" as const,
+            attachment,
+          })),
+        );
+      }
+      const references = conversationReferencesFromMetadata(m.metadata);
       this.writeMessage(
         id,
         {
           id,
           threadId,
           turnId,
+          runId: "",
+          turn: turnIndex,
           role: "user",
           provider,
           parts,
+          references,
           status: "completed",
           createdAt: at,
           updatedAt: at,
@@ -613,16 +1061,20 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
     if (m.frame_type === "text") {
       const prev = this.state.messagesById[id];
       if (prev) return;
-      this.ensureHistoryTurn(provider, threadId, turnId);
+      this.ensureHistoryTurn(provider, threadId, turnId, turnIndex);
       this.writeMessage(
         id,
         {
           id,
           threadId,
           turnId,
+          runId: "",
+          turn: turnIndex,
           role: "assistant",
           provider,
           parts: [{ type: "text", text: String(m.content ?? "") }],
+          forkHistoryIndex:
+            typeof m.historyIndex === "number" ? m.historyIndex : undefined,
           status: "completed",
           createdAt: at,
           updatedAt: at,
@@ -636,7 +1088,7 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
     if (m.frame_type === "tool_use") {
       const callId = m.toolId ?? id;
       if (this.state.messagesById[callId]) return;
-      this.ensureHistoryTurn(provider, threadId, turnId);
+      this.ensureHistoryTurn(provider, threadId, turnId, turnIndex);
       const args =
         m.toolInput && typeof m.toolInput === "object"
           ? (m.toolInput as Record<string, unknown>)
@@ -645,6 +1097,8 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
         id: callId,
         threadId,
         turnId,
+        runId: "",
+        turn: turnIndex,
         toolName: m.toolName ?? "unknown",
         status: "running",
         inputText: typeof m.toolInput === "string" ? m.toolInput : JSON.stringify(m.toolInput ?? {}),
@@ -667,6 +1121,8 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
           id: callId,
           threadId,
           turnId,
+          runId: "",
+          turn: turnIndex,
           role: "tool",
           provider,
           parts: [],
@@ -681,7 +1137,7 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
 
     if (m.frame_type !== "tool_result") return;
     const callId = m.toolId ?? id;
-    this.ensureHistoryTurn(provider, threadId, turnId);
+    this.ensureHistoryTurn(provider, threadId, turnId, turnIndex);
     const ok = m.isError !== true;
     const prevTool = this.state.toolsById[callId];
     const outputText = typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "");
@@ -689,6 +1145,8 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
       id: callId,
       threadId,
       turnId,
+      runId: "",
+      turn: turnIndex,
       toolName: m.toolName ?? prevTool?.toolName ?? "unknown",
       status: ok ? "completed" : "failed",
       inputText: prevTool?.inputText ?? "",
@@ -724,6 +1182,8 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
         id: callId,
         threadId,
         turnId,
+        runId: "",
+        turn: turnIndex,
         role: "tool",
         provider,
         parts: [],
@@ -739,11 +1199,14 @@ export class ChatTimelineStore implements ChatTimelineStoreApi {
     provider: ChatProviderKind,
     threadId: string,
     turnId: string,
+    turnIndex: number,
   ): void {
     if (this.state.turnsById[turnId]) return;
     const turn: ChatTurnState = {
       id: turnId,
       threadId,
+      runId: "",
+      turn: turnIndex,
       provider,
       phase: "completed",
       toolCallIds: [],
@@ -765,6 +1228,56 @@ function mergeText(parts: ChatMessagePart[], delta: string): ChatMessagePart[] {
   return next;
 }
 
+function textPartsOf(parts: ChatMessagePart[]): string {
+  return parts
+    .filter((part): part is Extract<ChatMessagePart, { type: "text" }> => part.type === "text")
+    .map((part) => part.text)
+    .join("");
+}
+
+function sameUsage(left: ChatMessageUsage | undefined, right: ChatMessageUsage): boolean {
+  return left?.prompt === right.prompt && left.completion === right.completion && left.total === right.total;
+}
+
+type EventCategory = "delta" | "terminal" | "ordering" | "stream-failure" | "history" | "immediate";
+
+/** 事件分类真源：新增有限 ChatEventKind 后 default 的 never 迫使显式决定边界语义。 */
+function classifyEvent(event: ChatEvent): EventCategory {
+  switch (event.kind) {
+    case "assistant_message_delta":
+      return "delta";
+    case "assistant_message_completed":
+    case "turn_completed":
+      return "terminal";
+    case "tool_call_started":
+      return "ordering";
+    case "error":
+      return event.payload.errorCode === "llm_error" ? "stream-failure" : "ordering";
+    case "history_batch_loaded":
+      return "history";
+    case "user_message":
+    case "assistant_message_started":
+    case "tool_call_delta":
+    case "tool_call_completed":
+    case "status":
+      return "immediate";
+    default:
+      return assertNever(event.kind);
+  }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled ChatEventKind: ${String(value)}`);
+}
+
+function turnKey(event: ChatEvent): TurnKey {
+  return `${event.threadId}\u0000${eventRunId(event)}\u0000${event.turnId}`;
+}
+
+function stringPayload(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
 function normalizedMessageMs(msg: NormalizedMessage, fallback: number): number {
   if (!msg.timestamp) return fallback;
   const parsed = Date.parse(msg.timestamp);
@@ -774,4 +1287,66 @@ function normalizedMessageMs(msg: NormalizedMessage, fallback: number): number {
 function normalizedHistoryRole(msg: NormalizedMessage): string {
   if (msg.frame_type === "tool_use" || msg.frame_type === "tool_result") return "tool";
   return msg.role ?? "assistant";
+}
+
+function eventRunId(event: ChatEvent): string {
+  return event.runId ?? "";
+}
+
+function eventTurn(event: ChatEvent): number | null {
+  return typeof event.turn === "number" ? event.turn : null;
+}
+
+function conversationReferencesFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+): ConversationReferenceDTO[] | undefined {
+  if (!metadata || typeof metadata !== "object") return undefined;
+  return conversationReferencesFromValue(metadata.conversation_references);
+}
+
+function attachmentsFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+): UserInputAttachment[] | undefined {
+  if (!metadata || typeof metadata !== "object") return undefined;
+  const raw = metadata.attachments;
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const attachments = raw.filter(isUserInputAttachment);
+  return attachments.length > 0 ? attachments : undefined;
+}
+
+function isUserInputAttachment(value: unknown): value is UserInputAttachment {
+  if (!value || typeof value !== "object") return false;
+  const attachment = value as Partial<UserInputAttachment>;
+  return (
+    typeof attachment.asset_id === "string" &&
+    (attachment.kind === "image" ||
+      attachment.kind === "video" ||
+      attachment.kind === "file") &&
+    typeof attachment.mime_type === "string" &&
+    typeof attachment.size_bytes === "number" &&
+    typeof attachment.preview_url === "string" &&
+    (attachment.status === "ready" ||
+      attachment.status === "processing" ||
+      attachment.status === "failed")
+  );
+}
+
+function conversationReferencesFromValue(
+  raw: unknown,
+): ConversationReferenceDTO[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const refs = raw.filter(isConversationReferenceDTO);
+  return refs.length > 0 ? refs : undefined;
+}
+
+function isConversationReferenceDTO(value: unknown): value is ConversationReferenceDTO {
+  if (!value || typeof value !== "object") return false;
+  const ref = value as Partial<ConversationReferenceDTO>;
+  return (
+    typeof ref.id === "string" &&
+    typeof ref.kind === "string" &&
+    typeof ref.ref === "string" &&
+    typeof ref.label === "string" &&
+    typeof ref.activation === "string"
+  );
 }

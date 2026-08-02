@@ -35,6 +35,19 @@ jobs:
       - name: Install dependencies (uv sync --all-extras)
         run: uv sync --all-extras
 
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Web dependencies
+        run: npm ci --prefix web
+
+      - name: Check generated Web protocol
+        run: make web-protocol-check
+
       - name: Format check (ruff format --check)
         run: make fmt-check
 

@@ -8,6 +8,7 @@ import { NotFoundPage } from "@/pages/NotFound";
 import { RuntimeStatusPage } from "@/modules/dashboard";
 import { ConfigPage } from "@/modules/dashboard/config";
 import { ModelProvidersPage } from "@/modules/model-providers";
+import { PluginsPage } from "@/modules/plugin-management";
 import { TaskDetailOverlayPage } from "@/modules/task-detail";
 
 /**
@@ -59,6 +60,7 @@ export const router = createBrowserRouter([
               { index: true, element: <Navigate to="config" replace /> },
               { path: "config", element: <Navigate to="model" replace /> },
               { path: "config/:section", element: <ConfigPage /> },
+              { path: "plugins", element: <PluginsPage /> },
               { path: "model-providers", element: <ModelProvidersPage /> },
               { path: "network", element: <RuntimeStatusPage /> },
             ],

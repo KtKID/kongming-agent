@@ -21,22 +21,33 @@ from fastapi.testclient import TestClient
 
 from hosts.web.app import create_app
 from infrastructure.config.models import Config
+from scheduler.domain import (
+    RunFailureReason,
+    RunStatus,
+    ScheduledRun,
+    ScheduledTask,
+    ScheduleTrigger,
+    TaskExecutionPolicy,
+    TaskLifecycleState,
+    TaskOrigin,
+    TaskTarget,
+    TriggerType,
+)
+from scheduler.store import Store
+from scheduler.timing import to_iso, utc_now
 
 
 def _make_cfg(*, scheduler_enabled: bool) -> Config:
     return Config.model_validate(
         {
             "model": {
-                "name": "fake",
-                "base_url": "http://127.0.0.1:1234/v1",
-                "api_key": "",
+                "preset_id": "local-gemma-4-e4b-it",
             },
             "web": {
                 "enabled": True,
                 "dev_mode": True,
                 "idle_timeout_seconds": 1800,
                 "idle_check_interval_seconds": 60,
-                "pending_approval_timeout_seconds": 60,
             },
             "scheduler": {
                 "enabled": scheduler_enabled,
@@ -126,45 +137,101 @@ def _seed_password(home: Path, password: str = "test-password") -> None:
     (web_dir / "password.hash").write_text(hash_password(password), encoding="utf-8")
 
 
+def _seed_running_scheduler_run(cron_home: Path, task_id: str = "task-stale") -> None:
+    now = to_iso(utc_now())
+    store = Store(cron_home)
+    task = store.create_task(
+        ScheduledTask(
+            task_id=task_id,
+            name="stale task",
+            lifecycle=TaskLifecycleState.SCHEDULED,
+            origin=TaskOrigin.WEB,
+            trigger=ScheduleTrigger(
+                trigger_type=TriggerType.ONCE,
+                expr=now,
+                timezone="UTC",
+            ),
+            policy=TaskExecutionPolicy(),
+            target=TaskTarget(agent_name="default", input_text="hi"),
+            next_run_at=now,
+            last_run_at=None,
+            created_by="test",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    store.append_run(
+        ScheduledRun(
+            run_id="run-stale",
+            task_id=task.task_id,
+            status=RunStatus.RUNNING,
+            scheduled_for=now,
+            started_at=now,
+            finished_at=None,
+            session_id="session-stale",
+            result_status=None,
+            final_message_excerpt=None,
+            error_message=None,
+            failure_reason=None,
+            delivery_error=None,
+            silent_suppressed=False,
+            thread_id="thread-aaaaaaaaaaaa",
+        )
+    )
+
+
 def test_lifespan_starts_ticker_when_scheduler_enabled(monkeypatch, tmp_path: Path) -> None:
     """scheduler.enabled=True → ticker 起跑 + shutdown 优雅退出。"""
     captured: dict[str, Any] = {
         "ticker_calls": 0,
         "factory_calls": 0,
         "aclose_calls": 0,
+        "manager_aclose_calls": 0,
         "stop_event_set": False,
     }
 
     cfg = _make_cfg(scheduler_enabled=True)
     tm = FakeThreadManager()
     _seed_password(tmp_path)
+    _seed_running_scheduler_run(tmp_path / "cron")
 
     class _FakeTickerRuntime:
         async def aclose(self) -> None:
             captured["aclose_calls"] += 1
 
-    def _fake_build_bridge(_cfg, _store, *, event_sinks=None, dispatcher=None, **_kwargs):
+    class _FakeScheduledRunManager:
+        def has_live_task(self, _task_id: str) -> bool:
+            return False
+
+        async def aclose(self) -> None:
+            captured["manager_aclose_calls"] += 1
+
+    def _fake_build_manager(_cfg, _store, *, event_sinks=None, dispatcher=None, **_kwargs):
         captured["factory_calls"] += 1
         captured["bridge_store"] = _store
+        latest = _store.get_latest_run("task-stale")
+        captured["startup_recovered_status"] = latest.status
+        captured["startup_recovered_reason"] = latest.failure_reason
         # v0.3 cron-delivery M4：lifespan ticker 必须传 dispatcher
         # （P0-1 R2 round 1 修复）；这里记下来给测试断言用
         captured["dispatcher_set"] = dispatcher is not None
         captured["dispatcher_has_web_sink"] = (
             dispatcher is not None and getattr(dispatcher, "_web_sink", None) is not None
         )
-        return _FakeTickerRuntime(), object()
+        captured["factory_max_inflight"] = _cfg.scheduler.max_inflight
+        return _FakeTickerRuntime(), _FakeScheduledRunManager()
 
     async def _fake_run_ticker_loop(_store, _bridge, stop_event: asyncio.Event, **kwargs):
         captured["ticker_calls"] += 1
         captured["interval"] = kwargs.get("interval")
-        captured["max_inflight"] = kwargs.get("max_inflight")
+        captured["ticker_max_inflight"] = kwargs.get("max_inflight")
         await stop_event.wait()
         captured["stop_event_set"] = True
 
     import scheduler.runtime_factory as rf
     import scheduler.ticker as tk
 
-    monkeypatch.setattr(rf, "build_cron_execution_bridge", _fake_build_bridge)
+    monkeypatch.setattr(rf, "build_scheduled_run_manager", _fake_build_manager)
     monkeypatch.setattr(tk, "run_ticker_loop", _fake_run_ticker_loop)
 
     app = create_app(cfg, tm, home_dir=tmp_path)
@@ -175,9 +242,13 @@ def test_lifespan_starts_ticker_when_scheduler_enabled(monkeypatch, tmp_path: Pa
 
     assert captured["factory_calls"] == 1
     assert captured["ticker_calls"] == 1
+    assert captured["startup_recovered_status"] is RunStatus.ABANDONED
+    assert captured["startup_recovered_reason"] is RunFailureReason.ABANDONED_ON_RESTART
     assert captured["interval"] == 0.1
-    assert captured["max_inflight"] == 2
+    assert captured["factory_max_inflight"] == 2
+    assert captured["ticker_max_inflight"] is None
     assert captured["aclose_calls"] == 1
+    assert captured["manager_aclose_calls"] == 1
     assert captured["stop_event_set"] is True
     # cron home 应在 home_dir / "cron"
     assert (tmp_path / "cron").exists()
@@ -214,7 +285,7 @@ def test_lifespan_does_not_start_ticker_when_scheduler_disabled(
     import scheduler.runtime_factory as rf
     import scheduler.ticker as tk
 
-    monkeypatch.setattr(rf, "build_cron_execution_bridge", _fake_build_bridge)
+    monkeypatch.setattr(rf, "build_scheduled_run_manager", _fake_build_bridge)
     monkeypatch.setattr(tk, "run_ticker_loop", _fake_run_ticker_loop)
 
     app = create_app(cfg, tm, home_dir=tmp_path)
@@ -238,7 +309,7 @@ def test_lifespan_ticker_startup_failure_does_not_block_app(monkeypatch, tmp_pat
 
     import scheduler.runtime_factory as rf
 
-    monkeypatch.setattr(rf, "build_cron_execution_bridge", _explode_build_bridge)
+    monkeypatch.setattr(rf, "build_scheduled_run_manager", _explode_build_bridge)
 
     app = create_app(cfg, tm, home_dir=tmp_path)
     # 不应抛
@@ -264,17 +335,18 @@ def test_lifespan_prefers_injected_scheduler_runtime_factory(tmp_path: Path) -> 
         async def aclose(self) -> None:
             captured["aclose_calls"] += 1
 
-    class _FakeBridge:
-        def __init__(self) -> None:
-            self._dispatcher = None
-            self._preset_map = None
-            self._trace_dir = None
+    class _FakeScheduledRunManager:
+        def has_live_task(self, _task_id: str) -> bool:
+            return False
+
+        async def aclose(self) -> None:
+            captured["manager_aclose_calls"] = captured.get("manager_aclose_calls", 0) + 1
 
     def _scheduler_runtime_factory(_store):
         captured["factory_calls"] += 1
-        bridge = _FakeBridge()
-        captured["bridge"] = bridge
-        return _FakeTickerRuntime(), bridge
+        manager = _FakeScheduledRunManager()
+        captured["manager"] = manager
+        return _FakeTickerRuntime(), manager
 
     async def _fake_run_ticker_loop(_store, _bridge, stop_event: asyncio.Event, **_kwargs) -> None:
         captured["ticker_calls"] += 1
@@ -286,7 +358,7 @@ def test_lifespan_prefers_injected_scheduler_runtime_factory(tmp_path: Path) -> 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
         rf,
-        "build_cron_execution_bridge",
+        "build_scheduled_run_manager",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("injected scheduler runtime factory should be used")
         ),
@@ -304,9 +376,7 @@ def test_lifespan_prefers_injected_scheduler_runtime_factory(tmp_path: Path) -> 
     finally:
         monkeypatch.undo()
 
-    bridge = captured["bridge"]
     assert captured["factory_calls"] == 1
     assert captured["ticker_calls"] == 1
     assert captured["aclose_calls"] == 1
-    assert bridge._dispatcher is not None
-    assert bridge._trace_dir == tmp_path / "cron" / "traces"
+    assert captured["manager_aclose_calls"] == 1

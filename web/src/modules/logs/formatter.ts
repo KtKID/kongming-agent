@@ -38,11 +38,16 @@ export interface LogLineViewModel {
   prettyJson?: string;
 }
 
+export interface FormatLogLinesOptions {
+  sourceType?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const MAX_SUMMARY_LEN = 200;
+const SESSION_CONVERSATION_TYPE = "session_conversation";
 
 // ---------------------------------------------------------------------------
 // Pre-compiled regexes
@@ -77,6 +82,10 @@ function truncate(s: string, max: number): string {
   return s.length <= max ? s : s.slice(0, max) + "...";
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /** Pick first non-empty string value from *obj* by trying each *key* in order. */
 function pickFirst(
   obj: Record<string, unknown>,
@@ -87,6 +96,11 @@ function pickFirst(
     if (typeof v === "string" && v.length > 0) return v;
   }
   return undefined;
+}
+
+function shortId(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  return value.length <= 8 ? value : value.slice(0, 8);
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +205,13 @@ function pad3(n: number): string {
   return n < 10 ? "00" + n : n < 100 ? "0" + n : "" + n;
 }
 
+function formatEpochSecondsOrMs(value: unknown): string | undefined {
+  if (typeof value !== "number") return formatTime(value);
+  if (!isFinite(value) || value <= 0) return undefined;
+  const ms = value < 10_000_000_000 ? value * 1000 : value;
+  return formatTime(ms);
+}
+
 // ---------------------------------------------------------------------------
 // Badge extraction
 // ---------------------------------------------------------------------------
@@ -256,6 +277,94 @@ function formatJsonLine(line: LogLine, idx: number): LogLineViewModel {
     badges,
     raw: line.raw,
     prettyJson,
+  };
+}
+
+function prettyPrintJson(parsed: Record<string, unknown>): string | undefined {
+  try {
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return undefined;
+  }
+}
+
+function sessionMessageRecord(
+  parsed: Record<string, unknown>,
+): Record<string, unknown> {
+  const message = parsed["message"];
+  return isRecord(message) ? message : {};
+}
+
+function sessionToolCallNames(message: Record<string, unknown>): string {
+  const toolCalls = message["tool_calls"];
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) return "";
+  const names = toolCalls
+    .map((call) => {
+      if (!isRecord(call)) return undefined;
+      const toolName = call["tool_name"];
+      return typeof toolName === "string" && toolName.length > 0
+        ? toolName
+        : undefined;
+    })
+    .filter((name): name is string => name !== undefined);
+  if (names.length === 0) return "tool calls";
+  return "tool calls: " + names.join(", ");
+}
+
+function sessionSummaryBody(message: Record<string, unknown>): string {
+  const content = message["content"];
+  if (typeof content === "string" && content.trim().length > 0) {
+    return content.trim();
+  }
+  return sessionToolCallNames(message);
+}
+
+function sessionRole(message: Record<string, unknown>): string {
+  const role = message["role"];
+  return typeof role === "string" && role.length > 0 ? role : "message";
+}
+
+function formatSessionConversationLine(
+  line: LogLine,
+  idx: number,
+): LogLineViewModel {
+  if (line.parse_error) {
+    return formatParseErrorLine(line, idx);
+  }
+  if (!line.parsed) {
+    return formatPlainLine(line, idx);
+  }
+
+  const parsed = line.parsed;
+  const message = sessionMessageRecord(parsed);
+  const role = sessionRole(message);
+  const roleLabel = role.toUpperCase();
+  const messageId = shortId(parsed["message_id"]) ?? `line${line.line_no ?? idx}`;
+  const body = sessionSummaryBody(message);
+  const summaryPrefix = `${messageId} · ${roleLabel}`;
+  const summary = body
+    ? `${summaryPrefix} · ${truncate(body, MAX_SUMMARY_LEN)}`
+    : summaryPrefix;
+
+  const badges = [roleLabel];
+  const parentId = shortId(parsed["parent_message_id"]);
+  if (parentId) {
+    badges.push(`parent:${parentId}`);
+  }
+
+  return {
+    key: "session-" + (line.line_no ?? idx),
+    kind: "json",
+    time:
+      formatEpochSecondsOrMs(parsed["created_at"]) ??
+      formatTime(parsed["ts"]) ??
+      formatTime(parsed["timestamp"]) ??
+      formatTime(parsed["time"]),
+    level: "info",
+    summary,
+    badges,
+    raw: line.raw,
+    prettyJson: prettyPrintJson(parsed),
   };
 }
 
@@ -407,6 +516,14 @@ function formatAsJsonl(lines: LogLine[]): LogLineViewModel[] {
   return results;
 }
 
+function formatAsSessionConversation(lines: LogLine[]): LogLineViewModel[] {
+  const results: LogLineViewModel[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    results.push(formatSessionConversationLine(lines[i], i));
+  }
+  return results;
+}
+
 /**
  * Plain pipeline: plain-text lines with traceback block merging.
  */
@@ -463,8 +580,12 @@ function formatAsMixed(lines: LogLine[]): LogLineViewModel[] {
 export function formatLogLines(
   lines: LogLine[],
   format: LogFormat,
+  options: FormatLogLinesOptions = {},
 ): LogLineViewModel[] {
   if (!lines || lines.length === 0) return [];
+  if (options.sourceType === SESSION_CONVERSATION_TYPE) {
+    return formatAsSessionConversation(lines);
+  }
 
   switch (format) {
     case "jsonl":

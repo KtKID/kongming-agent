@@ -1,0 +1,9 @@
+{
+  "frame_type": "thread-status",
+  "threadId": "thread-terminal-fixture",
+  "phase": "idle",
+  "sequence": 9,
+  "runId": "run-terminal",
+  "runGeneration": 3,
+  "run_end_reason": 8
+}

@@ -154,7 +154,7 @@ async def test_cli_manager_invalid_input_rejects(patch_cli_manager_input: Any) -
     assert action is ApprovalAction.REJECT
 
 
-# 验证危险 metadata 也走同一套 y/n 两选项，不进入 confirm_token 流程。
+# 验证危险 metadata 也走同一套 y/n 两选项。
 @pytest.mark.asyncio
 async def test_cli_manager_elevated_metadata_still_uses_two_choice(
     patch_cli_manager_input: Any,
@@ -167,7 +167,6 @@ async def test_cli_manager_elevated_metadata_still_uses_two_choice(
             metadata=_cli_metadata(
                 severity="elevated",
                 matched_rule="bash_rm_any",
-                confirm_token="abc12345",
             ),
         ),
     )

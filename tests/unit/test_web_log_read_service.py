@@ -10,7 +10,7 @@ import pytest
 from hosts.web.dashboard.logs.registry import LogSourceRegistry
 from hosts.web.dashboard.logs.service import LogReadService
 from hosts.web.protocol.log_dto import LogReadResponseDTO
-from infrastructure.config.models import Config, ModelConfig
+from infrastructure.config.models import Config, ModelSelectionConfig
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -18,7 +18,7 @@ from infrastructure.config.models import Config, ModelConfig
 
 
 def _test_config() -> Config:
-    return Config(model=ModelConfig(name="test-model", base_url="http://127.0.0.1:1234/v1"))
+    return Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
 
 
 @pytest.fixture()
@@ -103,6 +103,34 @@ class TestReadTailJsonlFile:
         assert resp.lines[0].parsed["msg"] == "first"
         assert resp.lines[1].parsed["ts"] == 2
         assert resp.lines[0].parse_error is None
+
+    def test_read_tail_session_conversation_file(
+        self,
+        service: LogReadService,
+        kongming_home: Path,
+    ) -> None:
+        thread_id = "thread-abcdef123456"
+        session_dir = kongming_home / "sessions" / thread_id
+        session_dir.mkdir(parents=True)
+        session_file = session_dir / f"{thread_id}.jsonl"
+        session_file.write_text(
+            json.dumps(
+                {
+                    "record_type": "message",
+                    "session_id": thread_id,
+                    "message": {"role": "assistant", "content": "done"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        resp = service.read_tail("session_conversation", thread_id=thread_id)
+
+        assert resp.source.type == "session_conversation"
+        assert resp.source.exists is True
+        assert resp.lines[0].parsed is not None
+        assert resp.lines[0].parsed["message"]["content"] == "done"
 
 
 class TestReadTailTruncation:

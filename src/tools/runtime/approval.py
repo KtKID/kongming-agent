@@ -17,7 +17,7 @@
 边界提醒：
 
 - 本模块**不**判断"某次工具调用是否应该进 ask 流程"——那是
-  :mod:`safety.policies.permission` 的事，:class:`ApprovalProvider` 只负责
+  safety 三模式决策链的事，:class:`ApprovalProvider` 只负责
   "在被问到时给一个决定"。
 - 本模块**不 import** ``safety/`` 下任何内部 policy 组件（硬约束）。
 
@@ -36,9 +36,8 @@ v0.1.4 三按钮 UX 协议升级：
 - ApprovalAction 返回 → 按 ACCEPT_* / REJECT 映射到 ApprovalDecision
   的 ``outcome`` + ``metadata.grant_scope``。
 
-请求 metadata 中携带 ``policy_hint="elevated"`` + ``confirm_token`` 时，
-``InteractiveApproval`` 透传给 prompt_fn；具体 elevated UI（隐藏 [s]/[p]、
-typed confirm）由 prompt_fn 实现端处理。
+请求 metadata 中的 ``policy_hint`` 标识审批严重级别，
+``InteractiveApproval`` 将该字段保留到审批决定，供审计链使用。
 """
 
 from __future__ import annotations
@@ -145,9 +144,8 @@ class InteractiveApproval:
           ``outcome`` + ``metadata.grant_scope``。
         - bool prompt_fn → True → ACCEPT_ONCE，False → REJECT。
 
-        请求 ``metadata`` 中的 ``policy_hint`` / ``confirm_token`` 不在
-        本类做校验：透传给 prompt_fn 由 UI 端处理（elevated 流程）。
-        本类只负责"拿到 action 后翻译成 decision"。
+        请求 ``metadata`` 会原样交给 prompt_fn；本类负责把 action 翻译成
+        decision，并保留 ``policy_hint`` 供审计链使用。
         """
         if self._action_aware:
             # action-aware 路径：prompt_fn 返回 ApprovalAction
@@ -172,16 +170,13 @@ def _action_to_decision(action: ApprovalAction, request: ApprovalRequest) -> App
     - REJECT → outcome=rejected
 
     所有路径都附带 ``metadata.source = "interactive"`` 便于 trace 区分；
-    elevated 路径下 ``confirm_token`` / ``policy_hint`` 也透传到 metadata
-    便于审计。
+    ``policy_hint`` 会透传到 metadata，便于审计。
     """
     base_meta: dict[str, Any] = {"source": "interactive"}
-    # 把请求 metadata 中的 elevated 透传到决策 metadata（便于 trace）
+    # 把请求 metadata 中的审批严重级别透传到决策 metadata（便于 trace）
     req_meta = request.metadata or {}
     if "policy_hint" in req_meta:
         base_meta["policy_hint"] = req_meta["policy_hint"]
-    if "confirm_token" in req_meta:
-        base_meta["confirm_token"] = req_meta["confirm_token"]
 
     if action == ApprovalAction.ACCEPT_ONCE:
         return ApprovalDecision(
@@ -218,6 +213,19 @@ class AutoAllowApproval:
     """
 
     async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        if request.metadata.get("bypass_immune") is True:
+            matched_rule = request.metadata.get("matched_rule", "unknown")
+            return ApprovalDecision(
+                outcome="rejected",
+                reason=f"auto_allow cannot bypass approval rule {matched_rule}",
+                metadata={
+                    "source": "auto_allow_fail_closed",
+                    "tool_name": request.tool_name,
+                    "matched_rule": matched_rule,
+                    "rule_source": request.metadata.get("rule_source", "builtin"),
+                    "bypass_immune": True,
+                },
+            )
         return ApprovalDecision(
             outcome="approved",
             reason="auto_allow mode",

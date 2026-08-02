@@ -12,13 +12,21 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, cast
 
 from fastapi import APIRouter, Request
 
 from hosts.web.dashboard import RuntimeStatusService
-from hosts.web.errors import InvalidThreadIdError, ThreadNotFoundError
-from hosts.web.protocol import CellSummaryDTO, RuntimeStatusSnapshotDTO
+from hosts.web.errors import InvalidRequestError, InvalidThreadIdError, ThreadNotFoundError
+from hosts.web.plugin_management import PluginManagementManager, PluginToolState
+from hosts.web.protocol import (
+    CellSummaryDTO,
+    PluginToolDTO,
+    PluginToolsResponseDTO,
+    RuntimeStatusSnapshotDTO,
+    UpdatePluginToolRequest,
+)
 
 if TYPE_CHECKING:
     from hosts.web.threads.types import ThreadManagerProtocol
@@ -37,11 +45,74 @@ def _validate_thread_id(thread_id: str) -> None:
         )
 
 
+def _plugin_manager(request: Request) -> PluginManagementManager:
+    """读取插件管理门户。"""
+    manager = getattr(request.app.state, "plugin_management_manager", None)
+    if not isinstance(manager, PluginManagementManager):
+        raise InvalidRequestError("plugin management manager is not configured", status_code=500)
+    return manager
+
+
+async def _sync_plugin_tools_if_available(request: Request) -> None:
+    """触发 runtime factory 同步 MCP 工具到插件 store。"""
+    runtime_factory = getattr(request.app.state, "runtime_factory", None)
+    sync = getattr(runtime_factory, "sync_plugin_tools_for_management", None)
+    if not callable(sync):
+        return
+    try:
+        await cast(Callable[[], Awaitable[None]], sync)()
+    except Exception:
+        logger.exception("plugin tools sync failed; returning persisted plugin states")
+
+
+def _plugin_dto(state: PluginToolState) -> PluginToolDTO:
+    """把内部状态转换成 REST DTO。"""
+    return PluginToolDTO(
+        id=state.id,
+        name=state.name,
+        display_name=state.display_name,
+        source=state.source,
+        enabled=state.enabled,
+        server_id=state.server_id,
+        mcp_tool_name=state.mcp_tool_name,
+        description=state.description,
+        canonical_name=state.canonical_name,
+        is_alias=state.is_alias,
+    )
+
+
 @router.get("/cells")
 async def list_cells(request: Request) -> list[CellSummaryDTO]:
     """列出所有活的 cell。"""
     tm: ThreadManagerProtocol = request.app.state.thread_manager
     return tm.list_cells()
+
+
+@router.get("/plugins", response_model=PluginToolsResponseDTO)
+async def list_plugins(request: Request) -> PluginToolsResponseDTO:
+    """列出当前已注册的 MCP 插件工具。"""
+    await _sync_plugin_tools_if_available(request)
+    manager = _plugin_manager(request)
+    return PluginToolsResponseDTO(
+        plugins=[_plugin_dto(state) for state in manager.list_registered_plugins()]
+    )
+
+
+@router.patch("/plugins/{tool_id}", response_model=PluginToolDTO)
+async def update_plugin(
+    tool_id: str, payload: UpdatePluginToolRequest, request: Request
+) -> PluginToolDTO:
+    """更新单个插件工具 enabled 状态。
+
+    开关只写持久化 bool。已创建的 SessionEngine 保持自身工具快照，新 session
+    在创建时读取最新 bool。
+    """
+    manager = _plugin_manager(request)
+    try:
+        state = manager.set_enabled(tool_id, payload.enabled)
+    except KeyError as exc:
+        raise InvalidRequestError(f"plugin tool not found: {tool_id}", status_code=404) from exc
+    return _plugin_dto(state)
 
 
 @router.get("/runtime-status", response_model=RuntimeStatusSnapshotDTO)
