@@ -259,13 +259,23 @@ def make_anthropic_message_delta(
     *,
     stop_reason: str = "end_turn",
     output_tokens: int = 0,
+    input_tokens: int | None = None,
+    cache_creation_input_tokens: int | None = None,
+    cache_read_input_tokens: int | None = None,
 ) -> tuple[str, dict[str, Any]]:
+    usage: dict[str, Any] = {"output_tokens": output_tokens}
+    if input_tokens is not None:
+        usage["input_tokens"] = input_tokens
+    if cache_creation_input_tokens is not None:
+        usage["cache_creation_input_tokens"] = cache_creation_input_tokens
+    if cache_read_input_tokens is not None:
+        usage["cache_read_input_tokens"] = cache_read_input_tokens
     return (
         "message_delta",
         {
             "type": "message_delta",
             "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-            "usage": {"output_tokens": output_tokens},
+            "usage": usage,
         },
     )
 

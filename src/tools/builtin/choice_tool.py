@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from core.contracts import Event, EventSink, ToolContext
+from core.contracts import Event, EventSink, PreparedToolCall, ToolContext
 from tools.runtime.base import BaseBuiltinTool
 
 CUSTOM_OPTION_ID = "__custom__"
@@ -100,15 +100,30 @@ class ChoiceTool(BaseBuiltinTool):
         super().__init__()
         self._event_sinks = tuple(event_sinks)
 
+    def prepare(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> PreparedToolCall:
+        """审批前校验并冻结完整选择面板 payload。"""
+        self._validate_args(arguments)
+        request_id = context.call_id.strip()
+        if not request_id:
+            raise ValueError("ToolContext.call_id is required")
+        return PreparedToolCall(
+            arguments={
+                **self._validate_payload(arguments),
+                "request_id": request_id,
+            }
+        )
+
     async def _run(
         self,
         args: dict[str, Any],
         ctx: ToolContext,
     ) -> tuple[str, dict[str, Any] | None]:
-        payload = self._validate_payload(args)
-        request_id = ctx.call_id.strip()
-        if not request_id:
-            raise ValueError("ToolContext.call_id is required")
+        payload = args
+        request_id = args["request_id"]
 
         event_payload = {
             "request_id": request_id,

@@ -38,8 +38,8 @@ from scheduler.domain import (
     ScheduleTrigger,
     SessionMode,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
@@ -82,8 +82,7 @@ def _make_task(
     return ScheduledTask(
         task_id=task_id,
         name=f"name-{task_id}",
-        enabled=True,
-        state=TaskState.SCHEDULED,
+        lifecycle=TaskLifecycleState.SCHEDULED,
         origin=TaskOrigin.CLI,
         trigger=ScheduleTrigger(
             trigger_type=TriggerType.INTERVAL,

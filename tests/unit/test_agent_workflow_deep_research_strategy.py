@@ -3,7 +3,7 @@
 本脚本验证 AgentWorkflowManager 的 deep_research 策略目录、describe 说明和确定性 fake 运行链路。
 作用是固定 manager -> strategy -> source provider -> subagent -> artifact 的第一层集成合同。
 关键执行流程：构造 fake source provider 和 subagent 哨兵，绑定到 workflow manager，运行 deep_research payload 后检查产物。
-关键函数：_manager 构造 manager，_FakeDeepResearchSubAgentManager 记录意外子 agent 调用。
+关键函数：_manager 构造 manager，_DeepResearchTaskExecutor 记录意外 child 调用。
 """
 
 from __future__ import annotations
@@ -15,14 +15,14 @@ from typing import Any
 import pytest
 
 from application.agent_roles import AgentRoleManager
-from application.agent_workflows.manager import AgentWorkflowManager
 from application.agent_workflows.strategies.deep_research import FakeResearchSourceProvider
-from infrastructure.config.models import Config, ModelConfig
+from infrastructure.config.models import Config, ModelSelectionConfig
+from tests.support.workflow_strategy_manager import WorkflowStrategyTestManager
 
 
 def test_agent_workflow_manager_registers_deep_research_strategy(tmp_path: Path) -> None:
     """验证策略目录，输入为默认 manager，输出为 deep_research catalog 和 describe 断言。"""
-    manager = _manager(tmp_path, subagents=object())
+    manager = _manager(tmp_path, task_executor=object())
 
     catalog = manager.list_workflow_strategies()
     modes = [entry.mode for entry in catalog]
@@ -49,8 +49,12 @@ async def test_deep_research_strategy_runs_fake_provider_and_writes_artifacts(
     tmp_path: Path,
 ) -> None:
     """验证 strategy 完整 fake 链路，输入为离线 provider/subagent，输出为 result 和 deep_research 产物。"""
-    subagents = _FakeDeepResearchSubAgentManager()
-    manager = _manager(tmp_path, subagents=subagents, source_provider=_source_provider())
+    subagents = _DeepResearchTaskExecutor()
+    manager = _manager(
+        tmp_path,
+        task_executor=subagents,
+        source_provider=_source_provider(),
+    )
 
     result = await manager.run_workflow_payload(
         mode="deep_research",
@@ -80,17 +84,21 @@ async def test_deep_research_strategy_runs_fake_provider_and_writes_artifacts(
     root_result = json.loads((result.workflow_dir / "result.json").read_text(encoding="utf-8"))
     stats = json.loads((board_dir / "stats.json").read_text(encoding="utf-8"))
     checked = _jsonl(board_dir / "groups.checked.jsonl")
-    actions = {
-        json.loads(line)["action"]
-        for line in (result.workflow_dir / "audit.jsonl").read_text(encoding="utf-8").splitlines()
-    }
+    audit_records = _jsonl(result.workflow_dir / "audit.jsonl")
+    actions = {row["action"] for row in audit_records}
     checked_statuses = {row["ruling"]["status"] for row in checked}
+    plan_task_log = _jsonl(result.workflow_dir / "agents" / "phase-plan" / "task.log.jsonl")
+    phase_subagent = json.loads(
+        (result.workflow_dir / "agents" / "phase-plan" / "subagent.json").read_text(
+            encoding="utf-8"
+        )
+    )
 
     assert root_result["mode"] == "deep_research"
     assert root_result["completed"] is True
-    assert root_result["deep_research"]["artifact_paths"]["report_path"].endswith(
-        "deep_research/report.md"
-    )
+    report_path = Path(root_result["deep_research"]["artifact_paths"]["report_path"])
+    assert report_path.parent.name == "deep_research"
+    assert report_path.name == "report.md"
     assert stats["selected_source_count"] <= _payload()["limits"]["source_budget"]
     assert stats["top_fact_count"] <= _payload()["limits"]["fact_cap"]
     assert checked_statuses == {"upheld", "rejected"}
@@ -98,6 +106,14 @@ async def test_deep_research_strategy_runs_fake_provider_and_writes_artifacts(
     assert "deep_research.subagent_task_started" in actions
     assert "deep_research.subagent_task_completed" in actions
     assert "deep_research_completed" in actions
+    assert all("subagent_runtime" not in row["payload"] for row in audit_records)
+    assert all(
+        row["payload"]["resolved_runtime"]["model"] == "gemma-4-e4b-it" for row in audit_records
+    )
+    assert "subagent_runtime" not in plan_task_log[0]
+    assert plan_task_log[0]["resolved_runtime"]["model"] == "gemma-4-e4b-it"
+    assert "subagent_runtime" not in phase_subagent
+    assert phase_subagent["resolved_runtime"]["model"] == "gemma-4-e4b-it"
 
 
 @pytest.mark.asyncio
@@ -107,7 +123,7 @@ async def test_deep_research_strategy_uses_current_manager_source_provider(
     """验证 provider 热切换，输入为 setter 后的新 provider，输出为 result 使用新 provider。"""
     manager = _manager(
         tmp_path,
-        subagents=_FakeDeepResearchSubAgentManager(),
+        task_executor=_DeepResearchTaskExecutor(),
         source_provider=_source_provider(name="provider-a"),
     )
     manager.set_deep_research_source_provider(_source_provider(name="provider-b"))
@@ -125,8 +141,8 @@ async def test_deep_research_strategy_uses_current_manager_source_provider(
 @pytest.mark.asyncio
 async def test_deep_research_strategy_uses_payload_source_fixture(tmp_path: Path) -> None:
     """验证 payload fixture provider，输入为 source_fixture，输出为 fixture 来源产物。"""
-    subagents = _FakeDeepResearchSubAgentManager()
-    manager = _manager(tmp_path, subagents=subagents)
+    subagents = _DeepResearchTaskExecutor()
+    manager = _manager(tmp_path, task_executor=subagents)
 
     result = await manager.run_workflow_payload(
         mode="deep_research",
@@ -167,14 +183,14 @@ async def test_deep_research_strategy_uses_payload_source_fixture(tmp_path: Path
     assert subagents.tasks == []
 
 
-class _FakeDeepResearchSubAgentManager:
-    """测试用子 agent manager，记录 fallback 链路里的意外子 agent 调用。"""
+class _DeepResearchTaskExecutor:
+    """测试用 task executor，记录 fallback 链路里的意外 child 调用。"""
 
     def __init__(self) -> None:
         """初始化 fake manager，输入为空，输出为记录 task 的实例。"""
         self.tasks: list[Any] = []
 
-    async def run_task(
+    async def execute_task(
         self,
         *,
         workflow_id: str,
@@ -193,12 +209,12 @@ class _FakeDeepResearchSubAgentManager:
 def _manager(
     tmp_path: Path,
     *,
-    subagents: object,
+    task_executor: object,
     source_provider: FakeResearchSourceProvider | None = None,
-) -> AgentWorkflowManager:
-    """构造 workflow manager，输入为临时目录和 subagents，输出为 manager。"""
-    return AgentWorkflowManager(
-        subagents=subagents,  # type: ignore[arg-type]
+) -> WorkflowStrategyTestManager:
+    """构造 workflow manager，输入为临时目录和 task executor，输出为 manager。"""
+    return WorkflowStrategyTestManager(
+        task_executor=task_executor,  # type: ignore[arg-type]
         config=_config(tmp_path),
         workspace_root=tmp_path,
         role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
@@ -208,13 +224,7 @@ def _manager(
 
 def _config(tmp_path: Path) -> Config:
     """构造测试配置，输入为临时目录，输出为 file session 配置。"""
-    cfg = Config(
-        model=ModelConfig(
-            name="fake-model",
-            base_url="http://127.0.0.1:1234/v1",
-            api_key="",
-        )
-    )
+    cfg = Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
     cfg.session.file_store_path = str(tmp_path / "sessions")
     return cfg
 

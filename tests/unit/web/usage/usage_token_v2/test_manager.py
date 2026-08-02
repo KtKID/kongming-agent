@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from core.contracts import ProviderUsageFamily
 from hosts.web.usage.usage_token_v2 import (
     ClaudeJsonlLocator,
     ClaudeUsage,
@@ -22,6 +23,7 @@ from hosts.web.usage.usage_token_v2 import (
     ThreadMetadataReader,
     UsageTokenManager,
 )
+from infrastructure.llm_providers.usage import ProviderUsageManager
 
 # ---------------------------------------------------------------------------
 # 注入测试桩
@@ -55,10 +57,10 @@ class _FakeCodexLocator:
 
 
 class _FakeGenericLocator:
-    def __init__(self, mapping: dict[str, tuple[Path, str] | None]) -> None:
+    def __init__(self, mapping: dict[str, Path | None]) -> None:
         self.mapping = mapping
 
-    async def locate(self, thread_id: str):  # type: ignore[no-untyped-def]
+    async def locate(self, thread_id: str) -> Path | None:
         return self.mapping.get(thread_id)
 
 
@@ -118,6 +120,15 @@ def _write_codex_rollout(path: Path) -> None:
 
 
 def _write_generic_jsonl(path: Path) -> None:
+    usage = ProviderUsageManager().normalize(
+        family=ProviderUsageFamily.ANTHROPIC_MESSAGES,
+        raw_usage={
+            "input_tokens": 7,
+            "output_tokens": 3,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        },
+    )
     path.write_text(
         json.dumps(
             {
@@ -128,7 +139,7 @@ def _write_generic_jsonl(path: Path) -> None:
                 "parent_message_id": None,
                 "created_at": 1.0,
                 "message": {"role": "assistant", "content": []},
-                "usage": {"input_tokens": 7, "output_tokens": 3},
+                "usage": usage.to_payload(),
             }
         )
         + "\n",
@@ -212,7 +223,7 @@ async def test_dispatch_generic_chat_returns_generic_dto(tmp_path: Path) -> None
         meta_reader=_FakeMetaReader({"thread-z": {"backend_kind": "generic_chat"}}),
         claude_locator=_FakeClaudeLocator({}),
         codex_locator=_FakeCodexLocator({}),
-        generic_locator=_FakeGenericLocator({"thread-z": (p, "anthropic")}),
+        generic_locator=_FakeGenericLocator({"thread-z": p}),
     )
     result = await mgr.get_thread_usage("thread-z")
     assert isinstance(result, GenericChatAnthropicUsage)

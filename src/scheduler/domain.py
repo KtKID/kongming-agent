@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -46,14 +47,14 @@ THREAD_ID_PATTERN = r"^thread-[a-f0-9]{12}$"
 
 _THREAD_ID_RE = re.compile(THREAD_ID_PATTERN)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 """``scheduled_tasks.json`` / ``runs/*.jsonl`` 的持久化 schema 版本。
 
 v0.2 重构：引入 :attr:`TriggerType.SECONDS` 等新枚举值，**不兼容 v0.1 数据**。
 
 v0.3 新增（cron-delivery-v0.3）：``ScheduleDelivery`` 配置 +
 :class:`ScheduledRun` 的 ``delivered_at`` / ``delivery_status`` / ``seen_at``
-字段 + :class:`TaskState.DELETED` 软删除态。**不兼容 v0.2 数据**。
+字段 + task 软删除态。**不兼容 v0.2 数据**。
 
 v0.4 新增（cron-thread-preset-v0.4）：``ScheduleDelivery.target`` 投递目标 +
 ``ScheduledTask.preset_id`` LLM 选择。**不兼容 v0.3 数据**；
@@ -63,9 +64,13 @@ v0.5 新增（scheduler-approval-task-level-v0.5）：``TaskExecutionPolicy``
 新增 ``approval_mode`` 字段（默认 None）。**不兼容 v0.4 数据**；
 旧版由 Store 启动时重置式迁移（备份 + 写空 v5）。
 
-scheduled-task-thread 兼容扩展：``ScheduledTask.thread_id`` 与
-``TaskExecutionContext.thread_id`` 采用新字段 + 旧 payload 回填，不提升
-``SCHEMA_VERSION``，避免触发重置式迁移。
+v0.6 新增（nightly-p1-single-owner-hardening-v1）：任务持久化状态收口为
+``TaskLifecycleState``。v5 的 ``enabled + TaskLifecycleState`` 由 Store 启动时
+保留备份并确定性迁移，run 结果只保存在 ``ScheduledRun.status``。
+
+scheduled-task-thread 与 manual-run 兼容扩展：``ScheduledTask.thread_id`` /
+``manual_run_requested_at`` 与 ``TaskExecutionContext.thread_id`` 采用新字段 +
+旧 payload 回填，不提升 ``SCHEMA_VERSION``，避免触发重置式迁移。
 """
 
 
@@ -90,23 +95,26 @@ class TriggerType(StrEnum):
     SECONDS = "seconds"
 
 
-class TaskState(StrEnum):
-    """任务级状态（用于展示与恢复）。
+class TaskLifecycleState(StrEnum):
+    """任务调度生命周期；与单次执行的 :class:`RunStatus` 正交。
 
-    状态约束：``enabled=False`` 时只能是 ``PAUSED`` / ``DISABLED`` /
-    ``COMPLETED`` / ``DELETED``。
-
-    v0.3 新增 ``DELETED``：软删除态。Web ``/cron`` 列表 API 默认过滤；
-    runs 历史保留以便审计。
+    ``SCHEDULED`` 是 ticker 唯一可领取态；``EXHAUSTED`` 表示 one-shot 已经
+    原子领取；``PAUSED`` / ``DISABLED`` 保留用户暂停与配置关闭两种语义；
+    ``DELETED`` 是保留 run 历史的软删除态。
     """
 
     SCHEDULED = "scheduled"
     PAUSED = "paused"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
     DISABLED = "disabled"
+    EXHAUSTED = "exhausted"
     DELETED = "deleted"
+
+
+class TaskRuntimeStatus(StrEnum):
+    """当前任务是否存在 live run；只用于运行时投影。"""
+
+    IDLE = "idle"
+    RUNNING = "running"
 
 
 class RunStatus(StrEnum):
@@ -128,6 +136,13 @@ class RunStatus(StrEnum):
     INACTIVITY_TIMEOUT = "inactivity_timeout"
     ABANDONED = "abandoned"
     CANCELLED = "cancelled"
+
+
+class ScheduledRunSubmitDisposition(StrEnum):
+    """reservation 提交回执状态。"""
+
+    ACCEPTED = "accepted"
+    DUPLICATE = "duplicate"
 
 
 class RunFailureReason(StrEnum):
@@ -231,17 +246,6 @@ class TaskOrigin(StrEnum):
 # ---------------------------------------------------------------------------
 # 内部工具：不变量校验（不依赖外部库）
 # ---------------------------------------------------------------------------
-
-
-_DISABLED_TASK_STATES: frozenset[TaskState] = frozenset(
-    {
-        TaskState.PAUSED,
-        TaskState.DISABLED,
-        TaskState.COMPLETED,
-        TaskState.DELETED,  # v0.3 软删除
-    }
-)
-"""``enabled=False`` 时允许的 :class:`TaskState` 集合。"""
 
 
 def _ensure_iso_or_none(field_name: str, value: object) -> None:
@@ -429,10 +433,9 @@ class ScheduleDelivery:
 class ScheduledTask:
     """定时任务定义（文档 §3.4）。
 
-    状态约束：
-    - ``enabled=False`` 时 ``state`` 只能是 ``PAUSED`` / ``DISABLED`` / ``COMPLETED``
-    - one-shot 完成后可转为 ``COMPLETED``
-    - recurring task 正常执行后回到 ``SCHEDULED``
+    ``lifecycle`` 是任务级状态唯一真源。单次执行的 running/completed/failed
+    只属于 :class:`ScheduledRun.status`；one-shot 在领取时转为 ``EXHAUSTED``，
+    recurring 领取和执行终态均保持 ``SCHEDULED``。
 
     时间字段（``next_run_at`` / ``last_run_at`` / ``created_at`` / ``updated_at``）
     用 ISO8601 文本表示；本类只校验类型，内容由 store / trigger engine 解析。
@@ -440,8 +443,7 @@ class ScheduledTask:
 
     task_id: str
     name: str
-    enabled: bool
-    state: TaskState
+    lifecycle: TaskLifecycleState
     origin: TaskOrigin
     trigger: ScheduleTrigger
     policy: TaskExecutionPolicy
@@ -455,21 +457,24 @@ class ScheduledTask:
     """cron 触发后投递配置；``None`` 表示沿用默认（web channel，无 target）。"""
 
     preset_id: str = ""
-    """v0.4 新增：用哪个 LLM preset 执行。匹配 ``LLMPresetConfig.id``。
+    """v0.4 新增：用哪个 LLM preset 执行。匹配 model catalog preset ID。
     空串表示用全局默认（base_config.model）。创建时从来源 thread 继承。"""
 
     thread_id: str = ""
     """绑定的专属 thread id；空串表示历史任务或未绑定任务。"""
+
+    manual_run_requested_at: str | None = None
+    """Web 试运行待领取时间；独立于 ``next_run_at``，避免改写正式日程。"""
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_id, str) or not self.task_id:
             raise ValueError("task_id must be non-empty str")
         if not isinstance(self.name, str) or not self.name:
             raise ValueError("name must be non-empty str")
-        if not isinstance(self.enabled, bool):
-            raise TypeError(f"enabled must be bool, got {type(self.enabled).__name__}")
-        if not isinstance(self.state, TaskState):
-            raise TypeError(f"state must be TaskState, got {type(self.state).__name__}")
+        if not isinstance(self.lifecycle, TaskLifecycleState):
+            raise TypeError(
+                f"lifecycle must be TaskLifecycleState, got {type(self.lifecycle).__name__}"
+            )
         if not isinstance(self.origin, TaskOrigin):
             raise TypeError(f"origin must be TaskOrigin, got {type(self.origin).__name__}")
         if not isinstance(self.trigger, ScheduleTrigger):
@@ -498,12 +503,7 @@ class ScheduledTask:
             raise TypeError(f"thread_id must be str, got {type(self.thread_id).__name__}")
         if self.thread_id and _THREAD_ID_RE.match(self.thread_id) is None:
             raise ValueError(f"thread_id must match {THREAD_ID_PATTERN}, got {self.thread_id!r}")
-        if not self.enabled and self.state not in _DISABLED_TASK_STATES:
-            raise ValueError(
-                "enabled=False requires state in "
-                "{paused, disabled, completed, deleted}, "
-                f"got {self.state.value!r}"
-            )
+        _ensure_iso_or_none("manual_run_requested_at", self.manual_run_requested_at)
 
 
 @dataclass(frozen=True)
@@ -511,6 +511,7 @@ class ScheduledRun:
     """单次任务执行的运行记录（文档 §3.5）。
 
     - ``scheduled_for``: 这次执行原本对应的逻辑触发时间
+    - ``thread_id``: Web 入口 thread 标识；旧 CLI run 可为空
     - ``session_id``: fresh session 标识
     - ``result_status``: 映射 ``Result.status``
     - ``final_message_excerpt``: 用于列表展示与审计；命中 ``[SILENT]`` 时
@@ -544,6 +545,12 @@ class ScheduledRun:
     seen_at: str | None = None
     """v0.3: 用户在 web ``/cron`` 看过该 run 的 ISO8601 时间；未看为 None。
     红点未读计数仅看 ``delivery_status==DELIVERED and seen_at is None`` 的 run。"""
+    thread_id: str = ""
+    """v0.6: 定时任务入口 thread；执行上下文由 ``session_id`` 表示。"""
+    reservation_id: str = ""
+    """触发预占主键；同一次 reservation 重试必须映射到同一个 run。"""
+    cancel_reason: str | None = None
+    """取消来源；replace、shutdown、用户中断等由 live owner 显式写入。"""
 
     def __post_init__(self) -> None:
         if not isinstance(self.run_id, str) or not self.run_id:
@@ -559,6 +566,14 @@ class ScheduledRun:
         _ensure_iso_or_none("finished_at", self.finished_at)
         if self.session_id is not None and not isinstance(self.session_id, str):
             raise TypeError(f"session_id must be str or None, got {type(self.session_id).__name__}")
+        if not isinstance(self.thread_id, str):
+            raise TypeError(f"thread_id must be str, got {type(self.thread_id).__name__}")
+        if not isinstance(self.reservation_id, str):
+            raise TypeError(f"reservation_id must be str, got {type(self.reservation_id).__name__}")
+        if self.cancel_reason is not None and not isinstance(self.cancel_reason, str):
+            raise TypeError(
+                f"cancel_reason must be str or None, got {type(self.cancel_reason).__name__}"
+            )
         if self.result_status is not None and not isinstance(self.result_status, str):
             raise TypeError(
                 f"result_status must be str or None, got {type(self.result_status).__name__}"
@@ -614,6 +629,7 @@ class DueTaskReservation:
     task: ScheduledTask
     scheduled_for: str
     reserved_at: str
+    reservation_id: str = field(default_factory=lambda: f"reservation-{uuid.uuid4().hex}")
 
     def __post_init__(self) -> None:
         if not isinstance(self.task, ScheduledTask):
@@ -624,6 +640,20 @@ class DueTaskReservation:
         _ensure_iso_or_none("reserved_at", self.reserved_at)
         if self.reserved_at is None:
             raise ValueError("reserved_at is required (ISO8601 str)")
+        if not isinstance(self.reservation_id, str) or not self.reservation_id:
+            raise ValueError("reservation_id must be non-empty str")
+
+
+@dataclass(frozen=True)
+class ScheduledRunSubmitReceipt:
+    """live owner 接收 reservation 后返回的稳定业务回执。"""
+
+    reservation_id: str
+    task_id: str
+    run_id: str
+    session_id: str
+    thread_id: str
+    disposition: ScheduledRunSubmitDisposition
 
 
 @dataclass(frozen=True)
@@ -731,8 +761,9 @@ __all__ = [
     "SessionMode",
     "TaskExecutionContext",
     "TaskExecutionPolicy",
+    "TaskLifecycleState",
     "TaskOrigin",
-    "TaskState",
+    "TaskRuntimeStatus",
     "TaskTarget",
     "TriggerType",
     "resolve_effective_mode",

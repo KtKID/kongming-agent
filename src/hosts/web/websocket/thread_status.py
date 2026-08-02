@@ -1,36 +1,94 @@
-"""web — thread-status 全局 WS 广播器 + ``/ws/thread-status`` 端点。
+"""web — thread-status 全局 Manager + ``/ws/thread-status`` 端点。
 
 设计目的：让所有打开 web app 的客户端实时感知每个 thread 的运行阶段
 （idle / responding / thinking / tool_calling / waiting_approval / complete / error），
 用于 thread 列表的状态标签渲染。
 
-关键设计（1:1 复用 cron_ws.py 的 Lock + set + attach/detach/broadcast 模式）：
+关键设计：
 
-- 独立端点 ``/ws/thread-status``，**不复用** thread WS
+- 独立端点 ``/ws/thread-status``
 - 鉴权：复用 thread WS 的 cookie-based session
-- 连接管理：单例 :class:`ThreadStatusBroadcaster` 维护 ``set[WebSocket]``
-- broadcast：``asyncio.gather(..., return_exceptions=True)`` 包裹
-- ``emit(thread_id, normalized)``：从 normalized["frame_type"] 映射到 phase，
-  构造帧后调 ``broadcast``
+- 连接管理：单例 :class:`ThreadStatusManager` 维护 active snapshot、run lease
+  和每连接唯一 writer
+- 状态发布：producer 先取得 run lease，再把 canonical phase 交给 Manager
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any, Literal, cast
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, WebSocket
+from pydantic import ValidationError
 from starlette.websockets import WebSocketDisconnect
 
+from core.result import RunEndReason
 from hosts.web.auth.middleware import SESSION_COOKIE_NAME, verify_session_cookie
-from network.network_log import log_network_event, log_network_exception
+from hosts.web.protocol import (
+    ApprovalInboxResolveResultFrame,
+    PongFrame,
+    ThreadStatusC2SAdapter,
+)
+from hosts.web.websocket.thread_status_manager import (
+    ThreadStatusManager,
+    ThreadStatusRunLease,
+)
+from network.network_log import log_network_event
 
 logger = logging.getLogger(__name__)
 
 WS_CLOSE_POLICY_VIOLATION = 1008
+
+
+def _normalize_origin(value: str | None) -> str | None:
+    """归一化 HTTP origin，非法值返回空。"""
+    if value is None:
+        return None
+    raw = value.strip().rstrip("/")
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+        return None
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+
+def _request_origin(websocket: WebSocket) -> str | None:
+    """从 WebSocket 请求本身推导同源 HTTP origin。"""
+    host = websocket.headers.get("host")
+    if not host:
+        return None
+    scheme = "https" if websocket.url.scheme == "wss" else "http"
+    return _normalize_origin(f"{scheme}://{host}")
+
+
+def _configured_origin(websocket: WebSocket) -> str | None:
+    """读取配置里的外部 Web origin。"""
+    cfg = getattr(websocket.app.state, "config", None)
+    raw = getattr(getattr(cfg, "web", None), "server_origin", None)
+    return _normalize_origin(raw) if isinstance(raw, str) else None
+
+
+def _is_allowed_ws_origin(websocket: WebSocket) -> bool:
+    """校验浏览器 WebSocket Origin。
+
+    无 Origin 的本地客户端和测试客户端继续放行；带 Origin 的浏览器连接必须
+    匹配当前请求 origin 或配置的外部 Web origin。
+    """
+    origin = websocket.headers.get("origin")
+    if origin is None:
+        return True
+    normalized = _normalize_origin(origin)
+    if normalized is None:
+        return False
+    allowed = {_request_origin(websocket), _configured_origin(websocket)}
+    return normalized in {item for item in allowed if item is not None}
 
 
 def _now_ms() -> int:
@@ -70,123 +128,87 @@ _EVENT_KIND_TO_PHASE: dict[str, Phase] = {
     "error": "error",
 }
 
-# Runner 结束态 → thread-status phase。completed 已常由 turn.end 投影为
-# complete；这里保留 run.end 兜底，让所有 terminal status 都有单一收口。
-_RUN_END_STATUS_TO_PHASE: dict[str, Phase] = {
-    "completed": "complete",
-    "cancelled": "idle",
-    "failed": "error",
-}
+# run.end 结束原因 bitmask → thread-status phase 映射（错误分类器真源）。
+#
+# 优先级：INTERRUPT 位 set 时映成 idle（尊重用户介入，前端按钮复位为发送）；
+# 否则按自然因映射：COMPLETE→complete、MAX_TURNS→complete（预算耗尽不是错误，
+# 不该红条）、ERROR→error。
+#
+# 关键修复：旧实现把 status 三态直接映射（failed→error），导致 max_turns（也是
+# failed）被错映成 error phase。现在读 run_end_reason bitmask 精确区分。
+# run.end 帧也带 run_end_reason 原值透传给前端，供按钮复位与 UI 显示。
+#
+# 位常量真源 = core.result.RunEndReason（本模块直接 import，无重复定义）。
+_COMPLETE_PHASE: Phase = "complete"
+_MAX_TURNS_PHASE: Phase = "complete"
+_ERROR_PHASE: Phase = "error"
+_INTERRUPT_PHASE: Phase = "idle"
+
+
+def _phase_from_run_end_reason(reason_int: int) -> Phase | None:
+    """从 run_end_reason bitmask 推导终态 phase（优先 INTERRUPT，再按自然因）。"""
+    reason = RunEndReason(reason_int)
+    if reason == RunEndReason.NONE:
+        return None
+    if RunEndReason.INTERRUPT in reason:
+        return _INTERRUPT_PHASE
+    if RunEndReason.MAX_TURNS in reason:
+        return _MAX_TURNS_PHASE
+    if RunEndReason.ERROR in reason:
+        return _ERROR_PHASE
+    if RunEndReason.COMPLETE in reason:
+        return _COMPLETE_PHASE
+    # EVICTED 单独在场（无自然因）——线程被回收，映成 idle 让前端复位。
+    return _INTERRUPT_PHASE
 
 
 def _phase_from_event(kind: str, payload: Any) -> Phase | None:
     """把 Runner Event 映射为 thread-status phase。"""
     if kind == "run.end":
-        status = payload.get("status") if isinstance(payload, dict) else None
-        return _RUN_END_STATUS_TO_PHASE.get(status) if isinstance(status, str) else None
+        if not isinstance(payload, dict):
+            return None
+        reason_raw = payload.get("run_end_reason")
+        if isinstance(reason_raw, int):
+            return _phase_from_run_end_reason(reason_raw)
+        # 兼容旧 payload（无 run_end_reason 字段）——退化到 status 三态映射。
+        status = payload.get("status")
+        if status == "completed":
+            return _COMPLETE_PHASE
+        if status == "cancelled":
+            return _INTERRUPT_PHASE
+        return _ERROR_PHASE if status == "failed" else None
     return _EVENT_KIND_TO_PHASE.get(kind)
 
 
-class ThreadStatusBroadcaster:
-    """thread-status 全局 WS 广播器。
+async def publish_normalized_status(
+    manager: ThreadStatusManager,
+    lease: ThreadStatusRunLease,
+    normalized: dict[str, Any],
+) -> bool:
+    """把 Claude/Codex normalized message 映射为携带 lease 的状态增量。"""
+    frame_type = normalized.get("frame_type")
+    if not isinstance(frame_type, str):
+        return False
 
-    结构与 :class:`web.websocket.cron.CronWSBroker` 完全一致，扩展了
-    :meth:`emit` 方法做 kind→phase 映射。
-    """
+    phase: Phase | None = None
+    if frame_type == "stream_status":
+        raw_phase = normalized.get("phase")
+        if isinstance(raw_phase, str) and raw_phase in _STREAM_STATUS_PHASES:
+            phase = cast(Phase, raw_phase)
+    else:
+        phase = _KIND_TO_PHASE.get(frame_type)
+    if phase is None:
+        return False
 
-    def __init__(self) -> None:
-        self._connections: set[WebSocket] = set()
-        self._lock = asyncio.Lock()
-
-    @property
-    def connection_count(self) -> int:
-        """当前连接数（仅供测试 / 监控用，不加锁）。"""
-        return len(self._connections)
-
-    async def attach(self, ws: WebSocket) -> None:
-        """把 WS 连接加入广播池。重复 attach 同一连接幂等。"""
-        async with self._lock:
-            self._connections.add(ws)
-
-    async def detach(self, ws: WebSocket) -> None:
-        """把 WS 连接移出广播池。不存在的连接忽略。"""
-        async with self._lock:
-            self._connections.discard(ws)
-
-    async def broadcast(self, payload: dict[str, Any]) -> None:
-        """异步广播 payload 给所有当前订阅者。"""
-        async with self._lock:
-            connections = list(self._connections)
-
-        if not connections:
-            return
-
-        await asyncio.gather(
-            *(self._send_one(ws, payload) for ws in connections),
-            return_exceptions=True,
-        )
-
-    async def _send_one(self, ws: WebSocket, payload: dict[str, Any]) -> None:
-        """对单个连接 send；失败则自动 detach。"""
-        try:
-            await ws.send_json(payload)
-        except Exception as exc:
-            log_network_exception(
-                "hosts.web.websocket.thread_status",
-                "broadcast_send_failed",
-                exc,
-                websocket_id=id(ws),
-            )
-            await self.detach(ws)
-
-    async def emit(self, thread_id: str, normalized: dict[str, Any]) -> None:
-        """从 normalized 消息推导 phase 并广播 thread-status 帧。
-
-        映射规则：
-
-        - ``stream_status`` → 透传 ``normalized["phase"]``
-          （仅 responding / thinking / tool_calling）
-        - ``permission_request`` → ``waiting_approval``
-        - ``permission_cancelled`` → ``idle``
-        - ``complete`` → ``complete``
-        - ``error`` → ``error``
-        - 其他 frame_type → 不推送
-        """
-        # NormalizedMessage 的判别字段已由 protocol-frame-type-unify-v0.1
-        # 从 ``kind`` 改成 ``frame_type``；本路径属内部消费 NormalizedMessage，
-        # 跟随真源字段名同步，与 thread-status 出站 wire 帧（``type``）解耦
-        frame_type = normalized.get("frame_type")
-        if frame_type is None:
-            return
-
-        phase: Phase | None = None
-
-        if frame_type == "stream_status":
-            raw_phase = normalized.get("phase")
-            if isinstance(raw_phase, str) and raw_phase in _STREAM_STATUS_PHASES:
-                phase = cast(Phase, raw_phase)
-            else:
-                return
-        else:
-            phase = _KIND_TO_PHASE.get(frame_type)
-
-        if phase is None:
-            return
-
-        # protocol-frame-type-unify-v0.2：出站帧判别字段从 ``type`` 切到
-        # ``frame_type``（与全局 wire 协议对齐）。字面值 ``thread-status``
-        # 保持，前端 selector 也按 ``frame_type === "thread-status"`` 切换。
-        frame: dict[str, Any] = {
-            "frame_type": "thread-status",
-            "threadId": thread_id,
-            "phase": phase,
-        }
-        if phase == "tool_calling":
-            tool_name = normalized.get("toolName")
-            if tool_name is not None:
-                frame["toolName"] = tool_name
-
-        await self.broadcast(frame)
+    tool_name: str | None = None
+    if phase == "tool_calling":
+        raw_tool_name = normalized.get("toolName")
+        tool_name = raw_tool_name if isinstance(raw_tool_name, str) else None
+    return await manager.publish_status(
+        lease,
+        phase=phase,
+        tool_name=tool_name,
+    )
 
 
 class ThreadStatusEventSink:
@@ -198,53 +220,96 @@ class ThreadStatusEventSink:
 
     def __init__(self, thread_id: str) -> None:
         self._thread_id = thread_id
-        self._broadcaster = get_broadcaster()
-        self._last_phase: Phase | None = None
+        self._manager = get_thread_status_manager()
+        self._leases: dict[str, ThreadStatusRunLease] = {}
+        self._last_phase_by_run: dict[str, Phase] = {}
 
     async def emit(self, event: Any) -> None:
-        """满足 ``core.contracts.EventSink`` Protocol。"""
+        """满足 ``core.contracts.EventSink`` Protocol。
+
+        终态帧（run.end）bypass 节流强制广播：run 结束是状态机的终态信号，
+        必须可靠送达前端，否则停止按钮卡红、刷新无效。普通 delta 帧仍节流。
+        """
         kind = getattr(event, "kind", None)
         if not isinstance(kind, str):
             return
 
         payload = getattr(event, "payload", None) or {}
         phase = _phase_from_event(kind, payload)
-        if phase is None or phase == self._last_phase:
+        if phase is None:
             return
-        self._last_phase = phase
+        raw_run_id = getattr(event, "run_id", None)
+        if not isinstance(raw_run_id, str) or not raw_run_id:
+            return
+        lease = self._leases.get(raw_run_id)
+        if lease is None:
+            lease = await self._manager.begin_run(self._thread_id, raw_run_id)
+            self._leases[raw_run_id] = lease
 
-        frame: dict[str, Any] = {
-            "frame_type": "thread-status",
-            "threadId": self._thread_id,
-            "phase": phase,
-        }
+        # run.end 是终态帧——无论 _last_phase 是否相同都必须广播。
+        # 关键修复：旧实现靠 phase 变化节流，但 run.end 可能因竞态产生的 phase
+        # 与上一帧相同（如 tool_calling→idle 被节流后 run.end 也是 idle），
+        # 导致终态信号被吞，前端按钮永远不复位。
+        is_terminal = kind == "run.end"
+        if not is_terminal and phase == self._last_phase_by_run.get(raw_run_id):
+            return
+        self._last_phase_by_run[raw_run_id] = phase
+
+        tool_name: str | None = None
         if phase == "tool_calling":
-            tool_name = payload.get("tool_name")
-            if isinstance(tool_name, str) and tool_name:
-                frame["toolName"] = tool_name
+            raw_tool_name = payload.get("tool_name")
+            tool_name = raw_tool_name if isinstance(raw_tool_name, str) else None
 
-        await self._broadcaster.broadcast(frame)
+        run_end_reason: int | None = None
+        if is_terminal and isinstance(payload, dict):
+            reason_raw = payload.get("run_end_reason")
+            if isinstance(reason_raw, int):
+                run_end_reason = reason_raw
+
+        await self._manager.publish_status(
+            lease,
+            phase=phase,
+            tool_name=tool_name,
+            run_end_reason=run_end_reason,
+        )
+        if is_terminal:
+            self._leases.pop(raw_run_id, None)
+            self._last_phase_by_run.pop(raw_run_id, None)
 
 
 # ---------------------------------------------------------------------------
 # 模块级单例
 # ---------------------------------------------------------------------------
 
-_broadcaster_singleton: ThreadStatusBroadcaster | None = None
+_manager_singleton: ThreadStatusManager | None = None
 
 
-def get_broadcaster() -> ThreadStatusBroadcaster:
-    """获取或创建 :class:`ThreadStatusBroadcaster` 单例。"""
-    global _broadcaster_singleton
-    if _broadcaster_singleton is None:
-        _broadcaster_singleton = ThreadStatusBroadcaster()
-    return _broadcaster_singleton
+def get_thread_status_manager() -> ThreadStatusManager:
+    """获取或创建进程内共享 :class:`ThreadStatusManager`。"""
+    global _manager_singleton
+    if _manager_singleton is None:
+        _manager_singleton = ThreadStatusManager()
+    return _manager_singleton
 
 
 def reset_broadcaster_for_testing() -> None:
-    """**仅测试用**：重置单例到 None。"""
-    global _broadcaster_singleton
-    _broadcaster_singleton = None
+    """仅测试用：重置 thread status Manager 单例。"""
+    global _manager_singleton
+    _manager_singleton = None
+
+
+@dataclass(eq=False)
+class _ManagerBackedSender:
+    """把 approval inbox 的 send_json 转入 ThreadStatusManager 单 writer。"""
+
+    manager: ThreadStatusManager
+    websocket: WebSocket
+
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        """向指定连接的 Manager 队列发送 payload。"""
+        accepted = await self.manager.send_to(self.websocket, payload)
+        if not accepted:
+            raise RuntimeError("thread status connection is detached")
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +334,7 @@ async def _thread_status_ws_handler(websocket: WebSocket) -> None:
 
     入帧支持 3 种 frame_type：
     - ``ping`` → 回 pong（心跳）
-    - ``approval.inbox.resolve`` → 路由到 ApprovalInboxBroadcaster.resolve → bridge
+    - ``approval.inbox.resolve`` → 路由到 ApprovalInboxBroadcaster.resolve → manager
     - 其他 → 静默丢弃
     """
     # 延迟 import 避免循环依赖（thread_status_ws 是基础模块，被多处依赖）
@@ -284,6 +349,13 @@ async def _thread_status_ws_handler(websocket: WebSocket) -> None:
         )
         return
 
+    if not _is_allowed_ws_origin(websocket):
+        await websocket.close(
+            code=WS_CLOSE_POLICY_VIOLATION,
+            reason="invalid origin",
+        )
+        return
+
     raw_cookie = websocket.cookies.get(SESSION_COOKIE_NAME)
     payload = verify_session_cookie(raw_cookie, serializer)
     if payload is None:
@@ -295,13 +367,14 @@ async def _thread_status_ws_handler(websocket: WebSocket) -> None:
 
     # 2. accept + attach 两个 broadcaster
     await websocket.accept()
-    broadcaster = get_broadcaster()
+    manager = get_thread_status_manager()
     inbox = get_inbox_broadcaster()
-    await broadcaster.attach(websocket)
-    await inbox.attach(websocket)
+    inbox_sender = _ManagerBackedSender(manager, websocket)
+    await manager.attach(websocket)
+    await inbox.attach(inbox_sender)
 
     # 2.5 连接建立时主动 push inbox snapshot（让新连接看到当前所有 pending 审批）
-    await inbox.push_snapshot(websocket)
+    await inbox.push_snapshot(inbox_sender)
 
     # 3. 入帧循环
     try:
@@ -314,37 +387,32 @@ async def _thread_status_ws_handler(websocket: WebSocket) -> None:
             if not isinstance(data, dict):
                 continue
 
-            # protocol-frame-type-unify-v0.2：入站判别字段从 ``kind`` 切到
-            # ``frame_type``。
-            frame_type = data.get("frame_type")
-            if frame_type == "ping":
-                pong = {
-                    "frame_type": "pong",
-                    "timestamp_ms": _now_ms(),
-                    "ts": data.get("ts"),
-                }
-                await websocket.send_json(pong)
-            elif frame_type == "approval.inbox.resolve":
-                # smart-approval-v2-inbox: 用户点三按钮 → 路由回正确 bridge
-                thread_id = data.get("threadId")
-                request_id = data.get("requestId")
-                if not isinstance(thread_id, str) or not isinstance(request_id, str):
-                    continue
-                # rememberScope（generic-chat-session-grant）：仅在非 None 时
-                # 加入 dict，避免污染 claude_code v2-inbox 老 bridge 路径的
-                # decision 字面值（老 bridge 完全不感知此字段；下游测试用
-                # assert_called_once_with 严格匹配 dict 形状，多余字段会挂）。
-                # 用于 ``ApprovalManager.resolve`` 检测 == "session" 时调
-                # ``ApprovalRules.add_session_grant`` 写 thread 级 overrides。
+            try:
+                frame = ThreadStatusC2SAdapter.validate_python(data)
+            except ValidationError:
+                continue
+
+            if frame.frame_type == "ping":
+                pong = PongFrame(timestamp_ms=_now_ms(), ts=frame.ts)
+                await manager.send_to(websocket, pong.model_dump())
+            elif frame.frame_type == "approval.inbox.resolve":
+                # 用户决策统一路由到 ApprovalManager.resolve；remember 固定写入
+                # pending 创建时冻结的 thread 与 canonical candidate。
                 decision: dict[str, Any] = {
-                    "allow": bool(data.get("allow", False)),
-                    "message": data.get("message"),
-                    "rememberEntry": data.get("rememberEntry"),
+                    "allow": frame.allow,
+                    "message": frame.message,
+                    "remember": frame.remember,
+                    "rememberRule": (
+                        frame.rememberRule.model_dump() if frame.rememberRule is not None else None
+                    ),
                 }
-                remember_scope = data.get("rememberScope")
-                if remember_scope is not None:
-                    decision["rememberScope"] = remember_scope
-                inbox.resolve(thread_id, request_id, decision)
+                accepted = await inbox.resolve(frame.threadId, frame.requestId, decision)
+                resolve_result = ApprovalInboxResolveResultFrame(
+                    requestId=frame.requestId,
+                    accepted=accepted,
+                    message=(None if accepted else "规则保存失败、审批已结束或请求不匹配，请重试"),
+                )
+                await manager.send_to(websocket, resolve_result.model_dump())
             # 其他 frame_type 静默
     except Exception as exc:
         logger.debug("/ws/thread-status client disconnected or errored")
@@ -356,14 +424,14 @@ async def _thread_status_ws_handler(websocket: WebSocket) -> None:
         )
     finally:
         # 4. detach 两个 broadcaster
-        await broadcaster.detach(websocket)
-        await inbox.detach(websocket)
+        await inbox.detach(inbox_sender)
+        await manager.detach(websocket)
 
 
 __all__ = [
-    "ThreadStatusBroadcaster",
     "ThreadStatusEventSink",
-    "get_broadcaster",
+    "get_thread_status_manager",
+    "publish_normalized_status",
     "register_thread_status_routes",
     "reset_broadcaster_for_testing",
 ]

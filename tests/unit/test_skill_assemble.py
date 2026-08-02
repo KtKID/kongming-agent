@@ -1,7 +1,9 @@
-"""skill-assemble-v0.1.6 单测：验证 skill listing 真的进了 system prompt。
+"""skill-assemble-v0.1.6 单测：验证动态来源真的进了 system prompt。
 
 覆盖：
 - listing 文本经 ``_assemble_instructions`` 拼到 rendered；origins 含 "skills"。
+- 默认 workflow catalog 经 ``_assemble_instructions`` 拼到 rendered；origins 含
+  "workflow_catalog"。
 - 空 listing（无 skill 装载）保持 v0.1.5 行为，origins 不含 "skills"。
 - 真实文件路径走通：临时 ``.kongming/skills/<name>/SKILL.md`` →
   ``load_skill_specs`` → ``format_skill_listing`` → ``_assemble_instructions``
@@ -15,13 +17,12 @@ from pathlib import Path
 import pytest
 
 import hosts.cli.main as cli_main
-from application.agent_workflows.prompt_catalog import WorkflowPromptListingRender
 from infrastructure.config.models import (
     ApprovalConfig,
     Config,
     EvolutionConfig,
     EvolutionMemoryConfig,
-    ModelConfig,
+    ModelSelectionConfig,
     RunnerConfig,
     SessionConfig,
     TraceConfig,
@@ -31,12 +32,7 @@ from prompting.skills.skill_loader import format_skill_listing, load_skill_specs
 
 def _build_cfg() -> Config:
     return Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="stub-model",
-            base_url="http://127.0.0.1:1234",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         runner=RunnerConfig(max_turns=3),
         session=SessionConfig(backend="memory"),
         trace=TraceConfig(output_path=".kongming/traces/test.jsonl"),
@@ -47,10 +43,10 @@ def _build_cfg() -> Config:
 
 
 @pytest.mark.asyncio
-async def test_assemble_instructions_appends_skill_listing(
+async def test_assemble_instructions_includes_skill_and_workflow_listing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """非空 ``skill_listing`` 时，rendered 末尾追加 ``# skills`` 段，origins 含 "skills"。"""
+    """非空 ``skill_listing`` 时，公共装配器生成 workflow 与 skills 段。"""
     monkeypatch.setattr(cli_main, "get_kongming_home", lambda: tmp_path)
     cfg = _build_cfg()
     listing = "- demo: 演示用 skill - 当用户说 demo 时触发"
@@ -64,42 +60,38 @@ async def test_assemble_instructions_appends_skill_listing(
     assert "# skills" in rendered
     assert listing in rendered
     assert "skills" in origins
+    assert "# workflow_catalog" in rendered
+    assert "workflow_catalog" in origins
+    assert "mode: deep_research" in rendered
     assert memory_store is None
 
 
 @pytest.mark.asyncio
-async def test_assemble_instructions_places_workflow_listing_before_dynamic_sources(
+async def test_assemble_instructions_keeps_dynamic_sources_with_workflow_catalog(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """workflow listing 早于文件/env/skills，输入为三类动态来源，输出文本顺序断言。"""
+    """初始 system prompt 包含 workflow、基础指令、动态来源和 skills。"""
     monkeypatch.setattr(cli_main, "get_kongming_home", lambda: tmp_path)
     monkeypatch.setenv("KONGMING_EXTRA_INSTRUCTIONS", "env instruction")
     extra_file = tmp_path / "rules.md"
     extra_file.write_text("file instruction", encoding="utf-8")
     cfg = _build_cfg()
-    workflow_listing = WorkflowPromptListingRender(
-        text="# workflow catalog\nworkflow instruction",
-        origin="workflow_catalog",
-        template_version="test-template",
-        listing_hash="test-hash",
-    )
 
     rendered, origins, memory_store = await cli_main._assemble_instructions(
         cfg,
         instructions_files=[extra_file],
         skill_listing="- demo: skill instruction",
-        workflow_listing=workflow_listing,
     )
 
     assert "workflow_catalog" in origins
     assert "file:rules.md" in origins
     assert "env:KONGMING_EXTRA_INSTRUCTIONS" in origins
     assert "skills" in origins
+    assert "# workflow_catalog" in rendered
     assert rendered.index("# workflow_catalog") < rendered.index("# file:rules.md")
-    assert rendered.index("# workflow_catalog") < rendered.index(
-        "# env:KONGMING_EXTRA_INSTRUCTIONS"
-    )
-    assert rendered.index("# workflow_catalog") < rendered.index("# skills")
+    assert rendered.index("# file:rules.md") < rendered.index("# skills")
+    assert rendered.index("# env:KONGMING_EXTRA_INSTRUCTIONS") < rendered.index("# skills")
+    assert rendered.index("# file:rules.md") < rendered.index("# env:KONGMING_EXTRA_INSTRUCTIONS")
     assert memory_store is None
 
 
@@ -107,7 +99,7 @@ async def test_assemble_instructions_places_workflow_listing_before_dynamic_sour
 async def test_assemble_instructions_skips_empty_skill_listing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """空 listing 不动 v0.1.5 行为：origins 不含 "skills"，rendered 末尾无 skills 段。"""
+    """空 listing 时 origins 不含 "skills"，workflow catalog 仍会注入。"""
     monkeypatch.setattr(cli_main, "get_kongming_home", lambda: tmp_path)
     cfg = _build_cfg()
 
@@ -119,6 +111,8 @@ async def test_assemble_instructions_skips_empty_skill_listing(
 
     assert "# skills" not in rendered
     assert "skills" not in origins
+    assert "# workflow_catalog" in rendered
+    assert "workflow_catalog" in origins
 
 
 @pytest.mark.asyncio

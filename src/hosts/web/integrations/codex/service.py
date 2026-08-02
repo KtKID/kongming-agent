@@ -15,8 +15,13 @@ from typing import TYPE_CHECKING, Any
 from hosts.web.integrations.codex._image_cli_args import CodexImageCliArgsBuilder
 from hosts.web.integrations.codex.approval import map_permission_mode
 from hosts.web.integrations.codex.normalizer import normalize
+from hosts.web.protocol import UsageSummaryUpdatedFrame
 from hosts.web.shared.session_manager import SessionManager
-from hosts.web.websocket.thread_status import get_broadcaster
+from hosts.web.websocket.thread_status import (
+    get_thread_status_manager,
+    publish_normalized_status,
+)
+from hosts.web.websocket.thread_status_manager import ThreadStatusRunLease
 from network.network_log import log_network_exception
 
 if TYPE_CHECKING:
@@ -104,7 +109,29 @@ class CodexService:
         proc: asyncio.subprocess.Process | None = None
         active_sid = session_id
         complete_already_sent = False
+        status_lease: ThreadStatusRunLease | None = None
         try:
+            effective_tid = kongming_thread_id or active_sid
+            run_index = self._run_counters.get(effective_tid, 0) + 1
+            self._run_counters[effective_tid] = run_index
+            status_manager = get_thread_status_manager()
+            status_lease = await status_manager.begin_run(
+                effective_tid,
+                f"{effective_tid}-{run_index}",
+            )
+            await status_manager.publish_status(
+                status_lease,
+                phase="responding",
+            )
+            current_task = asyncio.current_task()
+            if current_task is None:
+                raise RuntimeError("codex query requires an active asyncio task")
+            await self.session_manager.register(
+                active_sid,
+                writer,
+                query_task=current_task,
+            )
+
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *invocation.argv,
@@ -120,6 +147,10 @@ class CodexService:
                         "codex CLI not installed; npm i -g @openai/codex",
                     ),
                 )
+                await status_manager.publish_status(
+                    status_lease,
+                    phase="error",
+                )
                 return
 
             self._processes[active_sid] = proc
@@ -127,23 +158,13 @@ class CodexService:
 
             stderr_task = asyncio.create_task(self._drain_stderr(proc))
 
-            current_task = asyncio.current_task()
-            await self.session_manager.register(
-                active_sid,
-                writer,
-                query_task=current_task,
-            )
-
-            effective_tid = kongming_thread_id or active_sid
-            run_index = self._run_counters.get(effective_tid, 0) + 1
-            self._run_counters[effective_tid] = run_index
-
             active_sid, complete_already_sent = await self._consume_stdout(
                 proc,
                 writer,
                 active_sid,
                 kongming_thread_id=kongming_thread_id,
                 cwd=cwd,
+                status_lease=status_lease,
                 run_index=run_index,
                 model=model,
             )
@@ -160,12 +181,20 @@ class CodexService:
                         writer,
                         self._complete_msg(active_sid, exit_code=return_code, aborted=True),
                     )
+                    await status_manager.publish_status(
+                        status_lease,
+                        phase="idle",
+                    )
                 return
 
             if self._stderr_has_auth_error(stderr_text):
                 await self._safe_send(
                     writer,
                     self._error_msg(active_sid, "codex not authenticated; run `codex login`"),
+                )
+                await status_manager.publish_status(
+                    status_lease,
+                    phase="error",
                 )
                 return
 
@@ -175,6 +204,10 @@ class CodexService:
                     writer,
                     self._error_msg(active_sid, f"codex exited with code {return_code}: {tail}"),
                 )
+                await status_manager.publish_status(
+                    status_lease,
+                    phase="error",
+                )
                 return
 
             if not complete_already_sent:
@@ -182,18 +215,32 @@ class CodexService:
                     writer,
                     self._complete_msg(active_sid, exit_code=return_code, aborted=False),
                 )
+                await status_manager.publish_status(
+                    status_lease,
+                    phase="complete",
+                )
         except asyncio.CancelledError:
             logger.info("codex service.query cancelled (session=%s)", active_sid)
             await self._safe_send(
                 writer,
                 self._complete_msg(active_sid, exit_code=1, aborted=True),
             )
+            if status_lease is not None:
+                await get_thread_status_manager().publish_status(
+                    status_lease,
+                    phase="idle",
+                )
         except Exception as exc:
             logger.exception("codex service.query failed")
             await self._safe_send(
                 writer,
                 self._error_msg(active_sid, f"codex service error: {exc}"),
             )
+            if status_lease is not None:
+                await get_thread_status_manager().publish_status(
+                    status_lease,
+                    phase="error",
+                )
         finally:
             self._processes.pop(active_sid, None)
             self._processes.pop(session_id, None)
@@ -287,12 +334,13 @@ class CodexService:
         *,
         kongming_thread_id: str | None,
         cwd: str,
+        status_lease: ThreadStatusRunLease,
         run_index: int = 0,
         model: str | None = None,
     ) -> tuple[str, bool]:
         active_sid = session_id
         complete_already_sent = False
-        broadcaster = get_broadcaster()
+        status_manager = get_thread_status_manager()
 
         if proc.stdout is None:
             return active_sid, complete_already_sent
@@ -364,13 +412,11 @@ class CodexService:
                         kongming_thread_id
                     )
                     if usage_dto is not None:
-                        await broadcaster.broadcast(
-                            {
-                                "type": "usage_summary_updated",
-                                "threadId": kongming_thread_id,
-                                "usage": usage_dto.model_dump(),
-                            }
+                        frame = UsageSummaryUpdatedFrame(
+                            threadId=kongming_thread_id,
+                            usage=usage_dto.model_dump(),
                         )
+                        await status_manager.broadcast(frame.model_dump())
                 except Exception as exc:
                     log_network_exception(
                         "hosts.web.integrations.codex.service",
@@ -387,7 +433,11 @@ class CodexService:
                     complete_already_sent = True
                 await self._safe_send(writer, dict(msg))
                 if kongming_thread_id is not None:
-                    await broadcaster.emit(kongming_thread_id, dict(msg))
+                    await publish_normalized_status(
+                        status_manager,
+                        status_lease,
+                        dict(msg),
+                    )
 
         return active_sid, complete_already_sent
 

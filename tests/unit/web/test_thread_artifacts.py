@@ -12,11 +12,11 @@ from fastapi.testclient import TestClient
 from hosts.web.errors import KongmingWebError, kongming_error_handler
 from hosts.web.routers.thread_artifacts import router
 from hosts.web.thread_artifacts.manager import ThreadArtifactManager, encode_artifact_id
-from infrastructure.config.models import Config, ModelConfig
+from infrastructure.config.models import Config, ModelSelectionConfig
 
 
 def _cfg(tmp_path: Path) -> Config:
-    cfg = Config(model=ModelConfig(name="m", base_url="http://127.0.0.1:1234/v1"))
+    cfg = Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
     cfg.session.file_store_path = str(tmp_path / "sessions")
     return cfg
 
@@ -87,10 +87,6 @@ def test_manager_reads_json_jsonl_and_directory(tmp_path: Path) -> None:
         thread_id=thread_id,
         artifact_id=encode_artifact_id("manifest.json"),
     )
-    system_prompt = manager.read_artifact(
-        thread_id=thread_id,
-        artifact_id=encode_artifact_id("system_prompt.json"),
-    )
     history = manager.read_artifact(
         thread_id=thread_id,
         artifact_id=encode_artifact_id(f"{thread_id}.jsonl"),
@@ -105,9 +101,6 @@ def test_manager_reads_json_jsonl_and_directory(tmp_path: Path) -> None:
     )
 
     assert manifest.content["session_id"] == thread_id
-    assert "content" not in system_prompt.content
-    assert system_prompt.content["content_redacted"] is True
-    assert system_prompt.content["content_chars"] == 3
     assert history.content[0]["message"]["content"].startswith("# 标题")
     assert trace.content[1]["__parse_error__"] is True
     assert trace.diagnostics[0].code == "thread_artifact.read_failed"

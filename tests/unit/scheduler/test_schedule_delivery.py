@@ -1,7 +1,7 @@
 """v0.3 cron-delivery domain 单元测试。
 
 覆盖 ``ScheduleDelivery`` / ``DeliveryChannel`` / ``DeliveryStatus`` /
-``TaskState.DELETED`` 的构造与不变量校验。
+``TaskLifecycleState.DELETED`` 的构造与不变量校验。
 
 不测序列化——序列化路径在 ``test_scheduler_store.py`` 通过 round-trip 间接覆盖
 （v0.2 起的约定：dataclass frozen + store 集中负责落盘）。
@@ -22,8 +22,8 @@ from scheduler.domain import (
     ScheduleTrigger,
     SessionMode,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
@@ -107,31 +107,25 @@ def test_schedule_delivery_equality_by_value():
 
 
 # ---------------------------------------------------------------------------
-# TaskState.DELETED
+# TaskLifecycleState.DELETED
 # ---------------------------------------------------------------------------
 
 
 def test_task_state_has_deleted_member():
     """v0.3 新增 DELETED 状态用于软删除。"""
-    assert TaskState.DELETED.value == "deleted"
+    assert TaskLifecycleState.DELETED.value == "deleted"
 
 
-def test_task_state_deleted_is_disabled_state():
-    """``state=DELETED`` 时 ``enabled=False`` 必须合法（否则 ScheduledTask 校验抛错）。"""
-    task = _make_task(enabled=False, state=TaskState.DELETED)
-    assert task.state is TaskState.DELETED
-    assert task.enabled is False
+def test_task_lifecycle_deleted_is_valid():
+    """``DELETED`` 是保留历史的软删除生命周期。"""
+    task = _make_task(lifecycle=TaskLifecycleState.DELETED)
+    assert task.lifecycle is TaskLifecycleState.DELETED
 
 
-def test_task_state_deleted_with_enabled_true_rejected():
-    """逻辑约束：DELETED 任务不能 enabled=True（不变量由 ScheduledTask 校验）。
-    现有 ``ScheduledTask`` 的不变量是 ``enabled=False → state in {paused, disabled,
-    completed, deleted}``；反向（enabled=True 时 state 任意）允许。
-    本用例确认 DELETED 也属于 enabled=False 时合法集合。"""
-    # 反向：enabled=True 时 state=DELETED 在当前 dataclass 不强禁，由调用方约束
-    # 这里只测合法路径，不测反例（v0.4 真正接业务时再补 state machine）
-    task = _make_task(enabled=False, state=TaskState.DELETED)
-    assert task.enabled is False
+def test_task_lifecycle_exhausted_is_valid():
+    """``EXHAUSTED`` 表示 one-shot 已被原子领取。"""
+    task = _make_task(lifecycle=TaskLifecycleState.EXHAUSTED)
+    assert task.lifecycle is TaskLifecycleState.EXHAUSTED
 
 
 # ---------------------------------------------------------------------------
@@ -210,15 +204,13 @@ def test_scheduled_run_seen_at_must_be_str_or_none():
 def _make_task(
     *,
     task_id: str = "t-d",
-    enabled: bool = True,
-    state: TaskState = TaskState.SCHEDULED,
+    lifecycle: TaskLifecycleState = TaskLifecycleState.SCHEDULED,
     delivery: ScheduleDelivery | None = None,
 ) -> ScheduledTask:
     return ScheduledTask(
         task_id=task_id,
         name=f"task-{task_id}",
-        enabled=enabled,
-        state=state,
+        lifecycle=lifecycle,
         origin=TaskOrigin.CLI,
         trigger=ScheduleTrigger(trigger_type=TriggerType.INTERVAL, expr="10", timezone="UTC"),
         policy=TaskExecutionPolicy(

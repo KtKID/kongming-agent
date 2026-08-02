@@ -2,9 +2,9 @@
 
 覆盖 README 列出的 6 类场景：
 
-1. happy path：改 ``model.temperature``，逐行比对注释/空行保留
+1. happy path：改 ``model.reasoning_effort``，逐行比对注释/空行保留
 2. mtime 冲突 → :class:`ConflictError`，原文件不动
-3. pydantic 校验失败（``temperature=99``） → :class:`ValidationFailedError`，原文件不动
+3. pydantic 校验失败（非法 reasoning effort） → :class:`ValidationFailedError`，原文件不动
 4. 嵌套字段（``evolution.memory.enabled``）改完仍保留注释
 5. 路径不存在（``nonexistent.foo``） → :class:`ValidationFailedError`
 6. 多字段一次写入（两个 patch 同时生效）
@@ -37,16 +37,15 @@ from infrastructure.config.writer import (
 # 含中文注释、空行、多层嵌套，模拟真实 setting.yaml 的注释密度。
 # 不引用任何外部 yaml；保留所有"格式细节"用于注释保留断言。
 _MINI_YAML = """\
+config_schema_version: v0.6
 # kongming-agent 测试用最小化配置
 # 本文件由 test_writer.py 生成；改了它要回查测试断言。
 
 model:
-  # 模型名（必填）
-  name: gpt-4o-mini
-  # 本地服务 base_url，跳过 api_key 校验
-  base_url: http://127.0.0.1:1234/v1
-  # 采样温度，[0, 2] 之间
-  temperature: 0.6
+  # 默认模型 preset（必填）
+  preset_id: local-gemma-4-e4b-it
+  # 默认推理档位
+  reasoning_effort: medium
 
 runner:
   # 单轮最大 turn 数
@@ -74,7 +73,7 @@ def _read_lines(p: Path) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# 1) happy path：改 model.temperature，注释 + 空行保留
+# 1) happy path：改 model.reasoning_effort，注释 + 空行保留
 # ---------------------------------------------------------------------------
 
 
@@ -86,7 +85,7 @@ def test_happy_path_preserves_comments_and_blank_lines(yaml_file: Path) -> None:
 
     result = round_trip_update(
         yaml_file,
-        patch=[PatchItem(path="model.temperature", value=0.9)],
+        patch=[PatchItem(path="model.reasoning_effort", value="high")],
         expected_mtime=expected_mtime,
     )
 
@@ -107,8 +106,8 @@ def test_happy_path_preserves_comments_and_blank_lines(yaml_file: Path) -> None:
     assert old_blank == new_blank, "空行数量变化"
 
     # 值确实改了
-    assert any("temperature: 0.9" in ln for ln in new_lines), "temperature 没改成 0.9"
-    assert not any("temperature: 0.6" in ln for ln in new_lines), "旧 temperature 残留"
+    assert any("reasoning_effort: high" in ln for ln in new_lines)
+    assert not any("reasoning_effort: medium" in ln for ln in new_lines)
 
     # diff_lines 极小：温度行 1 个 - + 1 个 + = 2 行
     assert result.diff_lines <= 3, f"改 1 字段不应产生 >{result.diff_lines} 行差异"
@@ -126,7 +125,7 @@ def test_mtime_conflict_raises_and_does_not_touch_file(yaml_file: Path) -> None:
     with pytest.raises(ConflictError) as excinfo:
         round_trip_update(
             yaml_file,
-            patch=[PatchItem(path="model.temperature", value=0.9)],
+            patch=[PatchItem(path="model.reasoning_effort", value="high")],
             expected_mtime=stale_mtime,
         )
 
@@ -146,18 +145,20 @@ def test_pydantic_validation_failure_rolls_back(yaml_file: Path) -> None:
     original_text = yaml_file.read_text(encoding="utf-8")
     expected_mtime = yaml_file.stat().st_mtime
 
-    # 99 超出 [0, 2] 范围
+    # ultra 超出 reasoning effort 枚举范围
     with pytest.raises(ValidationFailedError) as excinfo:
         round_trip_update(
             yaml_file,
-            patch=[PatchItem(path="model.temperature", value=99)],
+            patch=[PatchItem(path="model.reasoning_effort", value="ultra")],
             expected_mtime=expected_mtime,
         )
 
     assert excinfo.value.errors, "应当返回非空 errors"
-    # 至少一条错误指向 model.temperature
+    # 至少一条错误指向 model.reasoning_effort
     paths = [e.get("path", "") for e in excinfo.value.errors]
-    assert any("temperature" in p for p in paths), f"errors 中应含 temperature 路径，得到 {paths}"
+    assert any("reasoning_effort" in p for p in paths), (
+        f"errors 中应含 reasoning_effort 路径，得到 {paths}"
+    )
 
     # 原文件 + tmp 都不留
     assert yaml_file.read_text(encoding="utf-8") == original_text
@@ -226,7 +227,7 @@ def test_multi_field_patch_applies_all(yaml_file: Path) -> None:
     result = round_trip_update(
         yaml_file,
         patch=[
-            PatchItem(path="model.temperature", value=1.5),
+            PatchItem(path="model.reasoning_effort", value="low"),
             PatchItem(path="runner.max_turns", value=42),
         ],
         expected_mtime=expected_mtime,
@@ -234,11 +235,11 @@ def test_multi_field_patch_applies_all(yaml_file: Path) -> None:
 
     assert isinstance(result, WriteResult)
     new_text = yaml_file.read_text(encoding="utf-8")
-    assert "temperature: 1.5" in new_text
+    assert "reasoning_effort: low" in new_text
     assert "max_turns: 42" in new_text
 
     # 注释依然在
-    assert "# 模型名（必填）" in new_text
+    assert "# 默认模型 preset（必填）" in new_text
     assert "# 单轮最大 turn 数" in new_text
 
 
@@ -252,7 +253,7 @@ def test_missing_file_raises_file_not_found(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         round_trip_update(
             nonexistent,
-            patch=[PatchItem(path="model.temperature", value=0.9)],
+            patch=[PatchItem(path="model.reasoning_effort", value="high")],
             expected_mtime=0.0,
         )
 
@@ -263,14 +264,14 @@ def test_missing_file_raises_file_not_found(tmp_path: Path) -> None:
 
 
 def test_traverse_through_scalar_raises(yaml_file: Path) -> None:
-    """``model.temperature.bogus`` 中 temperature 是数字，不能再下钻。"""
+    """``model.reasoning_effort.bogus`` 穿过标量时必须失败。"""
     expected_mtime = yaml_file.stat().st_mtime
     original_text = yaml_file.read_text(encoding="utf-8")
 
     with pytest.raises(ValidationFailedError):
         round_trip_update(
             yaml_file,
-            patch=[PatchItem(path="model.temperature.bogus", value=1)],
+            patch=[PatchItem(path="model.reasoning_effort.bogus", value=1)],
             expected_mtime=expected_mtime,
         )
 

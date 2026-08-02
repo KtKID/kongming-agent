@@ -5,6 +5,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ClaudeCodeView } from "@/components/ClaudeCodeView";
 import type { NormalizedMessage, ThreadMetadataDTO } from "@/protocol";
 import { useThreadStatusStore } from "@/stores/threadStatus";
+import { useThreadsStore } from "@/stores/threads";
+import type { InitialMessageDraft } from "@/stores/threads";
 
 const mockApiGet = vi.fn();
 const mockUseClaudeCodeWS = vi.fn();
@@ -47,6 +49,19 @@ function makeSocket(): SocketHandle {
   };
 }
 
+function initialDraft(text: string): InitialMessageDraft {
+  return {
+    text,
+    reasoningEffort: null,
+    restoreDraft: {
+      text,
+      reasoningEffort: null,
+      attachments: [],
+      references: [],
+    },
+  };
+}
+
 async function mountStreamingView(
   handle: SocketHandle,
   threadOverrides: Partial<ThreadMetadataDTO> = {},
@@ -78,7 +93,14 @@ async function mountStreamingView(
     phase: "responding",
   } as unknown as NormalizedMessage);
   act(() => {
-    useThreadStatusStore.getState().setStatus("thread-1", "responding");
+    useThreadStatusStore.getState().applyStatus({
+      frame_type: "thread-status",
+      threadId: "thread-1",
+      phase: "responding",
+      sequence: 1,
+      runId: "run-1",
+      runGeneration: 1,
+    }, 1);
   });
 }
 
@@ -87,7 +109,49 @@ describe("ClaudeCodeView", () => {
     mockApiGet.mockReset();
     mockUseClaudeCodeWS.mockReset();
     // chat-running-state-unify #3：清 thread-status 真源，避免测试间残留 phase 污染 isRunning。
-    useThreadStatusStore.setState({ statuses: {} });
+    useThreadStatusStore.setState({
+      statuses: {},
+      connectionGeneration: 1,
+      lastSequence: 0,
+    });
+    useThreadsStore.setState({
+      pendingNewSession: null,
+      initialMessage: null,
+    });
+  });
+
+  it("创建后的首条消息发送失败时恢复草稿且不生成用户气泡", async () => {
+    const handle = makeSocket();
+    handle.socket.send.mockImplementation(() => {
+      throw new Error("claude transport down");
+    });
+    const fetchThreads = vi.fn();
+    mockUseClaudeCodeWS.mockReturnValue({
+      socket: handle.socket,
+      state: "open",
+    });
+    mockApiGet.mockResolvedValue({ messages: [] });
+    useThreadsStore.setState({
+      initialMessage: initialDraft("需要恢复的 Claude 首条消息"),
+      fetchThreads,
+    });
+
+    render(
+      <MemoryRouter>
+        <ClaudeCodeView
+          threadId="thread-1"
+          thread={{ claude_thread_id: "sdk-1" } as ThreadMetadataDTO}
+        />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("消息输入")).toHaveValue(
+        "需要恢复的 Claude 首条消息",
+      ),
+    );
+    expect(fetchThreads).not.toHaveBeenCalled();
+    expect(screen.getAllByText("需要恢复的 Claude 首条消息")).toHaveLength(1);
   });
 
   it("历史消息复用通用聊天 renderer，并把 tool_result 合并到工具卡片", async () => {
@@ -222,7 +286,14 @@ describe("ClaudeCodeView", () => {
       // isProcessing=false 同时也会通过 /ws/thread-status 广播 phase=idle，让
       // useThreadRunning(threadId)=false → Stop 消失。单元测试显式模拟这个同步。
       act(() => {
-        useThreadStatusStore.getState().setStatus("thread-1", "idle");
+        useThreadStatusStore.getState().applyStatus({
+          frame_type: "thread-status",
+          threadId: "thread-1",
+          phase: "idle",
+          sequence: 2,
+          runId: "run-1",
+          runGeneration: 1,
+        }, 1);
       });
 
       await waitFor(() => {

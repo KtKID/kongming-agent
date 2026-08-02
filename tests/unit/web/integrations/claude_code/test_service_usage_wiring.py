@@ -27,10 +27,12 @@ from claude_agent_sdk.types import (
     TextBlock,
 )
 
-from hosts.web.integrations.claude_code.approval import ApprovalBridge
 from hosts.web.integrations.claude_code.normalizer import ClaudeNormalizer
 from hosts.web.integrations.claude_code.service import ClaudeCodeService
 from hosts.web.shared.session_manager import SessionManager
+from tests.unit.web.integrations.claude_code._approval_test_support import (
+    build_test_approval_bridge as ApprovalBridge,
+)
 
 
 class _FakeWriter:
@@ -124,9 +126,11 @@ async def test_complete_triggers_get_thread_usage_broadcast(
     # mock broadcaster
     mock_broadcaster = MagicMock()
     mock_broadcaster.broadcast = AsyncMock()
-    mock_broadcaster.emit = AsyncMock()
+    mock_broadcaster.begin_run = AsyncMock(return_value=MagicMock())
+    mock_broadcaster.publish_status = AsyncMock()
     monkeypatch.setattr(
-        "hosts.web.integrations.claude_code.service.get_broadcaster", lambda: mock_broadcaster
+        "hosts.web.integrations.claude_code.service.get_thread_status_manager",
+        lambda: mock_broadcaster,
     )
 
     sessions = SessionManager()
@@ -154,10 +158,11 @@ async def test_complete_triggers_get_thread_usage_broadcast(
     broadcast_calls = [
         c
         for c in mock_broadcaster.broadcast.call_args_list
-        if isinstance(c[0][0], dict) and c[0][0].get("type") == "usage_summary_updated"
+        if isinstance(c[0][0], dict) and c[0][0].get("frame_type") == "usage_summary_updated"
     ]
     assert len(broadcast_calls) >= 1
     payload = broadcast_calls[0][0][0]
+    assert "type" not in payload
     assert payload["threadId"] == "thread-aabbccddeeff"
     assert "usage" in payload
 
@@ -181,9 +186,11 @@ async def test_v1_methods_no_longer_called(monkeypatch: pytest.MonkeyPatch) -> N
 
     mock_broadcaster = MagicMock()
     mock_broadcaster.broadcast = AsyncMock()
-    mock_broadcaster.emit = AsyncMock()
+    mock_broadcaster.begin_run = AsyncMock(return_value=MagicMock())
+    mock_broadcaster.publish_status = AsyncMock()
     monkeypatch.setattr(
-        "hosts.web.integrations.claude_code.service.get_broadcaster", lambda: mock_broadcaster
+        "hosts.web.integrations.claude_code.service.get_thread_status_manager",
+        lambda: mock_broadcaster,
     )
 
     sessions = SessionManager()
@@ -276,9 +283,11 @@ async def test_usage_dto_none_no_broadcast(monkeypatch: pytest.MonkeyPatch) -> N
 
     mock_broadcaster = MagicMock()
     mock_broadcaster.broadcast = AsyncMock()
-    mock_broadcaster.emit = AsyncMock()
+    mock_broadcaster.begin_run = AsyncMock(return_value=MagicMock())
+    mock_broadcaster.publish_status = AsyncMock()
     monkeypatch.setattr(
-        "hosts.web.integrations.claude_code.service.get_broadcaster", lambda: mock_broadcaster
+        "hosts.web.integrations.claude_code.service.get_thread_status_manager",
+        lambda: mock_broadcaster,
     )
 
     sessions = SessionManager()
@@ -304,7 +313,7 @@ async def test_usage_dto_none_no_broadcast(monkeypatch: pytest.MonkeyPatch) -> N
     broadcast_calls = [
         c
         for c in mock_broadcaster.broadcast.call_args_list
-        if isinstance(c[0][0], dict) and c[0][0].get("type") == "usage_summary_updated"
+        if isinstance(c[0][0], dict) and c[0][0].get("frame_type") == "usage_summary_updated"
     ]
     assert len(broadcast_calls) == 0
 
@@ -323,9 +332,11 @@ async def test_get_thread_usage_exception_does_not_break_main_flow(
 
     mock_broadcaster = MagicMock()
     mock_broadcaster.broadcast = AsyncMock()
-    mock_broadcaster.emit = AsyncMock()
+    mock_broadcaster.begin_run = AsyncMock(return_value=MagicMock())
+    mock_broadcaster.publish_status = AsyncMock()
     monkeypatch.setattr(
-        "hosts.web.integrations.claude_code.service.get_broadcaster", lambda: mock_broadcaster
+        "hosts.web.integrations.claude_code.service.get_thread_status_manager",
+        lambda: mock_broadcaster,
     )
 
     sessions = SessionManager()

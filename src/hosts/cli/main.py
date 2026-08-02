@@ -1,20 +1,14 @@
 """kongming-agent CLI 入口。
 
-这里只做四件事：
+本脚本负责进程级装配：解析 click 参数、加载 Config、组装 session / trace /
+instructions / memory / approval / tool registry，再通过 ``SessionEngine.build`` 创建
+runtime。
 
-1. 用 :mod:`click` 解析命令行参数；
-2. 调 :func:`infrastructure.config.load_config` 拿统一配置；
-3. 按 Config 装配 session 工厂 / trace sink / instructions 三条**可观测的**
-   输入通道；
-4. 通过 :meth:`runtime_assembly.native_runtime.NativeRuntime.build`
-   装配 runtime，交给 :class:`host.session_bridge.SessionBridge` 跑交互循环。
-
-**不做**：
-
-- 不复制 provider / registry / approval / runner / safety 装配——全部走
-  :meth:`NativeRuntime.build`。
-- 不写死 model / api_key / base_url / max_turns / timeout——全部从 Config 拿。
-- 不自持第二套 run loop。
+运行职责分成三层：
+1. ``main.py`` 持有 CLI 进程装配和 smoke / interactive 分支。
+2. ``HostDispatcher`` 持有 root ``AgentManager``、mailbox、Result future 和关闭流程。
+3. ``CLIInteractiveLoop`` 持有 CLI REPL、普通文本投递、命令分流、Ctrl-C 和 EOF drain。
+4. ``CommandService`` 只处理 slash command，并把 prompt command 交回 runtime delegate。
 
 同步入口 :func:`main`：click 不支持 native async，因此 ``main`` 是同步的，
 内部通过 ``asyncio.run`` 驱动 async 主链路。
@@ -27,39 +21,54 @@ import contextlib
 import logging
 import os
 import uuid
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, cast
 
 import click
 
 from application.agent_roles import AgentRoleManager
-from application.agent_workflows.manager import AgentWorkflowManager
-from application.agent_workflows.prompt_catalog import (
-    WorkflowPromptListingRender,
-    build_default_workflow_prompt_listing,
+from application.agent_workflows.manager import (
+    AgentWorkflowManager,
 )
-from application.agent_workflows.strategies.roundtable_review.presets import (
-    code_review_role_presets,
+from commands.service import build_default_command_service
+from core.contracts import (
+    ApprovalRequest,
+    EventSink,
+    PreparedToolCall,
+    SupportsLLMStream,
+    ToolCallPreparer,
+    ToolContext,
 )
-from application.subagents.manager import SubAgentManager, SubAgentTask
-from application.subagents.permissions import SubAgentPermissionSpec
-from core.contracts import ApprovalRequest, EventSink, SupportsLLMStream, ToolContext
 from hosts.cli.adapter import CLIAdapter, CLIEventSink
+from hosts.cli.interactive_loop import CLIInteractiveLoop
+from hosts.shared.host_dispatcher import (
+    HostDispatcher,
+    build_scheduled_run_dispatcher_factory,
+)
 from hosts.shared.mcp_runtime_registration import McpRuntimeRegistrationManager
-from hosts.shared.session_bridge import SessionBridge
 from infrastructure.config import (
     Config,
     get_kongming_home,
     load_config,
+    materialize_kongming_home_agent_config,
+    resolve_config_path,
     resolve_kongming_path,
 )
 from infrastructure.config.errors import ConfigLoadError, ConfigValidationError
+from infrastructure.config.model_catalog_manager import ModelCatalogManager
+from infrastructure.config.model_provider_catalog import (
+    ModelProviderCatalogError,
+    ResolvedModelConfig,
+)
+from infrastructure.config.models import ModelSelectionConfig, ReasoningEffortInput
+from infrastructure.llm_providers.provider_factory import resolve_model_config
 from infrastructure.tracing import JsonlTraceSink, PromptDebugDumpSink
 from memory import MemoryStore
-from prompting import InstructionSource, assemble_instructions
+from prompting import assemble_instructions
 from prompting.skills.skill_loader import SkillSpec, format_skill_listing, load_skill_specs
-from runtime_assembly.native_runtime import NativeRuntime
+from runtime_assembly.session_engine import SessionEngine
 from sessions import (
     SessionSummary,
     build_session,
@@ -75,10 +84,11 @@ from tools import (
     register_agent_role_tool,
     register_agent_workflow_tool,
     register_choice_tool,
-    register_evolution_write_tool_if_enabled,
     register_schedule_tool_if_enabled,
+    register_spawn_subagent_tool,
     register_task_progress_tool,
 )
+from tools.agent_workflow_tool import AgentTreeRuntimeRouter
 from tools.runtime.approval import PromptActionFn
 
 logger = logging.getLogger(__name__)
@@ -110,16 +120,37 @@ def _resolve_cli_session_id(
     return _generate_cli_session_id()
 
 
-def _build_cli_manager_prompt_fn(session_id: str) -> PromptActionFn:
+def _configure_cli_logging(cfg: Config) -> None:
+    """按配置初始化 CLI 日志，确保 provider 运行决策能输出到 stderr。"""
+    level = getattr(logging, cfg.logging.level.upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(levelname)s:%(name)s:%(message)s",
+    )
+
+
+def _build_cli_manager_prompt_fn(
+    session_id: str,
+    *,
+    config: Config | None = None,
+    auto_approval_policy: Any | None = None,
+    event_sinks: list[EventSink] | None = None,
+) -> PromptActionFn:
     """构造由审批管理器承接的 CLI 终端审批函数。"""
     from hosts.cli.approval import build_cli_action_prompt
     from hosts.cli.approval_manager_sink import CLIApprovalEventSink
+    from safety.approval.llm_reviewer import build_approval_llm_reviewer
     from safety.approval.manager import get_approval_manager, make_manager_prompt_fn
-    from safety.approval.rules import ApprovalRules
+    from safety.approval.permissions_manager import PermissionsManager
 
     action_prompt = build_cli_action_prompt()
     manager = get_approval_manager(
-        rules=ApprovalRules(policy=_build_cli_auto_approval_policy()),
+        permissions_manager=PermissionsManager(
+            get_kongming_home(),
+            event_sinks=event_sinks or (),
+        ),
+        auto_approval_policy=auto_approval_policy,
+        llm_reviewer=build_approval_llm_reviewer(config) if config is not None else None,
     )
     if not manager.has_event_sink_type(CLIApprovalEventSink):
         manager.register_event_sink(CLIApprovalEventSink(manager, action_prompt))
@@ -129,29 +160,6 @@ def _build_cli_manager_prompt_fn(session_id: str) -> PromptActionFn:
         channel="cli",
         default_cwd=str(Path.cwd()),
     )
-
-
-def _build_cli_auto_approval_policy() -> Any:
-    """为 CLI 构造共享自动审批策略；装配失败时按失败关闭处理。"""
-    try:
-        from safety.auto_approval import (
-            AutoApprovalPolicy,
-            ConfigStore,
-            load_default_rules,
-            materialize_user_rules_yaml,
-        )
-
-        home = get_kongming_home()
-        auto_approval_root = home / "web" / "auto_approval"
-        auto_approval_root.mkdir(parents=True, exist_ok=True)
-        rules_yaml = materialize_user_rules_yaml(home)
-        return AutoApprovalPolicy(
-            load_default_rules(rules_yaml),
-            ConfigStore(auto_approval_root),
-        )
-    except Exception:
-        logger.exception("CLI auto-approval policy setup failed; falling back to ask")
-        return None
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
@@ -210,7 +218,7 @@ def _build_cli_auto_approval_policy() -> Any:
     "--model-preset",
     "model_preset_id",
     default=None,
-    help="按 config.web.llm_presets 里的 preset id 覆盖 CLI 模型配置，例如 minimax-m3。",
+    help="按 model-providers.yaml 里的 preset id 覆盖 CLI 模型配置，例如 minimax-m3。",
 )
 @click.option(
     "--instructions-file",
@@ -229,9 +237,9 @@ def _build_cli_auto_approval_policy() -> Any:
 @click.option(
     "--reasoning-effort",
     "reasoning_effort",
-    type=click.Choice(["low", "medium", "high"], case_sensitive=False),
+    type=click.Choice(["none", "low", "medium", "high", "max"], case_sensitive=False),
     default=None,
-    help="覆盖模型思考深度（low/medium/high）。仅对支持的 provider 生效（OpenAI o 系列、GLM-Z 等）。",
+    help="覆盖模型思考深度（none/low/medium/high/max）。仅对支持的 provider 生效。",
 )
 @click.option(
     "--show-reasoning",
@@ -346,9 +354,11 @@ async def _run(
     if workdir is not None:
         _chdir_or_exit(workdir)
 
+    config_path = resolve_config_path(config_path)
     cfg = _load_config_or_exit(config_path)
     if model_preset_id:
         cfg = _apply_model_preset_or_exit(cfg, model_preset_id)
+    _configure_cli_logging(cfg)
     _validate_session_selection_or_exit(
         session_id=session_id,
         list_sessions=list_sessions,
@@ -397,13 +407,24 @@ async def _run(
         subagent_smoke=subagent_smoke,
         workflow_smoke=workflow_smoke,
     )
+    default_cwd = str(Path.cwd())
 
     # CLI 参数 --reasoning-effort 覆盖 config 文件里的设置。
     if reasoning_effort is not None:
-        effort_typed: Literal["low", "medium", "high"] = reasoning_effort  # type: ignore[assignment]
+        effort_typed = cast(ReasoningEffortInput, reasoning_effort)
         cfg = cfg.model_copy(
             update={"model": cfg.model.model_copy(update={"reasoning_effort": effort_typed})}
         )
+    model_catalog_manager = ModelCatalogManager()
+    try:
+        resolved_model = resolve_model_config(
+            cfg,
+            catalog_manager=model_catalog_manager,
+        )
+        model_catalog_manager.resolve_credential(resolved_model)
+    except ModelProviderCatalogError as exc:
+        click.echo(f"[config] {exc.code.value}: {exc}", err=True)
+        raise SystemExit(2) from exc
 
     # CLI 参数 --stream/--no-stream 覆盖 config.stream.enabled。
     if stream_flag is not None:
@@ -437,7 +458,9 @@ async def _run(
 
         cli_pre_prompt_hook = _flush_cron_buffer
 
-    adapter = CLIAdapter(verbose=verbose, pre_prompt_hook=cli_pre_prompt_hook)
+    # adapter 构造挪到下方 stream_active 计算后:streaming 参数依赖 runtime.llm
+    # (runtime 在 ~639 行装配)。本处先保留 pre_prompt_hook 引用。
+    # 437→722 之间 adapter 不被任何装配代码使用,挪动零影响。
 
     # 事件 sink 装配：默认挂 JsonlTraceSink（--no-trace 可关）；verbose 或
     # show_reasoning 时挂 CLIEventSink。runner 会 fan-out 到 list 里所有 sink。
@@ -467,7 +490,7 @@ async def _run(
         )
 
     # v0.1.6 skill 装载：扫描 <home>/skills + <cwd>/.kongming/skills，得到 SkillSpec
-    # 列表与 listing 文本。listing 在 _assemble_instructions 内部拼到 system prompt；
+    # 列表与 listing 文本。listing 交给公共指令装配器生成 system prompt；
     # specs 字典传给 build_default_registry 注册 SkillTool。
     skill_specs_list = await load_skill_specs(
         get_kongming_home(),
@@ -488,48 +511,59 @@ async def _run(
         skill_event_sinks=event_sinks,
     )
 
-    # v0.2 cron：跟 memory_tool 一致的"外部 register"模式。
-    # ticker_factory 闭包：schedule_tool.run_now 路径会调它装配 fresh runtime；
-    # 必须 lazy 导入 build_cron_execution_bridge 以遵循"cron 关时不拉模块"。
-    # v0.3 M4/M5：cron_dispatcher 已在上方按 cfg.scheduler.enabled 构造；
-    # 这里透传给 bridge 让 schedule_tool.run_now 触发的 cron run 也走投递。
-    def _scheduler_runtime_factory(_store):  # type: ignore[no-untyped-def]
-        from scheduler.runtime_factory import build_cron_execution_bridge
+    # schedule_tool.run_now 读取进程内同一个 ScheduledRunManager。
+    ticker_scheduled_run_manager = None
 
-        return build_cron_execution_bridge(
-            cfg,
-            _store,
-            event_sinks=event_sinks,
-            dispatcher=cron_dispatcher,
-        )
+    def _scheduler_runtime_factory(_store):  # type: ignore[no-untyped-def]
+        del _store
+        if ticker_scheduled_run_manager is None:
+            raise RuntimeError("ScheduledRunManager is not ready")
+        return ticker_scheduled_run_manager
 
     scheduler_store = register_schedule_tool_if_enabled(
         registry,
         cfg,
         runtime_factory_fn=_scheduler_runtime_factory,
     )
-    register_evolution_write_tool_if_enabled(
+
+    from evolution.evolution_manager import EvolutionManager
+
+    evolution_manager = EvolutionManager(config=cfg, kongming_home=get_kongming_home())
+    evolution_manager.register_runtime_tools(
         registry,
-        cfg,
         event_sinks=event_sinks,
     )
     agent_workflow_handle = AgentWorkflowHandle()
+    agent_tree_runtime_router = AgentTreeRuntimeRouter()
+    kongming_home = get_kongming_home()
     agent_role_manager = AgentRoleManager(
-        role_dir=get_kongming_home() / "agent_roles",
-        builtin_roles=code_review_role_presets(),
+        role_dir=kongming_home / "agent_roles",
+        config_path=materialize_kongming_home_agent_config(kongming_home),
     )
     register_agent_role_tool(registry, agent_role_manager)
     register_agent_workflow_tool(registry, agent_workflow_handle)
+    register_spawn_subagent_tool(registry, agent_tree_runtime_router)
     register_choice_tool(registry, event_sinks=event_sinks)
     register_task_progress_tool(registry, cfg)
 
     # approval 按配置模式选：interactive 走 ApprovalManager + CLI sink；
     # 其它模式（auto_allow / auto_deny）不需要 prompt_fn。
-    prompt_fn = (
-        _build_cli_manager_prompt_fn(resolved_session_id)
-        if cfg.approval.mode == "interactive"
-        else None
-    )
+    from safety.auto_approval.manager import AutoApprovalManager
+
+    auto_approval_policy = AutoApprovalManager.build(get_kongming_home()).policy
+    permissions_manager = None
+    if cfg.approval.mode == "interactive":
+        prompt_fn = _build_cli_manager_prompt_fn(
+            resolved_session_id,
+            config=cfg,
+            auto_approval_policy=auto_approval_policy,
+            event_sinks=event_sinks,
+        )
+        from safety.approval.manager import get_approval_manager
+
+        permissions_manager = get_approval_manager().permissions_manager
+    else:
+        prompt_fn = None
     approval = build_default_approval(cfg.approval.mode, prompt_fn=prompt_fn)
 
     # instructions 装配：用 InstructionLoader 把 agent_spec 基础文本 + 外部文件
@@ -601,12 +635,13 @@ async def _run(
     mcp_runtime_registration = McpRuntimeRegistrationManager(cfg, event_sinks=event_sinks)
     await mcp_runtime_registration.register(
         registry,
-        excluded_tool_names=("evolution_write",),
+        excluded_tool_names=tuple(evolution_manager.private_tool_names),
     )
 
-    enabled_tool_names = [
-        name for name in registry.names() if name != "evolution_write"
-    ]  # child reviewer 专用工具不暴露给主 agent
+    enabled_tool_names = evolution_manager.enabled_tool_names(
+        registry.names(),
+        lifecycle_bound=True,
+    )
 
     # session bootstrap：收集 CLI 阶段可得的稳定元数据，file backend 需要它。
     import hashlib
@@ -616,11 +651,11 @@ async def _run(
 
     bootstrap = SessionBootstrap(
         agent_name="kongming-agent",
-        model_name=cfg.model.name,
+        model_name=resolved_model.name,
         instruction_sources=instruction_origins,
         instruction_text_hash=f"sha256:{hashlib.sha256(instructions.encode()).hexdigest()}",
         created_at=time.time(),
-        cwd=str(Path.cwd()),
+        cwd=default_cwd,
         instruction_text=instructions,
         app_version=None,
     )
@@ -630,7 +665,9 @@ async def _run(
     def _session_factory(sid: str):  # type: ignore[no-untyped-def]
         return build_session(cfg, sid, bootstrap=bootstrap)
 
-    runtime = NativeRuntime.build(
+    from evolution.lifecycle import register_evolution_lifecycle_hook
+
+    runtime = SessionEngine.build(
         cfg,
         event_sinks=event_sinks,
         approval=approval,
@@ -640,18 +677,24 @@ async def _run(
         instructions=instructions,
         prompt_debug_sink=PromptDebugDumpSink() if prompt_debug else None,
         instruction_origins=instruction_origins,
+        tool_context_metadata={"cwd": default_cwd},
+        permissions_manager=permissions_manager,
+        disposition_resolver=auto_approval_policy,
+        model_catalog_manager=model_catalog_manager,
+        model_config=resolved_model,
     )
-    subagent_manager = SubAgentManager(runtime)
+    register_evolution_lifecycle_hook(runtime=runtime, manager=evolution_manager)
     agent_workflow_manager = AgentWorkflowManager(
-        subagents=subagent_manager,
         config=cfg,
-        workspace_root=Path.cwd(),
+        workspace_root=Path(default_cwd),
         role_manager=agent_role_manager,
+        runtime=runtime,
+        model_catalog_manager=model_catalog_manager,
     )
     agent_workflow_handle.bind(agent_workflow_manager)
 
     # v0.2 cron：scheduler.enabled 时拉起后台 ticker 循环；ticker 自身装配
-    # 一份独立的 cron-用 NativeRuntime（fresh agent run 走它），不复用主聊天
+    # 一份独立的 cron-用 SessionEngine（fresh agent run 走它），不复用主聊天
     # runtime（后者带交互上下文）。退出路径必须 set stop_event + await，
     # 否则 KeyboardInterrupt 之后 ticker 还在跑、httpx client 未释放。
     ticker_task: asyncio.Task[None] | None = None
@@ -662,26 +705,35 @@ async def _run(
         and not (smoke or subagent_smoke or workflow_smoke)
         and scheduler_store is not None
     ):
-        from scheduler.runtime_factory import build_cron_execution_bridge
+        from scheduler.manager import SchedulerManager
+        from scheduler.runtime_factory import build_scheduled_run_manager
         from scheduler.ticker import run_ticker_loop
+
+        recovered_runs = SchedulerManager(scheduler_store).recover_stale_runs_on_startup()
+        if recovered_runs:
+            click.echo(f"[scheduler] recovered stale running runs: {recovered_runs}", err=True)
 
         # v0.3 M4/M5：ticker 主循环 build cron bridge 时也传 dispatcher，
         # 与 _scheduler_runtime_factory 闭包共用同一 cron_dispatcher 实例 ——
         # 两条路径触发的 cron run 投递最终都走同一个 cli_cron_sink。
-        ticker_runtime, ticker_bridge = build_cron_execution_bridge(
+        ticker_runtime, ticker_scheduled_run_manager = build_scheduled_run_manager(
             cfg,
             scheduler_store,
+            dispatcher_factory_builder=build_scheduled_run_dispatcher_factory,
             event_sinks=event_sinks,
             dispatcher=cron_dispatcher,
+            session_bootstrap=bootstrap,
+            tool_context_metadata={"cwd": default_cwd},
+            model_catalog_manager=model_catalog_manager,
+            resolved_model=resolved_model,
         )
         ticker_stop = asyncio.Event()
         ticker_task = asyncio.create_task(
             run_ticker_loop(
                 scheduler_store,
-                ticker_bridge,
+                ticker_scheduled_run_manager,
                 ticker_stop,
                 interval=cfg.scheduler.interval,
-                max_inflight=cfg.scheduler.max_inflight,
             )
         )
 
@@ -693,15 +745,63 @@ async def _run(
             await _run_smoke(runtime, resolved_session_id)
             return
         if subagent_smoke:
-            await _run_subagent_smoke(agent_workflow_manager, resolved_session_id)
+            smoke_dispatcher = HostDispatcher(
+                runtime=runtime,
+                session_id=resolved_session_id or "subagent-smoke",
+                agent_tree_runtime_router=agent_tree_runtime_router,
+            )
+            await smoke_dispatcher.ensure_started()
+            smoke_agent_manager = smoke_dispatcher.agent_manager
+            assert smoke_agent_manager is not None
+            agent_workflow_manager = AgentWorkflowManager(
+                config=cfg,
+                workspace_root=Path(default_cwd),
+                role_manager=agent_role_manager,
+                runtime=runtime,
+                model_catalog_manager=model_catalog_manager,
+                agent_manager=smoke_agent_manager,
+            )
+            agent_workflow_handle.bind(agent_workflow_manager)
+            try:
+                await _run_subagent_smoke(
+                    agent_workflow_manager,
+                    resolved_session_id,
+                    parent_agent_id=smoke_agent_manager.root_agent_id,
+                )
+            finally:
+                await smoke_dispatcher.aclose()
             return
         if workflow_smoke:
-            await _run_workflow_smoke(runtime, resolved_session_id)
+            smoke_dispatcher = HostDispatcher(
+                runtime=runtime,
+                session_id=resolved_session_id or "workflow-smoke",
+                agent_tree_runtime_router=agent_tree_runtime_router,
+            )
+            await smoke_dispatcher.ensure_started()
+            smoke_agent_manager = smoke_dispatcher.agent_manager
+            assert smoke_agent_manager is not None
+            agent_workflow_handle.bind(
+                AgentWorkflowManager(
+                    config=cfg,
+                    workspace_root=Path(default_cwd),
+                    role_manager=agent_role_manager,
+                    runtime=runtime,
+                    model_catalog_manager=model_catalog_manager,
+                    agent_manager=smoke_agent_manager,
+                )
+            )
+            try:
+                await _run_workflow_smoke(
+                    runtime,
+                    resolved_session_id,
+                    parent_agent_id=smoke_agent_manager.root_agent_id,
+                )
+            finally:
+                await smoke_dispatcher.aclose()
             return
 
-        # 流式路径下 CLIStreamSink 已实时打印 content；SessionBridge 不再重复
-        # write_output(final.content)。流式实际生效要求：cfg 启用 + provider
-        # 实现 SupportsLLMStream（AnthropicMessagesProvider 暂未实现，会自动 fallback）。
+        # 流式实际生效要求：cfg 启用 + provider 实现 SupportsLLMStream
+        # （AnthropicMessagesProvider 暂未实现，会自动 fallback）。
         # getattr 兜底：测试用的 dummy runtime 可能没暴露 llm 属性。
         runtime_llm = getattr(runtime, "llm", None)
         stream_active = (
@@ -709,21 +809,57 @@ async def _run(
             and runtime_llm is not None
             and isinstance(runtime_llm, SupportsLLMStream)
         )
-        bridge = SessionBridge(
+        # adapter 在此构造(依赖 stream_active):streaming=True 时
+        # CLIAdapter.render_result 跳过 final.content 二次打印(CLIStreamSink
+        # 已实时打字打过)。取代历史的 bridge echo_final_content 开关——
+        # 决策点下沉到 adapter,bridge 不再知道流式状态。
+        adapter = CLIAdapter(
+            verbose=verbose,
+            pre_prompt_hook=cli_pre_prompt_hook,
+            streaming=stream_active,
+        )
+        approval_canceller = None
+        if cfg.approval.mode == "interactive":
+            from safety.approval.manager import get_approval_manager
+
+            approval_canceller = get_approval_manager().cancel_by_agent
+        host_dispatcher = HostDispatcher(
             runtime=runtime,
-            adapter=adapter,
             session_id=resolved_session_id,
-            echo_final_content=not stream_active,
+            queued_result_handler=adapter.render_result,
+            agent_tree_runtime_router=agent_tree_runtime_router,
+            approval_canceller=approval_canceller,
+        )
+        command_service = build_default_command_service(
+            adapter=adapter,
+            runtime_delegate=host_dispatcher.run_text,  # type: ignore[arg-type]
+        )
+        cli_loop = CLIInteractiveLoop(
+            host_dispatcher=host_dispatcher,
+            command_service=command_service,
+            adapter=adapter,
+        )
+        agent_workflow_handle.bind(
+            AgentWorkflowManager(
+                config=cfg,
+                workspace_root=Path(default_cwd),
+                role_manager=agent_role_manager,
+                runtime=runtime,
+                model_catalog_manager=model_catalog_manager,
+                agent_manager_getter=lambda: host_dispatcher.agent_manager,
+            ),
+            session_id=host_dispatcher.session_id,
         )
 
         _print_banner(
             cfg,
-            bridge.session_id,
+            resolved_model,
+            host_dispatcher.session_id,
             verbose=verbose,
             trace_enabled=trace_enabled,
             instructions_sources=len(instructions_files),
         )
-        await bridge.run_loop()
+        await cli_loop.run_loop()
     finally:
         # cron ticker 收尾：set stop_event → 等 ticker_task 自然退出（带超时
         # 兜底，超时则 cancel）；ticker_runtime 必须随后 aclose 以释放 httpx
@@ -737,11 +873,16 @@ async def _run(
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await ticker_task
             if ticker_runtime is not None:
+                if ticker_scheduled_run_manager is not None:
+                    await ticker_scheduled_run_manager.aclose()
                 aclose_fn = getattr(ticker_runtime, "aclose", None)
                 if aclose_fn is not None:
                     await aclose_fn()
         try:
-            await runtime.aclose()
+            try:
+                await evolution_manager.aclose()
+            finally:
+                await runtime.aclose()
         finally:
             await mcp_runtime_registration.aclose()
 
@@ -779,7 +920,6 @@ async def _assemble_instructions(
     instructions_files: list[Path],
     *,
     skill_listing: str = "",
-    workflow_listing: WorkflowPromptListingRender | None = None,
 ) -> tuple[str, list[str], MemoryStore | None]:
     """用 InstructionLoader 合成最终 system prompt 文本。
 
@@ -787,43 +927,18 @@ async def _assemble_instructions(
         (rendered_text, instruction_origins, memory_store) — 渲染后的完整文本、来源 origin 列表、
         以及 MemoryStore 实例（memory 关闭时为 ``None``）。
 
-    - 基础指令装配（prompts 物化 + env + runtime context）委托给
-      :func:`prompting.assemble_instructions`，本函数只追加 skill / memory 通道。
-    - v0.1.6 skill 通道：``skill_listing`` 非空时追加为 ``# skills`` 段并标
-      origin。空 listing（无 skill 或 loader 跳过）保持 v0.1.5 行为。
+    - 基础指令装配（prompts 物化 + env + runtime context）和 workflow / skill /
+      memory 来源统一委托给 :func:`prompting.assemble_instructions`。
     - 本地长期记忆的加载由 ``cfg.evolution.memory`` 控制：
         - ``enabled=False`` 时完全跳过（返回 memory_store=None）
         - ``inject_prompt=False`` 时仍加载活态 entries 供 memory tool 使用，
-          但不追加 memory prompt 段
+          但不生成 memory prompt 段
     """
+    from application.agent_workflows.prompt_catalog import build_default_workflow_prompt_listing
+
     kongming_home = get_kongming_home()
     sitian_root = _resolve_sitian_prompt_root(cfg)
-    workflow_render = workflow_listing or build_default_workflow_prompt_listing()
-    pre_file_sources = (
-        [
-            InstructionSource(
-                origin=workflow_render.origin,
-                content=workflow_render.text,
-            )
-        ]
-        if workflow_render.text
-        else []
-    )
 
-    # 公共指令装配：prompts 物化 + InstructionLoader + runtime context
-    rendered, origins = await assemble_instructions(
-        kongming_home=kongming_home,
-        extra_files=instructions_files,
-        pre_file_sources=pre_file_sources,
-        sitian_root=sitian_root,
-    )
-
-    # v0.1.6 skill listing 通道（在 memory 之前；listing 描述能力，memory 描述事实）
-    if skill_listing:
-        rendered = rendered + f"\n\n# skills\n{skill_listing}"
-        origins = [*origins, "skills"]
-
-    # Memory 通道（CLI 特有，不在公共函数里）
     memory_cfg = cfg.evolution.memory
     memory_store: MemoryStore | None = None
 
@@ -835,18 +950,21 @@ async def _assemble_instructions(
         )
         await memory_store.load_from_disk()
 
-        if memory_cfg.inject_prompt:
-            snapshot_prompt = (
-                memory_store.snapshot.render_prompt() if memory_store.snapshot else None
-            )
-            if snapshot_prompt is not None:
-                rendered = rendered + f"\n\n# memory\n{snapshot_prompt}"
-                origins = [*origins, "memory"]
+    workflow_listing = build_default_workflow_prompt_listing().text
+    rendered, origins = await assemble_instructions(
+        kongming_home=kongming_home,
+        extra_files=instructions_files,
+        workflow_catalog=workflow_listing,
+        skill_listing=skill_listing,
+        memory_store=memory_store,
+        inject_memory=memory_cfg.inject_prompt,
+        sitian_root=sitian_root,
+    )
 
     return rendered, origins, memory_store
 
 
-async def _run_smoke(runtime: NativeRuntime, session_id: str | None) -> None:
+async def _run_smoke(runtime: SessionEngine, session_id: str | None) -> None:
     """最小 smoke：真的调一次模型，确认配置 + provider 可达。
 
     这条路径会**真的**发起一次模型请求，期望本地模型服务已经启动。
@@ -868,32 +986,36 @@ async def _run_smoke(runtime: NativeRuntime, session_id: str | None) -> None:
 async def _run_subagent_smoke(
     manager: AgentWorkflowManager,
     session_id: str | None,
+    *,
+    parent_agent_id: str | None,
 ) -> None:
     """Run a tiny real-model subagent workflow from the CLI."""
     parent_session_id = session_id or "subagent-smoke"
-    result = await manager.run_parallel(
+    result = await manager.run_workflow_payload(
+        mode="parallel",
         parent_session_id=parent_session_id,
-        tasks=[
-            SubAgentTask(
-                task_id="calc",
-                task_name="simple calculation",
-                prompt="计算 7 + 5。只输出数字 12 和一句很短的说明。",
-            ),
-            SubAgentTask(
-                task_id="write-note",
-                task_name="write scoped note",
-                prompt=(
-                    "必须调用 write_file 工具，在你的工作目录内创建 result.txt。"
-                    "文件内容必须是：kongming subagent smoke。"
-                    "完成后报告写入的绝对路径。"
-                ),
-                tool_names=("write_file",),
-                permission=SubAgentPermissionSpec(mode="scoped_workdir"),
-            ),
-        ],
+        parent_agent={"agent_id": parent_agent_id} if parent_agent_id else None,
+        payload={
+            "task_specs": [
+                {
+                    "task_name": "simple calculation",
+                    "prompt": "计算 7 + 5。只输出数字 12 和一句很短的说明。",
+                },
+                {
+                    "task_name": "write scoped note",
+                    "prompt": (
+                        "必须调用 write_file 工具，在你的工作目录内创建 result.txt。"
+                        "文件内容必须是：kongming subagent smoke。"
+                        "完成后报告写入的绝对路径。"
+                    ),
+                    "tool_names": ["write_file"],
+                    "permission": {"mode": "scoped_workdir"},
+                },
+            ],
+        },
     )
-    calc_run = next(run for run in result.runs if run.task.task_id == "calc")
-    write_run = next(run for run in result.runs if run.task.task_id == "write-note")
+    calc_run = next(run for run in result.runs if run.task.task_name == "simple calculation")
+    write_run = next(run for run in result.runs if run.task.task_name == "write scoped note")
     write_dir_raw = write_run.task.metadata.get("working_dir")
     write_dir = Path(str(write_dir_raw))
     expected_file = write_dir / "result.txt"
@@ -986,19 +1108,39 @@ def _workflow_smoke_args() -> dict[str, object]:
     }
 
 
-async def _run_workflow_smoke(runtime: NativeRuntime, session_id: str | None) -> None:
+async def _run_workflow_smoke(
+    runtime: SessionEngine,
+    session_id: str | None,
+    *,
+    parent_agent_id: str | None,
+) -> None:
     """运行 workflow 工具入口 smoke，输入为 runtime 和 session，输出为 CLI 状态行。"""
     smoke_sid = session_id or "workflow-smoke"
     run_id = f"{smoke_sid}-1"
     call_id = "workflow-smoke-call-1"
     args = _workflow_smoke_args()
+    tool = runtime.tools["run_agent_workflow"]
+    context = ToolContext(
+        run_id=run_id,
+        session_id=smoke_sid,
+        turn=1,
+        call_id=call_id,
+        agent_id=parent_agent_id or "",
+        metadata={"parent_agent": {"agent_id": parent_agent_id} if parent_agent_id else {}},
+    )
+    prepared = (
+        tool.prepare(deepcopy(args), context)
+        if isinstance(tool, ToolCallPreparer)
+        else PreparedToolCall(arguments=deepcopy(args))
+    )
     request = ApprovalRequest(
         run_id=run_id,
         session_id=smoke_sid,
         turn=1,
         call_id=call_id,
         tool_name="run_agent_workflow",
-        arguments=dict(args),
+        arguments=deepcopy(prepared.arguments),
+        execution_scope=deepcopy(prepared.execution_scope),
     )
     decision = await runtime.approval.decide(request)
     if not decision.approved:
@@ -1008,10 +1150,9 @@ async def _run_workflow_smoke(runtime: NativeRuntime, session_id: str | None) ->
         )
         raise SystemExit(1)
 
-    tool = runtime.tools["run_agent_workflow"]
     result = await tool.execute(
-        dict(args),
-        ToolContext(run_id=run_id, session_id=smoke_sid, turn=1, call_id=call_id),
+        deepcopy(prepared),
+        context,
     )
     error_text = result.error_message or result.content
     if result.ok or "map_reduce planner found no input files" not in error_text:
@@ -1073,27 +1214,19 @@ def _load_config_or_exit(config_path: Path | None) -> Config:
 
 
 def _apply_model_preset_or_exit(cfg: Config, preset_id: str) -> Config:
-    preset = next((item for item in cfg.web.llm_presets if item.id == preset_id), None)
-    if preset is None:
-        known = ", ".join(item.id for item in cfg.web.llm_presets) or "<empty>"
-        click.echo(f"[config] unknown --model-preset {preset_id!r}; available: {known}", err=True)
-        raise SystemExit(2)
-
-    api_key = os.environ.get(preset.api_key_env, "") if preset.api_key_env else ""
-    if preset.api_key_env and not api_key:
-        click.echo(f"[config] env {preset.api_key_env} is required by preset {preset_id}", err=True)
-        raise SystemExit(2)
-
-    model_overrides: dict[str, Any] = {
-        "name": preset.model,
-        "base_url": preset.base_url,
-        "api_key": api_key,
-    }
-    if preset.provider is not None:
-        model_overrides["provider"] = preset.provider
-    if preset.reasoning_effort is not None:
-        model_overrides["reasoning_effort"] = preset.reasoning_effort
-    return cfg.model_copy(update={"model": cfg.model.model_copy(update=model_overrides)})
+    """校验 CLI preset 并返回仅更新运行选择的 Config。"""
+    manager = ModelCatalogManager()
+    selection = ModelSelectionConfig(
+        preset_id=preset_id,
+        reasoning_effort=cfg.model.reasoning_effort,
+    )
+    try:
+        runtime = manager.resolve_runtime(selection)
+        manager.resolve_credential(runtime)
+    except ModelProviderCatalogError as exc:
+        click.echo(f"[config] {exc.code.value}: {exc}", err=True)
+        raise SystemExit(2) from exc
+    return cfg.model_copy(update={"model": selection})
 
 
 def _validate_session_selection_or_exit(
@@ -1212,19 +1345,19 @@ def _format_timestamp(value: float) -> str:
 
 def _print_banner(
     cfg: Config,
+    model: ResolvedModelConfig,
     session_id: str,
     *,
     verbose: bool,
     trace_enabled: bool,
     instructions_sources: int,
 ) -> None:
-    locality = "local" if cfg.model.is_local else "remote"
+    locality = "local" if model.is_local else "remote"
     thinking_suffix = (
-        f" · thinking={cfg.model.reasoning_effort}" if cfg.model.reasoning_effort else ""
+        f" · thinking={model.default_reasoning_effort}" if model.default_reasoning_effort else ""
     )
     click.echo(
-        f"kongming-agent · model={cfg.model.name} ({locality}){thinking_suffix} · "
-        f"session={session_id} ({cfg.session.backend}) · approval={cfg.approval.mode}"
+        f"kongming-agent · model={model.name} ({locality}){thinking_suffix} · session={session_id}"
     )
     extras: list[str] = ["Ctrl+D 退出"]
     if trace_enabled:

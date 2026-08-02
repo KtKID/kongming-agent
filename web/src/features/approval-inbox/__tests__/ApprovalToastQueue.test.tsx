@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { ApprovalToastQueue } from "../ApprovalToastQueue";
 import { useApprovalInboxStore } from "../useApprovalInbox";
-import type { ApprovalInboxItem } from "../types";
+import { resetSender, setSender } from "../senderRef";
+import type { ApprovalInboxItem } from "@/protocol";
 
 // 同 Card 单测：CountdownBar 替换成壳，避免定时器
 vi.mock("@/features/auto-approval", () => ({
@@ -18,14 +19,15 @@ function makeItem(
     threadId: `thread-${requestId}`,
     toolName: "Bash",
     toolInput: { cmd: "x" },
-    autoApproveAtMs: null,
-    autoRejectAtMs: null,
     blockedByRule: null,
     isElevated: false,
+    danger: false,
+    rememberAllowed: false,
     channel: "claude_code",
     cwd: "/p",
     arrivedAtMs: 0,
     timeoutMs: null,
+    rememberRule: null,
     ...overrides,
   };
 }
@@ -37,7 +39,8 @@ function seed(items: ApprovalInboxItem[]) {
 }
 
 beforeEach(() => {
-  useApprovalInboxStore.setState({ byRequestId: {} });
+  useApprovalInboxStore.getState().clear();
+  resetSender();
 });
 
 describe("ApprovalToastQueue 空态", () => {
@@ -60,9 +63,9 @@ describe("ApprovalToastQueue 排序与渲染", () => {
   it("排序：危险卡置顶 + 同组按 arrivedAtMs 递增", () => {
     seed([
       makeItem("safe-late", { arrivedAtMs: 50 }),
-      makeItem("danger-late", { blockedByRule: "r1", arrivedAtMs: 40 }),
+      makeItem("danger-late", { danger: true, blockedByRule: "r1", arrivedAtMs: 40 }),
       makeItem("safe-early", { arrivedAtMs: 10 }),
-      makeItem("danger-early", { blockedByRule: "r2", arrivedAtMs: 20 }),
+      makeItem("danger-early", { danger: true, blockedByRule: "r2", arrivedAtMs: 20 }),
     ]);
     render(<ApprovalToastQueue />);
     const wrappers = screen.getAllByTestId("approval-inbox-card-wrapper");
@@ -73,6 +76,35 @@ describe("ApprovalToastQueue 排序与渲染", () => {
       "safe-early",
       "safe-late",
     ]);
+  });
+});
+
+describe("ApprovalToastQueue authoritative remove", () => {
+  it("点击同意后卡片保持 submitting，直到服务端 remove", () => {
+    const send = vi.fn();
+    setSender(send);
+    seed([makeItem("r1")]);
+
+    render(<ApprovalToastQueue />);
+    expect(screen.getByTestId("approval-inbox-card-wrapper")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("approval-inbox-btn-allow-once"));
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("approval-inbox-card-wrapper")).toBeInTheDocument();
+    expect(screen.getByTestId("approval-inbox-remember-loading")).toHaveTextContent(
+      "正在提交",
+    );
+    expect(screen.getByTestId("approval-inbox-btn-allow-once")).toBeDisabled();
+
+    act(() => {
+      useApprovalInboxStore.getState().applyRemoveFrame({
+        frame_type: "approval.inbox.remove",
+        requestId: "r1",
+        reason: "user_decided",
+      });
+    });
+    expect(screen.queryByTestId("approval-inbox-card-wrapper")).toBeNull();
   });
 });
 

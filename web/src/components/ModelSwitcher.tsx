@@ -21,6 +21,22 @@ interface ModelSwitcherProps {
   onManageProviders?: () => void;
 }
 
+const EFFORT_LABELS: Record<string, string> = {
+  none: "关闭",
+  low: "低",
+  medium: "中",
+  high: "高",
+  max: "最高",
+};
+
+function reasoningSummary(option: ConnectedModelFamily): string {
+  const efforts = option.supportedReasoningEfforts ?? [];
+  if (efforts.length === 0 || efforts.every((effort) => effort === "none")) {
+    return "思考关闭";
+  }
+  return efforts.map((effort) => EFFORT_LABELS[effort] ?? effort).join(" / ");
+}
+
 export function ModelSwitcher({
   currentPresetId,
   options,
@@ -84,7 +100,12 @@ export function ModelSwitcher({
                 className="flex items-center justify-between gap-3 text-xs"
                 data-testid={`composer-model-option-${option.providerId}`}
               >
-                <span className="min-w-0 truncate">{option.displayName}</span>
+                <span className="min-w-0">
+                  <span className="block truncate">{option.displayName}</span>
+                  <span className="block truncate text-[10px] text-muted-foreground/70">
+                    {reasoningSummary(option)}
+                  </span>
+                </span>
                 <Check
                   data-testid={`composer-model-check-${option.providerId}`}
                   className={cn(

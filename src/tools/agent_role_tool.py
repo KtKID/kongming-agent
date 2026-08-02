@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from core.contracts import ToolContext
+from core.contracts import PreparedToolCall, ToolContext
 from tools.runtime.base import BaseBuiltinTool
 
 
@@ -21,13 +21,13 @@ class AgentRoleListResultLike(Protocol):
     """角色列表结果协议，输入为 manager 返回对象，输出供 tool 格式化。"""
 
     @property
-    def roles(self) -> list[dict[str, str]]:
-        """返回可选角色列表，输入为空，输出 id/title/role 三字段。"""
+    def roles(self) -> list[dict[str, object]]:
+        """返回可选角色列表，输入为空，输出 agent.toml 字段。"""
         ...
 
     @property
-    def current_roundtable_agents(self) -> list[dict[str, str]]:
-        """返回当前 session roster，输入为空，输出 id/title/role 三字段。"""
+    def current_roundtable_agents(self) -> list[dict[str, object]]:
+        """返回当前 session roster，输入为空，输出 agent.toml 字段。"""
         ...
 
     @property
@@ -49,8 +49,8 @@ class AgentRoleCreateResultLike(Protocol):
         ...
 
     @property
-    def role(self) -> dict[str, str]:
-        """返回角色摘要，输入为空，输出 id/title/role 三字段。"""
+    def role(self) -> dict[str, object]:
+        """返回角色摘要，输入为空，输出 agent.toml 字段。"""
         ...
 
     @property
@@ -59,8 +59,8 @@ class AgentRoleCreateResultLike(Protocol):
         ...
 
     @property
-    def current_roundtable_agents(self) -> list[dict[str, str]]:
-        """返回当前 session roster，输入为空，输出 id/title/role 三字段。"""
+    def current_roundtable_agents(self) -> list[dict[str, object]]:
+        """返回当前 session roster，输入为空，输出 agent.toml 字段。"""
         ...
 
     def to_data(self) -> dict[str, object]:
@@ -93,7 +93,8 @@ class ListAgentRolesTool(BaseBuiltinTool):
     name = "list_agent_roles"
     description = (
         "List reusable sub-agent roles before starting a roundtable or multi-agent workflow. "
-        "Returns only id, title, role, plus current_roundtable_agents for this session. "
+        "Returns id, nickname, model, role_desc, reasoning_effort, max_turns, "
+        "plus current_roundtable_agents for this session. "
         "If no suitable role exists, call create_agent_role with id, title, and role."
     )
     input_schema: dict[str, Any] = {  # noqa: RUF012
@@ -142,6 +143,22 @@ class CreateAgentRoleTool(BaseBuiltinTool):
         """初始化工具，输入为共享 AgentRoleManager，输出为可执行工具实例。"""
         self._manager = manager
 
+    def prepare(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> PreparedToolCall:
+        """审批前校验并冻结角色创建参数。"""
+        del context
+        self._validate_args(arguments)
+        return PreparedToolCall(
+            arguments={
+                "id": _required_string_arg(arguments, "id"),
+                "title": _required_string_arg(arguments, "title"),
+                "role": _required_string_arg(arguments, "role"),
+            }
+        )
+
     async def _run(
         self,
         args: dict[str, Any],
@@ -150,9 +167,9 @@ class CreateAgentRoleTool(BaseBuiltinTool):
         """执行角色创建，输入为 tool 参数和上下文，输出文本和 data。"""
         result = self._manager.create_role(
             session_id=ctx.session_id,
-            role_id=_required_string_arg(args, "id"),
-            title=_required_string_arg(args, "title"),
-            role=_required_string_arg(args, "role"),
+            role_id=args["id"],
+            title=args["title"],
+            role=args["role"],
         )
         return _format_create_result(result), result.to_data()
 
@@ -168,14 +185,20 @@ def _format_list_result(result: AgentRoleListResultLike) -> str:
     if not result.roles:
         lines.append("- none")
     for role in result.roles:
-        lines.append(f"- {role['id']} | {role['title']} | {role['role']}")
+        lines.append(
+            f"- {role['id']} | {role['nickname']} | {role['model']} | "
+            f"{role['reasoning_effort']} | max_turns={role['max_turns']} | {role['role_desc']}"
+        )
     if result.empty_message:
         lines.extend(["", result.empty_message])
     lines.extend(["", "current_roundtable_agents:"])
     if not result.current_roundtable_agents:
         lines.append("- none")
     for role in result.current_roundtable_agents:
-        lines.append(f"- {role['id']} | {role['title']} | {role['role']}")
+        lines.append(
+            f"- {role['id']} | {role['nickname']} | {role['model']} | "
+            f"{role['reasoning_effort']} | max_turns={role['max_turns']} | {role['role_desc']}"
+        )
     return "\n".join(lines)
 
 
@@ -189,7 +212,10 @@ def _format_create_result(result: AgentRoleCreateResultLike) -> str:
         "current_roundtable_agents:",
     ]
     for role in result.current_roundtable_agents:
-        lines.append(f"- {role['id']} | {role['title']} | {role['role']}")
+        lines.append(
+            f"- {role['id']} | {role['nickname']} | {role['model']} | "
+            f"{role['reasoning_effort']} | max_turns={role['max_turns']} | {role['role_desc']}"
+        )
     return "\n".join(lines)
 
 

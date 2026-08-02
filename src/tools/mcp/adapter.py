@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from core.contracts import ToolContext, ToolResult
+from core.contracts import PreparedToolCall, ToolContext, ToolResult
 
 _SAFE_NAME_RE = re.compile(r"[^0-9A-Za-z_]+")
 
@@ -183,13 +183,29 @@ class McpToolAdapter:
         self.input_schema = dict(registration.input_schema)
         self.metadata = dict(registration.metadata)
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        """执行 MCP tool，输入 Kongming args/context，输出 ToolResult。"""
+    def prepare(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> PreparedToolCall:
+        """审批前冻结 MCP 参数副本。"""
+        del context
+        if not isinstance(arguments, dict):
+            raise TypeError(f"tool args must be dict, got {type(arguments).__name__}")
+        return PreparedToolCall(arguments=dict(arguments))
+
+    async def execute(
+        self,
+        prepared: PreparedToolCall,
+        ctx: ToolContext,
+    ) -> ToolResult:
+        """执行 MCP tool，输入已准备调用/context，输出 ToolResult。"""
+        del ctx
         try:
             call_result = self._client.call_tool(
                 self._registration.server_id,
                 self._registration.mcp_tool_name,
-                dict(args),
+                dict(prepared.arguments),
             )
             value = await call_result if inspect.isawaitable(call_result) else call_result
         except Exception as exc:

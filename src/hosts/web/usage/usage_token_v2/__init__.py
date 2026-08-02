@@ -23,7 +23,6 @@ manager + 注入 Protocol（装配层用）：
 - ``UsageTokenManager``
 - ``ThreadMetadataReader`` / ``ClaudeJsonlLocator`` / ``CodexRolloutLocator``
   / ``GenericChatSessionLocator``
-- ``ProviderKind``（``"anthropic"`` / ``"openai_compatible"``）
 
 ### 故意不 export
 
@@ -49,7 +48,6 @@ from hosts.web.usage.usage_token_v2.manager import (
     ClaudeJsonlLocator,
     CodexRolloutLocator,
     GenericChatSessionLocator,
-    ProviderKind,
     ThreadMetadataReader,
     UsageTokenManager,
 )
@@ -69,7 +67,6 @@ __all__ = [
     "ClaudeJsonlLocator",
     "CodexRolloutLocator",
     "GenericChatSessionLocator",
-    "ProviderKind",
     "ThreadMetadataReader",
     "UsageTokenManager",
 ]

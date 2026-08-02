@@ -43,6 +43,20 @@ def _run(coro):  # type: ignore[no-untyped-def]
     return asyncio.run(coro)
 
 
+class _FakeMemorySnapshot:
+    """测试用 memory 快照，输入为空，输出固定 prompt 文本。"""
+
+    def render_prompt(self) -> str:
+        """返回测试 memory prompt。"""
+        return "memory facts"
+
+
+class _FakeMemoryStore:
+    """测试用 memory store，提供已加载冻结快照。"""
+
+    snapshot = _FakeMemorySnapshot()
+
+
 # ---------------------------------------------------------------------------
 # #2 三类来源加载
 # ---------------------------------------------------------------------------
@@ -406,12 +420,10 @@ async def test_assemble_pre_file_sources_before_prompt_files_env_and_sitian(
     rendered, origins = await assemble_instructions(
         kongming_home=tmp_path,
         extra_files=[extra_file],
-        pre_file_sources=[
-            InstructionSource(
-                origin="workflow_catalog",
-                content="# workflow catalog\nworkflow listing",
-            )
-        ],
+        workflow_catalog="# workflow catalog\nworkflow listing",
+        skill_listing="- demo: skill instruction",
+        memory_store=_FakeMemoryStore(),
+        inject_memory=True,
         sitian_root=sitian_dir,
     )
 
@@ -422,6 +434,8 @@ async def test_assemble_pre_file_sources_before_prompt_files_env_and_sitian(
         "file:extra.md",
         "env:KONGMING_EXTRA_INSTRUCTIONS",
         "sitian",
+        "skills",
+        "memory",
     ]
     assert rendered.index("# workflow_catalog") < rendered.index("# agent_spec")
     assert rendered.index("# workflow_catalog") < rendered.index("# file:extra.md")
@@ -429,6 +443,11 @@ async def test_assemble_pre_file_sources_before_prompt_files_env_and_sitian(
         "# env:KONGMING_EXTRA_INSTRUCTIONS"
     )
     assert rendered.index("# workflow_catalog") < rendered.index("# sitian")
+    assert rendered.index("# sitian") < rendered.index("# skills")
+    assert rendered.index("# skills") < rendered.index("# memory")
+    assert "workflow listing" in rendered
+    assert "- demo: skill instruction" in rendered
+    assert "memory facts" in rendered
 
 
 @pytest.mark.unit

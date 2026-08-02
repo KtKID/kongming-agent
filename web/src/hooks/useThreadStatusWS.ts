@@ -3,8 +3,15 @@ import { useThreadStatusStore } from "@/stores/threadStatus";
 import { useConnectionStatusStore } from "@/stores/connectionStatus";
 import { useChatStore } from "@/stores/chat";
 import { useApprovalInboxStore } from "@/features/approval-inbox";
-import { setSender as setInboxSender } from "@/features/approval-inbox/senderRef";
-import type { ThreadStatusFrame, ThreadUsage } from "@/protocol";
+import {
+  clearSender as clearInboxSender,
+  setSender as setInboxSender,
+} from "@/features/approval-inbox/senderRef";
+import type {
+  ThreadStatusFrame,
+  ThreadStatusSnapshotFrame,
+  UsageSummaryUpdatedFrame,
+} from "@/protocol";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -66,7 +73,9 @@ export function useThreadStatusWS(heartbeatConfig?: HeartbeatConfig): {
   state: StatusWsState;
   latencyMs: number | null;
 } {
-  const setStatus = useThreadStatusStore((s) => s.setStatus);
+  const beginStatusConnection = useThreadStatusStore((s) => s.beginConnection);
+  const applyStatusSnapshot = useThreadStatusStore((s) => s.applySnapshot);
+  const applyStatus = useThreadStatusStore((s) => s.applyStatus);
   const setStatusWs = useConnectionStatusStore((s) => s.setStatusWs);
 
   const [state, setState] = useState<StatusWsState>("closed");
@@ -74,9 +83,11 @@ export function useThreadStatusWS(heartbeatConfig?: HeartbeatConfig): {
 
   // --- refs（跨 render 保持的可变状态） ---
   const wsRef = useRef<WebSocket | null>(null);
+  const senderOwnerRef = useRef<symbol | null>(null);
   const disposedRef = useRef(false);
   const retryCountRef = useRef(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectionGenerationRef = useRef(0);
 
   // 心跳相关
   const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -207,6 +218,9 @@ export function useThreadStatusWS(heartbeatConfig?: HeartbeatConfig): {
       }
 
       wsRef.current = ws;
+      const senderOwner = Symbol("thread-status-ws");
+      const connectionGeneration = connectionGenerationRef.current + 1;
+      connectionGenerationRef.current = connectionGeneration;
 
       ws.onopen = () => {
         if (disposedRef.current) {
@@ -215,18 +229,22 @@ export function useThreadStatusWS(heartbeatConfig?: HeartbeatConfig): {
         }
         retryCountRef.current = 0;
         setState("open");
+        beginStatusConnection(connectionGeneration);
         startHeartbeat(ws);
         // smart-approval-v2-inbox: 注入 send 通道到 module-level senderRef（**不进 store**，
         // 避免高频 mutate 触发 React 19 useSyncExternalStore tearing → #185 + ws 风暴）
+        senderOwnerRef.current = senderOwner;
         setInboxSender((frame) => {
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify(frame));
+            return true;
           } else {
             console.warn(
               "[useThreadStatusWS] inbox.resolve dropped — ws not open",
             );
+            return false;
           }
-        });
+        }, senderOwner);
       };
 
       ws.onmessage = (ev) => {
@@ -253,39 +271,44 @@ export function useThreadStatusWS(heartbeatConfig?: HeartbeatConfig): {
             useApprovalInboxStore.getState().applySnapshotFrame(data);
             return;
           }
+          if (data.frame_type === "approval.inbox.resolve_result") {
+            useApprovalInboxStore.getState().applyResolveResultFrame(data);
+            return;
+          }
 
           // usage_summary_updated 帧（v2）：service 调 manager.get_thread_usage 后推送，
           // 含 v2 channel-specific DTO（自带 provider discriminator）。
-          // 注：该帧来自 manager.broadcast，沿用 ``type`` 字段（非 wire 协议帧），
-          // 不在 frame_type 统一范围内。
           if (
-            data.type === "usage_summary_updated" &&
+            data.frame_type === "usage_summary_updated" &&
             typeof data.threadId === "string" &&
             data.usage
           ) {
-            const usage = data.usage as ThreadUsage;
-            const tid = data.threadId as string;
+            const frame = data as UsageSummaryUpdatedFrame;
             const chatStore = useChatStore.getState();
             useChatStore.setState({
               usageByThread: {
                 ...chatStore.usageByThread,
-                [tid]: usage,
+                [frame.threadId]: frame.usage,
               },
             });
+            return;
           }
 
-          // thread-status 帧：原有逻辑
+          if (data.frame_type === "thread-status.snapshot") {
+            applyStatusSnapshot(
+              data as ThreadStatusSnapshotFrame,
+              connectionGeneration,
+            );
+            return;
+          }
+
           const frame = data as ThreadStatusFrame;
           if (
             frame.frame_type === "thread-status" &&
             frame.threadId &&
             frame.phase
           ) {
-            setStatus(
-              frame.threadId,
-              frame.phase,
-              frame.toolName ?? undefined,
-            );
+            applyStatus(frame, connectionGeneration);
           }
         } catch {
           // 非 JSON / 解析失败：静默丢弃
@@ -293,10 +316,15 @@ export function useThreadStatusWS(heartbeatConfig?: HeartbeatConfig): {
       };
 
       ws.onclose = () => {
-        wsRef.current = null;
+        if (wsRef.current === ws) {
+          wsRef.current = null;
+        }
         clearHeartbeat();
         // smart-approval-v2-inbox: 清 sender 避免旧 ws 闭包被复用（走 module-level ref）
-        setInboxSender(null);
+        clearInboxSender(senderOwner);
+        if (senderOwnerRef.current === senderOwner) {
+          senderOwnerRef.current = null;
+        }
         if (disposedRef.current) return;
         scheduleReconnect();
       };
@@ -316,7 +344,10 @@ export function useThreadStatusWS(heartbeatConfig?: HeartbeatConfig): {
       clearRetryTimer();
       setState("closed");
       // smart-approval-v2-inbox: 清 sender，避免 StrictMode 第二次 mount 前残留旧闭包（走 module-level ref）
-      setInboxSender(null);
+      if (senderOwnerRef.current !== null) {
+        clearInboxSender(senderOwnerRef.current);
+        senderOwnerRef.current = null;
+      }
       if (wsRef.current) {
         try {
           wsRef.current.close();
@@ -326,7 +357,13 @@ export function useThreadStatusWS(heartbeatConfig?: HeartbeatConfig): {
         wsRef.current = null;
       }
     };
-  }, [setStatus, clearHeartbeat, clearRetryTimer]);
+  }, [
+    applyStatus,
+    applyStatusSnapshot,
+    beginStatusConnection,
+    clearHeartbeat,
+    clearRetryTimer,
+  ]);
 
   return { state, latencyMs };
 }

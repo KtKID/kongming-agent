@@ -14,8 +14,8 @@ provider 实现方（``openai_responses.py`` 以及未来的 ``anthropic_message
   OpenAI-compatible 厂商共用）；把 OpenAI choice 对象转回 :class:`Message`
   （包含 tool_calls 解析）
 
-依赖方向：只依赖 ``core`` 协议与 ``infrastructure.config.models.ModelConfig``，
-不依赖任何 sibling 模块。
+依赖方向：只依赖 ``core`` 协议与 catalog 解析后的 immutable runtime snapshot，
+不读取持久化 setting。
 """
 
 from __future__ import annotations
@@ -31,7 +31,11 @@ import httpx
 from core.contracts import LLMRequest, LLMResponse
 from core.errors import ProviderError
 from core.message import Message, ToolCall
-from infrastructure.config.models import ModelConfig
+from infrastructure.config.model_provider_catalog import (
+    ReasoningCapability,
+    ResolvedModelConfig,
+    ResolvedModelCredential,
+)
 
 
 class BaseLLMProvider:
@@ -50,7 +54,8 @@ class BaseLLMProvider:
     def __init__(
         self,
         *,
-        model_config: ModelConfig,
+        model_config: ResolvedModelConfig,
+        credential: ResolvedModelCredential,
         max_retries: int = 3,
         retry_backoff: float = 1.0,
     ) -> None:
@@ -59,6 +64,7 @@ class BaseLLMProvider:
         if retry_backoff <= 0:
             raise ValueError("retry_backoff must be > 0")
         self._model_config = model_config
+        self._credential = credential
         self._max_retries = max_retries
         self._retry_backoff = retry_backoff
         # 懒加载的 httpx.AsyncClient：首次 :meth:`_ensure_client` 触发构造，
@@ -68,8 +74,25 @@ class BaseLLMProvider:
         self._client: httpx.AsyncClient | None = None
 
     @property
-    def model_config(self) -> ModelConfig:
+    def model_config(self) -> ResolvedModelConfig:
         return self._model_config
+
+    def _default_reasoning_effort(self) -> str | None:
+        """读取 runtime snapshot 的默认 effort。"""
+        return self._model_config.default_reasoning_effort
+
+    def _reasoning_capability(self, model_name: str) -> ReasoningCapability | None:
+        """读取 runtime snapshot 的模型能力。"""
+        _ = model_name
+        return self._model_config.reasoning
+
+    def _reasoning_catalog_context(self) -> tuple[str, str | None, str | None]:
+        """返回 trace 使用的 catalog source、provider ID 与 preset ID。"""
+        return (
+            self._model_config.catalog_source.value,
+            self._model_config.provider_id,
+            self._model_config.preset_id,
+        )
 
     # ------------------------------------------------------------------
     # httpx client 生命周期
@@ -94,7 +117,7 @@ class BaseLLMProvider:
     async def aclose(self) -> None:
         """关闭持有的 ``httpx.AsyncClient`` 并释放连接池。
 
-        幂等：未曾创建或已关闭时，连续调用不抛错。调用方（``NativeRuntime.aclose``
+        幂等：未曾创建或已关闭时，连续调用不抛错。调用方（``SessionEngine.aclose``
         / CLI finally 分支）负责在生命周期结束时调用。
         """
         client = self._client

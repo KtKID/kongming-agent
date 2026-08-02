@@ -24,7 +24,7 @@ from application.agent_workflows.strategies.roundtable_review.contracts import (
     RoundtableReviewSpec,
     SourceFileRecord,
 )
-from application.subagents.manager import SubAgentTask
+from application.agent_workflows.task_models import SubAgentTask
 from application.subagents.permissions import to_jsonable
 
 

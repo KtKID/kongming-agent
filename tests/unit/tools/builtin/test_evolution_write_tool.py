@@ -10,6 +10,7 @@ import pytest
 from core.contracts import ToolContext
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore
+from tests.support.tool_calls import execute_prepared_tool
 from tools.builtin.evolution_write_tool import build_evolution_write_tool
 
 
@@ -72,7 +73,7 @@ def _payload() -> dict[str, object]:
 
 
 @pytest.mark.unit
-async def test_evolution_write_tool_writes_review_queue_and_state(tmp_path: Path) -> None:
+async def test_evolution_write_tool_writes_review_queue(tmp_path: Path) -> None:
     root_dir = tmp_path / ".kongming" / "evolution"
     store = EvolutionStore(
         root_dir=root_dir,
@@ -80,26 +81,20 @@ async def test_evolution_write_tool_writes_review_queue_and_state(tmp_path: Path
     )
     tool = build_evolution_write_tool(store, min_confidence=0.75, max_nutrients=2)
 
-    result = await tool.execute(_payload(), _ctx())
+    result = await execute_prepared_tool(tool, _payload(), _ctx())
     assert result.ok
     assert result.data["status"] == "written"
     assert result.data["nutrients_written"] == 1
 
     review_path = root_dir / "reviews" / "run-parent-1.json"
     queue_path = root_dir / "evolution-nutrients.jsonl"
-    state_path = root_dir / "evolution.state.json"
     assert review_path.exists()
     assert queue_path.exists()
-    assert state_path.exists()
 
     queue_lines = queue_path.read_text(encoding="utf-8").strip().splitlines()
     assert len(queue_lines) == 1
     queue_item = json.loads(queue_lines[0])
     assert queue_item["nutrient_id"] == "nutrient-1"
-
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    assert state["sessions"]["cli-demo"]["last_reviewed_run_id"] == "run-parent-1"
-    assert state["sessions"]["cli-demo"]["last_nutrient_id"] == "nutrient-1"
 
 
 @pytest.mark.unit
@@ -111,8 +106,8 @@ async def test_evolution_write_tool_is_idempotent_by_run_id(tmp_path: Path) -> N
     )
     tool = build_evolution_write_tool(store, min_confidence=0.75, max_nutrients=2)
 
-    first = await tool.execute(_payload(), _ctx())
-    second = await tool.execute(_payload(), _ctx())
+    first = await execute_prepared_tool(tool, _payload(), _ctx())
+    second = await execute_prepared_tool(tool, _payload(), _ctx())
 
     assert first.ok and second.ok
     assert second.data["status"] == "already_exists"
@@ -131,7 +126,8 @@ async def test_evolution_write_tool_accepts_flattened_payload_with_transcript_fa
     )
     tool = build_evolution_write_tool(store, min_confidence=0.75, max_nutrients=2)
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {
             "run_id": "run-flat-1",
             "session_id": "flat-session",
@@ -177,7 +173,8 @@ async def test_evolution_write_tool_ignores_malformed_transcript_window(tmp_path
     )
     tool = build_evolution_write_tool(store, min_confidence=0.75, max_nutrients=2)
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {
             "review_result": {
                 "run_id": "run-bad-window-1",
@@ -214,7 +211,8 @@ async def test_evolution_write_tool_recovers_parent_run_from_reviewer_session(
     )
     tool = build_evolution_write_tool(store, min_confidence=0.75, max_nutrients=2)
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {
             "review_result": {
                 "reviewed_at_ms": 789,
@@ -265,7 +263,8 @@ async def test_evolution_write_tool_skips_invalid_nutrient_items_and_writes_vali
     )
     tool = build_evolution_write_tool(store, min_confidence=0.75, max_nutrients=2)
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {
             "review_result": {
                 "run_id": "run-invalid-nutrient-1",

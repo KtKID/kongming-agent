@@ -24,7 +24,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from core.contracts import ToolContext, ToolResult
+from core.contracts import PreparedToolCall, ToolContext, ToolResult
 from scheduler.domain import (
     DEFAULT_INACTIVITY_TIMEOUT,
     ApprovalMode,
@@ -34,14 +34,16 @@ from scheduler.domain import (
     MisfirePolicy,
     ScheduleDelivery,
     ScheduledTask,
+    ScheduleTrigger,
     SessionMode,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
 from scheduler.manager import SchedulerManager, ScheduleThreadProvisioner
+from scheduler.run_portal import ScheduledRunPortal
 from scheduler.schedule_parser import parse_schedule
 from scheduler.store import Store, TaskNotFoundError
 from scheduler.timing import (
@@ -53,10 +55,8 @@ from scheduler.timing import (
 )
 from tools.runtime.base import BaseBuiltinTool
 
-# RuntimeFactoryFn: (store) -> (runtime, bridge)
-# 留 Any 避免循环 import：scheduler.runtime_factory 装配 NativeRuntime 时
-# 会反向触发 executors 导入链，本工具只在 run_now 路径需要。
-RuntimeFactoryFn = Callable[[Store], tuple[Any, Any]]
+# RuntimeFactoryFn: (store) -> 进程内共享 scheduled_run_manager。
+RuntimeFactoryFn = Callable[[Store], ScheduledRunPortal]
 
 
 class ScheduleTool(BaseBuiltinTool):
@@ -77,7 +77,7 @@ class ScheduleTool(BaseBuiltinTool):
 
     name = "schedule"
     description = (
-        "创建、查看、暂停、恢复、立即触发、删除定时任务。"
+        "支持创建、查看、暂停、恢复、立即触发、删除的定时任务工具手册。"
         "schedule 字段支持自然语言（如 'every 30s' / '2h' / '0 9 * * *'）和 ISO8601 时间戳。"
         "create 时必须给 name / schedule / agent / input；list 不需要参数；"
         "pause / resume / run_now / remove 需要 task_id。"
@@ -116,7 +116,7 @@ class ScheduleTool(BaseBuiltinTool):
             "timezone": {"type": "string", "default": "UTC"},
             "preset": {
                 "type": "string",
-                "description": "LLM preset id（匹配 cfg.web.llm_presets[].id）；空串用全局默认",
+                "description": "LLM preset id（匹配 model catalog）；空串用全局默认",
             },
             "approval_mode": {
                 "type": "string",
@@ -167,25 +167,112 @@ class ScheduleTool(BaseBuiltinTool):
         self._default_preset_id = default_preset_id
         self._thread_provisioner = thread_provisioner
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    def prepare(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> PreparedToolCall:
+        """审批前冻结 action 专属校验、默认值、trigger 与首次执行时间。"""
+        del context
+        self._validate_args(arguments)
+        allowed = set(self.input_schema["properties"])
+        unknown = sorted(set(arguments) - allowed)
+        if unknown:
+            raise ValueError(f"unknown arguments: {unknown}")
+        action = arguments.get("action")
+        if action not in {"create", "list", "pause", "resume", "run_now", "remove"}:
+            raise ValueError("invalid action")
+        if action == "list":
+            include_disabled = arguments.get("include_disabled", False)
+            if not isinstance(include_disabled, bool):
+                raise ValueError("include_disabled must be a boolean")
+            return PreparedToolCall(
+                arguments={"action": action, "include_disabled": include_disabled}
+            )
+        if action != "create":
+            return PreparedToolCall(
+                arguments={
+                    "action": action,
+                    "task_id": self._require(arguments, "task_id").strip(),
+                }
+            )
+
+        name = self._require(arguments, "name").strip()
+        schedule_expr = self._require(arguments, "schedule").strip()
+        input_text = self._require(arguments, "input")
+        raw_agent = arguments.get("agent", "default")
+        if raw_agent is None:
+            raw_agent = "default"
+        if not isinstance(raw_agent, str):
+            raise ValueError("argument 'agent' must be string")
+        agent_name = raw_agent.strip() or "default"
+        raw_preset = arguments.get("preset", self._default_preset_id)
+        if raw_preset is None or raw_preset == "":
+            raw_preset = self._default_preset_id
+        if not isinstance(raw_preset, str):
+            raise ValueError("argument 'preset' must be string")
+        raw_timezone = arguments.get("timezone", self._default_timezone)
+        if raw_timezone is None or raw_timezone == "":
+            raw_timezone = self._default_timezone
+        if not isinstance(raw_timezone, str):
+            raise ValueError("argument 'timezone' must be string")
+        concurrency = arguments.get("concurrency", "forbid")
+        if not isinstance(concurrency, str):
+            raise ValueError("argument 'concurrency' must be string")
+        try:
+            concurrency_policy = ConcurrencyPolicy(concurrency)
+        except ValueError as exc:
+            raise ValueError(
+                f"invalid concurrency {concurrency!r}: must be forbid/allow/replace"
+            ) from exc
+        raw_approval_mode = arguments.get("approval_mode")
+        approval_mode: str | None = None
+        if raw_approval_mode is not None:
+            if not isinstance(raw_approval_mode, str):
+                raise ValueError("argument 'approval_mode' must be string")
+            try:
+                approval_mode = ApprovalMode(raw_approval_mode).value
+            except ValueError as exc:
+                raise ValueError(
+                    f"invalid approval_mode {raw_approval_mode!r}: must be fail_closed/trust"
+                ) from exc
+        trigger = parse_schedule(schedule_expr, default_tz=raw_timezone)
+        next_run_at = compute_first_run_at(trigger)
+        try:
+            delivery_channel = DeliveryChannel(self._default_delivery_channel).value
+        except ValueError:
+            delivery_channel = DeliveryChannel.WEB.value
+        return PreparedToolCall(
+            arguments={
+                "action": action,
+                "name": name,
+                "schedule": schedule_expr,
+                "input": input_text,
+                "agent": agent_name,
+                "preset": raw_preset,
+                "timezone": raw_timezone,
+                "concurrency": concurrency_policy.value,
+                "approval_mode": approval_mode,
+                "trigger_type": trigger.trigger_type.value,
+                "trigger_expr": trigger.expr,
+                "trigger_timezone": trigger.timezone,
+                "next_run_at": next_run_at,
+                "delivery_channel": delivery_channel,
+            }
+        )
+
+    async def execute(
+        self,
+        prepared: PreparedToolCall,
+        ctx: ToolContext,
+    ) -> ToolResult:
         """主入口：按 action 分派。
 
         覆盖 :meth:`BaseBuiltinTool.execute` 以承载更细的错误结构（同时携带
         ``content`` 解释文本和 ``error_message`` 机器可读字段）。
         """
-        if not isinstance(args, dict):
-            return ToolResult(
-                ok=False,
-                content="invalid args: expected dict",
-                error_message="invalid args type",
-            )
-        action = args.get("action")
-        if not action:
-            return ToolResult(
-                ok=False,
-                content="missing required 'action' field",
-                error_message="missing action",
-            )
+        args = dict(prepared.arguments)
+        action = args["action"]
         try:
             if action == "create":
                 return await self._do_create(args, ctx)
@@ -228,49 +315,22 @@ class ScheduleTool(BaseBuiltinTool):
     # ------------------------------------------------------------------
 
     async def _do_create(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        name = self._require(args, "name")
-        schedule_expr = self._require(args, "schedule")
-        input_text = self._require(args, "input")
-        agent_name = (args.get("agent") or "default").strip() or "default"
-        preset_id = args.get("preset", "") or self._default_preset_id
-        # v0.3：timezone 走配置默认（cfg.scheduler.default_timezone），
-        # 不让 LLM 凭空填 UTC 导致 cron 表达式时间偏移。
-        timezone = args.get("timezone") or self._default_timezone
-        concurrency_str = args.get("concurrency", "forbid")
-
-        try:
-            concurrency_policy = ConcurrencyPolicy(concurrency_str)
-        except ValueError as exc:
-            raise ValueError(
-                f"invalid concurrency {concurrency_str!r}: must be forbid/allow/replace"
-            ) from exc
-
-        # v0.5：任务级 approval_mode；缺省 None → bridge 解析时走全局兜底
-        approval_mode_str = args.get("approval_mode")
-        approval_mode: ApprovalMode | None = None
-        if approval_mode_str is not None:
-            try:
-                approval_mode = ApprovalMode(approval_mode_str)
-            except ValueError as exc:
-                raise ValueError(
-                    f"invalid approval_mode {approval_mode_str!r}: must be fail_closed/trust"
-                ) from exc
-
-        trigger = parse_schedule(schedule_expr, default_tz=timezone)
-
-        # next_run_at：所有 trigger_type 都立即算出第一次触发时刻。
-        # 历史实现把 recurring（INTERVAL/CRON/SECONDS）留空，导致
-        # store.reserve_due_tasks 看到 next_run_at 为空时 continue，任务
-        # 永不触发（v0.2.1 P0 bug）。改为统一走 compute_first_run_at，
-        # ONCE 路径仍等价于直接返回 trigger.expr。
-        try:
-            next_run_at = compute_first_run_at(trigger)
-        except ValueError as exc:
-            return ToolResult(
-                ok=False,
-                content=f"无法计算第一次触发时刻：{exc}",
-                error_message=str(exc),
-            )
+        name = args["name"]
+        schedule_expr = args["schedule"]
+        input_text = args["input"]
+        agent_name = args["agent"]
+        preset_id = args["preset"]
+        concurrency_policy = ConcurrencyPolicy(args["concurrency"])
+        raw_approval_mode = args["approval_mode"]
+        approval_mode = (
+            ApprovalMode(raw_approval_mode) if isinstance(raw_approval_mode, str) else None
+        )
+        trigger = ScheduleTrigger(
+            trigger_type=TriggerType(args["trigger_type"]),
+            expr=args["trigger_expr"],
+            timezone=args["trigger_timezone"],
+        )
+        next_run_at = args["next_run_at"]
 
         if trigger.trigger_type is TriggerType.ONCE:
             now_dt = utc_now()
@@ -284,18 +344,14 @@ class ScheduleTool(BaseBuiltinTool):
 
         task_id = f"task-{uuid.uuid4().hex[:12]}"
         # v0.3：默认填 delivery（dispatcher 看到 None 会 SKIPPED 整条投递链路）
-        try:
-            channel = DeliveryChannel(self._default_delivery_channel)
-        except ValueError:
-            channel = DeliveryChannel.WEB
+        channel = DeliveryChannel(args["delivery_channel"])
         delivery = ScheduleDelivery(channel=channel)
 
         now = to_iso(utc_now())
         task = ScheduledTask(
             task_id=task_id,
             name=name,
-            enabled=True,
-            state=TaskState.SCHEDULED,
+            lifecycle=TaskLifecycleState.SCHEDULED,
             origin=TaskOrigin.TOOL,
             trigger=trigger,
             policy=TaskExecutionPolicy(
@@ -366,7 +422,7 @@ class ScheduleTool(BaseBuiltinTool):
         )
 
     def _do_list(self, args: dict[str, Any]) -> ToolResult:
-        include_disabled = bool(args.get("include_disabled", False))
+        include_disabled = args["include_disabled"]
         tasks = self._store.list_tasks(include_disabled=include_disabled)
         if not tasks:
             return ToolResult(
@@ -377,7 +433,7 @@ class ScheduleTool(BaseBuiltinTool):
 
         lines = []
         for t in tasks:
-            marker = "[on]" if t.enabled else "[off]"
+            marker = f"[{t.lifecycle.value}]"
             name_disp = t.name if len(t.name) <= 40 else t.name[:37] + "..."
             expr_disp = t.trigger.expr if len(t.trigger.expr) <= 25 else t.trigger.expr[:22] + "..."
             lines.append(
@@ -395,8 +451,7 @@ class ScheduleTool(BaseBuiltinTool):
                     {
                         "task_id": t.task_id,
                         "name": t.name,
-                        "enabled": t.enabled,
-                        "state": t.state.value,
+                        "lifecycle": t.lifecycle.value,
                         "trigger_type": t.trigger.trigger_type.value,
                         "expr": t.trigger.expr,
                         "next_run_at": t.next_run_at,
@@ -410,7 +465,7 @@ class ScheduleTool(BaseBuiltinTool):
         )
 
     def _do_pause(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        task_id = self._require(args, "task_id")
+        task_id = args["task_id"]
         task = self._store.get_task(task_id)
         if task is None:
             return ToolResult(
@@ -418,16 +473,18 @@ class ScheduleTool(BaseBuiltinTool):
                 content=f"task {task_id} not found",
                 error_message="task_not_found",
             )
-        if not task.enabled and task.state is TaskState.PAUSED:
+        if task.lifecycle is TaskLifecycleState.PAUSED:
             return ToolResult(
                 ok=True,
                 content=f"task {task_id} already paused",
-                data={"task_id": task_id, "enabled": False, "state": TaskState.PAUSED.value},
+                data={
+                    "task_id": task_id,
+                    "lifecycle": TaskLifecycleState.PAUSED.value,
+                },
             )
         updated = self._store.update_task(
             task_id,
-            enabled=False,
-            state=TaskState.PAUSED,
+            lifecycle=TaskLifecycleState.PAUSED,
         )
         self._store.append_audit(
             action="pause",
@@ -440,13 +497,12 @@ class ScheduleTool(BaseBuiltinTool):
             content=f"paused task {task_id}",
             data={
                 "task_id": task_id,
-                "enabled": updated.enabled,
-                "state": updated.state.value,
+                "lifecycle": updated.lifecycle.value,
             },
         )
 
     def _do_resume(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        task_id = self._require(args, "task_id")
+        task_id = args["task_id"]
         task = self._store.get_task(task_id)
         if task is None:
             return ToolResult(
@@ -454,16 +510,18 @@ class ScheduleTool(BaseBuiltinTool):
                 content=f"task {task_id} not found",
                 error_message="task_not_found",
             )
-        if task.enabled and task.state is TaskState.SCHEDULED:
+        if task.lifecycle is TaskLifecycleState.SCHEDULED:
             return ToolResult(
                 ok=True,
                 content=f"task {task_id} already running",
-                data={"task_id": task_id, "enabled": True, "state": TaskState.SCHEDULED.value},
+                data={
+                    "task_id": task_id,
+                    "lifecycle": TaskLifecycleState.SCHEDULED.value,
+                },
             )
         updated = self._store.update_task(
             task_id,
-            enabled=True,
-            state=TaskState.SCHEDULED,
+            lifecycle=TaskLifecycleState.SCHEDULED,
         )
         self._store.append_audit(
             action="resume",
@@ -476,13 +534,12 @@ class ScheduleTool(BaseBuiltinTool):
             content=f"resumed task {task_id}",
             data={
                 "task_id": task_id,
-                "enabled": updated.enabled,
-                "state": updated.state.value,
+                "lifecycle": updated.lifecycle.value,
             },
         )
 
     def _do_remove(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        task_id = self._require(args, "task_id")
+        task_id = args["task_id"]
         removed = self._store.delete_task(task_id)
         if not removed:
             return ToolResult(
@@ -503,7 +560,7 @@ class ScheduleTool(BaseBuiltinTool):
         )
 
     async def _do_run_now(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        task_id = self._require(args, "task_id")
+        task_id = args["task_id"]
         task = self._store.get_task(task_id)
         if task is None:
             return ToolResult(
@@ -533,13 +590,9 @@ class ScheduleTool(BaseBuiltinTool):
             actor=f"agent:{ctx.session_id}",
             payload={"source": "schedule_tool", "scheduled_for": reservation.scheduled_for},
         )
-        runtime, bridge = self._runtime_factory(self._store)
-        try:
-            run = await bridge.execute(reservation)
-        finally:
-            aclose = getattr(runtime, "aclose", None)
-            if aclose is not None:
-                await aclose()
+        scheduled_run_manager = self._runtime_factory(self._store)
+        receipt = await scheduled_run_manager.submit_scheduled_run(reservation)
+        run = await scheduled_run_manager.wait_for_run(receipt.run_id)
 
         return ToolResult(
             ok=True,

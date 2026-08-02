@@ -21,7 +21,7 @@ import pytest
 from infrastructure.config.models import (
     ApprovalConfig,
     Config,
-    ModelConfig,
+    ModelSelectionConfig,
     RunnerConfig,
     SchedulerConfig,
     SessionConfig,
@@ -32,12 +32,7 @@ from tools import build_default_registry, register_schedule_tool_if_enabled
 
 def _make_cfg(*, enabled: bool, home: Path | None = None) -> Config:
     return Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="stub-model",
-            base_url="http://127.0.0.1:1234",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         runner=RunnerConfig(max_turns=3),
         session=SessionConfig(backend="memory", store_path=".kongming/sessions.db"),
         trace=TraceConfig(output_path=".kongming/traces/test.jsonl"),

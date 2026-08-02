@@ -2,15 +2,17 @@
 
 本脚本验证并行子 agent 编排、scoped_workdir 权限审计、workflow tool 入参传递、策略注册分发和模型 preset 覆盖行为。
 作用是确保 AgentWorkflowManager 写入完整审计产物，保持子 agent 上下文隔离，并通过测试文件复现边界输入。
-关键执行流程：构造 fake LLM 和 NativeRuntime，运行 workflow manager 或 agent_workflow_tool，读取 workflow 产物和审计日志进行断言。
+关键执行流程：构造 fake LLM 和 SessionEngine，运行 workflow manager 或 agent_workflow_tool，读取 workflow 产物和审计日志进行断言。
 关键函数：_runtime 构造测试 runtime，_audit_records 读取审计日志，各 test_* 函数覆盖并行执行、失败收口、权限隔离、策略分发和 CLI preset。
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -22,18 +24,39 @@ from application.agent_workflows.manager import (
     SubAgentReportProjection,
 )
 from application.agent_workflows.strategies.base import WorkflowRunRequest, WorkflowStrategyNotFound
-from application.subagents.manager import SubAgentManager, SubAgentTask
+from application.agent_workflows.task_models import SubAgentTask
+from application.subagents.permissions import SubAgentPermissionSpec
 from core.agent_spec import AgentSpec
-from core.contracts import LLMRequest, LLMResponse, ToolContext
+from core.contracts import (
+    LLMRequest,
+    LLMResponse,
+    ProviderUsageFamily,
+    ProviderUsageSnapshot,
+    ToolContext,
+)
 from core.message import Message, ToolCall
 from core.runner import Runner
 from hosts.cli.main import _apply_model_preset_or_exit
-from infrastructure.config.models import Config, LLMPresetConfig, ModelConfig, WebConfig
-from runtime_assembly.native_runtime import NativeRuntime
+from infrastructure.config.model_catalog_manager import ModelCatalogManager
+from infrastructure.config.models import Config, ModelSelectionConfig
+from infrastructure.llm_providers.usage import ProviderUsageManager
+from runtime_assembly.session_engine import SessionEngine
 from sessions import SessionBootstrap, build_session
+from tests.support.workflow_agent_tree import (
+    WorkflowAgentTreeBinding,
+    bind_workflow_agent_tree,
+)
 from tools import AutoAllowApproval, ToolRegistry
 from tools.agent_workflow_tool import AgentWorkflowHandle, build_agent_workflow_tool
 from tools.builtin.file_tool import build_file_tools
+
+
+def _anthropic_usage(raw_usage: dict[str, Any]) -> ProviderUsageSnapshot:
+    """经真实 Manager 构造 Anthropic 测试快照。"""
+    return ProviderUsageManager().normalize(
+        family=ProviderUsageFamily.ANTHROPIC_MESSAGES,
+        raw_usage=raw_usage,
+    )
 
 
 class _EchoLLM:
@@ -75,7 +98,9 @@ class _EchoLLM:
         return LLMResponse(
             message=Message.assistant(content),
             finish_reason="stop",
-            usage=usage_by_content.get(content, {}),
+            usage=(
+                _anthropic_usage(usage_by_content[content]) if content in usage_by_content else None
+            ),
         )
 
 
@@ -113,7 +138,7 @@ class _WorkflowLLM:
                                         "prompt": "beta child task",
                                         "permission": {"mode": "scoped_workdir"},
                                     },
-                                ]
+                                ],
                             },
                         )
                     ]
@@ -156,12 +181,14 @@ class _ToolCallingLLM:
             return LLMResponse(
                 message=Message.assistant(self.final_content),
                 finish_reason="stop",
-                usage={
-                    "input_tokens": 7,
-                    "output_tokens": 3,
-                    "cache_read_input_tokens": 2,
-                    "provider_extra_tokens": 11,
-                },
+                usage=_anthropic_usage(
+                    {
+                        "input_tokens": 7,
+                        "output_tokens": 3,
+                        "cache_read_input_tokens": 2,
+                        "provider_extra_tokens": 11,
+                    }
+                ),
             )
         return LLMResponse(
             message=Message.assistant(
@@ -174,59 +201,173 @@ class _ToolCallingLLM:
                 ]
             ),
             finish_reason="tool_calls",
-            usage={
-                "input_tokens": 5,
-                "output_tokens": 2,
-                "cache_creation_input_tokens": 1,
-                "provider_extra_tokens": 13,
-            },
+            usage=_anthropic_usage(
+                {
+                    "input_tokens": 5,
+                    "output_tokens": 2,
+                    "cache_creation_input_tokens": 1,
+                    "provider_extra_tokens": 13,
+                }
+            ),
         )
 
 
-class _ProgressSubagents:
-    """测试用子 agent 管理器，按 task_id 生成完成或失败结果。"""
+class _ProgressAgentManager:
+    """测试用 AgentManager 投影，按 source_task_id 回灌完成或失败 child_result。"""
 
-    async def run_task(
-        self,
-        *,
-        workflow_id: str,
-        parent_session_id: str,
-        task: SubAgentTask,
-        audit_writer: Any | None = None,
-    ) -> Any:
-        """运行测试任务，输入为子任务，输出为成功 run 或抛出测试异常。"""
-        if task.task_id == "fail":
-            raise RuntimeError("child exploded")
-        return workflow_manager_module.SubAgentRun(
-            task=task,
-            session_id=f"child-{task.task_id}",
-            run_id=f"run-{task.task_id}",
-            status="completed",
-            content=f"{task.task_id} done",
-            error_message=None,
-            turn_count=1,
-            usage={},
+    def __init__(self) -> None:
+        """初始化父 cell 和 child 索引，输入为空，输出可执行 fake。"""
+        self.root = SimpleNamespace(
+            agent_id="root-agent",
+            session_id="parent-session",
+            mailbox=asyncio.Queue(),
+        )
+        self.children: dict[str, object] = {}
+
+    def get_agent(self, agent_id: str) -> object | None:
+        """查询父/子 cell，输入为 agent id，输出匹配对象。"""
+        if agent_id == self.root.agent_id:
+            return self.root
+        return self.children.get(agent_id)
+
+    def spawn(self, request: Any) -> object:
+        """回灌测试 child_result，输入为 SpawnAgentRequest，输出 dispatched 投影。"""
+        task_id = request.source_task_id or "task"
+        child_id = f"child-{task_id}"
+        child_session_id = request.child_session_id or f"child-session-{task_id}"
+        self.children[child_id] = SimpleNamespace(
+            agent_id=child_id,
+            session_id=child_session_id,
+        )
+        metadata: dict[str, object] = {}
+        if task_id == "fail":
+            metadata["child_error_reason"] = "child exploded"
+        self.root.mailbox.put_nowait(
+            SimpleNamespace(
+                kind="child_result",
+                task_id=f"spawn-{task_id}",
+                payload=Message.assistant(f"{task_id} done", metadata=metadata),
+            )
+        )
+        return SimpleNamespace(child_id=child_id, task_id=f"spawn-{task_id}")
+
+
+class _RejectingSubagents:
+    """测试用旧子 agent 管理器，记录 run_task 调用并返回失败信号。"""
+
+    def __init__(self) -> None:
+        """初始化调用计数，输入为空，输出可断言 fake。"""
+        self.run_task_calls = 0
+
+    async def run_task(self, **_kwargs: Any) -> Any:
+        """记录旧路径调用，输入为任意参数，输出异常以暴露错误分支。"""
+        self.run_task_calls += 1
+        raise AssertionError("legacy subagent path called")
+
+
+class _RuntimeBackedRejectingSubagents(_RejectingSubagents):
+    """测试用旧 subagent manager，提供 runtime 供 spawn path 构造 run overrides。"""
+
+    def __init__(self, cfg: Config) -> None:
+        """初始化 fake，输入为配置，输出带 runtime 的 rejecting subagents。"""
+        super().__init__()
+        self.runtime = SimpleNamespace(
+            tools=ToolRegistry(build_file_tools()),
+            approval=AutoAllowApproval(),
+            config=cfg,
         )
 
 
-class _FakeWorkflowTaskProgressInput:
-    """测试用 workflow 进度输入，记录构造 payload。"""
+class _FakeWorkflowSpawnAgentManager:
+    """测试用 AgentManager，记录 spawn request 并向父 mailbox 投递 child_result。"""
 
-    def __init__(self, **payload: object) -> None:
-        """保存输入 payload，输入为字段字典，输出为可断言对象。"""
-        self.payload = payload
+    def __init__(self, root: Any) -> None:
+        """初始化 fake manager，输入为 root cell，输出可记录 spawn 的实例。"""
+        self.root = root
+        self.requests: list[Any] = []
+        self.child = SimpleNamespace(agent_id="child-alpha", session_id="parent-session-child")
 
-    @classmethod
-    def model_validate(
-        cls,
-        payload: dict[str, object],
-    ) -> _FakeWorkflowTaskProgressInput:
-        """模拟 Pydantic 合同入口，输入为字段字典，输出为 fake 输入对象。"""
-        return cls(**payload)
+    def get_agent(self, agent_id: str) -> Any | None:
+        """查询 fake cell，输入为 agent_id，输出 root / child / None。"""
+        if agent_id == self.root.agent_id:
+            return self.root
+        if agent_id == self.child.agent_id:
+            return self.child
+        return None
+
+    def spawn(self, request: Any) -> Any:
+        """记录 request 并投递测试 mail，输入为 SpawnAgentRequest，输出 SpawnResult 形态。"""
+        self.requests.append(request)
+        spawn_result = SimpleNamespace(child_id=self.child.agent_id, task_id="spawn-task-alpha")
+        self.root.mailbox.put_nowait(
+            SimpleNamespace(
+                kind="system_notice",
+                task_id="unmatched",
+                payload=Message.user("unmatched"),
+            )
+        )
+        self.root.mailbox.put_nowait(
+            SimpleNamespace(
+                kind="child_result",
+                task_id=spawn_result.task_id,
+                payload=Message.assistant(
+                    "spawn path done",
+                    metadata={
+                        "usage": _anthropic_usage(
+                            {"input_tokens": 5, "output_tokens": 2}
+                        ).to_payload()
+                    },
+                ),
+            )
+        )
+        return spawn_result
+
+
+class _OutOfOrderWorkflowSpawnAgentManager:
+    """测试用 AgentManager，先投递 beta 结果再投递 alpha 结果，覆盖 demux 缓存。"""
+
+    def __init__(self, root: Any) -> None:
+        """初始化 fake manager，输入为 root cell，输出可记录 spawn 的实例。"""
+        self.root = root
+        self.requests: list[Any] = []
+        self.children: dict[str, Any] = {}
+
+    def get_agent(self, agent_id: str) -> Any | None:
+        """查询 fake cell，输入为 agent_id，输出 root / child / None。"""
+        if agent_id == self.root.agent_id:
+            return self.root
+        return self.children.get(agent_id)
+
+    def spawn(self, request: Any) -> Any:
+        """记录 request 并乱序投递结果，输入为 request，输出 SpawnResult 形态。"""
+        self.requests.append(request)
+        source_task_id = request.source_task_id or f"task-{len(self.requests)}"
+        child_id = f"child-{source_task_id}"
+        self.children[child_id] = SimpleNamespace(
+            agent_id=child_id,
+            session_id=request.child_session_id or f"session-{source_task_id}",
+        )
+        spawn_result = SimpleNamespace(child_id=child_id, task_id=f"spawn-{source_task_id}")
+        if source_task_id == "alpha":
+            self.root.mailbox.put_nowait(
+                SimpleNamespace(
+                    kind="child_result",
+                    task_id="spawn-beta",
+                    payload=Message.assistant("beta done"),
+                )
+            )
+            self.root.mailbox.put_nowait(
+                SimpleNamespace(
+                    kind="child_result",
+                    task_id="spawn-alpha",
+                    payload=Message.assistant("alpha done"),
+                )
+            )
+        return spawn_result
 
 
 class _FakeSessionTaskProgressManager:
-    """测试用进度 Manager，记录 sync_workflow_tasks 调用。"""
+    """测试用进度 Manager，记录初始化和运行时状态迁移。"""
 
     instances: list[_FakeSessionTaskProgressManager] = []
 
@@ -241,45 +382,45 @@ class _FakeSessionTaskProgressManager:
         cls.instances.append(manager)
         return manager
 
-    def sync_workflow_tasks(
+    def open_workflow(
         self,
         *,
         session_id: str,
         workflow_id: str,
-        tasks: list[_FakeWorkflowTaskProgressInput],
+        title: str,
+        control_mode: object,
+        tasks: list[object],
     ) -> None:
-        """记录 workflow 同步调用，输入为任务对象，输出为 calls 追加记录。"""
-        status_map = {
-            "assigned": "pending",
-            "running": "in_progress",
-            "completed": "completed",
-            "failed": "pending",
-        }
-        normalized_tasks = []
-        for task in tasks:
-            payload = dict(task.payload)
-            task_run_id = str(payload["task_run_id"])
-            source_status = str(payload["status"])
-            orchestration_task_id = f"{workflow_id}:{task_run_id}"
-            normalized_tasks.append(
-                {
-                    "id": orchestration_task_id,
-                    "orchestration_task_id": orchestration_task_id,
-                    "workflow_id": workflow_id,
-                    "task_id": payload["task_id"],
-                    "task_run_id": task_run_id,
-                    "desc": payload["desc"],
-                    "status": status_map[source_status],
-                    "source_status": source_status,
-                    "error_message": payload["error_message"],
-                    "display_order": payload["display_order"],
-                }
-            )
+        """记录前台 workflow 初始化，输入为坐标和不可变骨架，输出为调用记录。"""
         self.calls.append(
             {
+                "kind": "open",
                 "session_id": session_id,
                 "workflow_id": workflow_id,
-                "tasks": normalized_tasks,
+                "title": title,
+                "control_mode": control_mode,
+                "tasks": tasks,
+            }
+        )
+
+    def record_runtime_transition(
+        self,
+        *,
+        session_id: str,
+        workflow_id: str,
+        task_id: str,
+        runtime_status: object,
+        error_message: str | None = None,
+    ) -> None:
+        """记录 runtime 事实，输入为任务状态和错误，输出为调用记录。"""
+        self.calls.append(
+            {
+                "kind": "transition",
+                "session_id": session_id,
+                "workflow_id": workflow_id,
+                "task_id": task_id,
+                "runtime_status": runtime_status,
+                "error_message": error_message,
             }
         )
 
@@ -293,27 +434,36 @@ class _FailingSessionTaskProgressManager:
         del config
         return cls()
 
-    def sync_workflow_tasks(
+    def open_workflow(
         self,
         *,
         session_id: str,
         workflow_id: str,
-        tasks: list[Any],
+        title: str,
+        control_mode: object,
+        tasks: list[object],
     ) -> None:
-        """模拟进度同步失败，输入为同步参数，输出为 RuntimeError。"""
-        del session_id, workflow_id, tasks
+        """模拟进度初始化失败，输入为 workflow 骨架，输出为 RuntimeError。"""
+        del session_id, workflow_id, title, control_mode, tasks
+        raise RuntimeError("progress disk unavailable")
+
+    def record_runtime_transition(
+        self,
+        *,
+        session_id: str,
+        workflow_id: str,
+        task_id: str,
+        runtime_status: object,
+        error_message: str | None = None,
+    ) -> None:
+        """模拟生命周期落盘失败，输入为状态事实，输出为 RuntimeError。"""
+        del session_id, workflow_id, task_id, runtime_status, error_message
         raise RuntimeError("progress disk unavailable")
 
 
 def _config(tmp_path: Path) -> Config:
     """构造测试配置，输入为临时目录，输出为 file session 和 auto_allow 审批配置。"""
-    cfg = Config(
-        model=ModelConfig(
-            name="fake-model",
-            base_url="http://127.0.0.1:1234/v1",
-            api_key="",
-        )
-    )
+    cfg = Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
     cfg.session.backend = "file"
     cfg.session.file_store_path = str(tmp_path / "sessions")
     cfg.approval.mode = "auto_allow"
@@ -330,7 +480,6 @@ def test_workflow_dir_resolves_kongming_home_session_root(
     cfg = _config(tmp_path)
     cfg.session.file_store_path = ".kongming/sessions"
     manager = AgentWorkflowManager(
-        subagents=_ProgressSubagents(),  # type: ignore[arg-type]
         config=cfg,
         workspace_root=tmp_path / "workspace",
         role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
@@ -349,12 +498,12 @@ def _runtime(
     llm: Any,
     *,
     tools: ToolRegistry | None = None,
-) -> tuple[Config, NativeRuntime]:
-    """构造测试 runtime，输入为临时目录、fake LLM 和可选工具表，输出为配置和 NativeRuntime。"""
+) -> tuple[Config, SessionEngine]:
+    """构造测试 runtime，输入为临时目录、fake LLM 和可选工具表，输出为配置和 SessionEngine。"""
     cfg = _config(tmp_path)
     bootstrap = SessionBootstrap(
         agent_name="test-agent",
-        model_name=cfg.model.name,
+        model_name="gemma-4-e4b-it",
         instruction_sources=[],
         instruction_text_hash="test",
         created_at=1.0,
@@ -365,19 +514,26 @@ def _runtime(
         """构造测试 session，输入为 session ID，输出为 file backend session。"""
         return build_session(cfg, sid, bootstrap=bootstrap)
 
-    runtime = NativeRuntime(
+    registry = tools or ToolRegistry()
+    enabled_tool_names = [tool.name for tool in registry.all_tools()]
+    catalog_manager = ModelCatalogManager()
+    model_config = catalog_manager.resolve_runtime(cfg.model)
+    runtime = SessionEngine(
         config=cfg,
         runner=Runner(),
         llm=llm,
-        tools=tools or ToolRegistry(),
-        enabled_tool_names=[],
+        tools=registry,
+        enabled_tool_names=enabled_tool_names,
         approval=AutoAllowApproval(),
         session_factory=session_factory,
         event_sinks=[],
+        model_catalog_manager=catalog_manager,
+        model_config=model_config,
         agent_spec=AgentSpec(
             name="parent",
             instructions="parent instructions",
-            default_model=cfg.model.name,
+            default_model="gemma-4-e4b-it",
+            tool_names=tuple(enabled_tool_names),
         ),
     )
     return cfg, runtime
@@ -391,6 +547,26 @@ def _audit_records(workflow_dir: Path) -> list[dict[str, Any]]:
     ]
 
 
+def _workflow_manager(
+    *,
+    runtime: SessionEngine,
+    config: Config,
+    workspace_root: Path,
+) -> tuple[AgentWorkflowManager, WorkflowAgentTreeBinding]:
+    """装配真实 workflow agent 树，输入为 runtime/config，输出 manager 与清理绑定。"""
+    binding = bind_workflow_agent_tree(runtime)
+    return (
+        AgentWorkflowManager(
+            runtime=runtime,
+            agent_manager=binding.manager,
+            config=config,
+            workspace_root=workspace_root,
+            role_manager=AgentRoleManager(role_dir=workspace_root / "roles"),
+        ),
+        binding,
+    )
+
+
 @pytest.mark.asyncio
 async def test_parallel_workflow_writes_audit_and_keeps_child_contexts_isolated(
     tmp_path: Path,
@@ -398,22 +574,34 @@ async def test_parallel_workflow_writes_audit_and_keeps_child_contexts_isolated(
     """验证并行 workflow 审计和上下文隔离，输入为临时目录，输出为产物与审计断言。"""
     llm = _EchoLLM()
     cfg, runtime = _runtime(tmp_path, llm)
+    manager, binding = _workflow_manager(
+        runtime=runtime,
+        config=cfg,
+        workspace_root=tmp_path,
+    )
     try:
-        manager = AgentWorkflowManager(
-            subagents=SubAgentManager(runtime),
-            config=cfg,
-            workspace_root=tmp_path,
-            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
-        )
-        result = await manager.run_parallel(
+        result = await manager.run_workflow_payload(
+            mode="parallel",
             parent_session_id="parent-session",
+            parent_agent=binding.parent_agent,
             desc="  梳理现有 thread/session 路径与顶部工具栏结构  ",
-            tasks=[
-                SubAgentTask(task_id="alpha", task_name="alpha", prompt="alpha task"),
-                SubAgentTask(task_id="beta", task_name="beta", prompt="beta task"),
-            ],
+            payload={
+                "task_specs": [
+                    {
+                        "task_id": "alpha",
+                        "task_name": "alpha",
+                        "prompt": "alpha task",
+                    },
+                    {
+                        "task_id": "beta",
+                        "task_name": "beta",
+                        "prompt": "beta task",
+                    },
+                ]
+            },
         )
     finally:
+        await binding.aclose()
         await runtime.aclose()
 
     assert result.completed is True
@@ -435,6 +623,12 @@ async def test_parallel_workflow_writes_audit_and_keeps_child_contexts_isolated(
     assert audit_actions.count("agent_completed") == 2
     assert audit_actions.count("subagent_reported") == 2
     assert audit_actions.count("workflow_completed") == 1
+    assert all("subagent_runtime" not in record["payload"] for record in audit_records)
+    assert all("runtime_spec" not in record["payload"] for record in audit_records)
+    assert all(
+        record["payload"]["resolved_runtime"]["model"] == "gemma-4-e4b-it"
+        for record in audit_records
+    )
 
     report_index = json.loads(result.report_index_path.read_text(encoding="utf-8"))
     assert report_index["status"] == "completed"
@@ -449,16 +643,14 @@ async def test_parallel_workflow_writes_audit_and_keeps_child_contexts_isolated(
     assert [report["task_id"] for report in workflow_result["reports"]] == ["alpha", "beta"]
     assert [run.usage for run in result.runs] == [
         {
-            "input_tokens": 11,
-            "output_tokens": 3,
-            "cache_read_input_tokens": 2,
-            "provider_extra_tokens": 7,
+            "input_uncached_tokens": 11,
+            "cache_read_tokens": 2,
+            "output_total_tokens": 3,
         },
         {
-            "input_tokens": 13,
-            "output_tokens": 4,
-            "cache_creation_input_tokens": 5,
-            "provider_extra_tokens": 9,
+            "input_uncached_tokens": 13,
+            "cache_write_tokens": 5,
+            "output_total_tokens": 4,
         },
     ]
     assert workflow_result["runs"][0]["usage"] == result.runs[0].usage
@@ -502,6 +694,7 @@ async def test_parallel_workflow_writes_audit_and_keeps_child_contexts_isolated(
             and record["payload"]["task_id"] == run.task.task_id
         )
         assert completed["usage"] == run.usage
+        assert completed["resolved_runtime"]["model"] == "gemma-4-e4b-it"
         reported = next(
             record["payload"]
             for record in audit_records
@@ -512,6 +705,7 @@ async def test_parallel_workflow_writes_audit_and_keeps_child_contexts_isolated(
         assert reported["report_path"] == str(report_path)
         assert reported["content_digest"] == report["content_digest"]
         assert reported["usage"] == run.usage
+        assert reported["resolved_runtime"]["model"] == "gemma-4-e4b-it"
 
 
 @pytest.mark.asyncio
@@ -526,64 +720,57 @@ async def test_parallel_workflow_syncs_task_progress_from_workflow_events(
         "SessionTaskProgressManager",
         _FakeSessionTaskProgressManager,
     )
-    monkeypatch.setattr(
-        workflow_manager_module,
-        "WorkflowTaskProgressInput",
-        _FakeWorkflowTaskProgressInput,
-    )
     cfg = _config(tmp_path)
+    agent_manager = _ProgressAgentManager()
     manager = AgentWorkflowManager(
-        subagents=_ProgressSubagents(),  # type: ignore[arg-type]
+        agent_manager=agent_manager,
         config=cfg,
         workspace_root=tmp_path,
         role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
     )
 
-    result = await manager.run_parallel(
+    result = await manager.run_workflow_payload(
+        mode="parallel",
         parent_session_id="parent-session",
-        tasks=[
-            SubAgentTask(task_id="alpha", task_name="Alpha Review", prompt="alpha task"),
-            SubAgentTask(task_id="fail", task_name="Failure Case", prompt="fail task"),
-        ],
+        parent_agent={"agent_id": agent_manager.root.agent_id},
+        payload={
+            "task_specs": [
+                {
+                    "task_id": "alpha",
+                    "task_name": "Alpha Review",
+                    "prompt": "alpha task",
+                },
+                {
+                    "task_id": "fail",
+                    "task_name": "Failure Case",
+                    "prompt": "fail task",
+                },
+            ]
+        },
     )
 
     progress = _FakeSessionTaskProgressManager.instances[0]
     assert progress.calls
     assert all(call["session_id"] == "parent-session" for call in progress.calls)
     assert all(call["workflow_id"] == result.workflow_id for call in progress.calls)
-
-    first_tasks = progress.calls[0]["tasks"]
-    assert isinstance(first_tasks, list)
-    assert [task["source_status"] for task in first_tasks] == ["assigned", "assigned"]
-    assert [task["status"] for task in first_tasks] == ["pending", "pending"]
-
-    assert any(
-        any(
-            task["task_id"] == "alpha"
-            and task["task_run_id"] == "001-alpha"
-            and task["status"] == "in_progress"
-            and task["source_status"] == "running"
-            for task in call["tasks"]
-        )
+    opened = progress.calls[0]
+    assert opened["kind"] == "open"
+    assert str(opened["control_mode"]) == "runtime_lifecycle"
+    opened_tasks = opened["tasks"]
+    assert isinstance(opened_tasks, list)
+    assert [(task.task_id, task.task_run_id, task.desc) for task in opened_tasks] == [
+        ("alpha", "001-alpha", "Alpha Review"),
+        ("fail", "002-fail", "Failure Case"),
+    ]
+    transitions = {
+        (str(call["task_id"]), str(call["runtime_status"]), call["error_message"])
         for call in progress.calls
-    )
-
-    final_tasks = progress.calls[-1]["tasks"]
-    assert isinstance(final_tasks, list)
-    final_by_task_id = {str(task["task_id"]): task for task in final_tasks}
-    alpha = final_by_task_id["alpha"]
-    failure = final_by_task_id["fail"]
-    assert alpha["task_run_id"] == "001-alpha"
-    assert alpha["desc"] == "Alpha Review"
-    assert alpha["status"] == "completed"
-    assert alpha["source_status"] == "completed"
-    assert alpha["orchestration_task_id"] == f"{result.workflow_id}:001-alpha"
-    assert failure["task_run_id"] == "002-fail"
-    assert failure["desc"] == "Failure Case"
-    assert failure["status"] == "pending"
-    assert failure["source_status"] == "failed"
-    assert failure["error_message"] == "child exploded"
-    assert failure["orchestration_task_id"] == f"{result.workflow_id}:002-fail"
+        if call["kind"] == "transition"
+    }
+    assert ("alpha", "running", None) in transitions
+    assert ("alpha", "completed", None) in transitions
+    assert ("fail", "running", None) in transitions
+    assert ("fail", "failed", "child exploded") in transitions
 
 
 @pytest.mark.asyncio
@@ -598,16 +785,27 @@ async def test_parallel_workflow_audits_task_progress_sync_failure(
         _FailingSessionTaskProgressManager,
     )
     cfg = _config(tmp_path)
+    agent_manager = _ProgressAgentManager()
     manager = AgentWorkflowManager(
-        subagents=_ProgressSubagents(),  # type: ignore[arg-type]
+        agent_manager=agent_manager,
         config=cfg,
         workspace_root=tmp_path,
         role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
     )
 
-    result = await manager.run_parallel(
+    result = await manager.run_workflow_payload(
+        mode="parallel",
         parent_session_id="parent-session",
-        tasks=[SubAgentTask(task_id="alpha", task_name="Alpha Review", prompt="alpha task")],
+        parent_agent={"agent_id": agent_manager.root.agent_id},
+        payload={
+            "task_specs": [
+                {
+                    "task_id": "alpha",
+                    "task_name": "Alpha Review",
+                    "prompt": "alpha task",
+                }
+            ]
+        },
     )
 
     assert result.completed is True
@@ -619,23 +817,267 @@ async def test_parallel_workflow_audits_task_progress_sync_failure(
 
 
 @pytest.mark.asyncio
+async def test_workflow_task_uses_agent_manager_spawn_when_parent_agent_id_exists(
+    tmp_path: Path,
+) -> None:
+    """验证 workflow 子任务走 AgentManager.spawn，输入为父 agent 快照，输出为 completed 报告。"""
+    cfg = _config(tmp_path)
+    root = SimpleNamespace(
+        agent_id="root-agent",
+        session_id="parent-session",
+        mailbox=asyncio.Queue(),
+    )
+    fake_agent_manager = _FakeWorkflowSpawnAgentManager(root)
+    fake_subagents = _RejectingSubagents()
+    manager = AgentWorkflowManager(
+        agent_manager=fake_agent_manager,
+        config=cfg,
+        workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
+    )
+    context = manager._build_workflow_context(
+        WorkflowRunRequest(
+            mode="parallel",
+            parent_session_id="parent-session",
+            payload={},
+            source="unit",
+            parent_agent={"agent_id": "root-agent", "model": "fake-model"},
+        )
+    )
+    task = manager.prepare_subagent_tasks(
+        workflow_dir=context.workflow_dir,
+        tasks=[
+            SubAgentTask(
+                task_id="alpha",
+                task_name="Alpha",
+                prompt="alpha task",
+            )
+        ],
+        parent_agent=context.parent_agent,
+    )[0]
+
+    outcome = await manager.run_subagent_task(
+        context=context,
+        task=task,
+        display_order=1,
+    )
+
+    assert fake_subagents.run_task_calls == 0
+    assert len(fake_agent_manager.requests) == 1
+    request = fake_agent_manager.requests[0]
+    assert request.parent_agent_id == "root-agent"
+    assert request.source_task_id == "alpha"
+    assert request.metadata["workflow_id"] == context.workflow_id
+    assert request.cwd == task.metadata["working_dir"]
+    assert outcome.run.status == "completed"
+    assert outcome.run.session_id == "parent-session-child"
+    assert outcome.run.content == "spawn path done"
+    assert outcome.run.usage == {
+        "input_uncached_tokens": 5,
+        "output_total_tokens": 2,
+    }
+    assert outcome.report.status == "completed"
+    report = json.loads(Path(outcome.report.report_path).read_text(encoding="utf-8"))
+    assert report["content"] == "spawn path done"
+    assert report["usage"] == outcome.run.usage
+    agent_result = json.loads(
+        (context.workflow_dir / "agents" / "001-alpha" / "result.json").read_text(encoding="utf-8")
+    )
+    assert agent_result["status"] == "completed"
+    assert agent_result["content"] == "spawn path done"
+    assert root.mailbox.qsize() == 1
+    buffered = root.mailbox.get_nowait()
+    assert buffered.task_id == "unmatched"
+
+
+def test_child_mail_parser_preserves_zero_turn_count() -> None:
+    """child Result 的 turn_count=0 经 workflow parser 保持为 0。"""
+    task = SubAgentTask(
+        task_id="zero-turn",
+        task_name="Zero turn",
+        prompt="stop immediately",
+    )
+    mail = SimpleNamespace(
+        payload=Message.assistant(
+            "cancelled before first turn",
+            metadata={"turn_count": 0},
+        )
+    )
+
+    run = workflow_manager_module._subagent_run_from_child_mail(
+        task=task,
+        session_id="child-session",
+        run_id="child-run",
+        mail=mail,
+    )
+
+    assert run.turn_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_axis", ["manager", "identity"])
+async def test_workflow_without_parent_agent_manager_fails_before_child_side_effects(
+    tmp_path: Path,
+    missing_axis: str,
+) -> None:
+    """SC_14：manager/identity 两个故障轴都在目录、spawn 和审计前失败。"""
+    cfg = _config(tmp_path)
+    root = SimpleNamespace(mailbox=asyncio.Queue())
+    fake_agent_manager = _FakeWorkflowSpawnAgentManager(root)
+    manager = AgentWorkflowManager(
+        agent_manager=fake_agent_manager if missing_axis == "identity" else None,
+        config=cfg,
+        workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
+    )
+    workflow_root = Path(cfg.session.file_store_path) / "parent-session" / "agent-workflows"
+    parent_agent = (
+        None
+        if missing_axis == "identity"
+        else {"agent_id": "root-agent", "session_id": "parent-session", "model": "fake"}
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="workflow requires a booted parent AgentManager and parent agent identity",
+    ):
+        await manager.run_workflow_payload(
+            mode="parallel",
+            parent_session_id="parent-session",
+            parent_agent=parent_agent,
+            payload={
+                "task_specs": [{"task_id": "alpha", "task_name": "Alpha", "prompt": "alpha task"}]
+            },
+        )
+
+    assert fake_agent_manager.requests == []
+    assert root.mailbox.empty()
+    assert workflow_root.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_parallel_workflow_demuxes_out_of_order_child_results(tmp_path: Path) -> None:
+    """验证并发 workflow child_result demux，输入为乱序结果，输出各任务拿到匹配结果。"""
+    cfg = _config(tmp_path)
+    root = SimpleNamespace(
+        agent_id="root-agent",
+        session_id="parent-session",
+        mailbox=asyncio.Queue(),
+    )
+    fake_agent_manager = _OutOfOrderWorkflowSpawnAgentManager(root)
+    manager = AgentWorkflowManager(
+        agent_manager=fake_agent_manager,
+        config=cfg,
+        workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
+    )
+
+    result = await manager.run_workflow_payload(
+        mode="parallel",
+        parent_session_id="parent-session",
+        parent_agent={"agent_id": "root-agent", "model": "fake-model"},
+        payload={
+            "task_specs": [
+                {"task_id": "alpha", "task_name": "Alpha", "prompt": "alpha task"},
+                {"task_id": "beta", "task_name": "Beta", "prompt": "beta task"},
+            ]
+        },
+    )
+
+    assert result.completed is True
+    contents = {run.task.task_id: run.content for run in result.runs}
+    assert contents == {"alpha": "alpha done", "beta": "beta done"}
+    assert [request.source_task_id for request in fake_agent_manager.requests] == [
+        "alpha",
+        "beta",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_workflow_spawn_request_carries_scoped_run_overrides(tmp_path: Path) -> None:
+    """验证 scoped workflow spawn，输入为授权文件任务，输出 request 带工具快照和 scope。"""
+    cfg = _config(tmp_path)
+    root = SimpleNamespace(
+        agent_id="root-agent",
+        session_id="parent-session",
+        mailbox=asyncio.Queue(),
+    )
+    fake_agent_manager = _FakeWorkflowSpawnAgentManager(root)
+    runtime_resources = _RuntimeBackedRejectingSubagents(cfg).runtime
+    manager = AgentWorkflowManager(
+        agent_manager=fake_agent_manager,
+        runtime=runtime_resources,
+        config=cfg,
+        workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
+    )
+    context = manager._build_workflow_context(
+        WorkflowRunRequest(
+            mode="parallel",
+            parent_session_id="parent-session",
+            payload={},
+            source="unit",
+            parent_agent={"agent_id": "root-agent", "model": "fake-model"},
+        )
+    )
+    task = manager.prepare_subagent_tasks(
+        workflow_dir=context.workflow_dir,
+        tasks=[
+            SubAgentTask(
+                task_id="alpha",
+                task_name="Alpha",
+                prompt="read scoped file",
+                tool_names=("read_file",),
+                permission=SubAgentPermissionSpec(mode="scoped_workdir"),
+            )
+        ],
+        parent_agent=context.parent_agent,
+    )[0]
+
+    await manager.run_subagent_task(context=context, task=task, display_order=1)
+
+    request = fake_agent_manager.requests[0]
+    assert request.child_session_id is not None
+    assert request.enabled_tools is not None
+    assert [tool.name for tool in request.enabled_tools] == ["read_file"]
+    assert request.scope_allowed_tool_names == ("list_dir", "read_file", "write_file")
+    assert request.lifecycle_hooks
+    assert request.timeout_seconds == task.runtime.timeout_seconds
+    assert request.llm_request_metadata["resolved_runtime"]["model"] == task.runtime.model
+    creation_path = context.workflow_dir / "agents" / "001-alpha" / "subagent.json"
+    creation = json.loads(creation_path.read_text(encoding="utf-8"))
+    assert creation["grant"]["session_id"] == request.child_session_id
+    assert creation["grant"]["allowed_tools"] == ["read_file"]
+
+
+@pytest.mark.asyncio
 async def test_workflow_rejects_parent_session_path_traversal(tmp_path: Path) -> None:
     """验证父会话 ID 不能穿越 session 根目录，输入为 traversal ID，输出为拒绝。"""
     llm = _EchoLLM()
     cfg, runtime = _runtime(tmp_path, llm)
+    manager, binding = _workflow_manager(
+        runtime=runtime,
+        config=cfg,
+        workspace_root=tmp_path,
+    )
     try:
-        manager = AgentWorkflowManager(
-            subagents=SubAgentManager(runtime),
-            config=cfg,
-            workspace_root=tmp_path,
-            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
-        )
         with pytest.raises(ValueError, match="session root"):
-            await manager.run_parallel(
+            await manager.run_workflow_payload(
+                mode="parallel",
                 parent_session_id="../escape",
-                tasks=[SubAgentTask(task_id="alpha", task_name="alpha", prompt="alpha task")],
+                parent_agent=binding.parent_agent,
+                payload={
+                    "task_specs": [
+                        {
+                            "task_id": "alpha",
+                            "task_name": "alpha",
+                            "prompt": "alpha task",
+                        }
+                    ]
+                },
             )
     finally:
+        await binding.aclose()
         await runtime.aclose()
 
     assert not (tmp_path / "escape").exists()
@@ -646,25 +1088,29 @@ async def test_parallel_workflow_reports_failed_child_task(tmp_path: Path) -> No
     """验证失败子任务收口，输入为缺失工具任务，输出为 failed 报告和审计断言。"""
     llm = _EchoLLM()
     cfg, runtime = _runtime(tmp_path, llm)
+    manager, binding = _workflow_manager(
+        runtime=runtime,
+        config=cfg,
+        workspace_root=tmp_path,
+    )
     try:
-        manager = AgentWorkflowManager(
-            subagents=SubAgentManager(runtime),
-            config=cfg,
-            workspace_root=tmp_path,
-            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
-        )
-        result = await manager.run_parallel(
+        result = await manager.run_workflow_payload(
+            mode="parallel",
             parent_session_id="parent-session",
-            tasks=[
-                SubAgentTask(
-                    task_id="bad-tool",
-                    task_name="bad tool",
-                    prompt="bad task",
-                    tool_names=("missing_tool",),
-                )
-            ],
+            parent_agent=binding.parent_agent,
+            payload={
+                "task_specs": [
+                    {
+                        "task_id": "bad-tool",
+                        "task_name": "bad tool",
+                        "prompt": "bad task",
+                        "tool_names": ["missing_tool"],
+                    }
+                ]
+            },
         )
     finally:
+        await binding.aclose()
         await runtime.aclose()
 
     assert result.completed is False
@@ -698,21 +1144,33 @@ async def test_parallel_workflow_uses_unique_task_run_paths_for_slug_collisions(
     """验证 slug 冲突时生成唯一路径，输入为冲突任务 ID，输出为独立 result/report 路径断言。"""
     llm = _EchoLLM()
     cfg, runtime = _runtime(tmp_path, llm)
+    manager, binding = _workflow_manager(
+        runtime=runtime,
+        config=cfg,
+        workspace_root=tmp_path,
+    )
     try:
-        manager = AgentWorkflowManager(
-            subagents=SubAgentManager(runtime),
-            config=cfg,
-            workspace_root=tmp_path,
-            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
-        )
-        result = await manager.run_parallel(
+        result = await manager.run_workflow_payload(
+            mode="parallel",
             parent_session_id="parent-session",
-            tasks=[
-                SubAgentTask(task_id="a/b", task_name="alpha", prompt="alpha task"),
-                SubAgentTask(task_id="a?b", task_name="beta", prompt="beta task"),
-            ],
+            parent_agent=binding.parent_agent,
+            payload={
+                "task_specs": [
+                    {
+                        "task_id": "a/b",
+                        "task_name": "alpha",
+                        "prompt": "alpha task",
+                    },
+                    {
+                        "task_id": "a?b",
+                        "task_name": "beta",
+                        "prompt": "beta task",
+                    },
+                ]
+            },
         )
     finally:
+        await binding.aclose()
         await runtime.aclose()
 
     assert result.completed is True
@@ -739,16 +1197,16 @@ async def test_scoped_parallel_workflow_writes_subagent_creation_and_workdir_fil
         arguments={"path": "result.txt", "content": "scoped ok"},
     )
     cfg, runtime = _runtime(tmp_path, llm, tools=ToolRegistry(build_file_tools()))
+    manager, binding = _workflow_manager(
+        runtime=runtime,
+        config=cfg,
+        workspace_root=tmp_path,
+    )
     try:
-        manager = AgentWorkflowManager(
-            subagents=SubAgentManager(runtime),
-            config=cfg,
-            workspace_root=tmp_path,
-            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
-        )
         result = await manager.run_workflow_specs(
             mode="parallel",
             parent_session_id="parent-session",
+            parent_agent=binding.parent_agent,
             task_specs=[
                 {
                     "task_name": "write ok",
@@ -760,6 +1218,7 @@ async def test_scoped_parallel_workflow_writes_subagent_creation_and_workdir_fil
             ],
         )
     finally:
+        await binding.aclose()
         await runtime.aclose()
 
     assert result.completed is True
@@ -773,11 +1232,8 @@ async def test_scoped_parallel_workflow_writes_subagent_creation_and_workdir_fil
     assert creation["grant"]["allowed_skills"] == ["writer"]
     assert creation["working_dir"] == str(working_dir)
     assert creation["usage"] == {
-        "input_tokens": 12,
-        "output_tokens": 5,
-        "cache_creation_input_tokens": 1,
-        "provider_extra_tokens": 24,
-        "cache_read_input_tokens": 2,
+        "input_uncached_tokens": 12,
+        "output_total_tokens": 5,
     }
     assert creation["completed_status"] == "completed"
     assert creation["completed_turn_count"] == result.runs[0].turn_count
@@ -787,12 +1243,13 @@ async def test_scoped_parallel_workflow_writes_subagent_creation_and_workdir_fil
     actions = [record["action"] for record in records]
     assert "subagent_created" in actions
     assert "subagent_grant_bound" in actions
-    approval_payload = next(
-        record["payload"] for record in records if record["action"] == "subagent_approval_decided"
+    creation_payload = next(
+        record["payload"] for record in records if record["action"] == "subagent_created"
     )
-    assert approval_payload["decision"] == "approved"
-    assert approval_payload["decision_source"] == "grant_allow"
-    assert approval_payload["resolved_path"] == str(working_dir / "result.txt")
+    assert creation_payload["resolved_runtime"]["model"] == "gemma-4-e4b-it"
+    assert "runtime_spec" not in creation_payload
+    assert "subagent_runtime" not in creation_payload
+    assert "subagent_approval_decided" not in actions
 
 
 @pytest.mark.asyncio
@@ -806,16 +1263,16 @@ async def test_scoped_parallel_workflow_rejects_outside_write_without_side_effec
         final_content="write rejected by scoped permission",
     )
     cfg, runtime = _runtime(tmp_path, llm, tools=ToolRegistry(build_file_tools()))
+    manager, binding = _workflow_manager(
+        runtime=runtime,
+        config=cfg,
+        workspace_root=tmp_path,
+    )
     try:
-        manager = AgentWorkflowManager(
-            subagents=SubAgentManager(runtime),
-            config=cfg,
-            workspace_root=tmp_path,
-            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
-        )
         result = await manager.run_workflow_specs(
             mode="parallel",
             parent_session_id="parent-session",
+            parent_agent=binding.parent_agent,
             task_specs=[
                 {
                     "task_name": "write denied",
@@ -826,20 +1283,17 @@ async def test_scoped_parallel_workflow_rejects_outside_write_without_side_effec
             ],
         )
     finally:
+        await binding.aclose()
         await runtime.aclose()
 
     assert result.completed is True
     task_run_dir = result.workflow_dir / "agents" / "001-agent-1"
     assert not (task_run_dir / "outside.txt").exists()
     assert result.reports[0].summary == "write rejected by scoped permission"
-    approval_payload = next(
-        record["payload"]
+    assert all(
+        record["action"] != "subagent_approval_decided"
         for record in _audit_records(result.workflow_dir)
-        if record["action"] == "subagent_approval_decided"
     )
-    assert approval_payload["decision"] == "rejected"
-    assert approval_payload["decision_source"] == "scope_deny"
-    assert approval_payload["target_path"] == "../outside.txt"
 
 
 @pytest.mark.asyncio
@@ -853,16 +1307,16 @@ async def test_scoped_parallel_workflow_audits_hallucinated_not_registered_tool(
         final_content="missing tool rejected",
     )
     cfg, runtime = _runtime(tmp_path, llm, tools=ToolRegistry(build_file_tools()))
+    manager, binding = _workflow_manager(
+        runtime=runtime,
+        config=cfg,
+        workspace_root=tmp_path,
+    )
     try:
-        manager = AgentWorkflowManager(
-            subagents=SubAgentManager(runtime),
-            config=cfg,
-            workspace_root=tmp_path,
-            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
-        )
         result = await manager.run_workflow_specs(
             mode="parallel",
             parent_session_id="parent-session",
+            parent_agent=binding.parent_agent,
             task_specs=[
                 {
                     "task_name": "hallucinated tool",
@@ -873,6 +1327,7 @@ async def test_scoped_parallel_workflow_audits_hallucinated_not_registered_tool(
             ],
         )
     finally:
+        await binding.aclose()
         await runtime.aclose()
 
     assert result.completed is True
@@ -894,20 +1349,21 @@ async def test_run_workflow_specs_rejects_missing_task_fields_with_index(
     """验证缺失任务字段报错带索引，输入为空 task spec，输出为 task_name 错误断言。"""
     llm = _EchoLLM()
     cfg, runtime = _runtime(tmp_path, llm)
+    manager, binding = _workflow_manager(
+        runtime=runtime,
+        config=cfg,
+        workspace_root=tmp_path,
+    )
     try:
-        manager = AgentWorkflowManager(
-            subagents=SubAgentManager(runtime),
-            config=cfg,
-            workspace_root=tmp_path,
-            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
-        )
         with pytest.raises(ValueError, match=r"task_specs\[1\]\.task_name"):
             await manager.run_workflow_specs(
                 mode="parallel",
                 parent_session_id="parent-session",
+                parent_agent=binding.parent_agent,
                 task_specs=[{}],
             )
     finally:
+        await binding.aclose()
         await runtime.aclose()
 
 
@@ -918,20 +1374,21 @@ async def test_run_workflow_specs_rejects_more_than_eight_task_specs(
     """验证并行任务数量上限，输入为 9 个 task specs，输出为数量限制错误断言。"""
     llm = _EchoLLM()
     cfg, runtime = _runtime(tmp_path, llm)
+    manager, binding = _workflow_manager(
+        runtime=runtime,
+        config=cfg,
+        workspace_root=tmp_path,
+    )
     try:
-        manager = AgentWorkflowManager(
-            subagents=SubAgentManager(runtime),
-            config=cfg,
-            workspace_root=tmp_path,
-            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
-        )
         with pytest.raises(ValueError, match="at most 8 task specs"):
             await manager.run_workflow_specs(
                 mode="parallel",
                 parent_session_id="parent-session",
+                parent_agent=binding.parent_agent,
                 task_specs=[{"task_name": f"task {index}", "prompt": "work"} for index in range(9)],
             )
     finally:
+        await binding.aclose()
         await runtime.aclose()
 
 
@@ -942,20 +1399,21 @@ async def test_run_workflow_specs_unknown_mode_uses_strategy_registry(
     """验证未知 mode 走策略注册表错误，输入为 missing mode，输出为可用策略列表断言。"""
     llm = _EchoLLM()
     cfg, runtime = _runtime(tmp_path, llm)
+    manager, binding = _workflow_manager(
+        runtime=runtime,
+        config=cfg,
+        workspace_root=tmp_path,
+    )
     try:
-        manager = AgentWorkflowManager(
-            subagents=SubAgentManager(runtime),
-            config=cfg,
-            workspace_root=tmp_path,
-            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
-        )
         with pytest.raises(WorkflowStrategyNotFound) as exc_info:
             await manager.run_workflow_specs(
                 mode="missing",
                 parent_session_id="parent-session",
+                parent_agent=binding.parent_agent,
                 task_specs=[{"task_name": "ok", "prompt": "work"}],
             )
     finally:
+        await binding.aclose()
         await runtime.aclose()
 
     assert exc_info.value.available_modes == (
@@ -992,20 +1450,21 @@ async def test_run_workflow_specs_rejects_invalid_task_spec_shapes(
     """验证非法 task spec 形状，输入为参数化坏数据，输出为对应 ValueError 断言。"""
     llm = _EchoLLM()
     cfg, runtime = _runtime(tmp_path, llm)
+    manager, binding = _workflow_manager(
+        runtime=runtime,
+        config=cfg,
+        workspace_root=tmp_path,
+    )
     try:
-        manager = AgentWorkflowManager(
-            subagents=SubAgentManager(runtime),
-            config=cfg,
-            workspace_root=tmp_path,
-            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
-        )
         with pytest.raises(ValueError, match=error):
             await manager.run_workflow_specs(
                 mode="parallel",
                 parent_session_id="parent-session",
+                parent_agent=binding.parent_agent,
                 task_specs=task_specs,  # type: ignore[arg-type]
             )
     finally:
+        await binding.aclose()
         await runtime.aclose()
 
 
@@ -1025,23 +1484,24 @@ async def test_parallel_strategy_rejects_empty_or_non_list_task_specs(
     """验证 parallel 策略 payload 边界，输入为空或非列表 task_specs，输出为校验错误断言。"""
     llm = _EchoLLM()
     cfg, runtime = _runtime(tmp_path, llm)
+    manager, binding = _workflow_manager(
+        runtime=runtime,
+        config=cfg,
+        workspace_root=tmp_path,
+    )
     try:
-        manager = AgentWorkflowManager(
-            subagents=SubAgentManager(runtime),
-            config=cfg,
-            workspace_root=tmp_path,
-            role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
-        )
         with pytest.raises(ValueError, match=error):
             await manager.run_workflow(
                 WorkflowRunRequest(
                     mode="parallel",
                     parent_session_id="parent-session",
+                    parent_agent=binding.parent_agent,
                     payload=payload,
                     source="unit-test",
                 )
             )
     finally:
+        await binding.aclose()
         await runtime.aclose()
 
 
@@ -1058,6 +1518,7 @@ async def test_agent_workflow_tool_passes_task_specs_to_bound_manager() -> None:
             self.parent_session_id = ""
             self.desc: str | None = None
             self.task_specs: list[dict[str, object]] = []
+            self.parent_agent: object | None = None
 
         async def run_workflow_specs(
             self,
@@ -1065,6 +1526,7 @@ async def test_agent_workflow_tool_passes_task_specs_to_bound_manager() -> None:
             mode: str,
             parent_session_id: str,
             task_specs: list[dict[str, object]],
+            parent_agent: object | None = None,
             desc: str | None = None,
         ) -> Any:
             """记录 workflow 调用，输入为 mode、父会话和 task_specs，输出为 fake 结果对象。"""
@@ -1072,6 +1534,7 @@ async def test_agent_workflow_tool_passes_task_specs_to_bound_manager() -> None:
             self.parent_session_id = parent_session_id
             self.desc = desc
             self.task_specs = task_specs
+            self.parent_agent = parent_agent
 
             class _Result:
                 """测试用 workflow 结果对象，提供 tool 输出格式化所需字段。"""
@@ -1120,6 +1583,7 @@ async def test_agent_workflow_tool_passes_task_specs_to_bound_manager() -> None:
     tool = build_agent_workflow_tool(handle)
     content, data = await tool._run(
         {
+            "mode": "parallel",
             "desc": "实现 session task progress 文件模型",
             "tasks": [
                 {
@@ -1138,6 +1602,7 @@ async def test_agent_workflow_tool_passes_task_specs_to_bound_manager() -> None:
     assert manager.mode == "parallel"
     assert manager.parent_session_id == "parent-session"
     assert manager.desc == "实现 session task progress 文件模型"
+    assert manager.parent_agent is None
     assert manager.task_specs == [
         {
             "task_name": "calc",
@@ -1171,14 +1636,15 @@ async def test_agent_workflow_tool_requires_permission() -> None:
     tool = build_agent_workflow_tool(handle)
 
     with pytest.raises(ValueError, match="permission must be an object"):
-        await tool._run(
+        await tool.prepare(
             {
+                "mode": "parallel",
                 "tasks": [
                     {
                         "task_name": "calc",
                         "prompt": "calculate",
                     }
-                ]
+                ],
             },
             ToolContext(run_id="r", session_id="parent-session", turn=1, call_id="c"),
         )
@@ -1191,7 +1657,7 @@ async def test_parent_agent_can_create_subagents_through_registered_tool(tmp_pat
     cfg = _config(tmp_path)
     bootstrap = SessionBootstrap(
         agent_name="test-agent",
-        model_name=cfg.model.name,
+        model_name="gemma-4-e4b-it",
         instruction_sources=[],
         instruction_text_hash="test",
         created_at=1.0,
@@ -1204,7 +1670,9 @@ async def test_parent_agent_can_create_subagents_through_registered_tool(tmp_pat
 
     handle = AgentWorkflowHandle()
     registry = ToolRegistry([build_agent_workflow_tool(handle)])
-    runtime = NativeRuntime(
+    catalog_manager = ModelCatalogManager()
+    model_config = catalog_manager.resolve_runtime(cfg.model)
+    runtime = SessionEngine(
         config=cfg,
         runner=Runner(),
         llm=llm,
@@ -1213,24 +1681,31 @@ async def test_parent_agent_can_create_subagents_through_registered_tool(tmp_pat
         approval=AutoAllowApproval(),
         session_factory=session_factory,
         event_sinks=[],
+        model_catalog_manager=catalog_manager,
+        model_config=model_config,
         agent_spec=AgentSpec(
             name="parent",
             instructions="parent instructions",
-            default_model=cfg.model.name,
+            default_model="gemma-4-e4b-it",
             tool_names=("run_parallel_subagents",),
             max_turns=5,
         ),
     )
-    manager = AgentWorkflowManager(
-        subagents=SubAgentManager(runtime),
+    manager, binding = _workflow_manager(
+        runtime=runtime,
         config=cfg,
         workspace_root=tmp_path,
-        role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
     )
     handle.bind(manager)
     try:
-        result = await runtime.run("delegate work", session_id="parent-session")
+        result = await runtime.run(
+            "delegate work",
+            session_id="parent-session",
+            thread_id="parent-session",
+            agent_id=str(binding.parent_agent["agent_id"]),
+        )
     finally:
+        await binding.aclose()
         await runtime.aclose()
 
     assert result.status == "completed"
@@ -1265,32 +1740,47 @@ async def test_parent_agent_can_create_subagents_through_registered_tool(tmp_pat
 
 
 def test_apply_model_preset_overrides_cli_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    """验证模型 preset 覆盖 CLI 模型，输入为环境变量和 preset ID，输出为更新后的模型配置断言。"""
+    """CLI preset 覆盖只更新运行选择字段。"""
     monkeypatch.setenv("MINIMAX_API_KEY", "sk-test")
     cfg = Config(
-        model=ModelConfig(
-            name="local",
-            base_url="http://127.0.0.1:1234/v1",
-            api_key="",
-        ),
-        web=WebConfig(
-            llm_presets=[
-                LLMPresetConfig(
-                    id="minimax-m3",
-                    display_name="MiniMax M3",
-                    base_url="https://api.minimaxi.com/anthropic",
-                    model="MiniMax-M3",
-                    api_key_env="MINIMAX_API_KEY",
-                    reasoning_effort="high",
-                )
-            ]
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
+    )
+
+    updated = _apply_model_preset_or_exit(cfg, "minimax-m3")
+
+    assert updated.model.preset_id == "minimax-m3"
+    assert updated.model.reasoning_effort is None
+    assert set(updated.model.model_dump()) == {"preset_id", "reasoning_effort"}
+
+
+def test_apply_model_preset_reads_provider_catalog_when_web_presets_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI preset 直接读取 provider catalog。"""
+    monkeypatch.setenv("MINIMAX_API_KEY", "sk-test")
+    cfg = Config(
+        model=ModelSelectionConfig(
+            preset_id="local-gemma-4-e4b-it",
+            reasoning_effort="high",
         ),
     )
 
     updated = _apply_model_preset_or_exit(cfg, "minimax-m3")
 
-    assert updated.model.name == "MiniMax-M3"
-    assert updated.model.base_url == "https://api.minimaxi.com/anthropic"
-    assert updated.model.api_key == "sk-test"
+    assert updated.model.preset_id == "minimax-m3"
     assert updated.model.reasoning_effort == "high"
-    assert updated.model.effective_provider == "anthropic"
+
+
+def test_apply_model_preset_reads_catalog_model_list_when_web_presets_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI preset 可选择 catalog provider 下的非默认模型。"""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    cfg = Config(
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
+    )
+
+    updated = _apply_model_preset_or_exit(cfg, "deepseek-pro")
+
+    assert updated.model.preset_id == "deepseek-pro"
+    assert updated.model.reasoning_effort is None

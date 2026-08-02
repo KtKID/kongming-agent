@@ -12,7 +12,11 @@ const TID = "t1";
 
 beforeEach(() => {
   // 隔离：清空 store statuses，避免测试间状态污染。
-  useThreadStatusStore.setState({ statuses: {} });
+  useThreadStatusStore.setState({
+    statuses: {},
+    connectionGeneration: 1,
+    lastSequence: 0,
+  });
 });
 
 describe("useThreadRunning · RUNNING_PHASES 常量", () => {
@@ -33,7 +37,14 @@ describe("useThreadRunning · phase 判定", () => {
   it.each(["responding", "thinking", "tool_calling", "waiting_approval"] as const)(
     "phase=%s → true",
     (phase) => {
-      useThreadStatusStore.getState().setStatus(TID, phase);
+      useThreadStatusStore.getState().applyStatus({
+        frame_type: "thread-status",
+        threadId: TID,
+        phase,
+        sequence: 1,
+        runId: "run-1",
+        runGeneration: 1,
+      }, 1);
       const { result } = renderHook(() => useThreadRunning(TID));
       expect(result.current).toBe(true);
     },
@@ -42,11 +53,33 @@ describe("useThreadRunning · phase 判定", () => {
   it.each(["idle", "complete", "error"] as const)(
     "phase=%s → false（结束/空闲/错误必须复位）",
     (phase) => {
-      useThreadStatusStore.getState().setStatus(TID, phase);
+      useThreadStatusStore.getState().applyStatus({
+        frame_type: "thread-status",
+        threadId: TID,
+        phase,
+        sequence: 1,
+        runId: "run-1",
+        runGeneration: 1,
+      }, 1);
       const { result } = renderHook(() => useThreadRunning(TID));
       expect(result.current).toBe(false);
     },
   );
+
+  it("running phase 携带 run_end_reason 时终态兜底返回 false", () => {
+    useThreadStatusStore.getState().applyStatus({
+      frame_type: "thread-status",
+      threadId: TID,
+      phase: "responding",
+      sequence: 1,
+      runId: "run-1",
+      runGeneration: 1,
+      run_end_reason: 8,
+    }, 1);
+    const { result } = renderHook(() => useThreadRunning(TID));
+
+    expect(result.current).toBe(false);
+  });
 
   it("threadId=undefined → false（未进入会话）", () => {
     const { result } = renderHook(() => useThreadRunning(undefined));

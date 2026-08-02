@@ -112,15 +112,17 @@ function TimePicker({
   minute,
   onHourChange,
   onMinuteChange,
+  hourRef,
   minuteRef,
 }: {
   hour: string;
   minute: string;
   onHourChange: (v: string) => void;
   onMinuteChange: (v: string) => void;
+  hourRef?: React.RefObject<HTMLInputElement | null>;
   minuteRef?: React.RefObject<HTMLInputElement | null>;
 }) {
-  const hourRef = useRef<HTMLInputElement>(null);
+  const internalHourRef = useRef<HTMLInputElement>(null);
 
   const focusMinute = useCallback(() => {
     // 延迟一帧让 React state 先更新
@@ -132,7 +134,7 @@ function TimePicker({
   return (
     <span className="inline-flex items-center gap-0.5">
       <input
-        ref={hourRef}
+        ref={hourRef ?? internalHourRef}
         type="text"
         inputMode="numeric"
         className="rounded-md border border-border bg-background px-2 py-1.5 text-center font-mono text-sm tabular-nums focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
@@ -339,9 +341,9 @@ function buildDefaultForm(): FormFields {
     agentName: "default",
     year: String(now.getFullYear()),
     month: String(now.getMonth() + 1),
-    day: "",
-    hour: "",
-    minute: "",
+    day: String(now.getDate()),
+    hour: String(now.getHours()).padStart(2, "0"),
+    minute: String(now.getMinutes()).padStart(2, "0"),
     weekday: "",
     cronExpr: "",
     presetId: "",
@@ -396,6 +398,7 @@ export function CreateSchedulerTaskDialog({
   const pendingTaskIdRef = useRef<string | null>(null);
 
   const minuteRef = useRef<HTMLInputElement>(null);
+  const hourRef = useRef<HTMLInputElement>(null);
 
   // open 边沿触发：dialog 打开时初始化表单。
   // 用 useRef 持有上一次 open 状态避免 useEffect 把 initialTask/mode 当依赖
@@ -422,7 +425,7 @@ export function CreateSchedulerTaskDialog({
           inputText: initialTask.inputText ?? "",
           agentName: initialTask.agentName || "default",
           presetId: initialTask.presetId ?? "",
-          enabled: initialTask.enabled,
+          enabled: initialTask.lifecycle === "scheduled",
         });
         setScheduleMode(decoded.mode);
       } else {
@@ -484,8 +487,8 @@ export function CreateSchedulerTaskDialog({
         if (form.presetId !== (initialTask.presetId ?? "")) {
           body.preset_id = form.presetId;
         }
-        if (form.enabled !== initialTask.enabled) {
-          body.enabled = form.enabled;
+        if (form.enabled !== (initialTask.lifecycle === "scheduled")) {
+          body.lifecycle = form.enabled ? "scheduled" : "disabled";
         }
         const result = await updateTaskAction(initialTask.taskId, body);
         if (result) {
@@ -647,7 +650,7 @@ export function CreateSchedulerTaskDialog({
                 <NumField
                   value={form.day}
                   onChange={(v) => update("day", v)}
-                  onFocusNext={() => minuteRef.current?.focus()}
+                  onFocusNext={() => hourRef.current?.focus()}
                   min={1}
                   max={31}
                   width={36}
@@ -659,6 +662,7 @@ export function CreateSchedulerTaskDialog({
                   minute={form.minute}
                   onHourChange={(v) => update("hour", v)}
                   onMinuteChange={(v) => update("minute", v)}
+                  hourRef={hourRef}
                   minuteRef={minuteRef}
                 />
               </div>

@@ -21,7 +21,7 @@ import json
 
 import pytest
 
-from core.contracts import LLMStreamChunk
+from core.contracts import LLMStreamChunk, ProviderUsageFamily
 from core.errors import ProviderError
 from infrastructure.llm_providers.anthropic_stream_parser import AnthropicStreamParser
 
@@ -74,17 +74,15 @@ async def test_pure_text_block() -> None:
             assert c.index == 0
     # finish_reason 映射
     assert chunks[-1].finish_reason == "stop"
-    # usage 透传 + 累加（task#3.1：新增 SDK 原生字段 + provider_kind）
-    assert chunks[-1].usage == {
-        "provider_kind": "anthropic",
-        "input_tokens": 10,
-        "output_tokens": 5,
-        "cache_read_input_tokens": 0,
-        "cache_creation_input_tokens": 0,
-        "prompt_tokens": 10,
-        "completion_tokens": 5,
-        "total_tokens": 15,
-    }
+    usage = chunks[-1].usage
+    assert usage is not None
+    assert usage.family is ProviderUsageFamily.ANTHROPIC_MESSAGES
+    assert usage.input_uncached_tokens.value == 10
+    assert usage.output_total_tokens.value == 5
+    assert usage.input_total_tokens.value is None
+    assert usage.cache_read_tokens.value is None
+    assert usage.cache_write_tokens.value is None
+    assert usage.total_tokens.value is None
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +203,7 @@ async def test_tool_use_with_invalid_json_keeps_raw() -> None:
 
 
 # ---------------------------------------------------------------------------
-# usage 累加 + cache token 字段写入 provider_metadata
+# usage 累加 + cache token canonical snapshot
 # ---------------------------------------------------------------------------
 
 
@@ -226,23 +224,57 @@ async def test_usage_and_cache_tokens() -> None:
     ]
     chunks = await _run(events)
     last = chunks[-1]
-    # task#3.1：prompt_tokens 修 lossy bug，现在含 cache_read + cache_creation
-    # 真值 = 100 + 300 + 200 = 600
-    assert last.usage == {
-        "provider_kind": "anthropic",
-        "input_tokens": 100,
-        "output_tokens": 42,
-        "cache_read_input_tokens": 300,
-        "cache_creation_input_tokens": 200,
-        "prompt_tokens": 600,  # ← 修 lossy: input + cache_read + cache_creation
-        "completion_tokens": 42,
-        "total_tokens": 642,  # ← 600 + 42
-    }
+    usage = last.usage
+    assert usage is not None
+    assert usage.input_uncached_tokens.value == 100
+    assert usage.cache_read_tokens.value == 300
+    assert usage.cache_write_tokens.value == 200
+    assert usage.input_total_tokens.value == 600
+    assert usage.output_total_tokens.value == 42
+    assert usage.total_tokens.value == 642
+    assert usage.raw_usage["cache_creation_input_tokens"] == 200
+    assert usage.raw_usage["cache_read_input_tokens"] == 300
     meta = last.provider_metadata
     assert meta["id"] == "msg_cached"
     assert meta["model"] == "claude-test"
-    assert meta["cache_creation_input_tokens"] == 200
-    assert meta["cache_read_input_tokens"] == 300
+
+
+async def test_message_delta_latest_usage_overrides_message_start_values() -> None:
+    """MiniMax 终态 delta 的累计 usage 必须覆盖 message_start 占位值。"""
+    events = [
+        make_anthropic_message_start(
+            msg_id="msg_minimax_cache_hit",
+            model="MiniMax-M3",
+            input_tokens=0,
+            output_tokens=0,
+        ),
+        make_anthropic_block_start(index=0, block_type="text"),
+        make_anthropic_text_delta(index=0, text="ok"),
+        make_anthropic_block_stop(index=0),
+        make_anthropic_message_delta(
+            stop_reason="end_turn",
+            input_tokens=194,
+            output_tokens=119,
+            cache_read_input_tokens=9088,
+        ),
+        make_anthropic_message_stop(),
+    ]
+
+    chunks = await _run(events)
+
+    usage = chunks[-1].usage
+    assert usage is not None
+    assert usage.input_uncached_tokens.value == 194
+    assert usage.output_total_tokens.value == 119
+    assert usage.cache_read_tokens.value == 9088
+    assert usage.cache_write_tokens.value is None
+    assert usage.input_total_tokens.value is None
+    assert usage.total_tokens.value is None
+    assert usage.raw_usage == {
+        "input_tokens": 194,
+        "output_tokens": 119,
+        "cache_read_input_tokens": 9088,
+    }
 
 
 # ---------------------------------------------------------------------------

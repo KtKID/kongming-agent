@@ -15,6 +15,10 @@ const families: ConnectedModelFamily[] = [
     presetId: "minimax-cn",
     model: "MiniMax-M3",
     connected: true,
+    supportedReasoningEfforts: ["none", "high"],
+    defaultReasoningEffort: "high",
+    reasoningAdapter: "anthropic_thinking_toggle",
+    contextWindowTokens: 200000,
   },
   {
     providerId: "glm",
@@ -24,6 +28,10 @@ const families: ConnectedModelFamily[] = [
     presetId: "bigmodel-glm5",
     model: "glm-5.1",
     connected: true,
+    supportedReasoningEfforts: ["none", "high", "max"],
+    defaultReasoningEffort: "high",
+    reasoningAdapter: "glm_thinking_toggle",
+    contextWindowTokens: 1000000,
   },
 ];
 
@@ -59,7 +67,9 @@ describe("ModelSwitcher", () => {
     const items = within(menu).getAllByRole("menuitem");
     expect(items[0]).toHaveTextContent("模型服务商");
     expect(items[1]).toHaveTextContent("MiniMax-M3");
+    expect(items[1]).toHaveTextContent("关闭 / 高");
     expect(items[2]).toHaveTextContent("glm-5.1");
+    expect(items[2]).toHaveTextContent("关闭 / 高 / 最高");
 
     await user.click(screen.getByTestId("composer-model-manage"));
     expect(onManageProviders).toHaveBeenCalledTimes(1);

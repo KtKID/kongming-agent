@@ -53,7 +53,7 @@ describe("HostObservSection", () => {
     const fields: FieldMeta[] = [
       makeField("host.kind"),
       makeField("web.port", "int"),
-      makeField("web.llm_presets", "list"),
+      makeField("web.cors_origins", "list"),
       makeField("trace.output_path"),
       makeField("logging.level"),
       makeField("evolution.root"),

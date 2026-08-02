@@ -14,13 +14,11 @@
 # =============================================================================
 
 # ---- 顶级 model 段（schema 强制必填） ------------------------------------
-# 司天本身不消费这里的 endpoint/key/timeout/max_tokens/temperature 等字段，
-# 真正调 LLM 的配置在下面 `sitian.analyzer.*` 段。
-# 这里只填 schema 必填的两个字段（name / base_url）做占位，让 Config 验证过。
-# ⚠️ 如果 sitian.analyzer.model_name / base_url 留空，sitian 会 fallback 到这里。
+# 司天 analyzer.preset_id 留空时继承这里的默认 preset。
+config_schema_version: v0.6
 model:
-  name: stub-model                          # schema 必填占位，无实际作用
-  base_url: http://127.0.0.1:1234/v1        # schema 必填占位，无实际作用
+  preset_id: minimax-m3
+  reasoning_effort: high
 
 # =============================================================================
 # 司天本体配置
@@ -46,12 +44,8 @@ sitian:
   # ---- LLM 分析层（真正调模型的地方） ----------------------------------
   analyzer:
     enabled: true                           # false = 只 scan 不调 LLM（回退到规则化 suggestions）
-    model_name: "MiniMax-M3"                # 模型名；留空则 fallback 到顶级 model.name（不推荐）
-    base_url: "https://api.minimaxi.com/anthropic"   # 模型 endpoint；留空则 fallback 到顶级 model.base_url
-    api_key_env: "MINIMAX_API_KEY"          # 从这个环境变量读 API key（不要把明文 key 写进配置）
-    max_tokens: 4096                        # LLM 单次响应最大 token 数
-    temperature: 0.3                        # 采样温度（0-2）；0.3 = 低温度稳定输出
-    timeout: 90                             # LLM 调用超时秒数；超时会被分析器拦下并写 errors
+    preset_id: minimax-m3                   # 留空时继承顶级 model.preset_id
+    reasoning_effort: high                  # 请求级推理档位
     max_context_chars: 50000                # 输入 observations 裁剪上限（字符数），超出按最新 session 优先裁剪
     skip_if_unchanged: true                 # observations 没变化时跳过 LLM 调用（用 last_observations_hash 比对，省 token）
     full_log_enabled: true                  # 写完整 LLM 提示词+回复到产物根 full-log/（审计 + 调试用）
@@ -103,6 +97,14 @@ sitian:
     #   kind: codex_project
     #   path: /Volumes/machub_app/proj/kongming-agent
     #   tags: [codex, single-project]
+
+    # source 模板 D：Kongming Web 通用频道聊天历史
+    # - id: kongming-generic-chat
+    #   kind: generic_chat
+    #   path: ~/.kongming                    # Kongming home；扫描 web/threads 与 sessions
+    #   top_n: 10                             # 最近活跃的项目数上限
+    #   scan_interval_sec: 120
+    #   tags: [kongming, generic-chat]
 
 # =============================================================================
 # 产物文件清单（落在 <root>/<output_subdir>/）

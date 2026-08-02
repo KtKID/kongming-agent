@@ -30,6 +30,7 @@ from core.contracts import (
     Event,
     LLMRequest,
     LLMResponse,
+    PreparedToolCall,
     ToolContext,
     ToolResult,
 )
@@ -87,7 +88,8 @@ class _HangingTool:
     description = "hangs forever"
     input_schema: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    async def execute(self, prepared: PreparedToolCall, ctx: ToolContext) -> ToolResult:
+        del prepared, ctx
         await asyncio.Event().wait()
         raise RuntimeError("unreachable")
 
@@ -102,7 +104,8 @@ class _QuickTool:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    async def execute(self, prepared: PreparedToolCall, ctx: ToolContext) -> ToolResult:
+        del prepared
         self.calls.append(ctx.call_id)
         return ToolResult(ok=True, content="quick ok")
 
@@ -257,7 +260,7 @@ async def test_interrupt_during_approval_writes_placeholder_tool_result() -> Non
 
 @pytest.mark.asyncio
 async def test_interrupt_during_tool_execute_writes_placeholder() -> None:
-    """cancel 时机 = tool.execute() 永远 await。"""
+    """cancel 时机 = execute_prepared_tool(tool, ) 永远 await。"""
     sink = _RecordingSink()
     session = InMemorySession("s-tool-cancel")
     llm = _StubLLM(

@@ -16,27 +16,21 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.config.models import Config, ModelConfig
+from infrastructure.config.models import Config, ModelSelectionConfig
 from sitian.config import SiTianAnalyzerConfig, SiTianConfig, SiTianSourceConfig
 from sitian.store import SiTianRecordsStore
 
 
 def _build_cfg(*, source: SiTianSourceConfig, analyzer_enabled: bool = False) -> Config:
     return Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="stub-model",
-            base_url="http://127.0.0.1:1234",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         sitian=SiTianConfig(
             default_scan_interval_sec=60,
             idle_sleep_sec=2,
             sources=[source],
             analyzer=SiTianAnalyzerConfig(
                 enabled=analyzer_enabled,
-                model_name="fake-model",
-                base_url="http://127.0.0.1:1234",
+                preset_id="local-gemma-4-e4b-it",
                 skip_if_unchanged=False,
             ),
         ),

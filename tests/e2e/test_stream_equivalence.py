@@ -13,8 +13,9 @@ from __future__ import annotations
 import pytest
 
 from core import AgentSpec, InMemorySession, Runner
-from core.contracts import LLMStreamChunk
+from core.contracts import LLMStreamChunk, ProviderUsageFamily
 from core.message import Message, ToolCall
+from infrastructure.llm_providers.usage import ProviderUsageManager
 from tests.e2e.conftest import RecordingApproval, StubLLMStreamProvider
 
 
@@ -51,6 +52,10 @@ async def _run_with(*, stream_enabled: bool, stub: StubLLMStreamProvider) -> dic
 async def test_e1_1_pure_content_equivalence() -> None:
     """E.1.1：纯文本响应在 stream / non-stream 路径下产出等价 final_message。"""
     final_msg = Message.assistant(content="Hello world")
+    usage = ProviderUsageManager().normalize(
+        family=ProviderUsageFamily.OPENAI_CHAT_COMPLETIONS,
+        raw_usage={"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+    )
     chunks = [
         LLMStreamChunk(kind="content.delta", delta="Hel", index=0),
         LLMStreamChunk(kind="content.delta", delta="lo ", index=0),
@@ -59,7 +64,7 @@ async def test_e1_1_pure_content_equivalence() -> None:
             kind="message.done",
             message=final_msg,
             finish_reason="stop",
-            usage={"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+            usage=usage,
         ),
     ]
 

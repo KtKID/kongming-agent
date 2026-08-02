@@ -34,8 +34,8 @@ from scheduler.domain import (
     ScheduleTrigger,
     SessionMode,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
@@ -70,12 +70,22 @@ class _RaisingSink(DeliverySink):
 class _TargetSink:
     """记录 target 定向投递调用。"""
 
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str, str]] = []
+    def __init__(self, *, return_value: bool = True, error: Exception | None = None) -> None:
+        self.calls: list[tuple[str, ScheduledTask, ScheduledRun, str]] = []
+        self._return_value = return_value
+        self._error = error
 
-    async def deliver_to_target(self, target: str, task_name: str, message: str) -> bool:
-        self.calls.append((target, task_name, message))
-        return True
+    async def deliver_to_target(
+        self,
+        target: str,
+        task: ScheduledTask,
+        run: ScheduledRun,
+        message: str,
+    ) -> bool:
+        if self._error is not None:
+            raise self._error
+        self.calls.append((target, task, run, message))
+        return self._return_value
 
 
 def _make_task(
@@ -87,8 +97,7 @@ def _make_task(
     return ScheduledTask(
         task_id=task_id,
         name=f"task-{task_id}",
-        enabled=True,
-        state=TaskState.SCHEDULED,
+        lifecycle=TaskLifecycleState.SCHEDULED,
         origin=TaskOrigin.TOOL,
         trigger=ScheduleTrigger(trigger_type=TriggerType.INTERVAL, expr="10", timezone="UTC"),
         policy=TaskExecutionPolicy(
@@ -329,6 +338,56 @@ async def test_dispatcher_broadcast_only_skips_target_sink_when_target_is_none()
     assert result.status is DeliveryStatus.DELIVERED
     assert len(web_sink.calls) == 1
     assert target_sink.calls == []
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_passes_task_run_metadata_to_target_sink():
+    web_sink = _StubSink()
+    target_sink = _TargetSink()
+    dispatcher = DeliveryDispatcher(web_sink=web_sink, target_sink=target_sink)
+
+    task = _make_task(delivery=ScheduleDelivery(channel=DeliveryChannel.WEB, target="thread:t1"))
+    run = _make_run(run_id="run-target")
+    result = await dispatcher.deliver(task, run, "thread-visible result")
+
+    assert result.status is DeliveryStatus.DELIVERED
+    assert len(target_sink.calls) == 1
+    target, target_task, target_run, message = target_sink.calls[0]
+    assert target == "thread:t1"
+    assert target_task is task
+    assert target_run is run
+    assert message == "thread-visible result"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_keeps_delivered_when_target_sink_misses_live_thread():
+    web_sink = _StubSink()
+    target_sink = _TargetSink(return_value=False)
+    dispatcher = DeliveryDispatcher(web_sink=web_sink, target_sink=target_sink)
+
+    task = _make_task(delivery=ScheduleDelivery(channel=DeliveryChannel.WEB, target="thread:t1"))
+    run = _make_run(run_id="run-target")
+    result = await dispatcher.deliver(task, run, "thread-visible result")
+
+    assert result.status is DeliveryStatus.DELIVERED
+    assert result.error_message is None
+    assert len(web_sink.calls) == 1
+    assert len(target_sink.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_keeps_delivered_when_target_sink_raises():
+    web_sink = _StubSink()
+    target_sink = _TargetSink(error=RuntimeError("cell evicted"))
+    dispatcher = DeliveryDispatcher(web_sink=web_sink, target_sink=target_sink)
+
+    task = _make_task(delivery=ScheduleDelivery(channel=DeliveryChannel.WEB, target="thread:t1"))
+    run = _make_run(run_id="run-target")
+    result = await dispatcher.deliver(task, run, "thread-visible result")
+
+    assert result.status is DeliveryStatus.DELIVERED
+    assert result.error_message is None
+    assert len(web_sink.calls) == 1
 
 
 @pytest.mark.asyncio

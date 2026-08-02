@@ -24,6 +24,7 @@ from core.contracts import (
     ApprovalRequest,
     LLMRequest,
     LLMResponse,
+    PreparedToolCall,
     ToolContext,
     ToolResult,
 )
@@ -69,7 +70,8 @@ class _HangingTool:
     description = "hang"
     input_schema: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    async def execute(self, prepared: PreparedToolCall, ctx: ToolContext) -> ToolResult:
+        del prepared, ctx
         await asyncio.Event().wait()
         raise RuntimeError("unreachable")
 
@@ -79,7 +81,8 @@ class _QuickTool:
     description = "quick"
     input_schema: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    async def execute(self, prepared: PreparedToolCall, ctx: ToolContext) -> ToolResult:
+        del prepared, ctx
         return ToolResult(ok=True, content="quick ok")
 
 

@@ -20,6 +20,7 @@ export function SchedulerTaskList({ onEditTask, onDuplicateTask }: Props) {
   const tasks = useSchedulerStore(selectFilteredTasks);
   const isLoading = useSchedulerStore((s) => s.isLoadingTasks);
   const selectedTaskId = useSchedulerStore((s) => s.selectedTaskId);
+  const runtimeStatusByTaskId = useSchedulerStore((s) => s.runtimeStatusByTaskId);
   const filter = useSchedulerStore((s) => s.filter);
   const setFilter = useSchedulerStore((s) => s.setFilter);
   const selectTask = useSchedulerStore((s) => s.selectTask);
@@ -30,10 +31,10 @@ export function SchedulerTaskList({ onEditTask, onDuplicateTask }: Props) {
 
   const filters: { key: typeof filter; label: string }[] = [
     { key: "all", label: "全部" },
-    { key: "running", label: "运行中" },
+    { key: "scheduled", label: "已调度" },
     { key: "paused", label: "已暂停" },
-    { key: "completed", label: "已完成" },
-    { key: "failed", label: "失败" },
+    { key: "disabled", label: "已停用" },
+    { key: "exhausted", label: "已耗尽" },
   ];
 
   return (
@@ -70,6 +71,7 @@ export function SchedulerTaskList({ onEditTask, onDuplicateTask }: Props) {
             <SchedulerTaskRow
               key={task.taskId}
               task={task}
+              runtimeStatus={runtimeStatusByTaskId[task.taskId]}
               isSelected={selectedTaskId === task.taskId}
               onSelect={() => selectTask(task.taskId)}
               onPause={() => void pauseTask(task.taskId)}

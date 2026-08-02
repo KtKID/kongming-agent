@@ -14,11 +14,11 @@ from hosts.web.errors import KongmingWebError, kongming_error_handler
 from hosts.web.routers.agent_workflows import router
 from hosts.web.workflow_viewer.artifact_reader import encode_artifact_id
 from hosts.web.workflow_viewer.manager import WorkflowRunViewerManager
-from infrastructure.config.models import Config, ModelConfig
+from infrastructure.config.models import Config, ModelSelectionConfig
 
 
 def _cfg(tmp_path: Path) -> Config:
-    cfg = Config(model=ModelConfig(name="m", base_url="http://127.0.0.1:1234/v1"))
+    cfg = Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
     cfg.session.file_store_path = str(tmp_path / "sessions")
     return cfg
 
@@ -378,7 +378,7 @@ def test_workflow_viewer_resolves_default_session_path_from_kongming_home(
 ) -> None:
     home = tmp_path / "home"
     monkeypatch.setenv("KONGMING_HOME", str(home))
-    cfg = Config(model=ModelConfig(name="m", base_url="http://127.0.0.1:1234/v1"))
+    cfg = Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
     cfg.session.file_store_path = ".kongming/sessions"
     thread_id = "thread-aaaaaaaaaaaa"
     workflow_id = "wf-20260612T031003-57c5672d"

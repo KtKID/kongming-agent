@@ -626,6 +626,45 @@ describe("Composer 图片集成", () => {
     expect(onSubmit.mock.calls[0][2]).toEqual([expected]);
   });
 
+  it("restoreDraftToken 变化时恢复最近一次提交的 ready 图片附件", async () => {
+    const expected = mockFetchOk("uploaded-restore");
+    const onSubmit = vi.fn();
+    const { rerender } = render(
+      <Composer onSubmit={onSubmit} threadId="t1" restoreDraftToken={null} />,
+    );
+    const ta = screen.getByLabelText("消息输入");
+    const user = userEvent.setup();
+
+    await act(async () => {
+      pasteImageOnTextarea(ta, [makeImageFile("a.png")]);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await user.click(screen.getByTestId("composer-send"));
+    expect(screen.queryByTestId("attachment-thumbnail-strip")).toBeNull();
+
+    rerender(
+      <Composer onSubmit={onSubmit} threadId="t1" restoreDraftToken={1} />,
+    );
+
+    expect(screen.getByTestId("attachment-thumbnail-strip")).toBeInTheDocument();
+    await user.click(screen.getByTestId("composer-send"));
+
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      "",
+      null,
+      [expected],
+      undefined,
+      {
+        text: "",
+        reasoningEffort: null,
+        attachments: [expected],
+        references: [],
+      },
+    );
+  });
+
   it("发送后 → ThumbnailStrip 被清空（uploader.clear 触发）", async () => {
     mockFetchOk("uploaded-x");
     const onSubmit = vi.fn();

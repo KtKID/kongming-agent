@@ -1,19 +1,16 @@
-export type ProviderConnectionStatus = "connected" | "disconnected" | "error";
+import type {
+  ConnectedModelFamilyDTO,
+  ConnectProviderRequestDTO,
+  ProviderActionResponseDTO,
+  ProviderCatalogItemDTO,
+  ProviderConnectionDTO,
+  ProviderConnectionStatus,
+  TestProviderRequestDTO,
+} from "@/protocol";
 
-export interface ProviderCatalogItem {
-  providerId: string;
-  displayName: string;
-  regionLabel: string;
-  description: string;
-  logoText: string;
-}
-
-export interface ProviderConnection {
-  providerId: string;
-  status: ProviderConnectionStatus;
-  model: string | null;
-  authLabel: string | null;
-}
+export type { ProviderConnectionStatus };
+export type ProviderCatalogItem = ProviderCatalogItemDTO;
+export type ProviderConnection = ProviderConnectionDTO;
 
 export interface ProviderListItem extends ProviderCatalogItem {
   status: ProviderConnectionStatus;
@@ -21,27 +18,9 @@ export interface ProviderListItem extends ProviderCatalogItem {
   authLabel: string | null;
 }
 
-export interface ConnectedModelFamily {
-  providerId: string;
-  providerLabel: string;
-  familyId: string;
-  displayName: string;
-  presetId: string;
-  model: string;
-  connected: boolean;
-}
+export type ConnectedModelFamily = ConnectedModelFamilyDTO;
 
-export interface TestProviderRequest {
-  apiKey?: string;
-}
+export type TestProviderRequest = TestProviderRequestDTO;
+export type ConnectProviderRequest = ConnectProviderRequestDTO;
 
-export interface ConnectProviderRequest {
-  apiKey: string;
-}
-
-export interface ProviderActionResponse {
-  providerId: string;
-  ok: boolean;
-  message: string;
-  connection?: ProviderConnection;
-}
+export type ProviderActionResponse = ProviderActionResponseDTO;

@@ -25,6 +25,11 @@ export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "claude-3-5-sonnet": 200_000,
   "claude-3-opus": 200_000,
   // === 国产 ===
+  // GLM-5.2 官方支持 1M context；远端 model 名是 glm-5.2（catalog preset 的 model
+  // 字段不带 [1m] 后缀，[1m] 仅在 display_name 作本地 UI 标识）。必须与后端
+  // `src/hosts/web/usage/usage_token_v2/_model_context_table.py` 字面对齐。
+  // 来源：https://docs.bigmodel.cn/cn/guide/models/text/glm-5.2
+  "glm-5.2": 1_000_000,
   "glm-5.1": 128_000,
   "glm-4": 128_000,
   "MiniMax-M3": 200_000,

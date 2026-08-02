@@ -5,7 +5,7 @@
 1. Domain: ScheduleDelivery.target + ScheduledTask.preset_id
 2. Store: _task_to_dict / _dict_to_task 对新字段的序列化/反序列化
 3. schedule_tool: _do_create 填 delivery.target / preset_id
-4. provider_factory: apply_preset / build_provider
+4. model catalog：preset 解析与 provider 构造
 5. WebDeliverySink: broadcast payload 含 delivery_target
 """
 
@@ -24,12 +24,13 @@ from scheduler.domain import (
     ScheduledTask,
     ScheduleTrigger,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
 from scheduler.store import Store, _dict_to_task, _task_to_dict
+from tests.support.tool_calls import execute_prepared_tool
 from tools.builtin.schedule_tool import build_schedule_tool
 
 # ---------------------------------------------------------------------------
@@ -49,8 +50,7 @@ def _make_task(
     return ScheduledTask(
         task_id="t1",
         name="test-task",
-        enabled=True,
-        state=TaskState.SCHEDULED,
+        lifecycle=TaskLifecycleState.SCHEDULED,
         origin=TaskOrigin.TOOL,
         trigger=_make_trigger(),
         policy=TaskExecutionPolicy(),
@@ -204,7 +204,8 @@ class TestScheduleToolDeliveryTarget:
             default_delivery_channel="web",
             thread_provisioner=provisioner,
         )
-        r = await tool.execute(
+        r = await execute_prepared_tool(
+            tool,
             {
                 "action": "create",
                 "name": "target-test",
@@ -226,7 +227,8 @@ class TestScheduleToolDeliveryTarget:
         """未注入 provisioner 时，create 返回结构化错误且不落盘。"""
         store = Store(home_dir=tmp_path / "cron")
         tool = build_schedule_tool(store, default_delivery_channel="web")
-        r = await tool.execute(
+        r = await execute_prepared_tool(
+            tool,
             {
                 "action": "create",
                 "name": "cli-test",
@@ -247,7 +249,8 @@ class TestScheduleToolDeliveryTarget:
             default_preset_id="claude-sonnet",
             thread_provisioner=_FakeThreadProvisioner("thread-bbbbbbbbbbbb"),
         )
-        r = await tool.execute(
+        r = await execute_prepared_tool(
+            tool,
             {
                 "action": "create",
                 "name": "preset-test",
@@ -260,73 +263,6 @@ class TestScheduleToolDeliveryTarget:
         task = store.get_task(r.data["task_id"])
         assert task is not None
         assert task.preset_id == "claude-sonnet"
-
-
-# ---------------------------------------------------------------------------
-# Group 4: provider_factory
-# ---------------------------------------------------------------------------
-
-
-class TestProviderFactory:
-    """infrastructure.llm_providers.provider_factory 的 apply_preset / build_provider。"""
-
-    def test_apply_preset_overrides_model_name(self) -> None:
-        """apply_preset 把 preset.model 写入 config.model.name。"""
-        from infrastructure.config.models import Config, LLMPresetConfig, ModelConfig
-
-        cfg = Config(
-            model=ModelConfig(
-                name="old-model",
-                base_url="http://127.0.0.1:1234/v1",
-                api_key="",
-            )
-        )
-        preset = LLMPresetConfig(
-            id="test-preset",
-            display_name="Test",
-            base_url="http://127.0.0.1:5678/v1",
-            model="gpt-4",
-        )
-        from infrastructure.llm_providers.provider_factory import apply_preset
-
-        new_cfg = apply_preset(cfg, preset)
-        assert new_cfg.model.name == "gpt-4"
-        assert new_cfg.model.base_url == "http://127.0.0.1:5678/v1"
-        # 原 cfg 不变
-        assert cfg.model.name == "old-model"
-
-    def test_build_provider_openai(self) -> None:
-        """config 的 effective_provider 为 openai_compatible 时返回 OpenAIResponsesProvider。"""
-        from infrastructure.config.models import Config, ModelConfig
-        from infrastructure.llm_providers.openai_responses import OpenAIResponsesProvider
-        from infrastructure.llm_providers.provider_factory import build_provider
-
-        cfg = Config(
-            model=ModelConfig(
-                name="gpt-4",
-                base_url="http://127.0.0.1:1234/v1",
-                api_key="",
-            )
-        )
-        provider = build_provider(cfg)
-        assert isinstance(provider, OpenAIResponsesProvider)
-
-    def test_build_provider_anthropic(self) -> None:
-        """config 的 effective_provider 为 anthropic 时返回 AnthropicMessagesProvider。"""
-        from infrastructure.config.models import Config, ModelConfig
-        from infrastructure.llm_providers.anthropic_messages import AnthropicMessagesProvider
-        from infrastructure.llm_providers.provider_factory import build_provider
-
-        cfg = Config(
-            model=ModelConfig(
-                provider="anthropic",
-                name="claude-sonnet-4-20250514",
-                base_url="https://api.anthropic.com",
-                api_key="sk-ant-test-key",
-            )
-        )
-        provider = build_provider(cfg)
-        assert isinstance(provider, AnthropicMessagesProvider)
 
 
 # ---------------------------------------------------------------------------

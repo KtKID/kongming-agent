@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from core.contracts import EventSink, ToolContext
+from core.contracts import EventSink, PreparedToolCall, ToolContext
 from evolution.models import ReviewResult, ReviewWritePayload
 from evolution.store import EvolutionStore
 from tools.runtime.base import BaseBuiltinTool
@@ -41,33 +41,39 @@ class EvolutionWriteTool(BaseBuiltinTool):
         self._max_nutrients = max_nutrients
         self._event_sinks = tuple(event_sinks)
 
+    def prepare(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> PreparedToolCall:
+        """审批前解析 reviewer fallback、校验 payload 并冻结过滤结果。"""
+        payload = ReviewWritePayload.from_dict(self._apply_reviewer_fallback(arguments, context))
+        normalized = ReviewWritePayload(
+            review_result=self._filter_review_result(payload.review_result),
+            transcript_window=payload.transcript_window,
+            trigger_reason=payload.trigger_reason,
+        )
+        return PreparedToolCall(arguments=normalized.to_dict())
+
     async def _run(
         self,
         args: dict[str, Any],
         ctx: ToolContext,
     ) -> tuple[str, dict[str, Any] | None]:
-        payload = ReviewWritePayload.from_dict(self._apply_reviewer_fallback(args, ctx))
-        filtered = self._filter_review_result(payload.review_result)
-        normalized = ReviewWritePayload(
-            review_result=filtered,
-            transcript_window=payload.transcript_window,
-            trigger_reason=payload.trigger_reason,
-        )
-        outcome = await self._store.write_review(normalized)
-        await self._store.mark_review_result(
-            session_id=filtered.session_id,
-            run_id=filtered.run_id,
-            status="written" if outcome.status == "written" else outcome.status,
-            reviewed_at_ms=filtered.reviewed_at_ms,
-            nutrient_ids=outcome.written_nutrient_ids,
-        )
+        payload = ReviewWritePayload.from_dict(args)
+        filtered = payload.review_result
+        outcome = await self._store.write_review(payload)
         written = tuple(
             nutrient
             for nutrient in filtered.nutrients
             if nutrient.nutrient_id in set(outcome.written_nutrient_ids)
         )
         if written:
-            await self._store.emit_nutrient_events(run_id=filtered.run_id, nutrients=written)
+            await self._store.emit_nutrient_events(
+                run_id=filtered.run_id,
+                nutrients=written,
+                extra_sinks=self._event_sinks,
+            )
         content = (
             f"evolution review stored at {outcome.review_path}; "
             f"wrote {outcome.nutrients_written} nutrients, skipped {outcome.nutrients_skipped}."

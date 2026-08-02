@@ -19,10 +19,12 @@ from hosts.web.approvals.global_inbox.broadcaster import get_inbox_broadcaster
 
 
 def _drain_snapshot(ws: Any) -> dict[str, Any]:
-    """连上后第一帧必为 approval.inbox.snapshot。"""
-    frame = ws.receive_json()
-    assert frame["frame_type"] == "approval.inbox.snapshot"
-    return frame
+    """连上后依次消费 thread status 与 approval inbox 两个 snapshot。"""
+    status_frame = ws.receive_json()
+    assert status_frame["frame_type"] == "thread-status.snapshot"
+    inbox_frame = ws.receive_json()
+    assert inbox_frame["frame_type"] == "approval.inbox.snapshot"
+    return inbox_frame
 
 
 def _make_payload(request_id: str, thread_id: str = "thread-aaa") -> dict[str, Any]:
@@ -32,9 +34,10 @@ def _make_payload(request_id: str, thread_id: str = "thread-aaa") -> dict[str, A
         "toolName": "Bash",
         "toolInput": {"command": "ls"},
         "autoApproveAtMs": None,
-        "autoRejectAtMs": None,
         "blockedByRule": None,
         "isElevated": False,
+        "danger": False,
+        "rememberAllowed": False,
         "channel": "claude_code",
         "cwd": "/proj/x",
         "arrivedAtMs": 1_000_000_000,

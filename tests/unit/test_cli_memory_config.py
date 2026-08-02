@@ -25,7 +25,7 @@ from infrastructure.config.models import (
     Config,
     EvolutionConfig,
     EvolutionMemoryConfig,
-    ModelConfig,
+    ModelSelectionConfig,
     RunnerConfig,
 )
 from memory import MemoryStore
@@ -39,12 +39,7 @@ _DEFAULT_AGENT_TEXT = (_TEMPLATES_DIR / "AGENT.md").read_text(encoding="utf-8").
 
 def _build_cfg(memory: EvolutionMemoryConfig | None = None) -> Config:
     return Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="stub-model",
-            base_url="http://127.0.0.1:1234",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         runner=RunnerConfig(max_turns=3),
         approval=ApprovalConfig(mode="auto_allow"),
         evolution=EvolutionConfig(memory=memory) if memory is not None else EvolutionConfig(),

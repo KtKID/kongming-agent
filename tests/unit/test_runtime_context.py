@@ -72,3 +72,14 @@ def test_paths_with_spaces_are_preserved(tmp_path: Path) -> None:
 
     assert str(cwd) in text
     assert str(home) in text
+
+
+@pytest.mark.unit
+def test_cwd_string_is_preserved_verbatim(tmp_path: Path) -> None:
+    """Web 已解析好的 cwd 字符串应原样进入 prompt，避免和 manifest 表达漂移。"""
+    cwd = "E:/xgt/proj/agent-proj/kongming-agent"
+    home = tmp_path / ".kongming"
+
+    text = build_runtime_context_text(cwd=cwd, kongming_home=home)
+
+    assert cwd in text

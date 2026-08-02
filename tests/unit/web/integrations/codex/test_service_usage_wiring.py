@@ -210,9 +210,11 @@ async def test_usage_summary_broadcast_after_turn_completed(
 
     mock_broadcaster = MagicMock()
     mock_broadcaster.broadcast = AsyncMock()
-    mock_broadcaster.emit = AsyncMock()
+    mock_broadcaster.begin_run = AsyncMock(return_value=MagicMock())
+    mock_broadcaster.publish_status = AsyncMock()
     monkeypatch.setattr(
-        "hosts.web.integrations.codex.service.get_broadcaster", lambda: mock_broadcaster
+        "hosts.web.integrations.codex.service.get_thread_status_manager",
+        lambda: mock_broadcaster,
     )
 
     session_mgr = SessionManager()
@@ -231,14 +233,15 @@ async def test_usage_summary_broadcast_after_turn_completed(
             writer=writer,
         )
 
-    # 断言 broadcaster.broadcast 被调用，且参数包含 usage_summary_updated（v2 字段名）
+    # 断言 broadcaster.broadcast 被调用，且参数包含 usage_summary_updated（v2 frame_type）
     broadcast_calls = [
         c
         for c in mock_broadcaster.broadcast.call_args_list
-        if isinstance(c[0][0], dict) and c[0][0].get("type") == "usage_summary_updated"
+        if isinstance(c[0][0], dict) and c[0][0].get("frame_type") == "usage_summary_updated"
     ]
     assert len(broadcast_calls) == 1
     payload = broadcast_calls[0][0][0]
+    assert "type" not in payload
     assert payload["threadId"] == "thread-aabbccddeeff"
     # v2: 字段名是 "usage"（含 provider discriminator），不是 "usage_summary"
     assert "usage" in payload

@@ -8,6 +8,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import cast
+
+from core.contracts import ReasoningEffort
+
+_REASONING_EFFORT_VALUES: frozenset[str] = frozenset({"none", "low", "medium", "high", "max"})
+
+
+def coerce_reasoning_effort(value: str | None) -> ReasoningEffort | None:
+    """把外部字符串收窄为 AgentSpec 支持的 reasoning effort。"""
+    if value is None:
+        return None
+    if value not in _REASONING_EFFORT_VALUES:
+        return None
+    return cast(ReasoningEffort, value)
 
 
 @dataclass(frozen=True)
@@ -29,7 +43,7 @@ class AgentSpec:
     tool_names: tuple[str, ...] = ()
     max_turns: int = 10
     metadata: dict[str, str] = field(default_factory=dict)
-    reasoning_effort: str | None = None
+    reasoning_effort: ReasoningEffort | None = None
 
     def __post_init__(self) -> None:
         if self.max_turns <= 0:
@@ -40,4 +54,4 @@ class AgentSpec:
             raise ValueError("AgentSpec.default_model must not be empty")
 
 
-__all__ = ["AgentSpec"]
+__all__ = ["AgentSpec", "coerce_reasoning_effort"]

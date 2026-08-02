@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -277,7 +278,7 @@ def test_build_test_env_strips_real_kongming_settings(tmp_path: Path) -> None:
 
     assert env["PATH"] == "/bin"
     assert env["HOME"] == str(tmp_path / ".kongming" / "prepush-home")
-    assert env["PYTHONPATH"] == f"{tmp_path / 'src'}:/tmp/neighbor"
+    assert env["PYTHONPATH"] == f"{tmp_path / 'src'}:{tmp_path}:/tmp/neighbor"
     assert env["KONGMING_HOME"] == str(tmp_path / ".kongming" / "prepush-home")
     assert env["KONGMING_E2E_REAL_MODEL"] == "0"
     assert env["KONGMING_SKIP_DOTENV"] == "1"
@@ -365,3 +366,71 @@ def test_pre_push_hook_runs_without_files_filter() -> None:
 
     assert "stages: [pre-push]" in hook_block
     assert "\n        files:" not in hook_block
+
+
+def test_pre_push_script_enables_pytest_item_timing_log() -> None:
+    project_root = Path(__file__).resolve().parents[3]
+    script = (project_root / "scripts" / "run_pre_push_tests.py").read_text(encoding="utf-8")
+
+    assert "KONGMING_PRE_PUSH_PYTEST_TIMING_LOG" in script
+    assert "scripts.prepush_pytest_timing" in script
+    assert "pre-push pytest timing log:" in script
+
+
+def test_print_slowest_tests_aggregates_pytest_phases(tmp_path: Path, capsys: Any) -> None:
+    log_path = tmp_path / "timing.jsonl"
+    records = [
+        {
+            "event": "test_phase",
+            "nodeid": "tests/unit/test_fast.py::test_fast",
+            "when": "call",
+            "outcome": "passed",
+            "duration_s": 0.1,
+        },
+        {
+            "event": "test_phase",
+            "nodeid": "tests/unit/test_slow.py::test_slow",
+            "when": "setup",
+            "outcome": "passed",
+            "duration_s": 0.5,
+        },
+        {
+            "event": "test_phase",
+            "nodeid": "tests/unit/test_slow.py::test_slow",
+            "when": "call",
+            "outcome": "passed",
+            "duration_s": 1.25,
+        },
+    ]
+    log_path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    pre_push._print_slowest_tests(log_path, limit=2)
+
+    output = capsys.readouterr().out
+    assert "tests/unit/test_slow.py::test_slow" in output
+    assert "   1.750s" in output
+    assert output.index("tests/unit/test_slow.py::test_slow") < output.index(
+        "tests/unit/test_fast.py::test_fast"
+    )
+
+
+def test_print_latest_started_test_reports_last_start(tmp_path: Path, capsys: Any) -> None:
+    log_path = tmp_path / "timing.jsonl"
+    records = [
+        {"event": "test_start", "nodeid": "tests/unit/test_a.py::test_a", "time": 1.0},
+        {"event": "test_phase", "nodeid": "tests/unit/test_a.py::test_a", "duration_s": 0.1},
+        {"event": "test_start", "nodeid": "tests/unit/test_b.py::test_b", "time": 2.0},
+    ]
+    log_path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    pre_push._print_latest_started_test(log_path)
+
+    output = capsys.readouterr().out
+    assert "tests/unit/test_b.py::test_b" in output
+    assert "2.0" in output

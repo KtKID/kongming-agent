@@ -23,6 +23,7 @@ from core.contracts import (
     Event,
     LLMRequest,
     LLMResponse,
+    PreparedToolCall,
     ToolContext,
     ToolResult,
 )
@@ -71,7 +72,8 @@ class _RichResultTool:
     description = "rich"
     input_schema: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    async def execute(self, prepared: PreparedToolCall, ctx: ToolContext) -> ToolResult:
+        del prepared, ctx
         return ToolResult(
             ok=True,
             content="stdout text",

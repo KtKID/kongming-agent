@@ -9,6 +9,7 @@
 - freshness 超 1h → "可能已过期"
 - freshness 新鲜 → 无"可能已过期"
 - latest_summary.md 存在 / 不存在
+- latest_analysis.md 存在 → 独立追加最近分析
 - blockers 非空 → "#### 阻塞项"
 - blockers 为空 → 无"#### 阻塞项"
 - risks 非空 → "#### 风险项"
@@ -305,6 +306,24 @@ def test_summary_present(tmp_path: Path) -> None:
     assert result is not None
     assert "#### 最近摘要" in result
     assert "这是一段摘要文本。" in result
+
+
+@pytest.mark.unit
+def test_summary_and_analysis_present(tmp_path: Path) -> None:
+    state = _make_state()
+    _write_state(tmp_path, state)
+    channel_dir = tmp_path / "claude"
+    (channel_dir / "latest_summary.md").write_text("规则摘要文本。", encoding="utf-8")
+    (channel_dir / "latest_analysis.md").write_text("分析报告文本。", encoding="utf-8")
+
+    with _patch_now():
+        result = build_sitian_context_text(tmp_path)
+
+    assert result is not None
+    assert "#### 最近摘要" in result
+    assert "规则摘要文本。" in result
+    assert "#### 最近分析" in result
+    assert "分析报告文本。" in result
 
 
 @pytest.mark.unit

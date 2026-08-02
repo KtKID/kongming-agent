@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from core.contracts import LLMStreamChunk
+from core.contracts import LLMStreamChunk, ProviderUsageFamily
 from infrastructure.llm_providers.openai_compat_stream_parser import OpenAICompatStreamParser
 
 from .streaming.fixtures import (
@@ -59,15 +59,13 @@ async def test_pure_content() -> None:
     # content.delta 的 index 都是 0（单正文 block 语义）
     assert all(c.index == 0 for c in content_chunks)
 
-    # usage 正确透传（task#3.1：含 provider_kind + SDK 原生字段）
-    assert chunks[-1].usage == {
-        "provider_kind": "openai_compatible",
-        "prompt_tokens": 5,
-        "completion_tokens": 3,
-        "total_tokens": 8,
-        "input_tokens": 5,
-        "output_tokens": 3,
-    }
+    usage = chunks[-1].usage
+    assert usage is not None
+    assert usage.family is ProviderUsageFamily.OPENAI_CHAT_COMPLETIONS
+    assert usage.input_total_tokens.value == 5
+    assert usage.output_total_tokens.value == 3
+    assert usage.total_tokens.value == 8
+    assert usage.input_uncached_tokens.value is None
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +204,7 @@ async def test_empty_choices_chunk_extracts_metadata() -> None:
                     "prompt_tokens": 10,
                     "completion_tokens": 2,
                     "total_tokens": 12,
-                    "completion_tokens_details": {"reasoning_tokens": 5},
+                    "completion_tokens_details": {"reasoning_tokens": 1},
                     "prompt_tokens_details": {"cached_tokens": 3},
                 },
             ),
@@ -215,20 +213,15 @@ async def test_empty_choices_chunk_extracts_metadata() -> None:
     chunks = await _run(events)
 
     done = chunks[-1]
-    # task#3.1：usage 字段透传 SDK 原生字段 + provider_kind；
-    # cached_tokens / reasoning_tokens 从 details 子结构提到 usage 主体
-    assert done.usage == {
-        "provider_kind": "openai_compatible",
-        "prompt_tokens": 10,
-        "completion_tokens": 2,
-        "total_tokens": 12,
-        "input_tokens": 10,
-        "output_tokens": 2,
-        "cached_input_tokens": 3,
-        "reasoning_output_tokens": 5,
-    }
+    usage = done.usage
+    assert usage is not None
+    assert usage.input_total_tokens.value == 10
+    assert usage.cache_read_tokens.value == 3
+    assert usage.output_total_tokens.value == 2
+    assert usage.reasoning_tokens.value == 1
+    assert usage.total_tokens.value == 12
     assert done.provider_metadata["model"] == "gpt-final"
-    assert done.provider_metadata["reasoning_tokens"] == 5
+    assert done.provider_metadata["reasoning_tokens"] == 1
     assert done.provider_metadata["cached_tokens"] == 3
 
 

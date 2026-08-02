@@ -9,7 +9,9 @@
 - tool result 作为 user 角色的 ``{"type": "tool_result", ...}`` content block。
 - Tools schema 不带 ``function`` 包装层，使用 ``input_schema``。
 - 响应用 ``stop_reason`` 而非 ``finish_reason``；usage 字段名也不同。
-- 鉴权头：``x-api-key``；必须携带 ``anthropic-version: 2023-06-01``。
+- 鉴权头：API key 默认写入 ``x-api-key``；兼容端点可通过配置
+  ``api_key_header: authorization-bearer`` 改为 ``Authorization: Bearer``。
+  必须携带 ``anthropic-version: 2023-06-01``。
 
 **base_url 约定**：``base_url`` 由调用方设置（默认 ``https://api.anthropic.com``），
 provider 内部拼 ``/v1/messages``——与 OpenAI provider 约定一致，版本段在 base_url 里。
@@ -29,21 +31,36 @@ from typing import Any, Literal
 
 import httpx
 
-from core.contracts import LLMRequest, LLMResponse, LLMStreamChunk
+from core.contracts import (
+    AssetBytesReader,
+    LLMRequest,
+    LLMResponse,
+    LLMStreamChunk,
+    ProviderUsageCompleteness,
+    ProviderUsageFamily,
+    collect_media_parts_from_messages,
+)
 from core.errors import ProviderError
 from core.message import Message, ToolCall
-from infrastructure.config.models import ModelConfig
+from infrastructure.config.api_key_headers import build_api_key_headers
+from infrastructure.config.model_provider_catalog import (
+    ResolvedModelConfig,
+    ResolvedModelCredential,
+)
 from infrastructure.llm_providers.anthropic_stream_parser import AnthropicStreamParser
 from infrastructure.llm_providers.base import BaseLLMProvider
 from infrastructure.llm_providers.media_adapter import (
     AnthropicMediaAdapter,
-    AssetStorage,
     MediaAdapter,
-    collect_media_parts_from_messages,
 )
 from infrastructure.llm_providers.raw_dump import dump_raw_llm_interaction
-from infrastructure.llm_providers.reasoning import ReasoningConfig, resolve_reasoning_plan
+from infrastructure.llm_providers.reasoning import (
+    ReasoningConfig,
+    ResolvedReasoningPlan,
+    resolve_reasoning_plan,
+)
 from infrastructure.llm_providers.sse_reader import iter_sse_events
+from infrastructure.llm_providers.usage import ProviderUsageManager
 from network.network_log import log_network_exception
 
 _LOGGER = logging.getLogger(__name__)
@@ -61,16 +78,18 @@ class AnthropicMessagesProvider(BaseLLMProvider):
     def __init__(
         self,
         *,
-        model_config: ModelConfig,
+        model_config: ResolvedModelConfig,
+        credential: ResolvedModelCredential,
         max_retries: int = 3,
         retry_backoff: float = 1.0,
         enable_raw_dump: bool = False,
         stream_read_timeout: float = 120.0,
         media_adapter: MediaAdapter | None = None,
-        asset_storage: AssetStorage | None = None,
+        asset_reader: AssetBytesReader | None = None,
     ) -> None:
         super().__init__(
             model_config=model_config,
+            credential=credential,
             max_retries=max_retries,
             retry_backoff=retry_backoff,
         )
@@ -80,14 +99,13 @@ class AnthropicMessagesProvider(BaseLLMProvider):
         # 按 is_local 自动上调。
         self._enable_raw_dump = enable_raw_dump
         self._stream_read_timeout = stream_read_timeout
+        self._usage_manager = ProviderUsageManager()
 
-        # claude-image-paste-e2e §5：多模态 user message 装配。
-        # 默认装配 ``AnthropicMediaAdapter()`` + ``AssetStorage()``,让 provider
-        # 在装配层未注入时也能跑(单测 / CLI fallback)。两者都为 ``None`` 时
-        # 仍走 multi-block 路径(默认实例化);仅当 message 不含 attachments 时
-        # 保持原 ``content: str`` 形态,完全向后兼容既有纯文本测试。
+        # 多模态 user message 装配：provider 只消费宿主无关的
+        # ``AssetBytesReader`` 协议。Web 上传存储由 Web 装配层显式注入；
+        # CLI / cron 等纯文本路径保持 ``None``。
         self._media_adapter: MediaAdapter = media_adapter or AnthropicMediaAdapter()
-        self._asset_storage: AssetStorage = asset_storage or AssetStorage()
+        self._asset_reader = asset_reader
 
     async def _do_complete(self, request: LLMRequest) -> LLMResponse:
         url = self._model_config.base_url.rstrip("/") + self._ENDPOINT_PATH
@@ -162,7 +180,7 @@ class AnthropicMessagesProvider(BaseLLMProvider):
         )
 
         client = self._ensure_client()
-        parser = AnthropicStreamParser()
+        parser = AnthropicStreamParser(usage_manager=self._usage_manager)
 
         chunks_buffer: list[dict[str, Any]] = []
         dump_status = 0
@@ -249,11 +267,8 @@ class AnthropicMessagesProvider(BaseLLMProvider):
         - tool_calls → ``tool_use`` content blocks
         - tool results → user 角色的 ``tool_result`` content blocks
         """
-        # claude-image-paste-e2e §5：从 ``request.metadata["thread_id"]`` 读 thread_id,
-        # 由 runner 在装配 LLMRequest 时注入(``session.session_id`` 真值)。
-        # 缺失时退化为空串——``collect_media_parts_from_messages`` 内部会按
-        # asset_id 走 storage 路径,thread_id="" 会让 path 解析失败但本来就不应该
-        # 命中(纯文本路径不进 collect)。
+        # 从 ``request.metadata["thread_id"]`` 读 thread_id，由 runner 在装配
+        # LLMRequest 时注入(``session.session_id`` 真值)。纯文本路径不读取资产。
         thread_id = ""
         if request.metadata:
             raw_tid = request.metadata.get("thread_id")
@@ -301,18 +316,45 @@ class AnthropicMessagesProvider(BaseLLMProvider):
         if request.tools:
             payload["tools"] = self._tools_to_anthropic_format(list(request.tools))
 
-        # reasoning_effort：从 model_config 读取，按最终模型名匹配 profile。
+        # reasoning_effort：请求级值覆盖 provider 配置默认值，按最终模型名匹配 profile。
         # 注意：与 OpenAI provider 不同，Anthropic provider 没有硬编码回退路径。
         # 原因：Anthropic 历史上没有内置的 reasoning 参数映射；V1 只通过配置驱动
         # 的 reasoning_profiles 支持 MiniMax 等兼容层模型。若 profiles 为空，
-        # 则 reasoning_effort 配置静默不生效——这是有意设计，不是遗漏。
-        effort = self._model_config.reasoning_effort
-        profiles = self._model_config.reasoning_profiles
-        if effort is not None and profiles:
+        # 则 reasoning_effort 配置静默不生效，这是有意的配置保护。
+        effort = (
+            request.reasoning_effort
+            if request.reasoning_effort is not None
+            else self._default_reasoning_effort()
+        )
+        model_name = _payload_model_name(payload, self._model_config.name)
+        capability = self._reasoning_capability(model_name)
+        if effort is None:
+            self._log_reasoning_decision(
+                model_name=model_name,
+                requested_effort=None,
+                plan=None,
+                capability_configured=capability is not None,
+            )
+        elif capability is not None:
             config = ReasoningConfig(enabled=True, effort=effort)
-            plan = resolve_reasoning_plan(payload["model"], config, profiles)
+            plan = resolve_reasoning_plan(model_name, config, capability)
+            self._log_reasoning_decision(
+                model_name=model_name,
+                requested_effort=effort,
+                plan=plan,
+                capability_configured=True,
+            )
             if plan.send_reasoning:
                 payload.update(plan.payload_patch)
+        else:
+            self._log_reasoning_decision(
+                model_name=model_name,
+                requested_effort=effort,
+                plan=None,
+                capability_configured=False,
+            )
+            config = ReasoningConfig(enabled=True, effort=effort)
+            resolve_reasoning_plan(model_name, config, capability)
 
         extra = request.metadata.get("provider_extra") if request.metadata else None
         if isinstance(extra, dict):
@@ -322,12 +364,45 @@ class AnthropicMessagesProvider(BaseLLMProvider):
 
         return payload
 
+    def _log_reasoning_decision(
+        self,
+        *,
+        model_name: str,
+        requested_effort: str | None,
+        plan: ResolvedReasoningPlan | None,
+        capability_configured: bool,
+    ) -> None:
+        """记录每次请求的 reasoning 开关、档位和实际 payload 注入决策。"""
+        switch = _reasoning_switch(requested_effort)
+        _LOGGER.info(
+            "llm.reasoning provider=%s model=%s switch=%s requested_effort=%s "
+            "normalized_effort=%s adapter=%s send_reasoning=%s payload_keys=%s "
+            "catalog_source=%s catalog_provider=%s preset_id=%s capability_configured=%s",
+            "anthropic",
+            model_name,
+            switch,
+            requested_effort,
+            plan.normalized_effort if plan is not None else None,
+            plan.adapter_name if plan is not None else "none",
+            plan.send_reasoning if plan is not None else False,
+            sorted(plan.payload_patch.keys()) if plan is not None else [],
+            *self._reasoning_catalog_context(),
+            capability_configured,
+        )
+
     def _build_headers(self) -> dict[str, str]:
-        return {
-            "x-api-key": self._model_config.api_key,
+        headers: dict[str, str] = {
             "anthropic-version": self._ANTHROPIC_VERSION,
             "content-type": "application/json",
         }
+        headers.update(
+            build_api_key_headers(
+                api_key=self._credential.value,
+                api_key_header=self._credential.header
+                or self._model_config.effective_api_key_header,
+            )
+        )
+        return headers
 
     # ------------------------------------------------------------------
     # 消息格式转换
@@ -421,8 +496,8 @@ class AnthropicMessagesProvider(BaseLLMProvider):
 
         - 无 ``metadata["attachments"]`` → 保持原 ``content: str`` 形态
           (向后兼容既有纯文本测试)。
-        - 有 ``metadata["attachments"]`` → 通过 :class:`AnthropicMediaAdapter`
-          把附件 ref 还原成 image blocks,与文本 block 一起组成 multi-block list。
+        - 有 ``metadata["attachments"]`` → 通过注入的 ``AssetBytesReader`` 还原
+          成 ``MediaPart``，再由 :class:`AnthropicMediaAdapter` 转成 image blocks。
           文本为空时省略 text block(Anthropic API 接受 image-only content)。
 
         :func:`collect_media_parts_from_messages` 内部对 unrebuildable / 未知 kind
@@ -430,7 +505,7 @@ class AnthropicMessagesProvider(BaseLLMProvider):
 
         Args:
             msg: 待转换的 user 消息。
-            thread_id: 当前 thread id,用于 :class:`AssetStorage` 路径解析。
+            thread_id: 当前 thread id,用于宿主层资产读取器解析资产坐标。
             dropped: 可选 list,被退化丢弃的 attachment asset_id 会 append 进去,
                 由调用方(``_build_payload``)写到 ``request.metadata["dropped_attachments"]``
                 作为后端 audit trail(P1 #1 R2 boundary fix)。None 时不收集。
@@ -449,8 +524,19 @@ class AnthropicMessagesProvider(BaseLLMProvider):
                 if isinstance(aid, str) and aid:
                     declared_asset_ids.append(aid)
 
+        if self._asset_reader is None:
+            if dropped is not None:
+                _LOGGER.warning(
+                    "drop attachments because no asset reader is configured for thread %s: "
+                    "asset_ids=%s",
+                    thread_id,
+                    declared_asset_ids,
+                )
+                dropped.extend(declared_asset_ids)
+            return {"role": "user", "content": text}
+
         parts = collect_media_parts_from_messages(
-            [msg], storage=self._asset_storage, thread_id=thread_id
+            [msg], reader=self._asset_reader, thread_id=thread_id
         )
         if not parts:
             # 所有 attachments 均无法还原 → 退化到纯文本(已 warning log)
@@ -553,45 +639,22 @@ class AnthropicMessagesProvider(BaseLLMProvider):
             stop_reason_raw, message_has_tool_calls=bool(tool_calls)
         )
 
-        usage_raw = data.get("usage") or {}
-        # task#3.1：Anthropic usage 字段透传 SDK 原生字段 + provider_kind 标识，
-        # 用于 web.usage_token.UsageTokenManager 按 channel 解析。
-        # ⚠️ 修复历史 lossy bug（commit 4a00907 前）：
-        # 旧代码 `prompt_tokens=input_tokens` 漏算 cache_read/cache_creation，
-        # 导致 web 显示的 prompt_tokens 比真实 prompt 小 N 万 token。
-        normalized_usage: dict[str, Any] = {
-            "provider_kind": "anthropic",
-        }
-        # 原生字段直透（缺失不写；下游 _channel_anthropic.parse_raw_to_usage 兜底 0）
-        for native_key in (
-            "input_tokens",
-            "output_tokens",
-            "cache_read_input_tokens",
-            "cache_creation_input_tokens",
-        ):
-            if native_key in usage_raw:
-                normalized_usage[native_key] = usage_raw[native_key]
-        # 派生 prompt_tokens / completion_tokens / total_tokens 兼容老消费者
-        # （旧 thread_manager.add_thread_usage shim + 旧 runner accumulated_usage 等）
-        # 派生公式：prompt = input + cache_read + cache_creation（task#3 真值，含 cache）
-        input_t = int(usage_raw.get("input_tokens", 0) or 0)
-        output_t = int(usage_raw.get("output_tokens", 0) or 0)
-        cache_read = int(usage_raw.get("cache_read_input_tokens", 0) or 0)
-        cache_creation = int(usage_raw.get("cache_creation_input_tokens", 0) or 0)
-        if "input_tokens" in usage_raw or "output_tokens" in usage_raw:
-            normalized_usage["prompt_tokens"] = input_t + cache_read + cache_creation
-            normalized_usage["completion_tokens"] = output_t
-            normalized_usage["total_tokens"] = (
-                normalized_usage["prompt_tokens"] + normalized_usage["completion_tokens"]
-            )
+        usage_value = data.get("usage")
+        usage_raw = usage_value if isinstance(usage_value, dict) else {}
+        response_id = data.get("id")
+        normalized_usage = self._usage_manager.normalize(
+            family=ProviderUsageFamily.ANTHROPIC_MESSAGES,
+            raw_usage=usage_raw,
+            completeness=(
+                ProviderUsageCompleteness.COMPLETE
+                if isinstance(usage_value, dict)
+                else ProviderUsageCompleteness.INCOMPLETE
+            ),
+            provider_response_id=response_id if isinstance(response_id, str) else None,
+        )
 
         # 厂商扩展字段：保留原始 Anthropic 字段名。
         provider_metadata: dict[str, Any] = {}
-
-        # cache token 细分也保留到 provider_metadata（向后兼容 infrastructure.tracing 旧消费者）
-        for cache_key in ("cache_creation_input_tokens", "cache_read_input_tokens"):
-            if cache_key in usage_raw:
-                provider_metadata[cache_key] = usage_raw[cache_key]
 
         # response 级标识
         for field_name in ("id", "model", "stop_sequence"):
@@ -617,6 +680,23 @@ class AnthropicMessagesProvider(BaseLLMProvider):
         if raw == "max_tokens":
             return "length"
         return "other"
+
+
+def _reasoning_switch(effort: str | None) -> str:
+    """把请求 effort 投影成日志里的开关状态。"""
+    if effort is None:
+        return "unspecified"
+    if effort.lower() == "none":
+        return "disabled"
+    return "enabled"
+
+
+def _payload_model_name(payload: dict[str, Any], fallback: str) -> str:
+    """从 provider payload 中读取最终模型名。"""
+    model_name = payload.get("model")
+    if isinstance(model_name, str):
+        return model_name
+    return fallback
 
 
 __all__ = ["AnthropicMessagesProvider"]

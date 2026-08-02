@@ -143,7 +143,7 @@ async def test_assemble_skips_non_dict_refs_in_summary() -> None:
     """attachments 里混入非 dict（异常历史）→ 汇总只收 dict，跳过其他。
 
     assembler 本身做防御性过滤（``isinstance(r, dict)``），不抛错，
-    与 :func:`infrastructure.llm_providers.media_adapter.collect_media_parts_from_messages`
+    与 :func:`core.contracts.collect_media_parts_from_messages`
     的"malformed ref 跳过"行为一致。
     """
 

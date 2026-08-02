@@ -52,7 +52,7 @@ class Message:
 
         ``attachments`` (``list[dict[str, Any]]``):
             仅在 ``role="user"`` 时有意义；其他角色应忽略此字段。
-            结构与 :class:`web.protocol.ws_frames.UserInputAttachment` 对齐
+            结构与 Web wire 的 ``UserInputAttachment`` 对齐
             （asset_id / kind / mime_type / size_bytes / width / height /
             duration_ms / preview_url / status），下游 InputAssembler 读出后
             组装为多模态 provider content block。

@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from infrastructure.config.models import Config, ModelConfig
+from infrastructure.config.models import Config, ModelSelectionConfig
 from infrastructure.config.schema import (
     FieldMeta,
     get_field_meta,
@@ -50,17 +50,12 @@ _ALLOWED_TYPES: frozenset[str] = frozenset(
 )
 
 # 强制锁定（editable=False）的字段
-_LOCKED_FIELDS: frozenset[str] = frozenset({"model.api_key", "web.dev_mode", "host.kind"})
+_LOCKED_FIELDS: frozenset[str] = frozenset({"web.dev_mode", "host.kind"})
 
 # 已知 dict-leaf 字段（schema 视图把整段当 1 个 leaf，flatten 不递归展开）。
 # 这两个字段是真 dict（不是嵌套 BaseModel），由用户在 yaml 内手工维护，
 # UI 一期只读不暴露子字段编辑。
-_DICT_LEAF_PATHS: frozenset[str] = frozenset(
-    {
-        "model.provider_routing",
-        "model.reasoning_profiles",
-    }
-)
+_DICT_LEAF_PATHS: frozenset[str] = frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -109,12 +104,7 @@ def pydantic_leaf_paths() -> set[str]:
     其余子节走 pydantic ``Field(default_factory=...)`` 默认值——这正是漂移检测
     所需的"完整 schema"。
     """
-    cfg = Config(
-        model=ModelConfig(
-            name="stub-model",
-            base_url="http://127.0.0.1:1234/v1",
-        )
-    )
+    cfg = Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
     dumped = cfg.model_dump(mode="json")
     return set(flatten_dict(dumped))
 
@@ -233,10 +223,11 @@ def test_list_and_dict_fields_are_readonly(metas: list[FieldMeta]) -> None:
 
 
 def test_get_field_meta_returns_correct_field() -> None:
-    meta = get_field_meta("model.temperature")
-    assert meta is not None, "get_field_meta('model.temperature') 应返回非 None"
-    assert meta.path == "model.temperature", (
-        f"get_field_meta 返回的 path 与查询不一致：expected=model.temperature, actual={meta.path}"
+    meta = get_field_meta("model.reasoning_effort")
+    assert meta is not None, "get_field_meta('model.reasoning_effort') 应返回非 None"
+    assert meta.path == "model.reasoning_effort", (
+        "get_field_meta 返回的 path 与查询不一致："
+        f"expected=model.reasoning_effort, actual={meta.path}"
     )
 
 

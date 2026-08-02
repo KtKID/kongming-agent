@@ -20,16 +20,16 @@ from typing import Any
 
 import pytest
 
+from core.contracts import ImageMediaPart, MediaPart
 from core.message import Message
 from hosts.web.uploads.storage import AssetStorage
-from infrastructure.config.models import ModelConfig
+from infrastructure.config.model_provider_catalog import ProviderProtocol
 from infrastructure.llm_providers.anthropic_messages import AnthropicMessagesProvider
 from infrastructure.llm_providers.media_adapter import (
     AnthropicMediaAdapter,
-    ImageMediaPart,
-    MediaPart,
     OpenAIMediaAdapter,
 )
+from tests._helpers.model_runtime import make_model_runtime
 
 # ---------------------------------------------------------------------------
 # 工具与 fixtures
@@ -71,17 +71,19 @@ def _write_image(
 def _make_provider(
     *,
     media_adapter: Any = None,
-    asset_storage: AssetStorage | None = None,
+    asset_reader: AssetStorage | None = None,
 ) -> AnthropicMessagesProvider:
+    runtime, credential = make_model_runtime(
+        protocol=ProviderProtocol.ANTHROPIC,
+        name="claude-sonnet-4-5",
+        base_url="https://api.anthropic.com",
+        api_key="sk-ant-test",
+    )
     return AnthropicMessagesProvider(
-        model_config=ModelConfig(
-            provider="anthropic",
-            name="claude-sonnet-4-5",
-            base_url="https://api.anthropic.com",
-            api_key="sk-ant-test",
-        ),
+        model_config=runtime,
+        credential=credential,
         media_adapter=media_adapter,
-        asset_storage=asset_storage,
+        asset_reader=asset_reader,
     )
 
 
@@ -106,7 +108,7 @@ def _make_image_part(
         thread_id=thread_id,
         mime_type=mime_type,
         ext=ext,
-        storage=storage,
+        reader=storage,
     )
 
 
@@ -397,7 +399,7 @@ def test_user_with_one_image_attachment_multi_block(
         ext=".png",
         payload=PAYLOAD_PNG,
     )
-    provider = _make_provider(asset_storage=storage)
+    provider = _make_provider(asset_reader=storage)
     msg = Message.user(
         "look at this",
         metadata={"attachments": [_make_attachment_ref(asset_id="a1")]},
@@ -433,7 +435,7 @@ def test_user_with_multiple_images(storage: AssetStorage) -> None:
         )
         refs.append(_make_attachment_ref(asset_id=aid, mime_type=mime))
 
-    provider = _make_provider(asset_storage=storage)
+    provider = _make_provider(asset_reader=storage)
     msg = Message.user("multi", metadata={"attachments": refs})
 
     result = provider._convert_user_message(msg, thread_id="t1")
@@ -462,7 +464,7 @@ def test_user_with_image_no_text(storage: AssetStorage) -> None:
         ext=".png",
         payload=PAYLOAD_PNG,
     )
-    provider = _make_provider(asset_storage=storage)
+    provider = _make_provider(asset_reader=storage)
     # Message.user 不允许 content=None; 用 "" 表达"无文本"
     msg = Message.user(
         "",
@@ -488,7 +490,7 @@ def test_user_with_unresolvable_attachment_falls_back_to_text(
 ) -> None:
     """mime 不在白名单 (image/bmp) → build 返回 None → 退化为 str content, 不抛错."""
 
-    provider = _make_provider(asset_storage=storage)
+    provider = _make_provider(asset_reader=storage)
     bad_ref = _make_attachment_ref(asset_id="a1", mime_type="image/bmp")
     msg = Message.user("fallback please", metadata={"attachments": [bad_ref]})
 
@@ -544,7 +546,7 @@ def test_user_with_attachments_not_list_keeps_str_content() -> None:
 
 @pytest.mark.unit
 def test_provider_default_media_adapter() -> None:
-    """不传 media_adapter / asset_storage → 内部默认实例化, 纯文本聊天不抛错."""
+    """不传 media_adapter / asset_reader → 纯文本聊天不抛错."""
 
     provider = _make_provider()
 
@@ -555,8 +557,8 @@ def test_provider_default_media_adapter() -> None:
 
     # 验证默认 media_adapter 是 AnthropicMediaAdapter
     assert isinstance(provider._media_adapter, AnthropicMediaAdapter)
-    # 验证默认 asset_storage 是 AssetStorage
-    assert isinstance(provider._asset_storage, AssetStorage)
+    # 纯文本默认路径不创建宿主上传读取器
+    assert provider._asset_reader is None
 
 
 @pytest.mark.unit
@@ -571,7 +573,7 @@ def test_provider_inject_fake_adapter(storage: AssetStorage) -> None:
         payload=PAYLOAD_PNG,
     )
     fake_adapter = _CapturingMediaAdapter()
-    provider = _make_provider(media_adapter=fake_adapter, asset_storage=storage)
+    provider = _make_provider(media_adapter=fake_adapter, asset_reader=storage)
 
     msg = Message.user(
         "with image",
@@ -603,7 +605,7 @@ def test_provider_inject_adapter_not_called_for_plain_text(
     """纯文本 user message (无 attachments) 不调 media_adapter.to_blocks."""
 
     fake_adapter = _CapturingMediaAdapter()
-    provider = _make_provider(media_adapter=fake_adapter, asset_storage=storage)
+    provider = _make_provider(media_adapter=fake_adapter, asset_reader=storage)
 
     msg = Message.user("plain text only")
     provider._convert_user_message(msg, thread_id="t1")
@@ -664,7 +666,7 @@ def test_convert_user_message_falls_back_when_to_blocks_raises(
         payload=PAYLOAD_PNG,
     )
     failing = _FailingMediaAdapter(exc)
-    provider = _make_provider(media_adapter=failing, asset_storage=storage)
+    provider = _make_provider(media_adapter=failing, asset_reader=storage)
 
     msg = Message.user(
         "describe this image",
@@ -694,7 +696,7 @@ def test_convert_user_message_to_blocks_failure_preserves_empty_text(
         payload=PAYLOAD_PNG,
     )
     failing = _FailingMediaAdapter(FileNotFoundError("vanished.png"))
-    provider = _make_provider(media_adapter=failing, asset_storage=storage)
+    provider = _make_provider(media_adapter=failing, asset_reader=storage)
     msg = Message.user(
         "",
         metadata={"attachments": [_make_attachment_ref(asset_id="boom2")]},
@@ -727,7 +729,7 @@ def test_dropped_attachments_collected_when_to_blocks_fails(
         payload=PAYLOAD_PNG,
     )
     failing = _FailingMediaAdapter(FileNotFoundError("vanished.png"))
-    provider = _make_provider(media_adapter=failing, asset_storage=storage)
+    provider = _make_provider(media_adapter=failing, asset_reader=storage)
     msg = Message.user(
         "describe",
         metadata={"attachments": [_make_attachment_ref(asset_id="vanish-1")]},
@@ -756,7 +758,7 @@ def test_dropped_attachments_collected_when_parts_empty(
     asset_id 也要进 dropped。
     """
 
-    provider = _make_provider(asset_storage=storage)
+    provider = _make_provider(asset_reader=storage)
     bad_ref = _make_attachment_ref(asset_id="bmp-bad", mime_type="image/bmp")
     msg = Message.user("fallback please", metadata={"attachments": [bad_ref]})
 
@@ -790,7 +792,7 @@ def test_build_payload_writes_dropped_to_request_metadata(
         payload=PAYLOAD_PNG,
     )
     failing = _FailingMediaAdapter(FileNotFoundError("vanish"))
-    provider = _make_provider(media_adapter=failing, asset_storage=storage)
+    provider = _make_provider(media_adapter=failing, asset_reader=storage)
 
     msg = Message.user(
         "with image",
@@ -829,7 +831,7 @@ def test_build_payload_no_dropped_field_when_attachments_loaded_ok(
         ext=".png",
         payload=PAYLOAD_PNG,
     )
-    provider = _make_provider(asset_storage=storage)
+    provider = _make_provider(asset_reader=storage)
     msg = Message.user(
         "hi",
         metadata={"attachments": [_make_attachment_ref(asset_id="ok-1")]},
@@ -860,7 +862,7 @@ def test_convert_user_message_dropped_none_does_not_crash(
         payload=PAYLOAD_PNG,
     )
     failing = _FailingMediaAdapter(FileNotFoundError("x"))
-    provider = _make_provider(media_adapter=failing, asset_storage=storage)
+    provider = _make_provider(media_adapter=failing, asset_reader=storage)
     msg = Message.user(
         "txt",
         metadata={"attachments": [_make_attachment_ref(asset_id="legacy")]},

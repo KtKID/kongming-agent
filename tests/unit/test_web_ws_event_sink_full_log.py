@@ -19,9 +19,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from core.contracts import Event
+from core.contracts import Event, ProviderUsageFamily
 from devtools.full_logger import FullLogger, _reset_for_tests, init_full_logger
 from hosts.web.websocket.event_sink import WSEventSink
+from infrastructure.llm_providers.usage import ProviderUsageManager
 
 
 class _StubConfig:
@@ -165,12 +166,16 @@ async def test_emit_usage_does_not_write_full_log(tmp_path: Path) -> None:
 
     ws = _make_ws()
     sink = WSEventSink(ws, thread_id="thread-usage")
+    usage = ProviderUsageManager().normalize(
+        family=ProviderUsageFamily.OPENAI_RESPONSES,
+        raw_usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+    )
     await sink.emit(
         Event(
             kind="usage",
             run_id="r1",
             turn=1,
-            payload={"input_tokens": 10, "output_tokens": 5},
+            payload=usage.to_payload(),
         )
     )
     await flogger.aclose()

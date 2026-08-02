@@ -15,10 +15,11 @@ from typing import Any
 import pytest
 
 from application.agent_roles import AgentRoleManager
-from application.agent_workflows.manager import AgentWorkflowManager
 from application.agent_workflows.strategies.deep_research import FakeResearchSourceProvider
 from core.contracts import ToolContext
-from infrastructure.config.models import Config, ModelConfig
+from infrastructure.config.models import Config, ModelSelectionConfig
+from tests.support.tool_calls import execute_prepared_tool
+from tests.support.workflow_strategy_manager import WorkflowStrategyTestManager
 from tools.agent_workflow_tool import AgentWorkflowHandle, build_run_agent_workflow_tool
 
 pytestmark = [pytest.mark.e2e, pytest.mark.smoke]
@@ -27,13 +28,18 @@ pytestmark = [pytest.mark.e2e, pytest.mark.smoke]
 @pytest.mark.asyncio
 async def test_deep_research_workflow_smoke_runs_tool_to_artifacts(tmp_path: Path) -> None:
     """验证完整离线链路，输入为 tool call，输出为 workflow root 和 deep_research 产物。"""
-    subagents = _DeterministicSubAgentManager()
-    manager = _manager(tmp_path, subagents=subagents, source_provider=_source_provider())
+    subagents = _DeterministicTaskExecutor()
+    manager = _manager(
+        tmp_path,
+        task_executor=subagents,
+        source_provider=_source_provider(),
+    )
     handle = AgentWorkflowHandle()
     handle.bind(manager)
     tool = build_run_agent_workflow_tool(handle)
 
-    tool_result = await tool.execute(
+    tool_result = await execute_prepared_tool(
+        tool,
         {"mode": "deep_research", "payload": _payload()},
         ToolContext(run_id="run-e2e", session_id="parent-session", turn=1, call_id="call-e2e"),
     )
@@ -79,14 +85,20 @@ async def test_deep_research_workflow_smoke_runs_tool_to_artifacts(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_deep_research_workflow_topic_only_uses_default_provider(tmp_path: Path) -> None:
     """验证默认 provider 链路，输入为 topic-only tool call，输出为确定性来源产物。"""
-    subagents = _DeterministicSubAgentManager()
-    manager = _manager(tmp_path, subagents=subagents)
+    subagents = _DeterministicTaskExecutor()
+    manager = _manager(tmp_path, task_executor=subagents)
     handle = AgentWorkflowHandle()
     handle.bind(manager)
     tool = build_run_agent_workflow_tool(handle)
 
-    tool_result = await tool.execute(
-        {"mode": "deep_research", "payload": {"topic": "Default provider research"}},
+    tool_result = await execute_prepared_tool(
+        tool,
+        {
+            "mode": "deep_research",
+            "payload": {
+                "topic": "Default provider research",
+            },
+        },
         ToolContext(
             run_id="run-default", session_id="parent-session", turn=1, call_id="call-default"
         ),
@@ -107,14 +119,14 @@ async def test_deep_research_workflow_topic_only_uses_default_provider(tmp_path:
     assert _task_log_paths_are_readable(workflow_dir)
 
 
-class _DeterministicSubAgentManager:
-    """测试用子 agent manager，记录 fallback 链路里的意外子 agent 调用。"""
+class _DeterministicTaskExecutor:
+    """测试用 task executor，记录 fallback 链路里的意外 child 调用。"""
 
     def __init__(self) -> None:
         """初始化 fake manager，输入为空，输出为记录任务的实例。"""
         self.tasks: list[Any] = []
 
-    async def run_task(
+    async def execute_task(
         self,
         *,
         workflow_id: str,
@@ -133,12 +145,12 @@ class _DeterministicSubAgentManager:
 def _manager(
     tmp_path: Path,
     *,
-    subagents: object,
+    task_executor: object,
     source_provider: FakeResearchSourceProvider | None = None,
-) -> AgentWorkflowManager:
-    """构造 workflow manager，输入为临时目录和 fake subagents，输出为 manager。"""
-    return AgentWorkflowManager(
-        subagents=subagents,  # type: ignore[arg-type]
+) -> WorkflowStrategyTestManager:
+    """构造 workflow manager，输入为临时目录和 task executor，输出为 manager。"""
+    return WorkflowStrategyTestManager(
+        task_executor=task_executor,  # type: ignore[arg-type]
         config=_config(tmp_path),
         workspace_root=tmp_path,
         role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
@@ -148,13 +160,7 @@ def _manager(
 
 def _config(tmp_path: Path) -> Config:
     """构造测试配置，输入为临时目录，输出为 file session 配置。"""
-    cfg = Config(
-        model=ModelConfig(
-            name="fake-model",
-            base_url="http://127.0.0.1:1234/v1",
-            api_key="",
-        )
-    )
+    cfg = Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
     cfg.session.file_store_path = str(tmp_path / "sessions")
     return cfg
 

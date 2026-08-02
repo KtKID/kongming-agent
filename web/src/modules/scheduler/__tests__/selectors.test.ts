@@ -12,13 +12,14 @@ import type {
 
 function makeTask(
   taskId: string,
-  state: SchedulerTaskVM["state"],
+  lifecycle: SchedulerTaskVM["lifecycle"],
 ): SchedulerTaskVM {
   return {
     taskId,
     name: taskId,
-    enabled: true,
-    state,
+    lifecycle,
+    latestRunStatus: null,
+    liveRuntimeStatus: "idle",
     triggerType: "cron",
     triggerExpr: "0 9 * * *",
     nextRunAt: null,
@@ -41,6 +42,10 @@ function makeState(overrides: Partial<SchedulerStoreState> = {}): SchedulerStore
     tasks: [],
     taskMap: {},
     runsByTaskId: {},
+    runtimeStatusByTaskId: {},
+    liveRunIdsByTaskId: {},
+    selectedRunIdByTaskId: {},
+    pendingManualRunTaskId: null,
     selectedTaskId: null,
     filter: "all",
     errorMessage: null,
@@ -73,10 +78,13 @@ describe("scheduler selectors", () => {
         runId: "run-1",
         taskId: task.taskId,
         taskName: task.name,
+        sessionId: "session-1",
+        threadId: "thread-1",
         scheduledFor: "2026-05-14T10:00:00+08:00",
         startedAt: null,
         finishedAt: null,
         status: "running",
+        failureReason: null,
         finalMessageExcerpt: null,
         deliveryStatus: "pending",
         deliveryError: null,
@@ -93,9 +101,20 @@ describe("scheduler selectors", () => {
   });
 
   it("memoizes filtered task arrays for the same snapshot", () => {
-    const tasks = [makeTask("task-1", "running"), makeTask("task-2", "paused")];
-    const state = makeState({ tasks, filter: "running" });
+    const tasks = [makeTask("task-1", "scheduled"), makeTask("task-2", "paused")];
+    const state = makeState({ tasks, filter: "scheduled" });
 
     expect(selectFilteredTasks(state)).toBe(selectFilteredTasks(state));
+  });
+
+  it("keeps lifecycle filters independent from live runtime status", () => {
+    const tasks = [makeTask("task-1", "scheduled"), makeTask("task-2", "paused")];
+    const state = makeState({
+      tasks,
+      filter: "paused",
+      runtimeStatusByTaskId: { "task-1": "running" },
+    });
+
+    expect(selectFilteredTasks(state)).toEqual([tasks[1]]);
   });
 });

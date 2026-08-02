@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -32,13 +32,14 @@ from core.contracts import (
     EventSink,
     LLMRequest,
     LLMResponse,
+    PreparedToolCall,
     Session,
     Tool,
 )
 from core.message import Message
 from core.result import Result
 from core.runner import Runner
-from infrastructure.config.models import Config, LLMPresetConfig, ModelConfig
+from infrastructure.config.models import Config, ModelSelectionConfig
 from scheduler.domain import (
     ConcurrencyPolicy,
     DueTaskReservation,
@@ -49,13 +50,19 @@ from scheduler.domain import (
     ScheduleTrigger,
     SessionMode,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
+from scheduler.manager import SchedulerManager
 from scheduler.store import Store
 from scheduler.timing import to_iso, utc_now
+from tests._helpers.model_runtime import CatalogModelFixture, make_model_catalog_manager
+from tests.support.scheduled_runtime import (
+    RunnerBackedScheduledRuntime,
+    execute_bridge_for_test,
+)
 
 # ---------------------------------------------------------------------------
 # fakes
@@ -78,7 +85,8 @@ class _NoopTool:
     description: str = "noop tool"
     input_schema: dict[str, Any] = field(default_factory=dict)
 
-    async def execute(self, args: dict[str, Any], ctx: Any) -> Any:  # pragma: no cover
+    async def execute(self, prepared: PreparedToolCall, ctx: Any) -> Any:
+        del prepared, ctx
         raise NotImplementedError
 
 
@@ -105,7 +113,10 @@ class _SuccessRunner(Runner):
         max_turns: int | None = None,
         run_id: str | None = None,
         enabled_tools: Sequence[Tool] | None = None,
+        event_sinks: Sequence[EventSink] | None = None,
+        tool_context_metadata: dict[str, Any] | None = None,
     ) -> Result:
+        del event_sinks, tool_context_metadata
         self.captured_agent_specs.append(agent_spec)
         return Result(
             run_id=run_id or f"run-{session.session_id}-1",
@@ -126,8 +137,7 @@ def _make_task(*, preset_id: str = "") -> ScheduledTask:
     return ScheduledTask(
         task_id="task-misconfig",
         name="t",
-        enabled=True,
-        state=TaskState.SCHEDULED,
+        lifecycle=TaskLifecycleState.SCHEDULED,
         origin=TaskOrigin.CLI,
         trigger=ScheduleTrigger(
             trigger_type=TriggerType.INTERVAL,
@@ -172,45 +182,43 @@ def _make_agent_spec() -> AgentSpec:
     )
 
 
-def _make_preset(preset_id: str, model_name: str) -> LLMPresetConfig:
-    return LLMPresetConfig(
-        id=preset_id,
-        display_name=preset_id,
-        base_url="https://api.example.com/v1",
-        model=model_name,
-    )
-
-
-def _make_base_config() -> Config:
-    """preset 命中路径会走 apply_preset(config, preset)，需要非 None base_config。"""
-    return Config(model=ModelConfig(name="default-model", base_url="http://127.0.0.1:1234/v1"))
+def _make_base_config(preset_id: str) -> Config:
+    """构造只保存默认 preset 的 v0.6 配置。"""
+    return Config(model=ModelSelectionConfig(preset_id=preset_id))
 
 
 def _build_bridge(
     *,
+    tmp_path: Path,
     store: Store,
     runner: Runner,
-    preset_map: dict[str, LLMPresetConfig] | None = None,
+    catalog_models: tuple[CatalogModelFixture, ...] = (),
     event_sinks: Sequence[EventSink] = (),
-    base_config: Config | None = None,
 ) -> ExecutionBridge:
-    # preset_map 装配时一般也有 base_config（apply_preset 需要）；测试用例可显式覆盖。
-    effective_base = (
-        base_config if base_config is not None else (_make_base_config() if preset_map else None)
+    catalog_manager = (
+        make_model_catalog_manager(tmp_path, models=catalog_models) if catalog_models else None
     )
+    base_config = _make_base_config(catalog_models[0].preset_id) if catalog_models else None
+    default_model = (
+        catalog_manager.resolve_runtime(base_config.model)
+        if catalog_manager is not None and base_config is not None
+        else None
+    )
+    approval = _AllowApproval()
     return ExecutionBridge(
-        runner=runner,
+        runtime=RunnerBackedScheduledRuntime(runner, approval=approval),
         llm=_StubLLM(),
         tools={},
         enabled_tool_names=(),
-        inner_approval=_AllowApproval(),
+        inner_approval=approval,
         session_factory=lambda sid: InMemorySession(sid),
         event_sinks=event_sinks,
         agent_spec=_make_agent_spec(),
         store=store,
         watchdog_poll_interval_seconds=0.02,
-        preset_map=preset_map,
-        base_config=effective_base,
+        model_catalog_manager=catalog_manager,
+        default_model=default_model,
+        base_config=base_config,
     )
 
 
@@ -225,16 +233,18 @@ def store(tmp_path: Path) -> Store:
 
 
 @pytest.mark.asyncio
-async def test_w1_misconfigured_preset_id_yields_failed_run(store: Store) -> None:
-    """preset_map 有 'foo' 但 task.preset_id='bar' → run 失败 + 写明原因。"""
+async def test_w1_misconfigured_preset_id_yields_failed_run(store: Store, tmp_path: Path) -> None:
+    """catalog 有 'foo' 但 task.preset_id='bar' → run 失败 + 写明原因。"""
     bridge = _build_bridge(
+        tmp_path=tmp_path,
         store=store,
         runner=_SuccessRunner(),
-        preset_map={"foo": _make_preset("foo", "Foo-Model")},
+        catalog_models=(CatalogModelFixture("foo", "Foo-Model"),),
     )
     task = _make_task(preset_id="bar")
+    store.create_task(task)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     # 1) 返回 FAILED + RUNNER_EXCEPTION（沿用 _build_exception_record 行为）
     assert run.status is RunStatus.FAILED, (
@@ -242,10 +252,9 @@ async def test_w1_misconfigured_preset_id_yields_failed_run(store: Store) -> Non
     )
     assert run.failure_reason is RunFailureReason.RUNNER_EXCEPTION
     assert run.error_message is not None
-    # error_message 包含 ValueError 类型 + 错配的 preset_id 名 + 可用列表
-    assert "ValueError" in run.error_message
+    # error_message 包含稳定 catalog error 类型与错配 preset。
+    assert "ModelProviderCatalogError" in run.error_message
     assert "'bar'" in run.error_message
-    assert "foo" in run.error_message  # 可用列表里露出 foo
 
     # 2) RUNNING 行被 supersede：list_runs 拿到的最终一行是 FAILED
     # store.list_runs 内部已过滤 _superseded=True，返回 list[ScheduledRun]
@@ -260,9 +269,61 @@ async def test_w1_misconfigured_preset_id_yields_failed_run(store: Store) -> Non
     assert "run_started" in actions
     assert "run_failed" in actions
 
+    # SC_15：recurring lifecycle 与失败 run 正交；last_run_at 取 terminal finished_at。
+    persisted = store.get_task(task.task_id)
+    assert persisted is not None
+    assert persisted.lifecycle is TaskLifecycleState.SCHEDULED
+    assert persisted.last_run_at == run.finished_at
+    projection = SchedulerManager(store).project_task(persisted)
+    assert projection.latest_run_status is RunStatus.FAILED
+
 
 @pytest.mark.asyncio
-async def test_w1_misconfigured_preset_does_not_invoke_runner(store: Store) -> None:
+async def test_one_shot_execution_bridge_finishes_exhausted_task(
+    store: Store,
+    tmp_path: Path,
+) -> None:
+    """SC_16：真实 ExecutionBridge 收口 one-shot run 后才写 last_run_at。"""
+    task = replace(
+        _make_task(),
+        task_id="task-one-shot-terminal",
+        lifecycle=TaskLifecycleState.SCHEDULED,
+        trigger=ScheduleTrigger(
+            trigger_type=TriggerType.ONCE,
+            expr="2026-07-29T00:00:00+00:00",
+            timezone="UTC",
+        ),
+        next_run_at="2026-07-29T00:00:00+00:00",
+        last_run_at=None,
+    )
+    store.create_task(task)
+    reservation = store.reserve_due_tasks(now="2026-07-29T00:00:01+00:00")[0]
+    reserved_task = store.get_task(task.task_id)
+    assert reserved_task is not None
+    assert reserved_task.lifecycle is TaskLifecycleState.EXHAUSTED
+    assert reserved_task.last_run_at is None
+
+    bridge = _build_bridge(
+        tmp_path=tmp_path,
+        store=store,
+        runner=_SuccessRunner(),
+    )
+    run = await execute_bridge_for_test(bridge, reservation)
+
+    persisted = store.get_task(task.task_id)
+    assert persisted is not None
+    assert run.status is RunStatus.COMPLETED
+    assert run.finished_at is not None
+    assert persisted.lifecycle is TaskLifecycleState.EXHAUSTED
+    assert persisted.last_run_at == run.finished_at
+    projection = SchedulerManager(store).project_task(persisted)
+    assert projection.latest_run_status is RunStatus.COMPLETED
+    assert projection.live_runtime_status is not None
+    assert projection.live_runtime_status.value == "idle"
+
+
+@pytest.mark.asyncio
+async def test_w1_misconfigured_preset_does_not_invoke_runner(store: Store, tmp_path: Path) -> None:
     """preset 错配时 runner 不应被调用（_build_provider 抛错位于 runner 之前）。"""
 
     invoked = {"count": 0}
@@ -276,11 +337,12 @@ async def test_w1_misconfigured_preset_does_not_invoke_runner(store: Store) -> N
             raise RuntimeError("should not be called")
 
     bridge = _build_bridge(
+        tmp_path=tmp_path,
         store=store,
         runner=_CountingRunner(),
-        preset_map={"foo": _make_preset("foo", "Foo-Model")},
+        catalog_models=(CatalogModelFixture("foo", "Foo-Model"),),
     )
-    run = await bridge.execute(_make_reservation(_make_task(preset_id="bar")))
+    run = await execute_bridge_for_test(bridge, _make_reservation(_make_task(preset_id="bar")))
 
     assert run.status is RunStatus.FAILED
     assert invoked["count"] == 0, "runner.run must not be invoked when preset misconfigured"
@@ -292,10 +354,12 @@ async def test_w1_misconfigured_preset_does_not_invoke_runner(store: Store) -> N
 
 
 @pytest.mark.asyncio
-async def test_w2_empty_preset_with_no_preset_map_uses_default_llm(store: Store) -> None:
-    """preset_id="" 且 preset_map=None → 走 self._llm，正常完成。"""
-    bridge = _build_bridge(store=store, runner=_SuccessRunner(), preset_map=None)
-    run = await bridge.execute(_make_reservation(_make_task(preset_id="")))
+async def test_w2_empty_preset_without_catalog_override_uses_default_llm(
+    store: Store, tmp_path: Path
+) -> None:
+    """preset_id="" 且无 catalog override → 走 self._llm，正常完成。"""
+    bridge = _build_bridge(tmp_path=tmp_path, store=store, runner=_SuccessRunner())
+    run = await execute_bridge_for_test(bridge, _make_reservation(_make_task(preset_id="")))
 
     assert run.status is RunStatus.COMPLETED, (
         "未启用 preset 体系应保留向后兼容（不抛错），现状被 regress"
@@ -304,17 +368,18 @@ async def test_w2_empty_preset_with_no_preset_map_uses_default_llm(store: Store)
 
 
 @pytest.mark.asyncio
-async def test_w3_empty_preset_with_preset_map_uses_default_llm(store: Store) -> None:
-    """preset_id="" 但 preset_map 装配了 entries → 仍走 self._llm，正常完成。
+async def test_w3_empty_preset_with_catalog_uses_default_llm(store: Store, tmp_path: Path) -> None:
+    """preset_id="" 且 catalog 已装配 → 仍走默认 snapshot/self._llm。
 
     语义：task 未声明 preset = 未启用 preset 体系，不查 map，**不算错配**。
     """
     bridge = _build_bridge(
+        tmp_path=tmp_path,
         store=store,
         runner=_SuccessRunner(),
-        preset_map={"foo": _make_preset("foo", "Foo-Model")},
+        catalog_models=(CatalogModelFixture("foo", "Foo-Model"),),
     )
-    run = await bridge.execute(_make_reservation(_make_task(preset_id="")))
+    run = await execute_bridge_for_test(bridge, _make_reservation(_make_task(preset_id="")))
 
     assert run.status is RunStatus.COMPLETED
     assert run.failure_reason is None
@@ -326,22 +391,28 @@ async def test_w3_empty_preset_with_preset_map_uses_default_llm(store: Store) ->
 
 
 @pytest.mark.asyncio
-async def test_w4_preset_hit_overrides_agent_spec_default_model(store: Store) -> None:
+async def test_w4_preset_hit_overrides_agent_spec_default_model(
+    store: Store, tmp_path: Path
+) -> None:
     """preset 命中时，runner 收到的 agent_spec.default_model 必须等于 preset.model。
 
     bug 复现历史：v0.4 切 preset 只换了 LLMProvider，agent_spec 没换，导致
-    LLMRequest.model 仍是装配期 cfg.model.name（env 默认）。结果：
+    LLMRequest.model 仍是装配期默认 catalog model。结果：
     ``base_url=智谱 + model=本地默认``，后端回"模型不存在"。
     本测试断言修复后 runner 拿到的 agent_spec.default_model == preset.model。
     """
     runner = _SuccessRunner()
     bridge = _build_bridge(
+        tmp_path=tmp_path,
         store=store,
         runner=runner,
-        preset_map={"glm5": _make_preset("glm5", "glm-5.1")},
+        catalog_models=(
+            CatalogModelFixture("default", "default-model"),
+            CatalogModelFixture("glm5", "glm-5.1"),
+        ),
     )
 
-    run = await bridge.execute(_make_reservation(_make_task(preset_id="glm5")))
+    run = await execute_bridge_for_test(bridge, _make_reservation(_make_task(preset_id="glm5")))
 
     assert run.status is RunStatus.COMPLETED
     assert len(runner.captured_agent_specs) == 1, "runner.run 应被调一次"
@@ -353,19 +424,20 @@ async def test_w4_preset_hit_overrides_agent_spec_default_model(store: Store) ->
 
 
 @pytest.mark.asyncio
-async def test_w4_preset_with_reasoning_effort_overrides_spec(store: Store) -> None:
-    """preset 声明了 reasoning_effort 时，agent_spec.reasoning_effort 也跟着换。"""
-    preset = LLMPresetConfig(
-        id="glm5-high",
-        display_name="glm5-high",
-        base_url="https://api.example.com/v1",
-        model="glm-5.1",
-        reasoning_effort="high",
-    )
+async def test_w4_preset_with_reasoning_effort_overrides_spec(store: Store, tmp_path: Path) -> None:
+    """catalog 默认 reasoning effort 会进入 per-run agent spec。"""
     runner = _SuccessRunner()
-    bridge = _build_bridge(store=store, runner=runner, preset_map={"glm5-high": preset})
+    bridge = _build_bridge(
+        tmp_path=tmp_path,
+        store=store,
+        runner=runner,
+        catalog_models=(
+            CatalogModelFixture("default", "default-model"),
+            CatalogModelFixture("glm5-high", "glm-5.1", "high"),
+        ),
+    )
 
-    await bridge.execute(_make_reservation(_make_task(preset_id="glm5-high")))
+    await execute_bridge_for_test(bridge, _make_reservation(_make_task(preset_id="glm5-high")))
 
     captured = runner.captured_agent_specs[0]
     assert captured.default_model == "glm-5.1"
@@ -373,16 +445,22 @@ async def test_w4_preset_with_reasoning_effort_overrides_spec(store: Store) -> N
 
 
 @pytest.mark.asyncio
-async def test_w4_preset_without_reasoning_effort_keeps_spec_value(store: Store) -> None:
-    """preset 没声明 reasoning_effort 时，保留 spec 现值，不被 None 覆盖。"""
+async def test_w4_preset_without_reasoning_effort_clears_spec_value(
+    store: Store, tmp_path: Path
+) -> None:
+    """catalog 未声明 reasoning capability 时 per-run spec 使用 None。"""
     runner = _SuccessRunner()
     bridge = _build_bridge(
+        tmp_path=tmp_path,
         store=store,
         runner=runner,
-        preset_map={"plain": _make_preset("plain", "plain-model")},  # 无 reasoning_effort
+        catalog_models=(
+            CatalogModelFixture("default", "default-model"),
+            CatalogModelFixture("plain", "plain-model"),
+        ),
     )
 
-    await bridge.execute(_make_reservation(_make_task(preset_id="plain")))
+    await execute_bridge_for_test(bridge, _make_reservation(_make_task(preset_id="plain")))
 
     captured = runner.captured_agent_specs[0]
     assert captured.default_model == "plain-model"
@@ -391,12 +469,12 @@ async def test_w4_preset_without_reasoning_effort_keeps_spec_value(store: Store)
 
 
 @pytest.mark.asyncio
-async def test_w4_no_preset_keeps_default_agent_spec(store: Store) -> None:
+async def test_w4_no_preset_keeps_default_agent_spec(store: Store, tmp_path: Path) -> None:
     """preset_id="" 时 agent_spec 不变（向后兼容）。"""
     runner = _SuccessRunner()
-    bridge = _build_bridge(store=store, runner=runner, preset_map=None)
+    bridge = _build_bridge(tmp_path=tmp_path, store=store, runner=runner)
 
-    await bridge.execute(_make_reservation(_make_task(preset_id="")))
+    await execute_bridge_for_test(bridge, _make_reservation(_make_task(preset_id="")))
 
     captured = runner.captured_agent_specs[0]
     # _make_agent_spec 设的 default_model="m"

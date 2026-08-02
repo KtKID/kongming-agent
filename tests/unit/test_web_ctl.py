@@ -3,6 +3,13 @@ from pathlib import Path
 from hosts.web import ctl
 
 
+def test_port_probe_host_uses_loopback_for_wildcard_hosts() -> None:
+    assert ctl._port_probe_host("0.0.0.0") == "127.0.0.1"
+    assert ctl._port_probe_host("") == "127.0.0.1"
+    assert ctl._port_probe_host("::") == "::1"
+    assert ctl._port_probe_host("localhost") == "localhost"
+
+
 def test_persist_running_pid_prefers_listener_pid(
     monkeypatch,
     tmp_path: Path,

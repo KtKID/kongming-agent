@@ -30,7 +30,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from starlette.responses import JSONResponse
 
@@ -40,6 +40,8 @@ if TYPE_CHECKING:
     from starlette.requests import Request
 
     from hosts.web.protocol import ErrorCode
+
+from infrastructure.config.model_provider_catalog import ModelProviderCatalogError
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +121,17 @@ class WebAuthNotConfiguredError(KongmingWebError):
     status_code = 500
 
 
+class ModelCatalogWebError(KongmingWebError):
+    """把 catalog typed error 映射到统一 REST error envelope。"""
+
+    status_code = 422
+
+    def __init__(self, error: ModelProviderCatalogError) -> None:
+        super().__init__(str(error))
+        self.error_code = cast("ErrorCode", error.code.value)
+        self.details = dict(error.details)
+
+
 async def kongming_error_handler(
     request: Request,
     exc: Exception,
@@ -152,6 +165,7 @@ async def kongming_error_handler(
         content=ErrorResponseDTO(
             error_code=exc.error_code,
             message=exc.message,
+            details=getattr(exc, "details", None),
         ).model_dump(),
         headers=headers,
     )
@@ -163,6 +177,7 @@ __all__ = [
     "InvalidRequestError",
     "InvalidThreadIdError",
     "KongmingWebError",
+    "ModelCatalogWebError",
     "NotAuthenticatedError",
     "RateLimitedError",
     "ThreadNotFoundError",

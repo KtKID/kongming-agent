@@ -12,7 +12,7 @@
   - 本地端点（127.x / localhost）保留完整 URL（无敏感信息）
   - 远端端点只保留 host 部分（``api.openai.com``）
 
-依赖：``cfg.web.llm_presets`` 列表。
+依赖：``app.state.model_catalog_manager``。
 """
 
 from __future__ import annotations
@@ -24,9 +24,15 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Request
 
 from hosts.web.protocol import LLMPresetDTO
+from infrastructure.config.model_catalog_manager import ModelCatalogManager
+from infrastructure.config.model_provider_catalog import ModelProviderCatalogError
 
 if TYPE_CHECKING:
-    from infrastructure.config.models import Config, LLMPresetConfig
+    from infrastructure.config.model_provider_catalog import (
+        ModelProviderDefinition,
+        ModelProviderModelDefinition,
+        ResolvedModelConfig,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -74,21 +80,39 @@ def _redact_base_url(base_url: str) -> str:
     return host
 
 
-def _preset_to_dto(preset: LLMPresetConfig) -> LLMPresetDTO:
+def _preset_to_dto(
+    provider: ModelProviderDefinition,
+    model: ModelProviderModelDefinition,
+    runtime: ResolvedModelConfig,
+) -> LLMPresetDTO:
     return LLMPresetDTO(
-        id=preset.id,
-        display_name=preset.display_name,
-        model=preset.model,
-        base_url_summary=_redact_base_url(preset.base_url),
-        requires_api_key=preset.api_key_env is not None,
+        id=model.preset_id,
+        display_name=model.display_name or f"{provider.display_name} / {model.model}",
+        model=model.model,
+        base_url_summary=_redact_base_url(runtime.base_url),
+        requires_api_key=runtime.api_key_env is not None and not runtime.is_local,
     )
 
 
 @router.get("")
 async def list_presets(request: Request) -> list[LLMPresetDTO]:
     """返回所有可用 preset（脱敏）。"""
-    cfg: Config = request.app.state.config
-    return [_preset_to_dto(p) for p in cfg.web.llm_presets]
+    manager = getattr(request.app.state, "model_catalog_manager", None)
+    if not isinstance(manager, ModelCatalogManager):
+        manager = ModelCatalogManager()
+    result: list[LLMPresetDTO] = []
+    for provider in manager.list_providers():
+        for model in provider.models:
+            try:
+                runtime = manager.resolve_runtime(
+                    request.app.state.config.model,
+                    preset_id=model.preset_id,
+                )
+                manager.resolve_credential(runtime)
+            except ModelProviderCatalogError:
+                continue
+            result.append(_preset_to_dto(provider, model, runtime))
+    return result
 
 
 __all__ = ["router"]

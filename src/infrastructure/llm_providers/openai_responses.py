@@ -23,32 +23,45 @@ runner 通过 ``isinstance(llm, SupportsLLMStream)`` 能力探测分派。
   每次握手的 ~100-300ms 延迟。
 - timeout 不绑在 client 级，而是每次 ``.post(..., timeout=...)`` 按 per-request
   覆盖，保证不同 ``LLMRequest.timeout_seconds`` 都生效。
-- 关闭由调用方（``NativeRuntime.aclose`` / CLI finally 分支）触发
+- 关闭由调用方（``SessionEngine.aclose`` / CLI finally 分支）触发
   :meth:`BaseLLMProvider.aclose` 释放连接池。
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import httpx
 
-from core.contracts import LLMRequest, LLMResponse, LLMStreamChunk
+from core.contracts import (
+    LLMRequest,
+    LLMResponse,
+    LLMStreamChunk,
+    ProviderUsageCompleteness,
+    ProviderUsageFamily,
+)
 from core.errors import ProviderError
-from infrastructure.config.models import ModelConfig
+from infrastructure.config.api_key_headers import build_api_key_headers
+from infrastructure.config.model_provider_catalog import (
+    ResolvedModelConfig,
+    ResolvedModelCredential,
+)
 from infrastructure.llm_providers.base import BaseLLMProvider
 from infrastructure.llm_providers.openai_compat_stream_parser import OpenAICompatStreamParser
 from infrastructure.llm_providers.raw_dump import dump_raw_llm_interaction
 from infrastructure.llm_providers.reasoning import (
-    EffortLevel,
     ReasoningConfig,
+    ResolvedReasoningPlan,
     resolve_reasoning_plan,
 )
 from infrastructure.llm_providers.sse_reader import iter_sse_events
+from infrastructure.llm_providers.usage import ProviderUsageManager
 from network.network_log import log_network_exception
 
 FinishReasonStr = Literal["stop", "tool_calls", "length", "error", "other"]
+_LOGGER = logging.getLogger(__name__)
 
 
 class OpenAIResponsesProvider(BaseLLMProvider):
@@ -65,7 +78,8 @@ class OpenAIResponsesProvider(BaseLLMProvider):
     def __init__(
         self,
         *,
-        model_config: ModelConfig,
+        model_config: ResolvedModelConfig,
+        credential: ResolvedModelCredential,
         max_retries: int = 3,
         retry_backoff: float = 1.0,
         enable_raw_dump: bool = False,
@@ -73,6 +87,7 @@ class OpenAIResponsesProvider(BaseLLMProvider):
     ) -> None:
         super().__init__(
             model_config=model_config,
+            credential=credential,
             max_retries=max_retries,
             retry_backoff=retry_backoff,
         )
@@ -80,6 +95,7 @@ class OpenAIResponsesProvider(BaseLLMProvider):
         # env KONGMING_TRACE_RAW_LLM=1 通过 infrastructure.config 的 env 覆盖链路
         # 会自动把 cfg.trace.raw_llm 变成 True，这里只读最终结果。
         self._enable_raw_dump = enable_raw_dump
+        self._usage_manager = ProviderUsageManager()
         # 流式 read 超时（秒）。装配层从 cfg.stream.read_timeout 传入；
         # 本地 endpoint（model.is_local=True）会被 stream() 内部自动上调到
         # max(stream_read_timeout, model.timeout)，因为本地推理 token 间隔可能更长。
@@ -201,7 +217,7 @@ class OpenAIResponsesProvider(BaseLLMProvider):
         )
 
         client = self._ensure_client()
-        parser = OpenAICompatStreamParser()
+        parser = OpenAICompatStreamParser(usage_manager=self._usage_manager)
 
         # B#3 raw_dump 累积：流结束（成功或失败）一次性落盘
         chunks_buffer: list[dict[str, Any]] = []
@@ -304,7 +320,7 @@ class OpenAIResponsesProvider(BaseLLMProvider):
             request.max_tokens if request.max_tokens is not None else self._model_config.max_tokens
         )
         payload["temperature"] = temperature
-        payload["max_tokens"] = max_tokens
+        payload[_token_parameter_name(request)] = max_tokens
 
         if request.tools:
             payload["tools"] = self.tools_to_openai_format(list(request.tools))
@@ -312,10 +328,22 @@ class OpenAIResponsesProvider(BaseLLMProvider):
             # 可配参数时，从 LLMRequest.metadata 读。
             payload["tool_choice"] = "auto"
 
-        # reasoning_effort：从 model_config 读取，按 model name 映射到厂商格式。
-        effort = self._model_config.reasoning_effort
+        # reasoning_effort：请求级值覆盖 provider 配置默认值，按最终 model 映射到厂商格式。
+        effort = (
+            request.reasoning_effort
+            if request.reasoning_effort is not None
+            else self._default_reasoning_effort()
+        )
         if effort is not None:
             self._apply_reasoning_effort(payload, effort)
+        else:
+            model_name = _payload_model_name(payload, self._model_config.name)
+            self._log_reasoning_decision(
+                model_name=model_name,
+                requested_effort=None,
+                plan=None,
+                capability_configured=self._reasoning_capability(model_name) is not None,
+            )
 
         # 允许调用方通过 metadata 追加 provider 特定字段（v1-mini 先不展开解释
         # 每个字段；透传便于调试）。
@@ -329,31 +357,73 @@ class OpenAIResponsesProvider(BaseLLMProvider):
         return payload
 
     def _apply_reasoning_effort(self, payload: dict[str, Any], effort: str) -> None:
-        """按 reasoning_profiles 匹配最终模型名，注入厂商特定 reasoning 参数。
-
-        profiles 为空时静默跳过（reasoning_effort 配置不生效）。
-        """
-        profiles = self._model_config.reasoning_profiles
-        if not profiles:
+        """按 runtime snapshot 的直接 capability 注入 reasoning 参数。"""
+        model_name = _payload_model_name(payload, self._model_config.name)
+        capability = self._reasoning_capability(model_name)
+        if capability is None:
+            self._log_reasoning_decision(
+                model_name=model_name,
+                requested_effort=effort,
+                plan=None,
+                capability_configured=False,
+            )
+            config = ReasoningConfig(enabled=True, effort=effort)
+            resolve_reasoning_plan(model_name, config, capability)
             return
-        model_name = payload.get("model", self._model_config.name)
-        config = ReasoningConfig(enabled=True, effort=cast(EffortLevel, effort))
-        plan = resolve_reasoning_plan(model_name, config, profiles)
+        config = ReasoningConfig(enabled=True, effort=effort)
+        plan = resolve_reasoning_plan(model_name, config, capability)
+        self._log_reasoning_decision(
+            model_name=model_name,
+            requested_effort=effort,
+            plan=plan,
+            capability_configured=True,
+        )
         if plan.send_reasoning:
             payload.update(plan.payload_patch)
+
+    def _log_reasoning_decision(
+        self,
+        *,
+        model_name: str,
+        requested_effort: str | None,
+        plan: ResolvedReasoningPlan | None,
+        capability_configured: bool,
+    ) -> None:
+        """记录每次请求的 reasoning 开关、档位和实际 payload 注入决策。"""
+        switch = _reasoning_switch(requested_effort)
+        _LOGGER.info(
+            "llm.reasoning provider=%s model=%s switch=%s requested_effort=%s "
+            "normalized_effort=%s adapter=%s send_reasoning=%s payload_keys=%s "
+            "catalog_source=%s catalog_provider=%s preset_id=%s capability_configured=%s",
+            "openai_compatible",
+            model_name,
+            switch,
+            requested_effort,
+            plan.normalized_effort if plan is not None else None,
+            plan.adapter_name if plan is not None else "none",
+            plan.send_reasoning if plan is not None else False,
+            sorted(plan.payload_patch.keys()) if plan is not None else [],
+            *self._reasoning_catalog_context(),
+            capability_configured,
+        )
 
     def _build_headers(self) -> dict[str, str]:
         """按 api_key 是否为空决定要不要带 Authorization 头。
 
         本地模型（api_key 为空）：无鉴权头，兼容 LM Studio / Ollama 等。
-        远端模型：标准 Bearer token。
+        远端模型：按 ``model.api_key_header`` 写入 API key。
         """
         headers: dict[str, str] = {
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        if self._model_config.api_key:
-            headers["Authorization"] = f"Bearer {self._model_config.api_key}"
+        headers.update(
+            build_api_key_headers(
+                api_key=self._credential.value,
+                api_key_header=self._credential.header
+                or self._model_config.effective_api_key_header,
+            )
+        )
         return headers
 
     # ------------------------------------------------------------------
@@ -376,30 +446,21 @@ class OpenAIResponsesProvider(BaseLLMProvider):
             finish_reason_raw, message_has_tool_calls=bool(message.tool_calls)
         )
 
-        usage = data.get("usage") or {}
-        # task#3.1：OpenAI usage 字段透传 SDK 原生字段 + provider_kind 标识，
-        # 用于 web.usage_token.UsageTokenManager 按 channel 解析。
-        normalized_usage: dict[str, Any] = {
-            "provider_kind": "openai_compatible",
-        }
-        # 标准 3 字段
-        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-            if key in usage:
-                normalized_usage[key] = usage[key]
-        # 派生 channel-specific 字段（OpenAI 系命名跟 usage_token._channel_openai 对齐）
-        # prompt_tokens 视为 input_tokens（OpenAI 语义：含 cached_input 子集）
-        # completion_tokens 视为 output_tokens（含 reasoning_output 子集）
-        if "prompt_tokens" in usage:
-            normalized_usage["input_tokens"] = usage["prompt_tokens"]
-        if "completion_tokens" in usage:
-            normalized_usage["output_tokens"] = usage["completion_tokens"]
-        # cached_tokens / reasoning_tokens：从 details 子结构提到 usage 主体
+        usage_value = data.get("usage")
+        usage = usage_value if isinstance(usage_value, dict) else {}
+        response_id = data.get("id")
+        normalized_usage = self._usage_manager.normalize(
+            family=ProviderUsageFamily.OPENAI_CHAT_COMPLETIONS,
+            raw_usage=usage,
+            completeness=(
+                ProviderUsageCompleteness.COMPLETE
+                if isinstance(usage_value, dict)
+                else ProviderUsageCompleteness.INCOMPLETE
+            ),
+            provider_response_id=response_id if isinstance(response_id, str) else None,
+        )
         completion_details = usage.get("completion_tokens_details") or {}
-        if "reasoning_tokens" in completion_details:
-            normalized_usage["reasoning_output_tokens"] = completion_details["reasoning_tokens"]
         prompt_details = usage.get("prompt_tokens_details") or {}
-        if "cached_tokens" in prompt_details:
-            normalized_usage["cached_input_tokens"] = prompt_details["cached_tokens"]
 
         # 厂商扩展字段：按原始字段名收集，不归一化（infrastructure.tracing 老消费者用）
         provider_metadata: dict[str, Any] = {}
@@ -476,7 +537,7 @@ class OpenAIResponsesProvider(BaseLLMProvider):
 
         - ``tool_calls`` → ``tool_calls``
         - ``stop`` / ``end_turn`` → ``stop``
-        - ``length`` / ``max_tokens`` → ``length``
+        - ``length`` / ``max_tokens`` / ``max_completion_tokens`` → ``length``
         - ``content_filter`` / ``error`` → ``error``
         - 其它 → ``other``
 
@@ -489,11 +550,36 @@ class OpenAIResponsesProvider(BaseLLMProvider):
             return "tool_calls"
         if raw in ("stop", "end_turn"):
             return "stop"
-        if raw in ("length", "max_tokens"):
+        if raw in ("length", "max_tokens", "max_completion_tokens"):
             return "length"
         if raw in ("content_filter", "error"):
             return "error"
         return "other"
+
+
+def _token_parameter_name(request: LLMRequest) -> str:
+    """读取请求级 token 字段名，输入为 LLMRequest，输出为 provider payload key。"""
+    raw = request.metadata.get("token_parameter_name") if request.metadata else None
+    if raw == "max_completion_tokens":
+        return "max_completion_tokens"
+    return "max_tokens"
+
+
+def _reasoning_switch(effort: str | None) -> str:
+    """把请求 effort 投影成日志里的开关状态。"""
+    if effort is None:
+        return "unspecified"
+    if effort.lower() == "none":
+        return "disabled"
+    return "enabled"
+
+
+def _payload_model_name(payload: dict[str, Any], fallback: str) -> str:
+    """从 provider payload 中读取最终模型名。"""
+    model_name = payload.get("model")
+    if isinstance(model_name, str):
+        return model_name
+    return fallback
 
 
 __all__ = ["OpenAIResponsesProvider"]

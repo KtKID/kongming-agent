@@ -1,18 +1,10 @@
-"""routers/presets.py 单测（v0.1.5）。
-
-覆盖：
-
-1. 多 preset 全字段返回
-2. api_key 不会出现在响应里
-3. base_url 远端只保留 host[:port]；本地原样
-4. requires_api_key 反映 api_key_env 是否非 None
-"""
+"""catalog v2 preset Web 路由合同测试。"""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from hosts.web.app import create_app
@@ -24,109 +16,101 @@ from tests.unit.test_web_app_lifespan import FakeThreadManager, _seed_password
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
 
 
-def _make_cfg(presets: list[dict[str, Any]]) -> Config:
+@pytest.fixture(autouse=True)
+def _isolate_provider_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """清理真实 provider credential，保持列表可预测。"""
+    for name in (
+        "MINIMAX_API_KEY",
+        "KONGMING_PROVIDER_MINIMAX_API_KEY",
+        "GLM_API_KEY",
+        "BIGMODEL_API_KEY",
+        "ZHIPU_API_KEY",
+        "ZAI_API_KEY",
+        "DEEPSEEK_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _make_cfg() -> Config:
+    """构造仅保存运行选择的 v0.6 Web 配置。"""
     return Config.model_validate(
         {
-            "model": {
-                "name": "fake",
-                "base_url": "http://127.0.0.1:1234/v1",
-                "api_key": "",
-            },
-            "web": {
-                "enabled": True,
-                "dev_mode": True,
-                "llm_presets": presets,
-            },
+            "model": {"preset_id": "local-gemma-4-e4b-it"},
+            "web": {"enabled": True, "dev_mode": True},
         }
     )
 
 
+def _login_client(tmp_path: Path, cfg: Config) -> TestClient:
+    """创建带真实鉴权中间件和路由的 client。"""
+    _seed_password(tmp_path, "pwd")
+    app = create_app(cfg, FakeThreadManager(), home_dir=tmp_path)
+    client = TestClient(app)
+    client.__enter__()
+    response = client.post(
+        "/api/auth/login",
+        json={"password": "pwd"},
+        headers=CSRF_HEADERS,
+    )
+    assert response.status_code == 200
+    return client
+
+
 def test_redact_base_url_remote_keeps_host_only() -> None:
     assert _redact_base_url("https://api.openai.com/v1") == "api.openai.com"
-    assert _redact_base_url("https://api.anthropic.com/some/path") == "api.anthropic.com"
-
-
-def test_redact_base_url_remote_preserves_port() -> None:
     assert _redact_base_url("https://api.example.com:8443/v2") == "api.example.com:8443"
 
 
 def test_redact_base_url_local_kept_intact() -> None:
     assert _redact_base_url("http://127.0.0.1:1234/v1") == "http://127.0.0.1:1234/v1"
-    assert _redact_base_url("http://localhost:5000/api") == "http://localhost:5000/api"
 
 
-def _login_client(tmp_path: Path, cfg: Config) -> TestClient:
-    _seed_password(tmp_path, "pwd")
-    tm = FakeThreadManager()
-    app = create_app(cfg, tm, home_dir=tmp_path)
-    client = TestClient(app)
-    client.__enter__()
-    resp = client.post(
-        "/api/auth/login",
-        json={"password": "pwd"},
-        headers=CSRF_HEADERS,
-    )
-    assert resp.status_code == 200
-    return client
-
-
-def test_list_presets_full_fields(tmp_path: Path) -> None:
-    presets = [
-        {
-            "id": "openai-gpt-5",
-            "display_name": "OpenAI GPT-5",
-            "base_url": "https://api.openai.com/v1",
-            "model": "gpt-5",
-            "api_key_env": "OPENAI_API_KEY",
-        },
-        {
-            "id": "local-qwen",
-            "display_name": "Local Qwen",
-            "base_url": "http://127.0.0.1:1234/v1",
-            "model": "qwen-7b",
-            "api_key_env": None,
-        },
-    ]
-    cfg = _make_cfg(presets)
+def test_list_presets_returns_connected_catalog_models_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """credential 可用的远端模型与本地模型进入脱敏列表。"""
+    monkeypatch.setenv("GLM_API_KEY", "glm-live")
+    cfg = _make_cfg()
     client = _login_client(tmp_path, cfg)
     try:
-        resp = client.get("/api/presets")
-        assert resp.status_code == 200
-        body = resp.json()
-        assert len(body) == 2
-
-        openai = next(p for p in body if p["id"] == "openai-gpt-5")
-        assert openai["display_name"] == "OpenAI GPT-5"
-        assert openai["model"] == "gpt-5"
-        assert openai["base_url_summary"] == "api.openai.com"
-        assert openai["requires_api_key"] is True
-        # 关键：不返回 api_key / api_key_env
-        assert "api_key" not in openai
-        assert "api_key_env" not in openai
-
-        local = next(p for p in body if p["id"] == "local-qwen")
-        assert local["base_url_summary"] == "http://127.0.0.1:1234/v1"
-        assert local["requires_api_key"] is False
+        response = client.get("/api/presets")
+        assert response.status_code == 200
+        body = {item["id"]: item for item in response.json()}
+        assert set(body) == {
+            "bigmodel-glm5-1m",
+            "bigmodel-glm5",
+            "local-gemma-4-e4b-it",
+        }
+        assert body["bigmodel-glm5-1m"] == {
+            "id": "bigmodel-glm5-1m",
+            "display_name": "glm-5.2",
+            "model": "glm-5.2",
+            "base_url_summary": "open.bigmodel.cn",
+            "requires_api_key": True,
+        }
+        assert body["local-gemma-4-e4b-it"]["base_url_summary"] == ("http://127.0.0.1:62000/v1")
+        assert "api_key" not in body["bigmodel-glm5-1m"]
+        assert set(cfg.model.model_dump()) == {"preset_id", "reasoning_effort"}
     finally:
         client.__exit__(None, None, None)
 
 
-def test_empty_presets(tmp_path: Path) -> None:
-    cfg = _make_cfg([])
-    client = _login_client(tmp_path, cfg)
+def test_list_presets_with_no_remote_credentials_keeps_local_model(tmp_path: Path) -> None:
+    """远端 credential 缺失时保留可直接运行的本地模型。"""
+    client = _login_client(tmp_path, _make_cfg())
     try:
-        resp = client.get("/api/presets")
-        assert resp.status_code == 200
-        assert resp.json() == []
+        response = client.get("/api/presets")
+        assert response.status_code == 200
+        assert [item["id"] for item in response.json()] == ["local-gemma-4-e4b-it"]
     finally:
         client.__exit__(None, None, None)
 
 
 def test_presets_unauthenticated(tmp_path: Path) -> None:
-    cfg = _make_cfg([])
+    cfg = _make_cfg()
     _seed_password(tmp_path, "pwd")
-    tm = FakeThreadManager()
-    app = create_app(cfg, tm, home_dir=tmp_path)
+    app = create_app(cfg, FakeThreadManager(), home_dir=tmp_path)
     with TestClient(app) as client:
-        resp = client.get("/api/presets")
-        assert resp.status_code == 401
+        response = client.get("/api/presets")
+        assert response.status_code == 401

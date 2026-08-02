@@ -91,7 +91,7 @@ def test_thread_metadata_name_max_200() -> None:
 
 def test_thread_metadata_default_schema_version() -> None:
     meta = _make_meta()
-    assert meta.schema_version == THREAD_METADATA_SCHEMA_VERSION == 11
+    assert meta.schema_version == THREAD_METADATA_SCHEMA_VERSION == 13
     assert meta.thread_kind == "chat"
     assert meta.source_kind == ""
     assert meta.source_id == ""
@@ -206,8 +206,8 @@ def test_read_v3_lazy_upgrades_to_current_schema(tmp_path: Path) -> None:
     )
     loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
     assert loaded is not None
-    # v9 schema：3 个 token 字段已物理删除；v10 补归档位；v11 补业务类型字段
-    assert loaded.schema_version == 11
+    # v9 物理删除 token 字段；v10 补归档位；v11 补业务类型；v12 补 lineage；v13 补时间线边界
+    assert loaded.schema_version == 13
     assert loaded.is_archived is False
     assert loaded.thread_kind == "chat"
     assert loaded.source_kind == ""
@@ -363,7 +363,7 @@ def test_read_v6_lazy_upgrades_through_v9(tmp_path: Path) -> None:
     )
     loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
     assert loaded is not None
-    assert loaded.schema_version == 11
+    assert loaded.schema_version == 13
     assert loaded.is_pinned is False
     assert loaded.is_archived is False
     # v9：token 字段已物理删除
@@ -394,7 +394,7 @@ def test_v8_to_v9_drops_token_fields(tmp_path: Path) -> None:
     )
     loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
     assert loaded is not None
-    assert loaded.schema_version == 11
+    assert loaded.schema_version == 13
     # v9：token 字段已物理删除（ThreadMetadata 类不再含这些字段）
     assert not hasattr(loaded, "cumulative_usage")
     assert not hasattr(loaded, "last_run_snapshot")
@@ -413,19 +413,38 @@ def test_v9_idempotent_no_change(tmp_path: Path) -> None:
     # 再读一次（模拟 idempotent 检查）
     loaded2 = read_thread_metadata(tmp_path, meta.id)
     assert loaded1 == loaded2 == meta
-    assert loaded1 is not None and loaded1.schema_version == 11
+    assert loaded1 is not None and loaded1.schema_version == 13
 
 
-def test_v12_unknown_schema_returns_none(tmp_path: Path) -> None:
-    """v12 是未来版本，本进程不认识 → 返回 None（Literal[1..11] 拒绝）。"""
+def test_v14_unknown_schema_returns_none(tmp_path: Path) -> None:
+    """v14 是未来版本，本进程不认识 → 返回 None（Literal[1..13] 拒绝）。"""
     path = thread_metadata_path(tmp_path, "thread-aaaaaaaaaaaa")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         '{"id":"thread-aaaaaaaaaaaa","name":"x","preset_id":"p",'
-        '"created_at":1.0,"updated_at":1.0,"message_count":0,"schema_version":12}',
+        '"created_at":1.0,"updated_at":1.0,"message_count":0,"schema_version":14}',
         encoding="utf-8",
     )
     assert read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa") is None
+
+
+def test_v12_lineage_metadata_upgrades_without_inventing_a_boundary(tmp_path: Path) -> None:
+    """旧 fork 只有父任务 ID 时保持边界为空，避免入口落到错误消息后。"""
+    path = thread_metadata_path(tmp_path, "thread-aaaaaaaaaaaa")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '{"id":"thread-aaaaaaaaaaaa","name":"fork","preset_id":"p",'
+        '"created_at":1.0,"updated_at":1.0,"message_count":4,'
+        '"forked_from_id":"thread-bbbbbbbbbbbb","schema_version":12}',
+        encoding="utf-8",
+    )
+
+    loaded = read_thread_metadata(tmp_path, "thread-aaaaaaaaaaaa")
+
+    assert loaded is not None
+    assert loaded.schema_version == 13
+    assert loaded.forked_from_id == "thread-bbbbbbbbbbbb"
+    assert loaded.forked_from_history_index is None
 
 
 def test_v10_extra_forbid_rejects_unknown_field(tmp_path: Path) -> None:
@@ -453,5 +472,5 @@ def test_v10_write_does_not_include_token_fields(tmp_path: Path) -> None:
     assert "cumulative_usage" not in data
     assert "last_run_snapshot" not in data
     assert "last_model_name" not in data
-    assert data["schema_version"] == 11
+    assert data["schema_version"] == 13
     assert data["is_archived"] is False

@@ -2,7 +2,7 @@
 
 完整链路覆盖（**全 stub，不调真 LLM**）：
 
-1. ``schedule_tool.execute(action="create")`` 创建一次性任务 → ticker 立即扫到
+1. ``execute_prepared_tool(schedule_tool, action="create")`` 创建一次性任务 → ticker 立即扫到
    （oneshot grace 内）→ stub bridge 收到 reservation → store 落 ScheduledRun +
    audits 含 ``tick_started`` / ``tick_finished`` / ``create``
 2. tick 时无 due → ``due_count=0`` / ``spawned=0``，但 ``tick_started`` /
@@ -37,8 +37,8 @@ from scheduler.domain import (
     ScheduleTrigger,
     SessionMode,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
@@ -46,6 +46,7 @@ from scheduler.policy import apply_concurrency_policy
 from scheduler.store import Store, TaskNotFoundError
 from scheduler.ticker import run_ticker_loop, tick
 from scheduler.timing import to_iso, utc_now
+from tests.support.tool_calls import execute_prepared_tool
 from tools.builtin.schedule_tool import build_schedule_tool
 
 
@@ -66,7 +67,7 @@ class _StubBridge:
         self._store = store
         self.executed: list[str] = []
 
-    async def execute(self, reservation):  # type: ignore[no-untyped-def]
+    async def submit_scheduled_run(self, reservation):  # type: ignore[no-untyped-def]
         idx = len(self.executed)
         self.executed.append(reservation.task.task_id)
         run = ScheduledRun(
@@ -91,15 +92,32 @@ class _StubBridge:
 class _NoOpBridge:
     """case 2 用：tick 不应调到。"""
 
-    async def execute(self, reservation):  # type: ignore[no-untyped-def]
+    async def submit_scheduled_run(self, reservation):  # type: ignore[no-untyped-def]
         raise AssertionError("NoOpBridge.execute 不应被调用")
 
 
 class _CrashBridge:
     """case 3 用：每次 execute 都抛异常。"""
 
-    async def execute(self, reservation):  # type: ignore[no-untyped-def]
+    async def submit_scheduled_run(self, reservation):  # type: ignore[no-untyped-def]
         raise RuntimeError("boom")
+
+
+class _FakeThreadProvisioner:
+    """schedule_tool create 路径使用的最小 thread provisioner。"""
+
+    async def create_scheduled_task_thread(
+        self,
+        *,
+        task_id: str,
+        name: str,
+        preset_id: str,
+        cwd: str = "",
+    ) -> str:
+        return "thread-aaaaaaaaaaaa"
+
+    async def delete_thread(self, thread_id: str, *, keep_history: bool = False) -> None:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -119,9 +137,14 @@ async def _create_oneshot_task(store: Store, *, name: str = "demo") -> str:
     进入 grace 窗口（已过期 0.1s，仍在 120s grace 内），调用方拿到的 task_id
     保证一接到 ticker 就被合规 reserve。
     """
-    tool = build_schedule_tool(store, runtime_factory_fn=None)
+    tool = build_schedule_tool(
+        store,
+        runtime_factory_fn=None,
+        thread_provisioner=_FakeThreadProvisioner(),
+    )
     ctx = ToolContext(run_id="run-x", session_id="ses-x", turn=1, call_id="call-1")
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {
             "action": "create",
             "name": name,
@@ -153,11 +176,7 @@ async def test_e2e_create_then_tick_then_audit(tmp_path: Path) -> None:
     task_id = await _create_oneshot_task(store, name="case1 demo")
 
     bridge = _StubBridge(store)
-    inflight: set[asyncio.Task[None]] = set()
-
-    stats = await tick(store, bridge, inflight=inflight)  # type: ignore[arg-type]
-    if inflight:
-        await asyncio.gather(*inflight, return_exceptions=True)
+    stats = await tick(store, bridge)  # type: ignore[arg-type]
 
     assert stats["due_count"] >= 1, stats
     assert stats["spawned"] >= 1, stats
@@ -167,8 +186,7 @@ async def test_e2e_create_then_tick_then_audit(tmp_path: Path) -> None:
     audits = store.list_audits()
     actions = [a["action"] for a in audits]
     assert "create" in actions
-    assert "tick_started" in actions
-    assert "tick_finished" in actions
+    assert "tick_dispatched" in actions
 
     # run 落盘
     runs = store.list_runs(task_id)
@@ -193,13 +211,14 @@ async def test_e2e_tick_no_due(tmp_path: Path) -> None:
     assert stats["due_count"] == 0
     assert stats["spawned"] == 0
 
-    audits = store.list_audits()
-    actions = [a["action"] for a in audits]
-    assert "tick_started" in actions
-    assert "tick_finished" in actions
+    assert store.list_audits() == []
+    status = store.read_ticker_status()
+    assert status is not None
+    assert status["status"] == "ok"
+    assert status["due_count"] == 0
+    assert status["spawned"] == 0
     # 空 store 不应有 create / tick_task_error
-    assert "create" not in actions
-    assert "tick_task_error" not in actions
+    assert store.list_incidents() == []
 
 
 # ---------------------------------------------------------------------------
@@ -208,23 +227,19 @@ async def test_e2e_tick_no_due(tmp_path: Path) -> None:
 
 
 async def test_e2e_bridge_exception_recorded(tmp_path: Path) -> None:
-    """bridge.execute 抛异常 → ``tick_task_error`` audit 落地，循环不挂。"""
+    """submit_scheduled_run 抛异常 → ``tick_submit_error`` incident 落地。"""
     store = Store(tmp_path)
     task_id = await _create_oneshot_task(store, name="case3 boom")
 
-    inflight: set[asyncio.Task[None]] = set()
-    stats = await tick(store, _CrashBridge(), inflight=inflight)  # type: ignore[arg-type]
+    stats = await tick(store, _CrashBridge())  # type: ignore[arg-type]
     assert stats["due_count"] >= 1
-    assert stats["spawned"] >= 1
+    assert stats["spawned"] == 0
 
-    if inflight:
-        await asyncio.gather(*inflight, return_exceptions=True)
-
-    audits = store.list_audits()
-    err_audits = [a for a in audits if a["action"] == "tick_task_error"]
-    assert len(err_audits) >= 1, audits
-    assert err_audits[0]["task_id"] == task_id
-    assert "boom" in err_audits[0]["payload"]["error"]
+    incidents = store.list_incidents()
+    err_incidents = [a for a in incidents if a["action"] == "tick_submit_error"]
+    assert len(err_incidents) >= 1, incidents
+    assert err_incidents[0]["task_id"] == task_id
+    assert "boom" in err_incidents[0]["payload"]["error"]
 
     # 异常路径下不应该有 ScheduledRun 落盘（bridge 没机会写）
     runs = store.list_runs(task_id)
@@ -250,8 +265,6 @@ async def test_e2e_loop_stops_gracefully(tmp_path: Path) -> None:
             bridge,  # type: ignore[arg-type]
             stop,
             interval=0.05,
-            max_inflight=2,
-            shutdown_timeout=2.0,
         )
     )
 
@@ -259,11 +272,9 @@ async def test_e2e_loop_stops_gracefully(tmp_path: Path) -> None:
     stop.set()
     await asyncio.wait_for(loop_task, timeout=5.0)
 
-    audits = store.list_audits()
-    started_count = sum(1 for a in audits if a["action"] == "tick_started")
-    finished_count = sum(1 for a in audits if a["action"] == "tick_finished")
-    assert started_count >= 2, f"expected >= 2 tick_started, got {started_count}"
-    assert finished_count >= 2, f"expected >= 2 tick_finished, got {finished_count}"
+    status = store.read_ticker_status()
+    assert status is not None
+    assert status["status"] == "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +289,7 @@ class _CountingBridge:
         self._store = store
         self.execute_count = 0
 
-    async def execute(self, reservation):  # type: ignore[no-untyped-def]
+    async def submit_scheduled_run(self, reservation):  # type: ignore[no-untyped-def]
         self.execute_count += 1
         await asyncio.sleep(0.05)  # 模拟一点点执行耗时
         run = ScheduledRun(
@@ -326,8 +337,6 @@ async def test_e2e_oneshot_only_fires_once_under_real_loop(tmp_path: Path) -> No
             bridge,  # type: ignore[arg-type]
             stop_event,
             interval=0.05,
-            max_inflight=4,
-            shutdown_timeout=2.0,
         )
     )
     await asyncio.sleep(0.6)
@@ -339,14 +348,13 @@ async def test_e2e_oneshot_only_fires_once_under_real_loop(tmp_path: Path) -> No
         f"ONCE 任务被触发 {bridge.execute_count} 次，期望 1 次（v0.2 死循环 bug 回归）"
     )
 
-    # 任务状态：归档（enabled=False、state=COMPLETED、last_run_at 已设）
+    # 计数 bridge 只验证 reserve 幂等；没有落 terminal run
     tasks = store.list_tasks(include_disabled=True)
     assert len(tasks) == 1
     archived = tasks[0]
     assert archived.task_id == task_id
-    assert archived.enabled is False
-    # last_run_at 来自 reserve 阶段或 bridge 完成阶段（任一非空即可）
-    assert archived.last_run_at is not None
+    assert archived.lifecycle is TaskLifecycleState.EXHAUSTED
+    assert archived.last_run_at is None
     assert archived.next_run_at is None
 
     # 落盘 run 也只有 1 条
@@ -366,9 +374,14 @@ async def _create_recurring_task(store: Store, *, name: str = "recurring demo") 
 
     这只是测试 fixture，不影响生产行为。
     """
-    tool = build_schedule_tool(store, runtime_factory_fn=None)
+    tool = build_schedule_tool(
+        store,
+        runtime_factory_fn=None,
+        thread_provisioner=_FakeThreadProvisioner(),
+    )
     ctx = ToolContext(run_id="run-x", session_id="ses-x", turn=1, call_id="call-1")
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {
             "action": "create",
             "name": name,
@@ -405,8 +418,6 @@ async def test_e2e_recurring_fires_normally_under_real_loop(tmp_path: Path) -> N
             bridge,  # type: ignore[arg-type]
             stop_event,
             interval=0.1,
-            max_inflight=4,
-            shutdown_timeout=2.0,
         )
     )
     # 留够时间让 1s 周期任务 fire 至少 2 次（首次到点 + 再过 1s 推进）
@@ -424,7 +435,7 @@ async def test_e2e_recurring_fires_normally_under_real_loop(tmp_path: Path) -> N
     assert len(tasks) == 1
     survivor = tasks[0]
     assert survivor.task_id == task_id
-    assert survivor.enabled is True
+    assert survivor.lifecycle is TaskLifecycleState.SCHEDULED
 
 
 # ---------------------------------------------------------------------------
@@ -466,8 +477,7 @@ def _make_seconds_task(
     return ScheduledTask(
         task_id=task_id,
         name=f"task-{task_id}",
-        enabled=True,
-        state=TaskState.SCHEDULED,
+        lifecycle=TaskLifecycleState.SCHEDULED,
         origin=TaskOrigin.TOOL,
         trigger=ScheduleTrigger(
             trigger_type=TriggerType.SECONDS,
@@ -499,8 +509,7 @@ def _make_cron_task(
     return ScheduledTask(
         task_id=task_id,
         name=f"task-{task_id}",
-        enabled=True,
-        state=TaskState.SCHEDULED,
+        lifecycle=TaskLifecycleState.SCHEDULED,
         origin=TaskOrigin.TOOL,
         trigger=ScheduleTrigger(trigger_type=TriggerType.CRON, expr=cron_expr, timezone="UTC"),
         policy=TaskExecutionPolicy(
@@ -542,8 +551,6 @@ async def test_e2e_seconds_recurring_under_real_loop(tmp_path: Path) -> None:
             bridge,  # type: ignore[arg-type]
             stop,
             interval=0.05,
-            max_inflight=4,
-            shutdown_timeout=2.0,
         )
     )
     # SECONDS period=1s：跑 ~2.5s 期望 fire ≥ 2 次（首次 + 推进 1s 一次）
@@ -554,7 +561,7 @@ async def test_e2e_seconds_recurring_under_real_loop(tmp_path: Path) -> None:
     assert bridge.execute_count >= 2, f"SECONDS 期望 fire >= 2 次，实际 {bridge.execute_count}"
     survivor = store.get_task("t-e2-seconds")
     assert survivor is not None
-    assert survivor.enabled is True, "recurring 任务不该被归档"
+    assert survivor.lifecycle is TaskLifecycleState.SCHEDULED
 
 
 # ----- E3 ------------------------------------------------------------------
@@ -583,8 +590,6 @@ async def test_e2e_seconds_grace_skip_no_fire(tmp_path: Path) -> None:
             bridge,  # type: ignore[arg-type]
             stop,
             interval=0.05,
-            max_inflight=4,
-            shutdown_timeout=2.0,
         )
     )
     # 0.5s 内最多 ~10 次 tick；首次 tick 后 next_run_at 已快进到 now+1s（未来）
@@ -627,8 +632,6 @@ async def test_e2e_cron_stale_skip_under_real_loop(tmp_path: Path) -> None:
             bridge,  # type: ignore[arg-type]
             stop,
             interval=0.05,
-            max_inflight=4,
-            shutdown_timeout=2.0,
         )
     )
     await asyncio.sleep(0.5)
@@ -651,7 +654,7 @@ class _AlwaysCrashBridge:
     def __init__(self) -> None:
         self.execute_count = 0
 
-    async def execute(self, reservation):  # type: ignore[no-untyped-def]
+    async def submit_scheduled_run(self, reservation):  # type: ignore[no-untyped-def]
         self.execute_count += 1
         raise RuntimeError(f"boom #{self.execute_count}")
 
@@ -661,15 +664,14 @@ async def test_e2e_oneshot_with_crashing_bridge_no_loop(tmp_path: Path) -> None:
     × 10 次 tick → execute_count == 1（不是 N 次）。
 
     防御 reserve 阶段归档的鲁棒性：即便 bridge 持续失败，归档也不能回滚。
-    任务**必须**仍然 last_run_at 非空、enabled=False（已下线）。
+    任务保持 EXHAUSTED，桥接异常发生在 terminal run 落盘前。
     """
     store = Store(tmp_path)
     next_run = _t(-5)  # grace 内
     task = ScheduledTask(
         task_id="t-e5-once-crash",
         name="task-e5",
-        enabled=True,
-        state=TaskState.SCHEDULED,
+        lifecycle=TaskLifecycleState.SCHEDULED,
         origin=TaskOrigin.TOOL,
         trigger=ScheduleTrigger(trigger_type=TriggerType.ONCE, expr=next_run, timezone="UTC"),
         policy=TaskExecutionPolicy(
@@ -694,8 +696,6 @@ async def test_e2e_oneshot_with_crashing_bridge_no_loop(tmp_path: Path) -> None:
             bridge,  # type: ignore[arg-type]
             stop,
             interval=0.05,
-            max_inflight=4,
-            shutdown_timeout=2.0,
         )
     )
     await asyncio.sleep(0.5)  # ~10 次 tick
@@ -708,16 +708,16 @@ async def test_e2e_oneshot_with_crashing_bridge_no_loop(tmp_path: Path) -> None:
     )
     archived = store.get_task("t-e5-once-crash")
     assert archived is not None
-    assert archived.enabled is False, "ONCE 必须归档（即便 bridge 失败）"
-    assert archived.state is TaskState.COMPLETED
-    assert archived.last_run_at is not None
+    assert archived.lifecycle is TaskLifecycleState.EXHAUSTED
+    assert archived.last_run_at is None
 
     # 单次失败应被 audit；但归档动作仍写入 run_oneshot_archived
     audits = store.list_audits(task_id="t-e5-once-crash")
     actions = [a["action"] for a in audits]
     assert actions.count("run_oneshot_archived") == 1, f"ONCE 应只归档 1 次；audit 实际：{actions}"
-    # bridge 异常被 ticker 吞为 tick_task_error
-    assert any(a == "tick_task_error" for a in actions), actions
+    incidents = store.list_incidents(task_id="t-e5-once-crash")
+    incident_actions = [i["action"] for i in incidents]
+    assert "tick_submit_error" in incident_actions
 
 
 # ----- E6 ------------------------------------------------------------------
@@ -733,7 +733,7 @@ class _InactivityTimeoutBridge:
         self._store = store
         self.execute_count = 0
 
-    async def execute(self, reservation):  # type: ignore[no-untyped-def]
+    async def submit_scheduled_run(self, reservation):  # type: ignore[no-untyped-def]
         self.execute_count += 1
         run_id = f"run-e6-{self.execute_count:04d}"
         running = ScheduledRun(
@@ -780,6 +780,12 @@ class _InactivityTimeoutBridge:
             actor="scheduler",
             payload={"run_id": run_id, "error_message": "inactivity timeout"},
         )
+        self._store.append_incident(
+            action="run_inactivity_timeout",
+            task_id=reservation.task.task_id,
+            actor="scheduler",
+            payload={"run_id": run_id, "error_message": "inactivity timeout"},
+        )
         return timed_out
 
 
@@ -809,8 +815,6 @@ async def test_e2e_inactivity_timeout_state_consistent(tmp_path: Path) -> None:
             bridge,  # type: ignore[arg-type]
             stop,
             interval=0.05,
-            max_inflight=4,
-            shutdown_timeout=2.0,
         )
     )
     await asyncio.sleep(0.5)
@@ -848,7 +852,7 @@ class _ReplaceableBridge:
         self.execute_count = 0
         self.cancel_count = 0
 
-    async def execute(self, reservation):  # type: ignore[no-untyped-def]
+    async def submit_scheduled_run(self, reservation):  # type: ignore[no-untyped-def]
         self.execute_count += 1
         # 应用 concurrency_policy（与真实 ExecutionBridge.execute 同样位置调）
         decision = apply_concurrency_policy(task=reservation.task, store=self._store)
@@ -935,8 +939,6 @@ async def test_e2e_concurrency_replace_cancels_running(tmp_path: Path) -> None:
             bridge,  # type: ignore[arg-type]
             stop,
             interval=0.05,
-            max_inflight=4,
-            shutdown_timeout=2.0,
         )
     )
     await asyncio.sleep(0.5)
@@ -1035,9 +1037,14 @@ async def test_e2e_interval_recurring_fires_under_real_loop(tmp_path: Path) -> N
     store = Store(tmp_path)
 
     # 用 schedule_tool 创建 recurring 任务（every 1s）
-    tool = build_schedule_tool(store, runtime_factory_fn=None)
+    tool = build_schedule_tool(
+        store,
+        runtime_factory_fn=None,
+        thread_provisioner=_FakeThreadProvisioner(),
+    )
     ctx = ToolContext(run_id="r-recurring", session_id="s", turn=1, call_id="c")
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {
             "action": "create",
             "name": "every-1s-test",
@@ -1066,8 +1073,6 @@ async def test_e2e_interval_recurring_fires_under_real_loop(tmp_path: Path) -> N
             bridge,  # type: ignore[arg-type]
             stop_event,
             interval=0.1,
-            max_inflight=4,
-            shutdown_timeout=2.0,
         )
     )
     await asyncio.sleep(2.5)  # 跑 2.5s，期望 fire 1-2 次（every 1s）
@@ -1078,9 +1083,9 @@ async def test_e2e_interval_recurring_fires_under_real_loop(tmp_path: Path) -> N
     assert bridge.execute_count >= 1, (
         f"every 1s recurring 应至少 fire 1 次，实际 {bridge.execute_count}"
     )
-    # task 仍 enabled（recurring 不归档）
+    # recurring task 保持 scheduled
     tasks_after = store.list_tasks(include_disabled=True)
-    assert tasks_after[0].enabled, "recurring 任务不应被归档"
+    assert tasks_after[0].lifecycle is TaskLifecycleState.SCHEDULED
 
 
 async def test_e2e_cron_recurring_fires_under_real_loop(tmp_path: Path) -> None:
@@ -1092,9 +1097,14 @@ async def test_e2e_cron_recurring_fires_under_real_loop(tmp_path: Path) -> None:
     """
     store = Store(tmp_path)
 
-    tool = build_schedule_tool(store, runtime_factory_fn=None)
+    tool = build_schedule_tool(
+        store,
+        runtime_factory_fn=None,
+        thread_provisioner=_FakeThreadProvisioner(),
+    )
     ctx = ToolContext(run_id="r-cron", session_id="s", turn=1, call_id="c")
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {
             "action": "create",
             "name": "every-second-cron",
@@ -1117,8 +1127,6 @@ async def test_e2e_cron_recurring_fires_under_real_loop(tmp_path: Path) -> None:
             bridge,  # type: ignore[arg-type]
             stop_event,
             interval=0.1,
-            max_inflight=4,
-            shutdown_timeout=2.0,
         )
     )
     await asyncio.sleep(2.5)

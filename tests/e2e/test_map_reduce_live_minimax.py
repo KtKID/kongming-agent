@@ -22,11 +22,12 @@ import pytest
 
 from application.agent_roles import AgentRoleManager
 from application.agent_workflows.manager import AgentWorkflowManager
-from application.subagents.manager import SubAgentManager
 from core.agent_spec import AgentSpec
 from hosts.cli.main import _apply_model_preset_or_exit
 from infrastructure.config import load_config
-from runtime_assembly.native_runtime import NativeRuntime
+from infrastructure.config.model_catalog_manager import ModelCatalogManager
+from runtime_assembly.session_engine import SessionEngine
+from tests.support.workflow_agent_tree import bind_workflow_agent_tree
 from tools import AutoAllowApproval, ToolRegistry, build_file_tools
 
 pytestmark = pytest.mark.skipif(
@@ -159,7 +160,8 @@ async def test_minimax_m3_map_reduce_runs_two_real_mapper_subagents(tmp_path: Pa
         }
     )
     registry = ToolRegistry(build_file_tools())
-    runtime = NativeRuntime.build(
+    resolved_model = ModelCatalogManager().resolve_runtime(cfg.model)
+    runtime = SessionEngine.build(
         cfg,
         approval=AutoAllowApproval(),
         tools=registry,
@@ -167,14 +169,19 @@ async def test_minimax_m3_map_reduce_runs_two_real_mapper_subagents(tmp_path: Pa
         agent_spec=AgentSpec(
             name="map-reduce-live-parent",
             instructions="你是 map_reduce live e2e 的父 agent。",
-            default_model=cfg.model.name,
+            default_model=resolved_model.name,
             tool_names=(),
             max_turns=8,
             reasoning_effort=cfg.model.reasoning_effort,
         ),
     )
+    binding = bind_workflow_agent_tree(
+        runtime,
+        parent_session_id="live-minimax-map-reduce",
+    )
     manager = AgentWorkflowManager(
-        subagents=SubAgentManager(runtime),
+        runtime=runtime,
+        agent_manager=binding.manager,
         config=cfg,
         workspace_root=tmp_path,
         role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
@@ -184,9 +191,11 @@ async def test_minimax_m3_map_reduce_runs_two_real_mapper_subagents(tmp_path: Pa
         result = await manager.run_workflow_payload(
             mode="map_reduce",
             parent_session_id="live-minimax-map-reduce",
+            parent_agent=binding.parent_agent,
             payload=_payload(),
         )
     finally:
+        await binding.aclose()
         await runtime.aclose()
 
     reducer_result_path = result.workflow_dir / "map_reduce" / "reducer" / "result.json"

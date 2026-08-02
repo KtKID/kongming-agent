@@ -15,7 +15,7 @@ def _make_test_config(tmp_path: Path, *, enabled: bool = True) -> object:
     """构造最小 Config 用于 EvolutionManager 装配测试。"""
     from infrastructure.config import load_config
 
-    cfg = load_config(None)
+    cfg = load_config(None, load_env_file=False)
     # 覆盖 evolution.learning 关键字段
     cfg = cfg.model_copy(
         update={
@@ -37,7 +37,7 @@ def _make_test_config(tmp_path: Path, *, enabled: bool = True) -> object:
 
 
 class TestStubParentRuntime:
-    """PoC #1: NativeRuntime.build 在 ad-hoc 上下文工作。"""
+    """PoC #1: SessionEngine.build 在 ad-hoc 上下文工作。"""
 
     @pytest.mark.asyncio
     async def test_build_and_aclose(self, tmp_path: Path) -> None:

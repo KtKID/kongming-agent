@@ -24,8 +24,8 @@ from scheduler.domain import (
     ScheduleTrigger,
     SessionMode,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
@@ -37,8 +37,7 @@ def _make_task_with_delivery(*, task_id: str, channel: DeliveryChannel | None) -
     return ScheduledTask(
         task_id=task_id,
         name=f"task-{task_id}",
-        enabled=True,
-        state=TaskState.SCHEDULED,
+        lifecycle=TaskLifecycleState.SCHEDULED,
         origin=TaskOrigin.TOOL,
         trigger=ScheduleTrigger(trigger_type=TriggerType.INTERVAL, expr="30", timezone="UTC"),
         policy=TaskExecutionPolicy(
@@ -257,8 +256,7 @@ def test_legacy_task_dict_without_delivery_field_falls_back_to_none(
     legacy_payload = {
         "task_id": "leg",
         "name": "legacy",
-        "enabled": True,
-        "state": "scheduled",
+        "lifecycle": "scheduled",
         "origin": "tool",
         "trigger": {"trigger_type": "interval", "expr": "30", "timezone": "UTC"},
         "policy": {

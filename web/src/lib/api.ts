@@ -8,7 +8,7 @@ import type {
   EvolutionDecisionResponse,
   EvolutionReviewDTO,
   ThreadSubAgentDTO,
-  ThreadSubAgentListResponse,
+  ThreadSubAgentListDTO,
   ThreadTaskProgressSnapshot,
 } from "@/protocol";
 
@@ -69,16 +69,11 @@ async function handle401(): Promise<void> {
   }
 }
 
-interface RequestOptions {
-  signal?: AbortSignal;
-}
-
 async function request<T>(
   method: string,
   path: string,
   body?: unknown,
   extraHeaders?: Record<string, string>,
-  options?: RequestOptions,
 ): Promise<T> {
   const headers: Record<string, string> = {
     "X-Requested-With": "XMLHttpRequest",
@@ -93,7 +88,6 @@ async function request<T>(
       headers,
       credentials: "include",
       body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: options?.signal,
     });
   } catch (err) {
     // TypeError 表示 DNS / TCP 失败、CORS 拒绝等
@@ -148,8 +142,7 @@ async function request<T>(
   return JSON.parse(text) as T;
 }
 
-export const apiGet = <T>(path: string, options?: RequestOptions) =>
-  request<T>("GET", path, undefined, undefined, options);
+export const apiGet = <T>(path: string) => request<T>("GET", path);
 export const apiGetWithHeaders = <T>(
   path: string,
   headers: Record<string, string>,
@@ -169,11 +162,9 @@ export const apiGetThreadTaskProgress = (threadId: string) =>
 
 export const apiGetThreadSubAgents = async (
   threadId: string,
-  options?: RequestOptions,
 ): Promise<ThreadSubAgentDTO[]> => {
-  const response = await apiGet<ThreadSubAgentListResponse>(
+  const response = await apiGet<ThreadSubAgentListDTO>(
     `/api/threads/${encodeURIComponent(threadId)}/subagents`,
-    options,
   );
   return response.subagents;
 };

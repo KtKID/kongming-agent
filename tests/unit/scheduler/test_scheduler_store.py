@@ -26,6 +26,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -41,8 +42,8 @@ from scheduler.domain import (
     ScheduleTrigger,
     SessionMode,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
@@ -98,8 +99,7 @@ def _target() -> TaskTarget:
 def _make_task(
     *,
     task_id: str = "t-1",
-    enabled: bool = True,
-    state: TaskState = TaskState.SCHEDULED,
+    lifecycle: TaskLifecycleState = TaskLifecycleState.SCHEDULED,
     trigger: ScheduleTrigger | None = None,
     next_run_at: str | None = None,
     last_run_at: str | None = None,
@@ -109,8 +109,7 @@ def _make_task(
     return ScheduledTask(
         task_id=task_id,
         name=f"task-{task_id}",
-        enabled=enabled,
-        state=state,
+        lifecycle=lifecycle,
         origin=TaskOrigin.CLI,
         trigger=trigger or _trigger_interval(10),
         policy=_policy(misfire=misfire),
@@ -132,6 +131,7 @@ def _make_run(
     scheduled_for: str | None = None,
     finished_at: str | None = None,
     failure_reason: RunFailureReason | None = None,
+    thread_id: str = "",
 ) -> ScheduledRun:
     return ScheduledRun(
         run_id=run_id,
@@ -147,6 +147,7 @@ def _make_run(
         failure_reason=failure_reason,
         delivery_error=None,
         silent_suppressed=False,
+        thread_id=thread_id,
     )
 
 
@@ -178,6 +179,18 @@ def test_task_thread_id_round_trip(tmp_path: Path) -> None:
     assert fetched.thread_id == "thread-aaaaaaaaaaaa"
     payload = json.loads((tmp_path / "scheduled_tasks.json").read_text(encoding="utf-8"))
     assert payload["tasks"][0]["thread_id"] == "thread-aaaaaaaaaaaa"
+
+
+def test_run_thread_id_round_trip(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    run = _make_run(run_id="r-thread", thread_id="thread-dddddddddddd")
+    store.append_run(run)
+
+    fetched = store.list_runs("t-1")
+
+    assert fetched[0].thread_id == "thread-dddddddddddd"
+    payload = json.loads((tmp_path / "runs" / "t-1.jsonl").read_text(encoding="utf-8"))
+    assert payload["thread_id"] == "thread-dddddddddddd"
 
 
 def test_dict_to_task_recovers_thread_id_from_metadata() -> None:
@@ -212,7 +225,7 @@ def test_create_task_duplicate_raises_value_error(tmp_path: Path) -> None:
 def test_update_task_unknown_raises_task_not_found(tmp_path: Path) -> None:
     store = Store(tmp_path)
     with pytest.raises(TaskNotFoundError):
-        store.update_task("missing", state=TaskState.PAUSED)
+        store.update_task("missing", lifecycle=TaskLifecycleState.PAUSED)
 
 
 def test_update_task_partial_fields(tmp_path: Path) -> None:
@@ -221,12 +234,10 @@ def test_update_task_partial_fields(tmp_path: Path) -> None:
     new_next = _t(600)
     updated = store.update_task(
         "t-upd",
-        state=TaskState.PAUSED,
-        enabled=False,
+        lifecycle=TaskLifecycleState.PAUSED,
         next_run_at=new_next,
     )
-    assert updated.state is TaskState.PAUSED
-    assert updated.enabled is False
+    assert updated.lifecycle is TaskLifecycleState.PAUSED
     assert updated.next_run_at == new_next
     # updated_at 自动刷新（与 created_at 不同）
     assert updated.updated_at != updated.created_at
@@ -236,7 +247,7 @@ def test_list_tasks_filters_disabled_by_default(tmp_path: Path) -> None:
     store = Store(tmp_path)
     store.create_task(_make_task(task_id="alive"))
     store.create_task(
-        _make_task(task_id="dead", enabled=False, state=TaskState.DISABLED),
+        _make_task(task_id="dead", lifecycle=TaskLifecycleState.DISABLED),
     )
     visible = store.list_tasks()
     assert [t.task_id for t in visible] == ["alive"]
@@ -306,7 +317,7 @@ def test_append_run_then_get_latest(tmp_path: Path) -> None:
     assert latest.status is RunStatus.RUNNING
 
 
-def test_supersede_marks_old_line_and_appends_new(tmp_path: Path) -> None:
+def test_supersede_appends_one_new_snapshot(tmp_path: Path) -> None:
     store = Store(tmp_path)
     store.create_task(_make_task(task_id="t-sup"))
     first = _make_run(run_id="r1", task_id="t-sup", status=RunStatus.RUNNING)
@@ -319,20 +330,38 @@ def test_supersede_marks_old_line_and_appends_new(tmp_path: Path) -> None:
     )
     store.supersede_and_append_run(second)
 
-    # list_runs 默认过滤 superseded
+    # list_runs 按 run_id 折叠到最新有效快照。
     runs = store.list_runs("t-sup")
     assert len(runs) == 1
     assert runs[0].status is RunStatus.COMPLETED
 
-    # 物理 jsonl append-only：原始 running 行 + supersede 副本(_superseded=True) +
-    # 新 completed 行，共 3 条。list_runs 通过"按 run_id 折叠到最后一条 + 过滤
-    # superseded"实现"原 running 不再可见"。
+    # 物理 jsonl append-only：原始 running + completed 完整快照，共两次 fsync。
     raw_lines = (tmp_path / "runs" / "t-sup.jsonl").read_text(encoding="utf-8").splitlines()
     parsed = [json.loads(line) for line in raw_lines if line.strip()]
-    assert len(parsed) == 3
+    assert len(parsed) == 2
     statuses = [(p["status"], bool(p.get("_superseded"))) for p in parsed]
-    # 顺序：原行(False) → supersede 副本(True) → 新行(False)
-    assert statuses == [("running", False), ("running", True), ("completed", False)]
+    assert statuses == [("running", False), ("completed", False)]
+
+
+def test_list_runs_recovers_previous_snapshot_from_dangling_legacy_tombstone(
+    tmp_path: Path,
+) -> None:
+    """旧进程若在 tombstone 后崩溃，逻辑读取仍保留上一条 RUNNING 快照。"""
+    store = Store(tmp_path)
+    store.create_task(_make_task(task_id="t-legacy-tombstone"))
+    running = _make_run(
+        run_id="r-legacy",
+        task_id="t-legacy-tombstone",
+        status=RunStatus.RUNNING,
+    )
+    store.append_run(running)
+    path = tmp_path / "runs" / "t-legacy-tombstone.jsonl"
+    payload = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    payload["_superseded"] = True
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload) + "\n")
+
+    assert store.get_run("t-legacy-tombstone", "r-legacy") == running
 
 
 def test_list_runs_limit_truncates_to_last_n(tmp_path: Path) -> None:
@@ -405,12 +434,13 @@ def test_oneshot_outside_grace_not_due(tmp_path: Path) -> None:
 
 
 def test_oneshot_already_ran_not_due(tmp_path: Path) -> None:
-    """``last_run_at`` 已设 → one-shot 不再 due。"""
+    """``EXHAUSTED`` one-shot 即使残留 next_run_at 也不再 due。"""
     store = Store(tmp_path)
     now = _t(0)
     store.create_task(
         _make_task(
             task_id="t-once-ran",
+            lifecycle=TaskLifecycleState.EXHAUSTED,
             trigger=_trigger_once(expr=now),
             next_run_at=now,
             last_run_at=_t(-30),
@@ -450,12 +480,11 @@ def test_reserve_oneshot_archives_immediately(tmp_path: Path) -> None:
     res2 = store.reserve_due_tasks(now=now)
     assert res2 == []
 
-    # task 已归档：enabled=False / state=COMPLETED / last_run_at 已设
+    # task 已被原子领取：lifecycle=EXHAUSTED，终态完成前不写 last_run_at
     archived = store.get_task("t-once-archive")
     assert archived is not None
-    assert archived.enabled is False
-    assert archived.state is TaskState.COMPLETED
-    assert archived.last_run_at == now
+    assert archived.lifecycle is TaskLifecycleState.EXHAUSTED
+    assert archived.last_run_at is None
     assert archived.next_run_at is None
 
 
@@ -504,9 +533,8 @@ def test_reserve_oneshot_archive_persists_across_reload(tmp_path: Path) -> None:
     fresh_store = Store(tmp_path)
     persisted = fresh_store.get_task("t-once-reload")
     assert persisted is not None
-    assert persisted.enabled is False
-    assert persisted.state is TaskState.COMPLETED
-    assert persisted.last_run_at is not None
+    assert persisted.lifecycle is TaskLifecycleState.EXHAUSTED
+    assert persisted.last_run_at is None
     assert persisted.next_run_at is None
 
     # 重启后再 reserve（哪怕用同一个 now）也不会返回
@@ -804,8 +832,7 @@ def test_reserve_skips_disabled_tasks(tmp_path: Path) -> None:
             task_id="off",
             trigger=_trigger_interval(10),
             next_run_at=now,
-            enabled=False,
-            state=TaskState.PAUSED,
+            lifecycle=TaskLifecycleState.PAUSED,
         ),
     )
     reservations = store.reserve_due_tasks(now=now)
@@ -935,6 +962,69 @@ def test_list_audits_limit(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # _period_seconds：v0.2 SECONDS 分支
 # ---------------------------------------------------------------------------
+
+
+def test_ticker_status_overwrites_latest_snapshot(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+
+    store.write_ticker_status(status="ok", payload={"tick_at": "t1", "due_count": 0})
+    store.write_ticker_status(status="ok", payload={"tick_at": "t2", "due_count": 3})
+
+    status = store.read_ticker_status()
+    assert status is not None
+    assert status["status"] == "ok"
+    assert status["tick_at"] == "t2"
+    assert status["due_count"] == 3
+
+
+def test_append_incident_then_list_and_filter(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+
+    store.append_incident(
+        action="tick_failed",
+        task_id=None,
+        actor="ticker",
+        payload={"error": "boom"},
+    )
+    store.append_incident(
+        action="tick_task_error",
+        task_id="A",
+        actor="ticker",
+        payload={"error": "task boom"},
+        severity="warning",
+    )
+
+    incidents = store.list_incidents()
+    assert [r["action"] for r in incidents] == ["tick_failed", "tick_task_error"]
+    assert incidents[0]["severity"] == "error"
+    assert incidents[1]["severity"] == "warning"
+    assert [r["task_id"] for r in store.list_incidents(task_id="A")] == ["A"]
+
+
+def test_record_timestamps_use_configured_display_timezone(tmp_path: Path) -> None:
+    store = Store(tmp_path, display_timezone="Asia/Shanghai")
+    tick_at = "2026-06-15T08:00:00+00:00"
+
+    store.append_audit(action="create", task_id="A", actor="x", payload={"tick_at": tick_at})
+    store.append_incident(
+        action="tick_failed",
+        task_id=None,
+        actor="ticker",
+        payload={"tick_at": tick_at},
+    )
+    store.write_ticker_status(status="ok", payload={"tick_at": tick_at})
+
+    audit = store.list_audits()[0]
+    incident = store.list_incidents()[0]
+    assert audit["created_at"].endswith("+08:00")
+    assert incident["created_at"].endswith("+08:00")
+    assert audit["payload"]["tick_at_display"] == "2026-06-15T16:00:00+08:00"
+    assert incident["payload"]["tick_at_display"] == "2026-06-15T16:00:00+08:00"
+    status = store.read_ticker_status()
+    assert status is not None
+    assert status["updated_at"].endswith("+08:00")
+    assert status["tick_at"] == tick_at
+    assert status["tick_at_display"] == "2026-06-15T16:00:00+08:00"
 
 
 def test_period_seconds_seconds_returns_int_seconds() -> None:
@@ -1096,29 +1186,17 @@ def test_init_v2_data_migrates_to_current(
     assert migrated[0]["payload"]["detected_version"] == 2
 
 
-def test_init_corrupt_tasks_json_migrates(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """无法 JSON 解析的 tasks.json → 也走迁移路径（detected_version='unparseable'）。"""
-    (tmp_path / "scheduled_tasks.json").write_text("{not json at all", encoding="utf-8")
+def test_init_corrupt_tasks_json_fails_without_overwrite(tmp_path: Path) -> None:
+    """无法解析的 tasks.json 明确失败，并保留原文件供恢复。"""
+    tasks_path = tmp_path / "scheduled_tasks.json"
+    original = "{not json at all"
+    tasks_path.write_text(original, encoding="utf-8")
 
-    store = Store(tmp_path)
-    captured = capsys.readouterr()
-    assert "backed up to" in captured.err
+    with pytest.raises(RuntimeError, match="无法解析迁移"):
+        Store(tmp_path)
 
-    # 备份保留原损坏内容（label=vunparseable）
-    backups = _backup_files(tmp_path, label="vunparseable")
-    assert len(backups) == 1
-    assert backups[0].read_text(encoding="utf-8") == "{not json at all"
-
-    # 当前 tasks.json 是空当前 schema
-    assert store.list_tasks(include_disabled=True) == []
-
-    audits = store.list_audits()
-    expected_action = f"schema_migrated_vunparseable_to_v{SCHEMA_VERSION}"
-    migrated = [a for a in audits if a["action"] == expected_action]
-    assert len(migrated) == 1
-    assert migrated[0]["payload"]["detected_version"] == "unparseable"
+    assert tasks_path.read_text(encoding="utf-8") == original
+    assert list(tmp_path.glob("scheduled_tasks.json.*.bak.*")) == []
 
 
 def test_init_after_migration_can_create_task(tmp_path: Path) -> None:
@@ -1173,8 +1251,8 @@ def test_init_unknown_schema_version_migrates(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _trigger_cron(expr: str = "*/1 * * * *") -> ScheduleTrigger:
-    return ScheduleTrigger(trigger_type=TriggerType.CRON, expr=expr, timezone="UTC")
+def _trigger_cron(expr: str = "*/1 * * * *", *, timezone: str = "UTC") -> ScheduleTrigger:
+    return ScheduleTrigger(trigger_type=TriggerType.CRON, expr=expr, timezone=timezone)
 
 
 def _trigger_seconds(seconds: int = 1) -> ScheduleTrigger:
@@ -1232,8 +1310,7 @@ def test_reserve_once_future_in_grace_not_reserved(tmp_path: Path) -> None:
     # 任务必须保持原状态（未被归档）
     task = store.get_task("t-once-future")
     assert task is not None
-    assert task.enabled is True, "未到点的 ONCE 不应被归档为 enabled=False"
-    assert task.state == TaskState.SCHEDULED
+    assert task.lifecycle is TaskLifecycleState.SCHEDULED
     assert task.last_run_at is None
 
 
@@ -1364,6 +1441,52 @@ def test_reserve_cron_normal_due_idempotent(tmp_path: Path) -> None:
 
     res2 = store.reserve_due_tasks(now=now)
     assert res2 == [], "CRON normal_due 二次 reserve 应为空"
+
+
+def test_manual_run_preserves_cron_cursor(tmp_path: Path) -> None:
+    """16:59 手动执行每日 22:00 任务后，当日 22:00 仍保留为正式触发点。"""
+    store = Store(tmp_path)
+    manual_at = to_iso(datetime(2026, 7, 12, 8, 59, 46, tzinfo=UTC))
+    scheduled_at = to_iso(datetime(2026, 7, 12, 14, 0, 0, tzinfo=UTC))
+    store.create_task(
+        _make_task(
+            task_id="t-cron-manual",
+            trigger=_trigger_cron("0 22 * * *", timezone="Asia/Shanghai"),
+            next_run_at=scheduled_at,
+        ),
+    )
+
+    store.request_manual_run("t-cron-manual", requested_at=manual_at)
+    reservations = store.reserve_due_tasks(now=manual_at)
+
+    assert len(reservations) == 1
+    assert reservations[0].scheduled_for == manual_at
+    after = store.get_task("t-cron-manual")
+    assert after is not None
+    assert after.next_run_at == scheduled_at
+    assert after.manual_run_requested_at is None
+
+
+def test_cron_normal_due_advances_to_next_expression_match(tmp_path: Path) -> None:
+    """每日 cron 在 22:00 触发后，下一次保持次日 22:00，不跟随 ticker 秒级漂移。"""
+    store = Store(tmp_path)
+    scheduled_at = to_iso(datetime(2026, 7, 12, 14, 0, 0, tzinfo=UTC))
+    tick_at = to_iso(datetime(2026, 7, 12, 14, 0, 5, tzinfo=UTC))
+    expected_next = to_iso(datetime(2026, 7, 13, 22, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai")))
+    store.create_task(
+        _make_task(
+            task_id="t-cron-fixed-clock",
+            trigger=_trigger_cron("0 22 * * *", timezone="Asia/Shanghai"),
+            next_run_at=scheduled_at,
+        ),
+    )
+
+    reservations = store.reserve_due_tasks(now=tick_at)
+
+    assert len(reservations) == 1
+    after = store.get_task("t-cron-fixed-clock")
+    assert after is not None
+    assert after.next_run_at == expected_next
 
 
 def test_reserve_cron_stale_skip_idempotent(tmp_path: Path) -> None:
@@ -1555,23 +1678,22 @@ def test_period_seconds_cron_6field_with_timezone() -> None:
 
 
 def test_reserve_disabled_task_not_returned(tmp_path: Path) -> None:
-    """v0.2 P0 测试覆盖：enabled=False 任务永远不被 reserve。
+    """暂停任务永远不被 reserve。
 
-    防御 store.reserve_due_tasks 中 ``if not task.enabled: continue`` 路径。
+    防御 store.reserve_due_tasks 的 lifecycle 门禁。
     """
     store = Store(tmp_path)
     next_run = _t(-30)  # 过期 30s
     store.create_task(
         _make_task(
             task_id="t-disabled",
-            enabled=False,
-            state=TaskState.PAUSED,
+            lifecycle=TaskLifecycleState.PAUSED,
             trigger=_trigger_once(expr=next_run),
             next_run_at=next_run,
         ),
     )
     res = store.reserve_due_tasks(now=_t(0))
-    assert res == [], "enabled=False 不应被 reserve"
+    assert res == [], "暂停任务不应被 reserve"
 
 
 def test_reserve_skips_task_without_next_run_at(tmp_path: Path) -> None:
@@ -1594,16 +1716,15 @@ def test_reserve_skips_task_without_next_run_at(tmp_path: Path) -> None:
 
 
 def test_reserve_oneshot_archived_not_returned(tmp_path: Path) -> None:
-    """v0.2 P0 测试覆盖：state=COMPLETED + enabled=False 的归档 ONCE 永不被 reserve。
+    """EXHAUSTED 的 one-shot 永远不被 reserve。
 
-    防御 ONCE 死循环修复后的归档状态，确保不会被某种"漏判"路径再次触发。
+    防御 one-shot 原子领取后的重复执行。
     """
     store = Store(tmp_path)
     store.create_task(
         _make_task(
             task_id="t-archived",
-            enabled=False,
-            state=TaskState.COMPLETED,
+            lifecycle=TaskLifecycleState.EXHAUSTED,
             trigger=_trigger_once(expr=_t(-30)),
             next_run_at=None,  # 归档时被设为 None
             last_run_at=_t(-25),  # 归档时被设
@@ -1633,8 +1754,7 @@ def test_reserve_oneshot_outside_grace_not_returned(tmp_path: Path) -> None:
     # 任务保持原状（不归档）
     task = store.get_task("t-stale-oneshot")
     assert task is not None
-    assert task.enabled is True
-    assert task.state == TaskState.SCHEDULED
+    assert task.lifecycle is TaskLifecycleState.SCHEDULED
     assert task.last_run_at is None
 
 

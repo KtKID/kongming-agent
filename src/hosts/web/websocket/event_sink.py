@@ -11,9 +11,8 @@
 - **静默丢弃未识别 kind**：runtime 未来可能新增 EventKind（如 v0.2 又
   加几个流式相关），sink 不识别的直接 return，避免每加一个 kind 都要
   改 sink。
-- **不重复推 ``approval.request``**：runner 发出 ``approval.request``
-  Event 时，:class:`web.app_support.host_adapter.WebHostAdapter.prompt_approval`
-  已经推了 ``ApprovalRequestFrame``；sink 这里识别但不推（避免双发）。
+- **审批事件分流**：Runner 的 ``approval.request`` 保留为审计事件，Web 审批由
+  ApprovalManager 投影成全局 ``approval.inbox.*`` 帧。
 - **不推 ``thread.history`` / ``assistant.final`` / ``cell.evicted``**：
   - ``thread.history``：建连时 ThreadManager 单独推（不走 Event）
   - ``assistant.final``：HostAdapter.write_output 推
@@ -27,10 +26,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import time
 from typing import Any, cast
 
-from core.contracts import Event
+from core.clock import now_epoch_ms
+from core.contracts import Event, ProviderUsageFamily, ProviderUsageSnapshot
 from devtools import get_full_logger
 from hosts.web.protocol import (
     ApprovalDecisionFrame,
@@ -59,7 +58,9 @@ logger = logging.getLogger(__name__)
 
 
 def _now_ms() -> int:
-    return int(time.time() * 1000)
+    # agent-tree-v0.1 模块 H：统一走 core.clock.now_epoch_ms（tz-aware），
+    # 取代裸 now_epoch_ms()。
+    return now_epoch_ms()
 
 
 # core.contracts.ErrorCode 的 5 类与 web.protocol.ErrorCode 5 类一一对应；
@@ -79,63 +80,52 @@ _EVOLUTION_NOTICE_SOURCE = "self_evolution"
 
 
 def _build_usage_dto(payload: dict[str, Any]) -> dict[str, Any]:
-    """从 runtime ``usage`` event payload 构造 v2 channel-specific DTO dict。
+    """从 canonical snapshot 构造 generic_chat channel DTO。"""
+    snapshot = ProviderUsageSnapshot.from_payload(payload)
+    raw = snapshot.raw_usage
+    model_raw = raw.get("model")
+    model = model_raw if isinstance(model_raw, str) else ""
 
-    payload 字段来源：LLMProvider 透传 SDK 原生字段 + provider_kind。
-    本函数按 provider_kind 决定通道：
-
-    - ``anthropic`` → ``ClaudeUsage`` 形态（含 cache_creation TTL 子结构）
-    - ``openai_compatible`` → ``GenericChatOpenAIUsage`` 形态（只填 last）
-    - 老 payload 无 provider_kind 退化为 openai 系基础字段
-
-    返回 dict 自带 ``provider`` discriminator，前端按 ``provider`` narrowing。
-    详见 docs/usage-token-v2/04-data-and-state.md。
-    """
-    provider_kind = payload.get("provider_kind")
-
-    if provider_kind == "anthropic":
-        input_tokens = int(payload.get("input_tokens", 0) or 0)
-        output_tokens = int(payload.get("output_tokens", 0) or 0)
-        cache_read = int(payload.get("cache_read_input_tokens", 0) or 0)
-        cache_creation_total = int(payload.get("cache_creation_input_tokens", 0) or 0)
-        cc_raw = payload.get("cache_creation") or {}
+    if snapshot.family is ProviderUsageFamily.ANTHROPIC_MESSAGES:
+        cc_raw = raw.get("cache_creation") or {}
         if not isinstance(cc_raw, dict):
             cc_raw = {}
-        model = str(payload.get("model") or "")
         return {
             "provider": "claude",
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cache_read_input_tokens": cache_read,
-            "cache_creation_input_tokens": cache_creation_total,
+            "input_tokens": snapshot.input_uncached_tokens.value,
+            "output_tokens": snapshot.output_total_tokens.value,
+            "cache_read_input_tokens": snapshot.cache_read_tokens.value,
+            "cache_creation_input_tokens": snapshot.cache_write_tokens.value,
             "cache_creation": {
-                "ephemeral_1h_input_tokens": int(cc_raw.get("ephemeral_1h_input_tokens", 0) or 0),
-                "ephemeral_5m_input_tokens": int(cc_raw.get("ephemeral_5m_input_tokens", 0) or 0),
+                "ephemeral_1h_input_tokens": _optional_token(
+                    cc_raw.get("ephemeral_1h_input_tokens")
+                ),
+                "ephemeral_5m_input_tokens": _optional_token(
+                    cc_raw.get("ephemeral_5m_input_tokens")
+                ),
             },
-            "context_usage": input_tokens + cache_read + cache_creation_total,
+            "context_usage": snapshot.input_total_tokens.value,
             "model": model,
-            "context_window": 0,  # 不查表（live event 没需要）
+            "context_window": 0,
         }
 
-    # openai_compatible 或老 payload 退化
-    input_tokens = int(payload.get("input_tokens", 0) or payload.get("prompt_tokens", 0) or 0)
-    output_tokens = int(payload.get("output_tokens", 0) or payload.get("completion_tokens", 0) or 0)
-    cached_input = int(payload.get("cached_input_tokens", 0) or 0)
-    reasoning_output = int(payload.get("reasoning_output_tokens", 0) or 0)
-    total_tokens = int(payload.get("total_tokens", 0) or 0) or (input_tokens + output_tokens)
-    model = str(payload.get("model") or "")
     return {
         "provider": "openai",
         "last": {
-            "input_tokens": input_tokens,
-            "cached_input_tokens": cached_input,
-            "output_tokens": output_tokens,
-            "reasoning_output_tokens": reasoning_output,
-            "total_tokens": total_tokens,
+            "input_tokens": snapshot.input_total_tokens.value,
+            "cached_input_tokens": snapshot.cache_read_tokens.value,
+            "output_tokens": snapshot.output_total_tokens.value,
+            "reasoning_output_tokens": snapshot.reasoning_tokens.value,
+            "total_tokens": snapshot.total_tokens.value,
         },
         "model": model,
         "context_window": 0,
     }
+
+
+def _optional_token(value: object) -> int | None:
+    """读取 raw 中的可选 token，输入为开放值，输出为非负整数或 None。"""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 # ⚠️ UsagePersistSink 已在 usage-token-v2-bigbang 删除。
@@ -245,6 +235,9 @@ class WSEventSink:
         turn = event.turn or 0
         # Event.run_id 类型为 str | None；前端 buffer key 不接受 None，统一兜底为 ""
         run_id = event.run_id or ""
+        # agent-tree-v0.1 模块 G：透传 Event.agent_id 坐标字段到 wire 帧，
+        # 让前端能按 agent 归属展示流式帧（多 agent 场景）。
+        agent_id = event.agent_id or ""
 
         # ----- 流式增量 -----
         if kind == "content.delta":
@@ -254,6 +247,7 @@ class WSEventSink:
                 seq=int(payload.get("seq", 0) or 0),
                 run_id=run_id,
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
         if kind == "reasoning.delta":
             return ReasoningDeltaFrame(
@@ -262,13 +256,29 @@ class WSEventSink:
                 seq=int(payload.get("seq", 0) or 0),
                 run_id=run_id,
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
 
         # ----- turn 边界 -----
         if kind == "turn.start":
-            return TurnStartFrame(turn=turn, run_id=run_id, timestamp_ms=ts)
+            return TurnStartFrame(turn=turn, run_id=run_id, timestamp_ms=ts, agent_id=agent_id)
         if kind == "turn.end":
-            return TurnEndFrame(turn=turn, run_id=run_id, timestamp_ms=ts)
+            history_index_raw = payload.get("history_index")
+            history_index = (
+                history_index_raw
+                if isinstance(history_index_raw, int)
+                and not isinstance(history_index_raw, bool)
+                and history_index_raw >= 0
+                else None
+            )
+            return TurnEndFrame(
+                turn=turn,
+                run_id=run_id,
+                history_index=history_index,
+                has_tool_calls=bool(payload.get("has_tool_calls", False)),
+                timestamp_ms=ts,
+                agent_id=agent_id,
+            )
 
         # ----- 工具调用 -----
         if kind == "tool.call.start":
@@ -279,6 +289,7 @@ class WSEventSink:
                 arguments=_safe_dict(payload.get("arguments")),
                 run_id=run_id,
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
         if kind == "tool.call.end":
             # v0.1.6：把 ToolResult 的 content / data 一并写入 frame，前端
@@ -294,6 +305,7 @@ class WSEventSink:
                 data=data_raw if isinstance(data_raw, dict) else None,
                 run_id=run_id,
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
 
         if kind == "choice.requested":
@@ -305,11 +317,12 @@ class WSEventSink:
                 turn=turn,
                 run_id=run_id,
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
 
         # ----- 审批 -----
-        # ``approval.request`` 不在这里推（HostAdapter.prompt_approval 已推）
-        # 但 ``approval.decision`` 走这里：runner 在审批通过 / 拒绝 / 取消后 emit。
+        # Runner 的 ``approval.request`` 是审计事件；generic_chat 审批走
+        # ApprovalManager → approval.inbox.*，本 sink 只推 approval.decision。
         if kind == "approval.decision":
             outcome_raw = payload.get("outcome")
             # ApprovalOutcome 枚举与 core 一致：approved / rejected / cancelled
@@ -323,19 +336,22 @@ class WSEventSink:
                 outcome=outcome,
                 turn=turn,
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
 
         # ----- 用量（usage-token-v2-bigbang 重构）-----
-        # runtime emit ``kind="usage"`` event 时，payload 已含 LLMProvider 透传的
-        # SDK 原生字段 + provider_kind。本 sink 按 provider 派生 v2 DTO dict
-        # 嵌入 UsageFrame.usage——前端按 ``usage.provider`` discriminator 分支。
         if kind == "usage":
-            usage_dto = _build_usage_dto(payload)
+            try:
+                usage_dto = _build_usage_dto(payload)
+            except ValueError:
+                logger.warning("WSEventSink received invalid canonical usage payload")
+                return None
             return UsageFrame(
                 turn=turn,
                 run_id=run_id,
                 usage=usage_dto,
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
 
         # ----- 错误 -----
@@ -348,6 +364,7 @@ class WSEventSink:
                 message=message,
                 turn=event.turn,  # 可为 None
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
 
         # ----- 系统 notice -----
@@ -362,6 +379,7 @@ class WSEventSink:
                 payload=payload,
                 run_id=run_id,
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
 
         # ----- interrupt-run-v0.1：run 被用户打断 -----
@@ -377,9 +395,10 @@ class WSEventSink:
                 cancelled_tool_call_id=cancelled_id,
                 cancel_reason=str(payload.get("cancel_reason", "user_interrupt")),
                 timestamp_ms=ts,
+                agent_id=agent_id,
             )
 
-        # ----- 其它（run.start / run.end / approval.request /
+        # ----- 其它（run.start / run.end / approval.request audit /
         # tool.silently_allowed / memory.* / safety 决策事件 / llm.* / ...）
         # 一律静默丢；sink 不阻塞 runtime 演化。
         return None
@@ -405,6 +424,7 @@ def _translate_evolution_notice(
     payload: dict[str, Any],
     run_id: str,
     timestamp_ms: int,
+    agent_id: str = "",
 ) -> SystemNoticeFrame:
     if kind == "evolution.review.started":
         review_id = _optional_str(payload.get("review_id")) or ""
@@ -427,6 +447,7 @@ def _translate_evolution_notice(
             icon="running",
             run_id=run_id,
             timestamp_ms=timestamp_ms,
+            agent_id=agent_id,
         )
 
     if kind == "evolution.review.completed":
@@ -470,6 +491,7 @@ def _translate_evolution_notice(
             icon="success",
             run_id=run_id,
             timestamp_ms=timestamp_ms,
+            agent_id=agent_id,
         )
 
     if kind == "evolution.review.failed":
@@ -498,6 +520,7 @@ def _translate_evolution_notice(
             icon="error",
             run_id=run_id,
             timestamp_ms=timestamp_ms,
+            agent_id=agent_id,
         )
 
     pending_review_ids = _coerce_str_list(payload.get("pending_review_ids"))
@@ -517,6 +540,7 @@ def _translate_evolution_notice(
         icon="warning",
         run_id=run_id,
         timestamp_ms=timestamp_ms,
+        agent_id=agent_id,
     )
 
 

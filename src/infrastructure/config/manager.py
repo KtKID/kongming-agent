@@ -18,7 +18,6 @@ from infrastructure.config.env_writer import EnvWriteResult, write_env_values
 from infrastructure.config.loader import _ENV_FIELD_PATHS as _LOADER_ENV_FIELD_PATHS
 from infrastructure.config.loader import load_config
 from infrastructure.config.migrations import migrate_config_if_needed
-from infrastructure.config.models import LLMPresetConfig
 from infrastructure.config.schema import FieldMeta, FieldSource
 from infrastructure.config.writer import (
     ConflictError,
@@ -44,12 +43,7 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = tuple(
 
 _ENV_PREFIX = "KONGMING_"
 
-_DICT_LEAF_PATHS: frozenset[str] = frozenset(
-    {
-        "model.provider_routing",
-        "model.reasoning_profiles",
-    }
-)
+_DICT_LEAF_PATHS: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -88,16 +82,6 @@ class SavePatchResponse:
 
 
 @dataclass(frozen=True)
-class PresetWriteResponse:
-    """`web.llm_presets` 写回响应。"""
-
-    ok: bool
-    preset_id: str
-    new_mtime: float
-    preset_count: int
-
-
-@dataclass(frozen=True)
 class EnvWriteResponse:
     """`.env` 写回响应。"""
 
@@ -129,7 +113,9 @@ class ConfigManager:
 
     def read_effective(self) -> EffectiveResponse:
         """加载当前 yaml + env 覆盖后的 Config，扁平化成 dot-path → value。"""
-        cfg = load_config(self._yaml_path)
+        # 进程环境已由 composition root 加载；dashboard 读取不能再次搜索 cwd
+        # 下的其它 .env，否则测试/多 home 运行会把无关 credential 注入当前配置。
+        cfg = load_config(self._yaml_path, load_env_file=False)
         dumped = cfg.model_dump(mode="json")
         values: dict[str, Any] = {}
         for path, value in _flatten_dict(dumped):
@@ -188,61 +174,6 @@ class ConfigManager:
             restart_required_fields=restart_fields,
         )
 
-    def upsert_web_llm_preset(
-        self,
-        preset: LLMPresetConfig,
-        expected_mtime: float | None = None,
-    ) -> PresetWriteResponse:
-        """向 `web.llm_presets` upsert 一条 preset。"""
-        presets = _read_web_llm_presets(self._yaml_path)
-        preset_data = preset.model_dump(mode="json", exclude_none=True)
-        replaced = False
-        for idx, item in enumerate(presets):
-            if item.get("id") == preset.id:
-                presets[idx] = preset_data
-                replaced = True
-                break
-        if not replaced:
-            presets.append(preset_data)
-        mtime = self._yaml_path.stat().st_mtime if expected_mtime is None else expected_mtime
-        result = writer.round_trip_update(
-            self._yaml_path,
-            [PatchItem(path="web.llm_presets", value=presets)],
-            mtime,
-            create_missing_paths={"web.llm_presets"},
-            load_env_file=True,
-        )
-        return PresetWriteResponse(
-            ok=True,
-            preset_id=preset.id,
-            new_mtime=result.new_mtime,
-            preset_count=len(presets),
-        )
-
-    def remove_web_llm_preset(
-        self,
-        preset_id: str,
-        expected_mtime: float | None = None,
-    ) -> PresetWriteResponse:
-        """从 `web.llm_presets` 删除一条 preset。"""
-        presets = [
-            item for item in _read_web_llm_presets(self._yaml_path) if item.get("id") != preset_id
-        ]
-        mtime = self._yaml_path.stat().st_mtime if expected_mtime is None else expected_mtime
-        result = writer.round_trip_update(
-            self._yaml_path,
-            [PatchItem(path="web.llm_presets", value=presets)],
-            mtime,
-            create_missing_paths={"web.llm_presets"},
-            load_env_file=True,
-        )
-        return PresetWriteResponse(
-            ok=True,
-            preset_id=preset_id,
-            new_mtime=result.new_mtime,
-            preset_count=len(presets),
-        )
-
     def write_env_values(self, values: dict[str, str]) -> EnvWriteResponse:
         """写入 `.env` 文件并同步当前进程。"""
         result: EnvWriteResult = write_env_values(self._env_path, values)
@@ -289,33 +220,12 @@ def _yaml_explicit_paths(yaml_path: Path) -> set[str]:
     return {path for path, _ in flat}
 
 
-def _read_web_llm_presets(yaml_path: Path) -> list[dict[str, Any]]:
-    """从 yaml 原文读取 `web.llm_presets`，缺省时返回空列表。"""
-    yaml = YAML(typ="rt")
-    with yaml_path.open("r", encoding="utf-8") as f:
-        doc = yaml.load(f)
-    if doc is None or not isinstance(doc, dict):
-        return []
-    web = doc.get("web")
-    if not isinstance(web, dict):
-        return []
-    raw_presets = web.get("llm_presets")
-    if raw_presets is None:
-        return []
-    if not isinstance(raw_presets, list):
-        raise ValidationFailedError(
-            [{"path": "web.llm_presets", "message": "web.llm_presets must be a list"}]
-        )
-    return [dict(item) for item in raw_presets if isinstance(item, dict)]
-
-
 __all__ = [
     "ConfigManager",
     "ConflictError",
     "EffectiveResponse",
     "EnvWriteResponse",
     "PatchItem",
-    "PresetWriteResponse",
     "RawResponse",
     "SavePatchResponse",
     "SchemaResponse",

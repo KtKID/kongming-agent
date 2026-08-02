@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { ChatMessageItem, MessageViewport } from "@/components/MessageList";
-import { Composer } from "@/components/Composer";
+import { Composer, type SubmittedDraft } from "@/components/Composer";
 import { useClaudeCodeWS } from "@/hooks/useClaudeCodeWS";
 import { ChatManager } from "@/chat/ChatManager";
 import { makeNetworkHandle, getTimelineStore } from "@/chat/runtimeWiring";
@@ -13,17 +13,21 @@ import type {
   SystemNoticeFrame,
   ThreadMetadataDTO,
   ClaudeCodeC2SFrame,
+  AutoApprovalStateFrame,
 } from "@/protocol";
 import type { ChatItem as GenericChatItem } from "@/stores/chat";
 import { useEvolutionStore } from "@/stores/evolution";
 import {
-  AutoApprovalToggle,
-  type AutoApprovalStateFrame,
+  AutoApprovalModeSelector,
   useAutoApprovalStore,
 } from "@/features/auto-approval";
 import { useItemsWithFileSummary } from "@/hooks/useItemsWithFileSummary";
 import { ModifiedFilesSummary } from "@/components/ModifiedFilesSummary";
-import { useThreadsStore } from "@/stores/threads";
+import {
+  useThreadsStore,
+  type InitialMessageDraft,
+} from "@/stores/threads";
+import { useThreadDispatchStore } from "@/stores/threadDispatch";
 
 type ClaudeMetaItem =
   | { kind: "status"; content?: unknown; id: string }
@@ -78,7 +82,6 @@ function isGenericChatItem(item: ClaudeRenderItem): item is GenericChatItem {
     item.kind === "user" ||
     item.kind === "assistant" ||
     item.kind === "tool" ||
-    item.kind === "approval" ||
     item.kind === "error"
   );
 }
@@ -249,6 +252,12 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
     () => threadRunning && !isConversationEnded,
     [threadRunning, isConversationEnded],
   );
+  const isDispatching = useThreadDispatchStore(
+    (store) =>
+      threadId
+        ? store.byThreadId[threadId]?.phase === "dispatching"
+        : false,
+  );
 
   // interrupt-claude-channel-v0.1 #4：abort-session 帧需要的 sessionId。
   // 优先用 thread.claude_thread_id（SDK session_created 后绑定的真值）；
@@ -312,6 +321,9 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
   const setPendingNewSession = useThreadsStore((s) => s.setPendingNewSession);
   const initialMessage = useThreadsStore((s) => s.initialMessage);
   const setInitialMessage = useThreadsStore((s) => s.setInitialMessage);
+  const [failedInitialDraft, setFailedInitialDraft] =
+    useState<SubmittedDraft | null>(null);
+  const initialSendKeyRef = useRef<InitialMessageDraft | null>(null);
   const createThread = useThreadsStore((s) => s.createThread);
   const fetchThreads = useThreadsStore((s) => s.fetchThreads);
   const triggerClaudeProjectsRefresh = useThreadsStore(
@@ -757,24 +769,52 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
 
   // --- #7: initialMessage buffer — auto-send after WS open ---
   useEffect(() => {
-    if (!threadId || !socket || state !== "open" || !initialMessage) return;
-    const text = initialMessage;
+    if (
+      !threadId ||
+      !socket ||
+      state !== "open" ||
+      !initialMessage ||
+      !chatManager
+    ) {
+      return;
+    }
+    const pendingMessage = initialMessage;
+    if (initialSendKeyRef.current === pendingMessage) return;
+    initialSendKeyRef.current = pendingMessage;
+    setFailedInitialDraft(null);
     setInitialMessage(null);
-    setItems((prev) => [
-      ...prev,
-      {
-        id: newId(),
-        kind: "user",
-        threadId,
-        content: text,
-        timestampMs: Date.now(),
-      },
-    ]);
-    void chatManager?.sendMessage({
-      common: { text },
-      provider: { provider: "claude", threadId },
-    });
-    fetchThreads();
+    void chatManager
+      .sendMessage({
+        common: {
+          text: pendingMessage.text,
+          attachments: pendingMessage.attachments,
+          reasoningEffort: pendingMessage.reasoningEffort,
+          references: pendingMessage.references,
+        },
+        provider: { provider: "claude", threadId },
+      })
+      .then(() => {
+        setItems((prev) => [
+          ...prev,
+          {
+            id: newId(),
+            kind: "user",
+            threadId,
+            content: pendingMessage.restoreDraft.text,
+            timestampMs: Date.now(),
+            ...(pendingMessage.attachments &&
+            pendingMessage.attachments.length > 0
+              ? { attachments: pendingMessage.attachments }
+              : {}),
+          },
+        ]);
+        void fetchThreads();
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        setFailedInitialDraft(pendingMessage.restoreDraft);
+        toast.error(`发送失败：${message}`);
+      });
   }, [threadId, socket, state, initialMessage, setInitialMessage, fetchThreads, chatManager]);
 
   // --- #6: onSend with pending-mode create-thread flow ---
@@ -788,6 +828,8 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
     text: string,
     attachments?: import("@/protocol").UserInputAttachment[],
     reasoningEffort?: import("@/chat/types").ReasoningEffort | null,
+    references?: import("@/protocol").ConversationReferenceDTO[],
+    submittedDraft?: SubmittedDraft,
   ) => {
     // #5/#6: pending mode — create thread first
     if (isPending) {
@@ -801,37 +843,56 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
           pending.cwd,
         );
         setPendingNewSession(null);
-        setInitialMessage(text);
+        setInitialMessage({
+          text,
+          reasoningEffort: reasoningEffort ?? null,
+          attachments,
+          references,
+          restoreDraft: submittedDraft ?? {
+            text,
+            reasoningEffort: reasoningEffort ?? null,
+            attachments: attachments ?? [],
+            references: references ?? [],
+          },
+        });
         navigate(`/chat/${created.id}`, { replace: true });
+        return true;
       } catch (err: unknown) {
         // #8: error handling — toast + keep input
         const msg =
           err instanceof Error ? err.message : String(err);
         toast.error(`创建会话失败：${msg}`);
+        return false;
       }
-      return;
     }
 
     // normal mode — send via WS
     if (!threadId) return;
     if (!socket || state !== "open") return;
-    setItems((prev) => [
-      ...prev,
-      {
-        id: newId(),
-        kind: "user",
-        threadId,
-        content: text,
-        timestampMs: Date.now(),
-        // 把刚发的图片附件塞进 user item，让 ChatMessageItem 渲染缩略图。
-        // 不传 attachments → ChatMessageItem 走纯文本路径（前置 task 已兼容）。
-        ...(attachments && attachments.length > 0 ? { attachments } : {}),
-      },
-    ]);
-    void chatManager?.sendMessage({
-      common: { text, attachments, reasoningEffort },
-      provider: { provider: "claude", threadId },
-    });
+    if (!chatManager) return false;
+    try {
+      await chatManager.sendMessage({
+        common: { text, attachments, reasoningEffort, references },
+        provider: { provider: "claude", threadId },
+      });
+      setItems((prev) => [
+        ...prev,
+        {
+          id: newId(),
+          kind: "user",
+          threadId,
+          content: text,
+          timestampMs: Date.now(),
+          ...(attachments && attachments.length > 0 ? { attachments } : {}),
+        },
+      ]);
+      setFailedInitialDraft(null);
+      return true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast.error(`发送失败：${message}`);
+      return false;
+    }
   };
 
   // 按 user 消息分界插入文件汇总（通用 hook，三频道共用）
@@ -881,15 +942,20 @@ export function ClaudeCodeView({ threadId, thread }: Props) {
         </div>
       )}
       <Composer
-        disabled={isPending ? false : state !== "open" || isRunning}
-        onSubmit={(text, reasoning, attachments) => onSend(text, attachments, reasoning)}
+        disabled={
+          isPending ? false : state !== "open" || isRunning || isDispatching
+        }
+        onSubmit={(text, reasoning, attachments, references, submittedDraft) =>
+          onSend(text, attachments, reasoning, references, submittedDraft)
+        }
+        draftSeed={failedInitialDraft}
         threadId={threadId}
         isRunning={isRunning}
         onInterrupt={onInterrupt}
         leftActions={
           /* smart-approval-v1: 只在已 bound cwd + socket 时挂；其他场景不渲染 */
           thread?.cwd && socket ? (
-            <AutoApprovalToggle cwd={thread.cwd} socket={socket} />
+            <AutoApprovalModeSelector cwd={thread.cwd} socket={socket} />
           ) : null
         }
       />

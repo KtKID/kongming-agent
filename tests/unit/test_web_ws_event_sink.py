@@ -20,8 +20,9 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
-from core.contracts import Event
+from core.contracts import Event, ProviderUsageFamily
 from hosts.web.websocket.event_sink import WSEventSink
+from infrastructure.llm_providers.usage import ProviderUsageManager
 
 
 def _make_ws() -> AsyncMock:
@@ -29,6 +30,27 @@ def _make_ws() -> AsyncMock:
     ws.send_json = AsyncMock(return_value=None)
     ws.close = AsyncMock(return_value=None)
     return ws
+
+
+def _openai_usage_payload(
+    *,
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int,
+) -> dict:
+    """经真实 Manager 构造 OpenAI usage event payload。"""
+    return (
+        ProviderUsageManager()
+        .normalize(
+            family=ProviderUsageFamily.OPENAI_CHAT_COMPLETIONS,
+            raw_usage={
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+            },
+        )
+        .to_payload()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -89,9 +111,18 @@ async def test_emit_turn_start() -> None:
 async def test_emit_turn_end() -> None:
     ws = _make_ws()
     sink = WSEventSink(ws)
-    await sink.emit(Event(kind="turn.end", run_id="r", turn=1))
+    await sink.emit(
+        Event(
+            kind="turn.end",
+            run_id="r",
+            turn=1,
+            payload={"history_index": 3, "has_tool_calls": False},
+        )
+    )
     sent = ws.send_json.await_args.args[0]
     assert sent["frame_type"] == "turn.end"
+    assert sent["history_index"] == 3
+    assert sent["has_tool_calls"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -219,11 +250,7 @@ async def test_emit_tool_call_end_non_dict_data_falls_to_none() -> None:
 
 
 async def test_emit_usage_includes_run_id() -> None:
-    """v2：UsageFrame.usage 是 channel-specific DTO dict（含 provider discriminator）。
-
-    无 ``provider_kind`` 时走 fallback openai 分支：``prompt_tokens`` → ``input_tokens``、
-    ``completion_tokens`` → ``output_tokens``。
-    """
+    """canonical snapshot 投影成 channel DTO 并保留 run_id。"""
     ws = _make_ws()
     sink = WSEventSink(ws)
     await sink.emit(
@@ -231,11 +258,11 @@ async def test_emit_usage_includes_run_id() -> None:
             kind="usage",
             run_id="run-42",
             turn=3,
-            payload={
-                "prompt_tokens": 100,
-                "completion_tokens": 25,
-                "total_tokens": 125,
-            },
+            payload=_openai_usage_payload(
+                prompt_tokens=100,
+                completion_tokens=25,
+                total_tokens=125,
+            ),
         )
     )
     sent = ws.send_json.await_args.args[0]
@@ -328,11 +355,11 @@ async def test_emit_usage() -> None:
             kind="usage",
             run_id="r",
             turn=1,
-            payload={
-                "prompt_tokens": 100,
-                "completion_tokens": 50,
-                "total_tokens": 150,
-            },
+            payload=_openai_usage_payload(
+                prompt_tokens=100,
+                completion_tokens=50,
+                total_tokens=150,
+            ),
         )
     )
     sent = ws.send_json.await_args.args[0]
@@ -581,7 +608,7 @@ async def test_emit_unknown_kind_silently_dropped() -> None:
 
 
 async def test_emit_approval_request_silently_dropped() -> None:
-    """approval.request 由 host adapter 推，sink 不重复推。"""
+    """Runner 审计事件不直出 wire；审批由 ApprovalManager inbox 投影。"""
     ws = _make_ws()
     sink = WSEventSink(ws)
     await sink.emit(
@@ -695,17 +722,26 @@ async def test_emit_tool_call_start_with_no_arguments() -> None:
     assert sent["arguments"] == {}
 
 
-async def test_emit_usage_with_missing_fields_defaults_to_zero() -> None:
-    """v2：空 payload → usage DTO 全 0；走 fallback openai provider 分支。"""
+async def test_emit_usage_preserves_unknown_fields_as_null() -> None:
+    """缺失 cache write/context total 在 Web DTO 中保持 null。"""
     ws = _make_ws()
     sink = WSEventSink(ws)
-    await sink.emit(Event(kind="usage", run_id="r", turn=1, payload={}))
+    snapshot = ProviderUsageManager().normalize(
+        family=ProviderUsageFamily.ANTHROPIC_MESSAGES,
+        raw_usage={
+            "input_tokens": 194,
+            "output_tokens": 119,
+            "cache_read_input_tokens": 9088,
+        },
+    )
+    await sink.emit(Event(kind="usage", run_id="r", turn=1, payload=snapshot.to_payload()))
     sent = ws.send_json.await_args.args[0]
     usage = sent["usage"]
-    assert usage["provider"] == "openai"
-    assert usage["last"]["input_tokens"] == 0
-    assert usage["last"]["output_tokens"] == 0
-    assert usage["last"]["total_tokens"] == 0
+    assert usage["provider"] == "claude"
+    assert usage["input_tokens"] == 194
+    assert usage["cache_read_input_tokens"] == 9088
+    assert usage["cache_creation_input_tokens"] is None
+    assert usage["context_usage"] is None
 
 
 # ---------------------------------------------------------------------------

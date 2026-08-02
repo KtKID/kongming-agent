@@ -1,14 +1,14 @@
 """unit：infrastructure.config.load_config 基本行为。
 
 - 从 yaml 加载出合法 Config
-- 环境变量覆盖单字段
-- 本地 base_url 可空 api_key
-- 远端 base_url + 空 api_key 抛 ConfigValidationError
+- 环境变量覆盖运行时选择字段
+- 旧静态 model 环境变量给出迁移错误
 - 文件不存在抛 ConfigLoadError
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,21 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SETTING_YAML = REPO_ROOT / "config" / "setting.yaml"
 DEFAULT_YAML = SETTING_YAML  # 向后兼容别名
 LOCAL_YAML = SETTING_YAML  # 向后兼容别名
+
+
+@pytest.fixture(autouse=True)
+def _clean_model_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """隔离宿主或前序测试留下的模型 env 覆盖。"""
+    for name in (
+        "KONGMING_MODEL_PROVIDER",
+        "KONGMING_MODEL_NAME",
+        "KONGMING_MODEL_BASE_URL",
+        "KONGMING_MODEL_API_KEY",
+        "KONGMING_MODEL_API_KEY_HEADER",
+        "KONGMING_MODEL_PRESET_ID",
+        "KONGMING_MODEL_REASONING_EFFORT",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -44,21 +59,20 @@ def test_load_default_yaml_returns_config() -> None:
 
     assert isinstance(cfg, Config)
     # 关键字段：从 yaml 动态取基准值比对
-    assert cfg.model.name == raw["model"]["name"]
-    # pydantic 会标准化 URL（去掉末尾 /），比较时统一 rstrip 再断言等价
-    assert cfg.model.base_url.rstrip("/") == raw["model"]["base_url"].rstrip("/")
+    assert cfg.model.preset_id == raw["model"]["preset_id"]
+    assert cfg.model.reasoning_effort == raw["model"]["reasoning_effort"]
     assert cfg.runner.max_turns == raw["runner"]["max_turns"]
     assert cfg.approval.mode == raw["approval"]["mode"]
 
 
 @pytest.mark.unit
-def test_load_setting_yaml_has_empty_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    # 隔离环境变量，还原"纯 yaml 无 env 覆盖"场景
-    monkeypatch.delenv("KONGMING_MODEL_API_KEY", raising=False)
-    monkeypatch.delenv("KONGMING_MODEL_BASE_URL", raising=False)
+def test_load_setting_yaml_has_runtime_selection() -> None:
+    """setting.yaml 的 model 节只保留运行时选择。"""
     cfg = load_config(SETTING_YAML, load_env_file=False)
-    assert cfg.model.api_key == ""
-    assert cfg.model.is_local is True
+    assert cfg.model.model_dump() == {
+        "preset_id": "local-gemma-4-e4b-it",
+        "reasoning_effort": None,
+    }
 
 
 @pytest.mark.unit
@@ -73,8 +87,26 @@ def test_env_override_api_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("KONGMING_MODEL_API_KEY", "sk-xyz")
-    cfg = load_config(LOCAL_YAML, load_env_file=False)
-    assert cfg.model.api_key == "sk-xyz"
+    with pytest.raises(ConfigValidationError, match="retired"):
+        load_config(LOCAL_YAML, load_env_file=False)
+
+
+@pytest.mark.unit
+def test_env_override_api_key_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KONGMING_MODEL_API_KEY_HEADER", "authorization-bearer")
+    with pytest.raises(ConfigValidationError, match="retired"):
+        load_config(LOCAL_YAML, load_env_file=False)
+
+
+@pytest.mark.unit
+def test_env_override_api_key_header_empty_means_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KONGMING_MODEL_API_KEY_HEADER", "")
+    with pytest.raises(ConfigValidationError, match="retired"):
+        load_config(LOCAL_YAML, load_env_file=False)
 
 
 @pytest.mark.unit
@@ -108,15 +140,15 @@ def test_env_override_base_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("KONGMING_MODEL_BASE_URL", "http://127.0.0.1:9999")
-    cfg = load_config(LOCAL_YAML, load_env_file=False)
-    assert cfg.model.base_url == "http://127.0.0.1:9999"
+    with pytest.raises(ConfigValidationError, match="retired"):
+        load_config(LOCAL_YAML, load_env_file=False)
 
 
 @pytest.mark.unit
 def test_remote_url_without_api_key_triggers_validation_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """远端 url + 空 api_key 应当在 pydantic 校验阶段被拒。"""
+    """静态 endpoint/key 环境变量退出后直接返回迁移错误。"""
     monkeypatch.setenv("KONGMING_MODEL_BASE_URL", "https://api.openai.com")
     monkeypatch.setenv("KONGMING_MODEL_API_KEY", "")
     with pytest.raises(ConfigValidationError):
@@ -146,8 +178,10 @@ def test_load_config_respects_kongming_config_env(
 ) -> None:
     """未显式传 path 时应该优先读取 ``KONGMING_CONFIG``。"""
     monkeypatch.setenv("KONGMING_CONFIG", str(SETTING_YAML))
+    monkeypatch.delenv("KONGMING_MODEL_BASE_URL", raising=False)
     cfg = load_config(load_env_file=False)
-    assert cfg.model.base_url == "http://127.0.0.1:1234/v1"
+    raw = _read_yaml(SETTING_YAML)
+    assert cfg.model.preset_id == raw["model"]["preset_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -155,48 +189,117 @@ def test_load_config_respects_kongming_config_env(
 # ---------------------------------------------------------------------------
 
 
+def _write_minimal_config(path: Path) -> None:
+    """写入只覆盖配置加载测试所需字段的最小配置。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "config_schema_version: v0.6\nmodel:\n  preset_id: local-gemma-4-e4b-it\n",
+        encoding="utf-8",
+    )
+
+
 @pytest.mark.unit
-def test_load_config_calls_load_dotenv_by_default(
+def test_load_config_reads_home_dotenv_by_default(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """默认 `load_env_file=True` 时 `load_config` 会调用 `dotenv.load_dotenv`。
+    """默认只加载 `KONGMING_HOME/.env`。
 
-    不直接测 dotenv 的路径搜索策略（那是 dotenv 自己的职责），而是 mock 它，
-    断言"调了 + 带 override=False 参数"——这两点是本项目对 dotenv 的契约。
+    home `.env` 是 Web 配置写回路径；provider key 进入当前进程环境，
+    KONGMING_* 配置覆盖只进入 Config。
     """
-    calls: list[dict[str, Any]] = []
-
-    def fake_load_dotenv(*args: Any, **kwargs: Any) -> bool:
-        calls.append({"args": args, "kwargs": kwargs})
-        return True
-
+    project = tmp_path / "project"
+    config = project / "config" / "setting.yaml"
+    home = tmp_path / "home"
+    _write_minimal_config(config)
+    (project / ".env").write_text(
+        "GLM_API_KEY=project-glm\n",
+        encoding="utf-8",
+    )
+    home.mkdir()
+    (home / ".env").write_text(
+        "GLM_API_KEY=home-glm\n",
+        encoding="utf-8",
+    )
     monkeypatch.delenv("KONGMING_SKIP_DOTENV", raising=False)
-    monkeypatch.setattr("dotenv.load_dotenv", fake_load_dotenv)
-    monkeypatch.setattr("dotenv.dotenv_values", lambda *args, **kwargs: {})
+    monkeypatch.delenv("GLM_API_KEY", raising=False)
+    monkeypatch.setenv("KONGMING_HOME", str(home))
 
-    load_config(LOCAL_YAML)
+    cfg = load_config(config)
 
-    assert len(calls) == 1
-    # 必须带 override=False：真实 env 优先，.env 不覆盖
-    assert calls[0]["kwargs"].get("override") is False
+    assert cfg.model.preset_id == "local-gemma-4-e4b-it"
+    assert os.environ["GLM_API_KEY"] == "home-glm"
+
+
+@pytest.mark.unit
+def test_project_dotenv_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """配置文件旁的项目 `.env` 不参与本地密钥读取。"""
+    project = tmp_path / "project"
+    config = project / "config" / "setting.yaml"
+    home = tmp_path / "home"
+    _write_minimal_config(config)
+    (project / ".env").write_text(
+        "GLM_API_KEY=project-glm\n",
+        encoding="utf-8",
+    )
+    home.mkdir()
+    monkeypatch.delenv("GLM_API_KEY", raising=False)
+    monkeypatch.setenv("KONGMING_HOME", str(home))
+
+    cfg = load_config(config)
+
+    assert cfg.model.preset_id == "local-gemma-4-e4b-it"
+    assert "GLM_API_KEY" not in os.environ
 
 
 @pytest.mark.unit
 def test_load_env_file_false_skips_dotenv(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """显式传 `load_env_file=False` 时不调用 `load_dotenv`。"""
-    calls: list[dict[str, Any]] = []
+    """显式传 `load_env_file=False` 时不读取任何 `.env`。"""
+    config = tmp_path / "project" / "config" / "setting.yaml"
+    home = tmp_path / "home"
+    _write_minimal_config(config)
+    home.mkdir()
+    (home / ".env").write_text("GLM_API_KEY=home-key\n", encoding="utf-8")
+    monkeypatch.delenv("GLM_API_KEY", raising=False)
+    monkeypatch.setenv("KONGMING_HOME", str(home))
 
-    def fake_load_dotenv(*args: Any, **kwargs: Any) -> bool:
-        calls.append({"args": args, "kwargs": kwargs})
-        return True
+    load_config(config, load_env_file=False)
 
-    monkeypatch.setattr("dotenv.load_dotenv", fake_load_dotenv)
+    assert "GLM_API_KEY" not in os.environ
 
-    load_config(LOCAL_YAML, load_env_file=False)
 
-    assert calls == []
+@pytest.mark.unit
+def test_real_env_wins_over_dotenv_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """真实进程 env 优先于 home `.env`。"""
+    project = tmp_path / "project"
+    config = project / "config" / "setting.yaml"
+    home = tmp_path / "home"
+    _write_minimal_config(config)
+    (project / ".env").write_text(
+        "GLM_API_KEY=project-glm\n",
+        encoding="utf-8",
+    )
+    home.mkdir()
+    (home / ".env").write_text(
+        "GLM_API_KEY=home-glm\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("KONGMING_HOME", str(home))
+    monkeypatch.setenv("GLM_API_KEY", "real-glm")
+
+    cfg = load_config(config)
+
+    assert cfg.model.preset_id == "local-gemma-4-e4b-it"
+    assert os.environ["GLM_API_KEY"] == "real-glm"
 
 
 @pytest.mark.unit
@@ -220,22 +323,17 @@ def test_trace_raw_llm_overridden_by_env(
 
 
 @pytest.mark.unit
-def test_dotenv_injected_env_vars_affect_config(
+def test_runtime_selection_env_affects_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """模拟 `.env` 被 dotenv 加载后的等价状态（env 变量已注入），
-    验证这些变量真的通过 `_apply_env_overrides` 链路进入 Config。
-
-    这是端到端契约：把值放进 `.env` 和把值 `export` 出来，效果必须一致。
-    """
-    monkeypatch.setenv("KONGMING_MODEL_API_KEY", "from-dotenv-simulated")
+    """preset env 通过 `_apply_env_overrides` 进入运行时选择。"""
+    monkeypatch.setenv("KONGMING_MODEL_PRESET_ID", "bigmodel-glm5-1m")
 
     # load_env_file=False：测试目的是验证"env var 存在时进入 Config"，
     # 不需要真正加载 .env 文件（避免 .env 内容污染后续测试）
     cfg = load_config(LOCAL_YAML, load_env_file=False)
 
-    # LOCAL_YAML 的 api_key 是空字符串，被注入的 env 覆盖后应该是测试值
-    assert cfg.model.api_key == "from-dotenv-simulated"
+    assert cfg.model.preset_id == "bigmodel-glm5-1m"
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +354,7 @@ def test_reasoning_effort_defaults_to_none(
     monkeypatch.delenv("KONGMING_MODEL_REASONING_EFFORT", raising=False)
     minimal_yaml = tmp_path / "minimal.yaml"
     minimal_yaml.write_text(
-        "model:\n  name: test-model\n  base_url: http://127.0.0.1:1234/v1\n  api_key: ''\n",
+        "config_schema_version: v0.6\nmodel:\n  preset_id: local-gemma-4-e4b-it\n",
         encoding="utf-8",
     )
     cfg = load_config(minimal_yaml, load_env_file=False)
@@ -264,20 +362,22 @@ def test_reasoning_effort_defaults_to_none(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("effort", ["low", "none"])
 def test_reasoning_effort_overridden_by_env(
     monkeypatch: pytest.MonkeyPatch,
+    effort: str,
 ) -> None:
-    """``KONGMING_MODEL_REASONING_EFFORT=low`` 通过 env 覆盖链路生效。"""
-    monkeypatch.setenv("KONGMING_MODEL_REASONING_EFFORT", "low")
+    """``KONGMING_MODEL_REASONING_EFFORT`` 通过 env 覆盖链路生效。"""
+    monkeypatch.setenv("KONGMING_MODEL_REASONING_EFFORT", effort)
     cfg = load_config(SETTING_YAML, load_env_file=False)
-    assert cfg.model.reasoning_effort == "low"
+    assert cfg.model.reasoning_effort == effort
 
 
 @pytest.mark.unit
 def test_reasoning_effort_invalid_value_raises(
     tmp_path: Path,
 ) -> None:
-    """非法值（非 low/medium/high）应被 pydantic 拒绝。"""
+    """非法值（非 none/low/medium/high/max）应被 pydantic 拒绝。"""
     cfg_file = tmp_path / "bad_effort.yaml"
     # 读原始 setting.yaml 然后注入非法值
     raw = _read_yaml(SETTING_YAML)

@@ -17,8 +17,31 @@ from typing import Any
 import pytest
 from fastapi import HTTPException
 
+from hosts.web.errors import ModelCatalogWebError
 from hosts.web.threads.metadata import read_thread_metadata
+from infrastructure.config.model_catalog_manager import ModelCatalogManager
 from infrastructure.config.models import Config
+
+_TEST_CATALOG = """\
+version: 2
+providers:
+  - provider_id: test
+    default_preset_id: preset-1
+    display_name: Test
+    region_label: Local
+    description: test provider
+    logo_text: T
+    protocol: openai
+    default_base_url: http://127.0.0.1:1234/v1
+    request_defaults: {}
+    models:
+      - preset_id: preset-1
+        display_name: Preset 1
+        model: model-1
+      - preset_id: preset-2
+        display_name: Preset 2
+        model: model-2
+"""
 
 
 class _FakeRuntime:
@@ -32,33 +55,14 @@ class _FakeRuntime:
         self.closed = True
 
 
-def _make_cfg() -> Config:
+def _make_cfg(tmp_path: Path) -> Config:
+    (tmp_path / "model-providers.yaml").write_text(_TEST_CATALOG, encoding="utf-8")
     return Config.model_validate(
         {
-            "model": {
-                "name": "fake",
-                "base_url": "http://127.0.0.1:1234/v1",
-                "api_key": "",
-            },
+            "model": {"preset_id": "preset-1"},
             "web": {
                 "enabled": True,
                 "dev_mode": True,
-                "llm_presets": [
-                    {
-                        "id": "preset-1",
-                        "display_name": "Preset 1",
-                        "provider": "openai_compatible",
-                        "base_url": "http://127.0.0.1:1234/v1",
-                        "model": "model-1",
-                    },
-                    {
-                        "id": "preset-2",
-                        "display_name": "Preset 2",
-                        "provider": "openai_compatible",
-                        "base_url": "http://127.0.0.1:1234/v1",
-                        "model": "model-2",
-                    },
-                ],
             },
         }
     )
@@ -81,7 +85,7 @@ async def test_update_thread_preset_rebuilds_idle_cell_runtime(tmp_path: Path) -
         builds.append(pid)
         return _FakeRuntime(pid), object()
 
-    tm = ThreadManager(_make_cfg(), kongming_home=tmp_path, runtime_factory=factory)
+    tm = ThreadManager(_make_cfg(tmp_path), kongming_home=tmp_path, runtime_factory=factory)
     meta = await tm.create_thread("t1", "preset-1")
     cell = await tm.boot_or_attach(meta.id)
     old_runtime = cell.runtime
@@ -118,7 +122,7 @@ async def test_update_thread_preset_running_cell_refreshes_after_run(
         builds.append(pid)
         return _FakeRuntime(pid), object()
 
-    tm = ThreadManager(_make_cfg(), kongming_home=tmp_path, runtime_factory=factory)
+    tm = ThreadManager(_make_cfg(tmp_path), kongming_home=tmp_path, runtime_factory=factory)
     meta = await tm.create_thread("t1", "preset-1")
     cell = await tm.boot_or_attach(meta.id)
 
@@ -164,7 +168,7 @@ async def test_update_thread_preset_keeps_old_runtime_when_refresh_fails(
             raise RuntimeError("factory down")
         return _FakeRuntime(pid), object()
 
-    tm = ThreadManager(_make_cfg(), kongming_home=tmp_path, runtime_factory=factory)
+    tm = ThreadManager(_make_cfg(tmp_path), kongming_home=tmp_path, runtime_factory=factory)
     meta = await tm.create_thread("t1", "preset-1")
     cell = await tm.boot_or_attach(meta.id)
     old_runtime = cell.runtime
@@ -199,11 +203,18 @@ async def test_patch_thread_preset_validates_and_returns_updated_dto(
         del tid, adapter, sinks
         return _FakeRuntime(pid), object()
 
-    cfg = _make_cfg()
+    cfg = _make_cfg(tmp_path)
+    catalog_manager = ModelCatalogManager(user_path=tmp_path / "model-providers.yaml")
     tm = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
     meta = await tm.create_thread("t1", "preset-1")
     request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(config=cfg, thread_manager=tm))
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                config=cfg,
+                thread_manager=tm,
+                model_catalog_manager=catalog_manager,
+            )
+        )
     )
 
     updated = await route_update_thread_preset(
@@ -213,14 +224,14 @@ async def test_patch_thread_preset_validates_and_returns_updated_dto(
     )
     assert updated.preset_id == "preset-2"
 
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(ModelCatalogWebError) as exc_info:
         await route_update_thread_preset(
             meta.id,
             UpdateThreadPresetRequest(preset_id="missing-preset"),
             request,  # type: ignore[arg-type]
         )
-    assert exc_info.value.status_code == 400
-    assert "unknown preset_id" in str(exc_info.value.detail)
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.error_code == "preset_unknown"
 
 
 @pytest.mark.asyncio
@@ -243,12 +254,19 @@ async def test_patch_thread_preset_returns_error_when_runtime_refresh_fails(
             raise RuntimeError("factory down")
         return _FakeRuntime(pid), object()
 
-    cfg = _make_cfg()
+    cfg = _make_cfg(tmp_path)
+    catalog_manager = ModelCatalogManager(user_path=tmp_path / "model-providers.yaml")
     tm = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
     meta = await tm.create_thread("t1", "preset-1")
     await tm.boot_or_attach(meta.id)
     request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(config=cfg, thread_manager=tm))
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                config=cfg,
+                thread_manager=tm,
+                model_catalog_manager=catalog_manager,
+            )
+        )
     )
 
     with pytest.raises(HTTPException) as exc_info:

@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from hosts.web.websocket.cron import get_broker
-from hosts.web.websocket.thread_status import get_broadcaster
+from hosts.web.websocket.thread_status import get_thread_status_manager
 
 
 def get_thread_status_connections() -> int:
-    return get_broadcaster().connection_count
+    return get_thread_status_manager().connection_count
 
 
 def get_cron_connections() -> int:

@@ -27,11 +27,183 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator
 
+from hosts.web.app_support.llm_protocol import NormalizedMessage
 from hosts.web.app_support.path_utils import is_absolute_workspace_path
 from hosts.web.protocol._base import (
     ErrorCode,
     _FrameBase,
 )
+
+
+class CronTaskDTO(_FrameBase):
+    """scheduler task 生命周期与运行结果的正交 REST 投影。"""
+
+    task_id: str
+    name: str
+    lifecycle: Literal["scheduled", "paused", "disabled", "exhausted", "deleted"]
+    latest_run_status: (
+        Literal[
+            "running",
+            "completed",
+            "silent",
+            "failed",
+            "inactivity_timeout",
+            "abandoned",
+            "cancelled",
+        ]
+        | None
+    )
+    live_runtime_status: Literal["idle", "running"]
+    trigger_type: Literal["once", "interval", "cron", "seconds"]
+    trigger_expr: str
+    timezone: str
+    next_run_at: str | None
+    last_run_at: str | None
+    thread_id: str
+    preset_id: str
+    created_by: str
+    input_text: str
+    agent_name: str
+
+
+class CronRunDTO(_FrameBase):
+    """scheduler 单次 run REST 投影。"""
+
+    run_id: str
+    task_id: str
+    task_name: str
+    session_id: str
+    thread_id: str
+    scheduled_for: str
+    started_at: str | None
+    finished_at: str | None
+    status: Literal[
+        "running",
+        "completed",
+        "silent",
+        "failed",
+        "inactivity_timeout",
+        "abandoned",
+        "cancelled",
+    ]
+    failure_reason: str | None
+    final_message_excerpt: str | None
+    delivery_status: Literal["pending", "delivered", "failed", "skipped"]
+    delivery_error: str | None
+
+
+class CronRunMessagesResponse(_FrameBase):
+    """单次 scheduler run 的归一化消息列表。"""
+
+    messages: list[NormalizedMessage]
+
+
+class CronRunsPage(_FrameBase):
+    """scheduler 全局 run 分页响应。"""
+
+    runs: list[CronRunDTO]
+    next_cursor: str | None
+
+
+class RunNowResponse(_FrameBase):
+    """scheduler 手动试运行受理响应。"""
+
+    run_id: str
+    status: Literal["PENDING"]
+
+
+class CreateCronTaskRequest(_FrameBase):
+    """创建 scheduler task 请求。"""
+
+    name: str
+    agent_name: str
+    input_text: str
+    schedule_type: Literal["once", "cron"]
+    once_at: str | None = None
+    cron_expr: str | None = None
+    timezone: str = "UTC"
+    concurrency_policy: Literal["forbid", "allow", "replace"] = "forbid"
+    preset_id: str | None = None
+
+
+class UpdateCronTaskRequest(_FrameBase):
+    """更新 scheduler task 请求；lifecycle 是任务状态唯一写入口。"""
+
+    name: str | None = None
+    schedule: str | None = None
+    agent: str | None = None
+    input_text: str | None = None
+    preset_id: str | None = None
+    lifecycle: Literal["scheduled", "paused", "disabled"] | None = None
+    concurrency_policy: Literal["forbid", "allow", "replace"] | None = None
+
+
+class ThreadSubAgentItemDTO(_FrameBase):
+    """TaskRegistry child task 的严格 REST 投影。"""
+
+    id: str
+    agent_id: Annotated[str, Field(max_length=256)]
+    thread_id: str
+    source: Annotated[str, Field(max_length=128)]
+    workflow_id: Annotated[str, Field(max_length=256)] | None = None
+    workflow_task_id: Annotated[str, Field(max_length=256)] | None = None
+    task_id: Annotated[str, Field(max_length=256)]
+    task_run_id: Annotated[str, Field(max_length=256)]
+    task_name: Annotated[str, Field(max_length=512)]
+    session_id: Annotated[str, Field(max_length=512)]
+    status: Literal["pending", "running", "completed", "failed", "cancelled"]
+    started_at: str
+    updated_at: str
+    finished_at: str | None = None
+    started_at_ms: Annotated[int, Field(ge=0)]
+    updated_at_ms: Annotated[int, Field(ge=0)]
+    finished_at_ms: Annotated[int, Field(ge=0)] | None = None
+    error_message: Annotated[str, Field(max_length=2000)] | None = None
+
+
+class ThreadSubAgentListDTO(_FrameBase):
+    """GET /api/threads/{thread_id}/subagents 的唯一 wrapper。"""
+
+    schema_version: Literal[1]
+    thread_id: str
+    subagents: list[ThreadSubAgentItemDTO]
+
+
+class TaskProgressItemPayload(_FrameBase):
+    """当前 foreground workflow 的单个任务进度 REST 投影。"""
+
+    task_id: Annotated[str, Field(min_length=1, max_length=256)]
+    task_run_id: Annotated[str, Field(min_length=1, max_length=256)]
+    desc: Annotated[str, Field(min_length=1, max_length=1000)]
+    depends_on: list[Annotated[str, Field(min_length=1, max_length=256)]]
+    status: Literal["pending", "in_progress", "completed", "failed", "cancelled"]
+    display_order: Annotated[int, Field(ge=0)]
+    error_message: Annotated[str, Field(max_length=2000)] | None = None
+    updated_at_ms: Annotated[int, Field(ge=0)]
+
+
+class TaskProgressCountsPayload(_FrameBase):
+    """五态任务计数 REST 投影。"""
+
+    pending: Annotated[int, Field(ge=0)]
+    in_progress: Annotated[int, Field(ge=0)]
+    completed: Annotated[int, Field(ge=0)]
+    failed: Annotated[int, Field(ge=0)]
+    cancelled: Annotated[int, Field(ge=0)]
+    total: Annotated[int, Field(ge=0)]
+
+
+class TaskProgressSnapshotPayload(_FrameBase):
+    """Thread 当前 foreground task progress 的唯一 REST 响应体。"""
+
+    schema_version: Literal[2]
+    session_id: Annotated[str, Field(min_length=1, max_length=256)]
+    workflow_id: Annotated[str, Field(min_length=1, max_length=256)] | None = None
+    title: Annotated[str, Field(min_length=1, max_length=1000)] | None = None
+    control_mode: Literal["llm_steps", "runtime_lifecycle"] | None = None
+    updated_at_ms: Annotated[int, Field(ge=0)]
+    tasks: list[TaskProgressItemPayload] = Field(max_length=128)
+    counts: TaskProgressCountsPayload
 
 
 class UserInputAttachment(_FrameBase):
@@ -88,6 +260,33 @@ class CellSummaryDTO(_FrameBase):
     current_turn: int | None = None
     pending_approval_count: Annotated[int, Field(ge=0)]
     status: Literal["idle", "running", "awaiting_approval"]
+
+
+class PluginToolDTO(_FrameBase):
+    """管理页插件工具项。"""
+
+    id: Annotated[str, Field(min_length=1)]
+    name: Annotated[str, Field(min_length=1)]
+    display_name: Annotated[str, Field(min_length=1)]
+    source: Literal["mcp"]
+    enabled: bool
+    server_id: Annotated[str, Field(min_length=1)]
+    mcp_tool_name: Annotated[str, Field(min_length=1)]
+    description: str = ""
+    canonical_name: str = ""
+    is_alias: bool = False
+
+
+class PluginToolsResponseDTO(_FrameBase):
+    """管理页插件列表响应。"""
+
+    plugins: list[PluginToolDTO]
+
+
+class UpdatePluginToolRequest(_FrameBase):
+    """更新单个插件工具 enabled 状态。"""
+
+    enabled: bool
 
 
 class RuntimeStatusPollingDTO(_FrameBase):
@@ -176,6 +375,12 @@ class CreateThreadRequest(_FrameBase):
         return trimmed
 
 
+class ForkThreadRequest(_FrameBase):
+    """从源 Session 的指定 assistant 回复边界创建 thread 分支。"""
+
+    history_index: Annotated[int, Field(ge=0)]
+
+
 class CreateGenericThreadFromFirstMessageRequest(_FrameBase):
     """通用频道空白页首发创建请求体。
 
@@ -185,7 +390,7 @@ class CreateGenericThreadFromFirstMessageRequest(_FrameBase):
     text: Annotated[str, Field(min_length=1)]
     preset_id: Annotated[str, Field(min_length=1)]
     cwd: str = ""
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    reasoning_effort: Literal["none", "low", "medium", "high", "max"] | None = None
 
     @field_validator("text")
     @classmethod
@@ -240,6 +445,62 @@ class LLMPresetDTO(_FrameBase):
     requires_api_key: bool
 
 
+class ProviderCatalogItemDTO(_FrameBase):
+    """模型 provider catalog 摘要。"""
+
+    providerId: str
+    displayName: str
+    regionLabel: str
+    description: str
+    logoText: str
+
+
+class ProviderConnectionDTO(_FrameBase):
+    """由 catalog credential 引用派生的 provider 连接状态。"""
+
+    providerId: str
+    status: Literal["connected", "disconnected", "error"]
+    model: str | None
+    authLabel: str | None
+
+
+class ConnectedModelFamilyDTO(_FrameBase):
+    """Composer 使用的已连接模型与 reasoning capability 投影。"""
+
+    providerId: str
+    providerLabel: str
+    familyId: str
+    displayName: str
+    presetId: str
+    model: str
+    connected: bool
+    supportedReasoningEfforts: list[Literal["none", "low", "medium", "high", "max"]]
+    defaultReasoningEffort: Literal["none", "low", "medium", "high", "max"] | None
+    reasoningAdapter: str | None
+    contextWindowTokens: int | None
+
+
+class ProviderActionResponseDTO(_FrameBase):
+    """provider test/connect/disconnect 的统一响应。"""
+
+    providerId: str
+    ok: bool
+    message: str
+    connection: ProviderConnectionDTO | None = None
+
+
+class TestProviderRequest(_FrameBase):
+    """临时 credential probe 请求。"""
+
+    apiKey: str | None = None
+
+
+class ConnectProviderRequest(_FrameBase):
+    """保存 provider-specific credential 请求。"""
+
+    apiKey: str | None = None
+
+
 class LoginRequest(_FrameBase):
     """登录请求体（``POST /api/auth/login``）。"""
 
@@ -286,6 +547,8 @@ class ThreadMetadataDTO(_FrameBase):
     - v7 (v0.2.4)：加 ``is_pinned``
     - **v8 (usage-token task#3.3)**：删 5 个 ``cumulative_*_tokens`` 平铺字段；
       改为嵌套 ``usage_summary: dict`` 字段（语义跟 ``ThreadUsageSummary`` 一致）
+    - v12：加 ``forked_from_id``，保存直接父任务
+    - v13：加 ``forked_from_history_index``，保存 fork 复制终点在目标历史中的位置
 
     ``usage_summary`` 字段说明：
 
@@ -333,7 +596,46 @@ class ThreadMetadataDTO(_FrameBase):
     # ``get_thread_usage`` 派生结果。
     is_pinned: bool = False
     is_archived: bool = False
-    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] = 11
+    forked_from_id: Annotated[str, Field(pattern=r"^thread-[a-f0-9]{12}$")] | None = None
+    forked_from_history_index: Annotated[int, Field(ge=0)] | None = None
+    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13] = 13
+
+
+class PermissionRuleDTO(_FrameBase):
+    """thread permissions 的结构化规则。"""
+
+    expression: Annotated[str, Field(min_length=1)]
+    scope_cwd: str | None
+
+
+class PermissionsMigrationSummaryDTO(_FrameBase):
+    """v1→v2 首次读取迁移的可见结果。"""
+
+    from_schema_version: Literal[1]
+    to_schema_version: Literal[2]
+    invalidated_shell_allow_count: Annotated[int, Field(ge=0)]
+    backup_path: str
+
+
+class ThreadPermissionsDTO(_FrameBase):
+    """单个 thread 的 permissions 本子 REST 快照。"""
+
+    schema_version: Literal[2] = 2
+    thread_id: str
+    revision: Annotated[int, Field(ge=0)]
+    allow: list[PermissionRuleDTO]
+    deny: list[PermissionRuleDTO]
+    updated_at: str | None
+    migration_summary: PermissionsMigrationSummaryDTO | None = None
+
+
+class UpdateThreadPermissionsRequest(_FrameBase):
+    """整本替换 thread permissions 的 revision CAS 请求。"""
+
+    thread_id: str
+    revision: Annotated[int, Field(ge=0)]
+    allow: list[PermissionRuleDTO]
+    deny: list[PermissionRuleDTO]
 
 
 class CreateGenericThreadFromFirstMessageResponse(_FrameBase):
@@ -753,19 +1055,42 @@ class UpdateWhiteboardLayoutRequest(_FrameBase):
 __all__: list[str] = [
     "AddProjectRequest",
     "CellSummaryDTO",
+    "ConnectProviderRequest",
+    "ConnectedModelFamilyDTO",
+    "CreateCronTaskRequest",
     "CreateGenericThreadFromFirstMessageRequest",
     "CreateGenericThreadFromFirstMessageResponse",
     "CreateThreadRequest",
     "CreateWhiteboardCardRequest",
+    "CronRunDTO",
+    "CronRunMessagesResponse",
+    "CronRunsPage",
+    "CronTaskDTO",
     "ErrorResponseDTO",
+    "ForkThreadRequest",
     "ImportClaudeSessionRequest",
     "ImportClaudeSessionResponse",
     "LLMPresetDTO",
     "LoginRequest",
+    "PermissionRuleDTO",
+    "PermissionsMigrationSummaryDTO",
     "ProjectRegistryEntryDTO",
+    "ProviderActionResponseDTO",
+    "ProviderCatalogItemDTO",
+    "ProviderConnectionDTO",
     "RenameThreadRequest",
+    "RunNowResponse",
     "ServerInfoResponse",
+    "TaskProgressCountsPayload",
+    "TaskProgressItemPayload",
+    "TaskProgressSnapshotPayload",
+    "TestProviderRequest",
     "ThreadMetadataDTO",
+    "ThreadPermissionsDTO",
+    "ThreadSubAgentItemDTO",
+    "ThreadSubAgentListDTO",
+    "UpdateCronTaskRequest",
+    "UpdateThreadPermissionsRequest",
     "UpdateThreadPresetRequest",
     "UpdateWhiteboardCardRequest",
     "UpdateWhiteboardLayoutRequest",

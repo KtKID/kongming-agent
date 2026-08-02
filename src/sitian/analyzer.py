@@ -92,7 +92,7 @@ async def sitian_analyze(
     ``sitian_root`` 用于审计日志落盘（full_log_enabled 时写到 ``sitian_root/full-log/``）。
     """
     report_id = _make_report_id(observed_at)
-    model_name = analyzer_config.model_name or "unknown"
+    model_name = analyzer_config.preset_id or "catalog-default"
 
     project_obs = [obs for obs in observations if obs.entity_type == "project"]
     thread_obs = [obs for obs in observations if obs.entity_type == "thread"]
@@ -605,14 +605,12 @@ async def _call_llm(
 ) -> tuple[str | None, dict[str, Any], str | None]:
     try:
         request = LLMRequest(
-            model=analyzer_config.model_name,
+            model="",
             messages=(
                 Message.system(system_prompt),
                 Message.user(user_prompt),
             ),
-            temperature=analyzer_config.temperature,
-            max_tokens=analyzer_config.max_tokens,
-            timeout_seconds=float(analyzer_config.timeout),
+            reasoning_effort=analyzer_config.reasoning_effort,
         )
         response = await provider.complete(request)
         content = response.message.content or ""

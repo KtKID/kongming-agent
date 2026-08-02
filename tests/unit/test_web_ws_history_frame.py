@@ -31,17 +31,14 @@ class _FakeWS:
         self.sent.append(payload)
 
 
-class _FakeSession:
+class _FakeRuntime:
     def __init__(self, messages: list[Message]) -> None:
         self._messages = messages
 
-    async def history(self) -> list[Message]:
+    async def read_session_history(self, session_id: str) -> list[Message]:
+        """返回公开门户历史。"""
+        assert session_id == "t1"
         return list(self._messages)
-
-
-class _FakeRuntime:
-    def __init__(self, messages: list[Message]) -> None:
-        self._sessions: dict[str, _FakeSession] = {"t1": _FakeSession(messages)}
 
 
 class _FakeCell:
@@ -50,12 +47,50 @@ class _FakeCell:
         self.runtime = _FakeRuntime(messages)
 
 
+class _PublicOnlyRuntime:
+    """公开 history 返回 B，任何私有 Session 入口访问都抛错。"""
+
+    def __init__(self, messages: list[Message]) -> None:
+        self._messages = messages
+        self.read_calls: list[str] = []
+
+    def __getattribute__(self, name: str) -> Any:
+        if name in {"_session_factory", "_sessions", "_get_or_create_session"}:
+            raise AssertionError(f"private session access: {name}")
+        return object.__getattribute__(self, name)
+
+    async def read_session_history(self, session_id: str) -> list[Message]:
+        """记录公开门户坐标并返回哨兵 B。"""
+        self.read_calls.append(session_id)
+        return list(self._messages)
+
+
+class _PublicOnlyCell:
+    """只向 history route 暴露 public-only runtime。"""
+
+    def __init__(self, messages: list[Message]) -> None:
+        self.thread_id = "t-public"
+        self.runtime = _PublicOnlyRuntime(messages)
+
+
 def _last_frame(ws: _FakeWS) -> ThreadHistoryFrame:
     """从 ws.sent 取最后一帧并 round-trip 到 pydantic 模型，做强校验。"""
     assert ws.sent, "expected at least one frame"
     payload = ws.sent[-1]
     assert payload["frame_type"] == "thread.history"
     return ThreadHistoryFrame.model_validate(payload)
+
+
+@pytest.mark.asyncio
+async def test_history_frame_uses_public_runtime_portal_only() -> None:
+    """相反哨兵证明 route 只消费 SessionEngine 任务级 history 门户。"""
+    ws = _FakeWS()
+    cell = _PublicOnlyCell([Message.user("public-B")])
+
+    await _send_history_frame(ws, cell)  # type: ignore[arg-type]
+
+    assert cell.runtime.read_calls == ["t-public"]
+    assert _last_frame(ws).messages[0]["content"] == "public-B"
 
 
 @pytest.mark.asyncio

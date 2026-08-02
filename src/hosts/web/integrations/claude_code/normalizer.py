@@ -57,7 +57,7 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
-from hosts.web.app_support.llm_protocol import NormalizedMessage
+from hosts.web.app_support.llm_protocol import MessageKind, NormalizedMessage
 from hosts.web.integrations.claude_code._content_filter import (
     INTERNAL_CONTENT_PREFIXES,
     is_internal_content,
@@ -93,13 +93,14 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
-def _base(session_id: str | None) -> NormalizedMessage:
+def _base(session_id: str | None, frame_type: MessageKind) -> NormalizedMessage:
     """构造 base 字段（id / sessionId / timestamp / provider）。"""
     return NormalizedMessage(
         id=_new_id(),
         sessionId=session_id,
         timestamp=_now_iso(),
         provider="claude",
+        frame_type=frame_type,
     )
 
 
@@ -172,8 +173,7 @@ class ClaudeNormalizer:
         sid = None
         if msg.data:
             sid = msg.data.get("session_id")
-        out = _base(sid or session_id)
-        out["frame_type"] = "session_created"
+        out = _base(sid or session_id, "session_created")
         if sid is not None:
             out["newSessionId"] = sid
         return [out]
@@ -193,20 +193,17 @@ class ClaudeNormalizer:
                 if is_internal_content(block.text):
                     # 内部 system 注入文本：整条丢弃
                     continue
-                out = _base(session_id)
-                out["frame_type"] = "text"
+                out = _base(session_id, "text")
                 out["role"] = "assistant"
                 out["content"] = block.text
                 results.append(out)
             elif isinstance(block, ThinkingBlock):
                 # 空 thinking 也照实输出（[smoke §2.3]）
-                out = _base(session_id)
-                out["frame_type"] = "thinking"
+                out = _base(session_id, "thinking")
                 out["content"] = block.thinking
                 results.append(out)
             elif isinstance(block, ToolUseBlock):
-                out = _base(session_id)
-                out["frame_type"] = "tool_use"
+                out = _base(session_id, "tool_use")
                 out["toolId"] = block.id
                 out["toolName"] = block.name
                 out["toolInput"] = block.input
@@ -236,8 +233,7 @@ class ClaudeNormalizer:
                 self._pending_deny.discard(tool_use_id)
                 continue
 
-            out = _base(session_id)
-            out["frame_type"] = "tool_result"
+            out = _base(session_id, "tool_result")
             out["toolId"] = tool_use_id
             if block.content is not None:
                 out["content"] = block.content
@@ -252,8 +248,7 @@ class ClaudeNormalizer:
         session_id: str | None,
     ) -> list[NormalizedMessage]:
         """``ResultMessage`` → ``complete``。"""
-        out = _base(session_id)
-        out["frame_type"] = "complete"
+        out = _base(session_id, "complete")
         out["exitCode"] = 1 if msg.is_error else 0
         if msg.duration_ms is not None:
             out["durationMs"] = msg.duration_ms
@@ -294,8 +289,7 @@ class ClaudeNormalizer:
         event_type = event.get("type")
 
         if event_type == "message_start":
-            out = _base(session_id)
-            out["frame_type"] = "stream_status"
+            out = _base(session_id, "stream_status")
             out["phase"] = "responding"
             inner = event.get("message") or {}
             model = inner.get("model")
@@ -310,8 +304,7 @@ class ClaudeNormalizer:
             if phase is None:
                 # 未知 block type：保守不产出 stream_status，避免误导前端
                 return []
-            out = _base(session_id)
-            out["frame_type"] = "stream_status"
+            out = _base(session_id, "stream_status")
             out["phase"] = phase
             index = event.get("index")
             if isinstance(index, int):
@@ -329,28 +322,24 @@ class ClaudeNormalizer:
             delta = event.get("delta") or {}
             delta_type = delta.get("type")
             if delta_type == "text_delta":
-                out = _base(session_id)
-                out["frame_type"] = "stream_delta"
+                out = _base(session_id, "stream_delta")
                 out["content"] = delta.get("text", "")
                 out["deltaType"] = "text"
                 return [out]
             if delta_type == "thinking_delta":
-                out = _base(session_id)
-                out["frame_type"] = "stream_delta"
+                out = _base(session_id, "stream_delta")
                 out["content"] = delta.get("thinking", "")
                 out["deltaType"] = "thinking"
                 return [out]
             if delta_type == "input_json_delta":
-                out = _base(session_id)
-                out["frame_type"] = "stream_delta"
+                out = _base(session_id, "stream_delta")
                 out["content"] = delta.get("partial_json", "")
                 out["deltaType"] = "input_json"
                 return [out]
             # signature_delta / 未知 delta 类型丢弃
             return []
         if event_type == "content_block_stop":
-            out = _base(session_id)
-            out["frame_type"] = "stream_end"
+            out = _base(session_id, "stream_end")
             return [out]
         # message_delta / message_stop / 未知 SSE 控制帧丢弃
         return []

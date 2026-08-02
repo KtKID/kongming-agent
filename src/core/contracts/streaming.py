@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from core.contracts.llm_provider import FinishReason, LLMRequest
+from core.contracts.provider_usage import ProviderUsageSnapshot
 from core.message import Message
 
 StreamChunkKind = Literal[
@@ -51,7 +52,7 @@ class LLMStreamChunk:
         message: 仅 ``message.done`` 必填，其他 kind 忽略；等价非流式
             :attr:`LLMResponse.message`。
         finish_reason: 仅 ``message.done`` 必填。
-        usage: 仅 ``message.done`` 必填（可为空 dict），其他 kind 忽略。
+        usage: 仅 ``message.done`` 使用；provider 没有 usage 时为 None。
         provider_metadata: 仅 ``message.done`` 必填（可为空 dict），其他 kind 忽略。
     """
 
@@ -62,7 +63,7 @@ class LLMStreamChunk:
     tool_name: str | None = None
     message: Message | None = None
     finish_reason: FinishReason | None = None
-    usage: dict[str, Any] = field(default_factory=dict)
+    usage: ProviderUsageSnapshot | None = None
     provider_metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -79,6 +80,8 @@ class SupportsLLMStream(Protocol):
     - runner 不 ``await stream()`` 本身，直接拿 :class:`AsyncIterator`
     - provider 在 iterator 内部处理 HTTP / SSE / 累积
     - runner 消费完所有 chunk（直到见到 ``kind="message.done"`` 的终态）
+    - 显式工具调用合同要求返回的 iterator 提供 async ``aclose()``；Runner 在消费
+      任何 chunk 前检查该能力，缺失时以 ProviderError 失败，避免不可释放的响应流
     - 非 ``message.done`` 结束 = 流中断 = 由 provider 抛
       :class:`core.errors.ProviderError`；runner 不靠 iterator 耗尽来推断终态
 

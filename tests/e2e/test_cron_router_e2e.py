@@ -30,8 +30,8 @@ from scheduler.domain import (
     ScheduleTrigger,
     SessionMode,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
@@ -83,15 +83,13 @@ def _t(seconds_offset: int = 0) -> str:
 def _make_task(
     task_id: str,
     *,
-    enabled: bool = True,
-    state: TaskState = TaskState.SCHEDULED,
+    lifecycle: TaskLifecycleState = TaskLifecycleState.SCHEDULED,
     next_run_at: str | None = None,
 ) -> ScheduledTask:
     return ScheduledTask(
         task_id=task_id,
         name=f"task-{task_id}",
-        enabled=enabled,
-        state=state,
+        lifecycle=lifecycle,
         origin=TaskOrigin.WEB,
         trigger=ScheduleTrigger(trigger_type=TriggerType.INTERVAL, expr="10", timezone="UTC"),
         policy=TaskExecutionPolicy(
@@ -129,11 +127,7 @@ def _install_cron_router_before_catch_all(app: Any) -> None:
 def _make_cfg() -> Config:
     return Config.model_validate(
         {
-            "model": {
-                "name": "fake",
-                "base_url": "http://127.0.0.1:1234/v1",
-                "api_key": "",
-            },
+            "model": {"preset_id": "local-gemma-4-e4b-it"},
             "web": {"enabled": True, "dev_mode": True},
             "scheduler": {"enabled": False},
         }
@@ -183,9 +177,13 @@ def test_cron_router_full_lifecycle(tmp_path: Path) -> None:
         assert r.status_code == 200, r.text
         assert r.json() == []
 
-        # 2. 落两条 task：一条 enabled、一条 disabled
+        # 2. 落两条 task：一条 scheduled、一条 paused
         active = _make_task("active")
-        paused = _make_task("paused", enabled=False, state=TaskState.PAUSED, next_run_at=None)
+        paused = _make_task(
+            "paused",
+            lifecycle=TaskLifecycleState.PAUSED,
+            next_run_at=None,
+        )
         store.create_task(active)
         store.create_task(paused)
 
@@ -195,42 +193,40 @@ def test_cron_router_full_lifecycle(tmp_path: Path) -> None:
         body = r.json()
         ids = sorted(t["task_id"] for t in body)
         assert ids == ["active", "paused"]
-        # disabled 也在列表里
-        disabled_dto = next(t for t in body if t["task_id"] == "paused")
-        assert disabled_dto["enabled"] is False
-        assert disabled_dto["state"] == TaskState.PAUSED.value
+        paused_dto = next(t for t in body if t["task_id"] == "paused")
+        assert paused_dto["lifecycle"] == TaskLifecycleState.PAUSED.value
+        assert paused_dto["latest_run_status"] is None
+        assert paused_dto["live_runtime_status"] == "idle"
 
         # 4. pause active task
         r = client.post("/api/cron/tasks/active/pause", headers=CSRF_HEADERS)
         assert r.status_code == 200, r.text
-        assert r.json()["enabled"] is False
-        assert r.json()["state"] == TaskState.PAUSED.value
+        assert r.json()["lifecycle"] == TaskLifecycleState.PAUSED.value
         # store 物理状态确认
         t_after_pause = store.get_task("active")
         assert t_after_pause is not None
-        assert t_after_pause.enabled is False
+        assert t_after_pause.lifecycle is TaskLifecycleState.PAUSED
 
         # 5. resume → SCHEDULED + 重算 next_run_at
         r = client.post("/api/cron/tasks/active/resume", headers=CSRF_HEADERS)
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["enabled"] is True
-        assert body["state"] == TaskState.SCHEDULED.value
+        assert body["lifecycle"] == TaskLifecycleState.SCHEDULED.value
         # next_run_at 重算后必非空
         assert body["next_run_at"] is not None
         assert "T" in body["next_run_at"]  # ISO8601
 
-        # 6. run_now → 202 + next_run_at 被推前
+        # 6. run_now → 202 + 独立 manual reservation，不改正式日程
         original_next = store.get_task("active").next_run_at  # type: ignore[union-attr]
         r = client.post("/api/cron/tasks/active/run_now", headers=CSRF_HEADERS)
         assert r.status_code == 202, r.text
         body = r.json()
         # status 字段存在；run_id 是占位
         assert body["status"] in ("PENDING", "pending")
-        # next_run_at 被推前
-        new_next = store.get_task("active").next_run_at  # type: ignore[union-attr]
-        assert new_next is not None
-        assert new_next != original_next  # 被推前了
+        after_run_now = store.get_task("active")
+        assert after_run_now is not None
+        assert after_run_now.next_run_at == original_next
+        assert after_run_now.manual_run_requested_at is not None
 
         # 7. 拿 /tasks/{id}/runs（ticker 没跑，应该空）
         r = client.get("/api/cron/tasks/active/runs")

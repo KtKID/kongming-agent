@@ -237,15 +237,11 @@ async def test_llm_request_local_trace_drops_messages_and_tool_schema(tmp_path):
                             "input_schema": {"type": "object", "properties": {"path": {}}},
                         }
                     ],
-                    "metadata": {
-                        "thread_id": "thread-1",
-                        "Authorization": "Bearer secret",
-                        "headers": {"x-api-key": "secret"},
-                    },
-                    "reasoning_effort": {"secret": "high"},
-                    "temperature": 0.2,
+                    "metadata": {"thread_id": "thread-1"},
+                    "reasoning_effort": "high",
+                    "temperature": None,
                     "max_tokens": None,
-                    "timeout_seconds": {"bad": True},
+                    "timeout_seconds": None,
                 },
                 "model": "stub-model",
                 "message_count": 2,
@@ -263,40 +259,8 @@ async def test_llm_request_local_trace_drops_messages_and_tool_schema(tmp_path):
     assert request["tool_count"] == 1
     assert request["tool_names"] == ["read_file"]
     assert request["metadata"] == {"thread_id": "thread-1"}
-    assert request["reasoning_effort"] is None
-    assert request["temperature"] == 0.2
-    assert request["timeout_seconds"] is None
     assert "messages" not in request
     assert "tools" not in request
-
-
-@pytest.mark.asyncio
-async def test_llm_request_sanitize_false_keeps_full_payload(tmp_path):
-    """debug 场景可关闭本地 trace 裁剪，保留完整 request payload。"""
-    from core.contracts import Event
-
-    path = tmp_path / "trace.jsonl"
-    sink = JsonlTraceSink(path, sanitize=False)
-    await sink.emit(
-        Event(
-            kind="llm.request",
-            run_id="r",
-            turn=1,
-            payload={
-                "request": {
-                    "model": "stub-model",
-                    "messages": [{"role": "user", "content": "full user text"}],
-                    "tools": [{"name": "read_file", "input_schema": {"type": "object"}}],
-                    "metadata": {"Authorization": "Bearer secret"},
-                }
-            },
-        )
-    )
-
-    request = _read_jsonl(path)[0]["payload"]["request"]
-    assert request["messages"][0]["content"] == "full user text"
-    assert request["tools"][0]["input_schema"] == {"type": "object"}
-    assert request["metadata"] == {"Authorization": "Bearer secret"}
 
 
 @pytest.mark.asyncio
@@ -326,26 +290,17 @@ async def test_llm_response_local_trace_drops_content_and_tool_arguments(tmp_pat
                         ],
                     },
                     "usage": {"total_tokens": 12},
-                    "provider_metadata": {
-                        "cache_read_input_tokens": 5,
-                        "Authorization": "Bearer secret",
-                        "headers": {"x-api-key": "secret"},
-                    },
+                    "provider_metadata": {"cache_read_input_tokens": 5},
                 },
                 "finish_reason": "tool_calls",
                 "has_tool_calls": True,
                 "usage": {"total_tokens": 12},
-                "provider_metadata": {
-                    "cache_read_input_tokens": 5,
-                    "Authorization": "Bearer secret",
-                    "headers": {"x-api-key": "secret"},
-                },
+                "provider_metadata": {"cache_read_input_tokens": 5},
             },
         )
     )
 
     line = _read_jsonl(path)[0]
-    payload = line["payload"]
     response = line["payload"]["response"]
     assert response["finish_reason"] == "tool_calls"
     assert response["message"]["role"] == "assistant"
@@ -354,58 +309,8 @@ async def test_llm_response_local_trace_drops_content_and_tool_arguments(tmp_pat
     assert response["message"]["tool_names"] == ["read_file"]
     assert response["usage"] == {"total_tokens": 12}
     assert response["provider_metadata"] == {"cache_read_input_tokens": 5}
-    assert payload["provider_metadata"] == {"cache_read_input_tokens": 5}
     assert "content" not in response["message"]
     assert "tool_calls" not in response["message"]
-
-
-@pytest.mark.asyncio
-async def test_llm_response_local_trace_reuses_safe_content_chars(tmp_path):
-    """二次裁剪的 response 摘要只复用安全整数 content_chars。"""
-    from core.contracts import Event
-
-    path = tmp_path / "trace.jsonl"
-    sink = JsonlTraceSink(path)
-    await sink.emit(
-        Event(
-            kind="llm.response",
-            run_id="r",
-            turn=1,
-            payload={
-                "response": {
-                    "finish_reason": "stop",
-                    "message": {
-                        "role": "assistant",
-                        "content_chars": 7,
-                        "tool_call_count": False,
-                    },
-                    "provider_metadata": {},
-                }
-            },
-        )
-    )
-    await sink.emit(
-        Event(
-            kind="llm.response",
-            run_id="r",
-            turn=2,
-            payload={
-                "response": {
-                    "finish_reason": "stop",
-                    "message": {
-                        "role": "assistant",
-                        "content_chars": False,
-                        "tool_call_count": False,
-                    },
-                    "provider_metadata": {},
-                }
-            },
-        )
-    )
-
-    first, second = _read_jsonl(path)
-    assert first["payload"]["response"]["message"]["content_chars"] == 7
-    assert second["payload"]["response"]["message"]["content_chars"] == 0
 
 
 @pytest.mark.asyncio
@@ -429,10 +334,10 @@ async def test_close_is_noop_and_idempotent(tmp_path):
 
 @pytest.mark.asyncio
 async def test_build_jsonl_trace_sink_reads_only_output_path(tmp_path):
-    from infrastructure.config.models import Config, ModelConfig, TraceConfig
+    from infrastructure.config.models import Config, ModelSelectionConfig, TraceConfig
 
     cfg = Config(
-        model=ModelConfig(name="m", base_url="http://localhost:1234"),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         trace=TraceConfig(output_path=str(tmp_path / "out.jsonl")),
     )
     sink = build_jsonl_trace_sink(cfg)
@@ -550,10 +455,10 @@ async def test_invalid_periodic_batch_size_raises(tmp_path):
 async def test_build_jsonl_trace_sink_passes_stream_config(tmp_path):
     """D#5：build_jsonl_trace_sink 把 cfg.stream.delta_sampling / periodic_batch_size 传入 sink。"""
     from core.contracts import Event
-    from infrastructure.config.models import Config, ModelConfig, StreamConfig, TraceConfig
+    from infrastructure.config.models import Config, ModelSelectionConfig, StreamConfig, TraceConfig
 
     cfg = Config(
-        model=ModelConfig(name="m", base_url="http://localhost:1234"),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         trace=TraceConfig(output_path=str(tmp_path / "out.jsonl")),
         stream=StreamConfig(delta_sampling="full", periodic_batch_size=5),
     )

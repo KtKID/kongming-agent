@@ -1,121 +1,68 @@
 """Unit tests for web/run.py:_make_runtime_factory.
 
-Mock NativeRuntime.build and verify:
+Mock SessionEngine.build and verify:
 - Preset lookup and error on unknown preset_id
-- ModelConfig override (name, base_url, api_key, provider, reasoning_effort)
-- API key read from env via api_key_env
+- Catalog preset resolution through ModelCatalogManager
 - Session factory with bootstrap
 - Approval wrapping (build_default_approval with adapter.prompt_approval)
-- echo_final_content=False on SessionBridge
+- HostDispatcher 构造参数(runtime/session_id/queued_result_handler)
 - Instructions lazy-load and cache
 """
 
 from __future__ import annotations
 
 import hashlib
-import os
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from infrastructure.config.models import Config
+from infrastructure.config.models import Config, ModelSelectionConfig
 
 
 def _make_test_config() -> Config:
-    """Build a minimal Config with two presets for testing."""
-    from io import StringIO
-
-    import yaml
-
-    yaml_text = """
-model:
-  name: base-model
-  base_url: http://127.0.0.1:1234/v1
-  api_key: ""
-  timeout: 30
-  max_tokens: 2048
-  temperature: 0.7
-
-runner:
-  max_turns: 5
-
-session:
-  backend: memory
-
-trace:
-  output_path: .kongming/trace.jsonl
-  auto_flush: true
-  raw_llm: false
-
-logging:
-  level: WARNING
-
-host:
-  kind: cli
-
-approval:
-  mode: interactive
-
-tool:
-  shell:
-    enabled: false
-  file:
-    enabled: false
-
-web:
-  enabled: true
-  host: "127.0.0.1"
-  port: 8080
-  idle_timeout_seconds: 60
-  llm_presets:
-    - id: test-local
-      display_name: "Test Local"
-      base_url: http://127.0.0.1:1234/v1
-      model: test-model
-    - id: test-remote
-      display_name: "Test Remote"
-      provider: anthropic
-      base_url: https://api.anthropic.com
-      model: claude-test
-      api_key_env: TEST_API_KEY
-      reasoning_effort: high
-
-stream:
-  enabled: true
-  read_timeout: 120.0
-  suppress_content_after_tool_call: true
-  delta_sampling: none
-  periodic_batch_size: 20
-
-compactor:
-  enabled: false
-  max_messages: 50
-  keep_recent: 20
-  keep_system: true
-  tool_result_max_chars: 2000
-
-retry:
-  max_retries: 1
-  retry_backoff: 1.0
-
-cli:
-  show_reasoning: false
-
-evolution:
-  memory:
-    enabled: false
-
-safety:
-  hard_deny_commands: []
-  approval_required_commands: []
-  sensitive_paths: []
-"""
-    data = yaml.safe_load(StringIO(yaml_text))
-    return Config(**data)
+    """Build a minimal v0.6 Config for runtime-factory testing."""
+    return Config(model=ModelSelectionConfig(preset_id="test-local"))
 
 
 @pytest.fixture()
-def test_cfg():
+def test_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Config:
+    """提供 user catalog 中的本地测试 preset。"""
+    import yaml
+
+    monkeypatch.setenv("KONGMING_HOME", str(tmp_path))
+    catalog = {
+        "version": 2,
+        "providers": [
+            {
+                "provider_id": "test-provider",
+                "default_preset_id": "test-local",
+                "display_name": "Test Provider",
+                "region_label": "Test",
+                "description": "Web runtime factory tests.",
+                "logo_text": "T",
+                "protocol": "openai",
+                "default_base_url": "http://127.0.0.1:1234/v1",
+                "request_defaults": {
+                    "timeout_seconds": 30,
+                    "max_tokens": 2048,
+                    "temperature": 0.7,
+                },
+                "models": [
+                    {
+                        "preset_id": "test-local",
+                        "display_name": "Test Local",
+                        "model": "test-model",
+                    }
+                ],
+            }
+        ],
+    }
+    (tmp_path / "model-providers.yaml").write_text(
+        yaml.safe_dump(catalog, sort_keys=False),
+        encoding="utf-8",
+    )
     return _make_test_config()
 
 
@@ -137,8 +84,8 @@ def mock_deps():
     from prompting.instructions.instruction_loader import InstructionSource
 
     with (
-        patch("runtime_assembly.native_runtime.NativeRuntime") as MockRuntime,
-        patch("hosts.shared.session_bridge.SessionBridge") as MockBridge,
+        patch("runtime_assembly.session_engine.SessionEngine") as MockRuntime,
+        patch("hosts.shared.host_dispatcher.HostDispatcher") as MockHostDispatcher,
         patch(
             "prompting.instructions.instruction_loader.assemble_instructions",
             new_callable=AsyncMock,
@@ -153,33 +100,57 @@ def mock_deps():
         patch("tools.build_default_approval") as mock_approval,
         patch("tools.build_default_registry") as mock_registry,
         patch("tools.register_schedule_tool_if_enabled") as mock_register_schedule,
-        patch("tools.register_evolution_write_tool_if_enabled") as mock_register_evolution,
+        patch("safety.approval.chain.build_safety_chain") as mock_safety_chain,
     ):
         mock_asm.return_value = ("test instructions", ["prompts", "env", "runtime"])
-        mock_sources.return_value = [
-            InstructionSource(origin="runtime", content="runtime context"),
-            InstructionSource(origin="agent_spec", content="test instructions"),
-        ]
+
+        async def _fake_instruction_sources(**kwargs: object) -> list[InstructionSource]:
+            sources = [
+                InstructionSource(origin="runtime", content="runtime context"),
+            ]
+            workflow_catalog = str(kwargs.get("workflow_catalog") or "")
+            if workflow_catalog.strip():
+                sources.append(
+                    InstructionSource(
+                        origin="workflow_catalog",
+                        content=workflow_catalog,
+                    )
+                )
+            sources.append(InstructionSource(origin="agent_spec", content="test instructions"))
+            skill_listing = str(kwargs.get("skill_listing") or "")
+            if skill_listing.strip():
+                sources.append(InstructionSource(origin="skills", content=skill_listing))
+            memory_store = kwargs.get("memory_store")
+            if kwargs.get("inject_memory") and memory_store is not None:
+                snapshot = getattr(memory_store, "snapshot", None)
+                memory_prompt = snapshot.render_prompt() if snapshot is not None else None
+                if memory_prompt:
+                    sources.append(InstructionSource(origin="memory", content=memory_prompt))
+            return sources
+
+        mock_sources.side_effect = _fake_instruction_sources
         mock_skills.return_value = []
         mock_runtime_instance = MagicMock()
         MockRuntime.build.return_value = mock_runtime_instance
-        MockBridge.return_value = MagicMock()
+        MockHostDispatcher.return_value = MagicMock()
         mock_approval.return_value = MagicMock()
         mock_reg_instance = MagicMock()
         mock_reg_instance.names.return_value = ["read_file", "shell"]
         mock_registry.return_value = mock_reg_instance
         mock_register_schedule.return_value = None
-        mock_register_evolution.return_value = None
+        mock_safety_chain.return_value = MagicMock(name="cron_safety_chain")
 
         yield {
-            "NativeRuntime": MockRuntime,
-            "SessionBridge": MockBridge,
+            "SessionEngine": MockRuntime,
+            "HostDispatcher": MockHostDispatcher,
             "assemble_instructions": mock_asm,
             "load_instruction_sources": mock_sources,
             "load_skill_specs": mock_skills,
             "build_default_approval": mock_approval,
+            "build_default_registry": mock_registry,
             "registry": mock_reg_instance,
             "register_schedule_tool_if_enabled": mock_register_schedule,
+            "build_safety_chain": mock_safety_chain,
         }
 
 
@@ -201,152 +172,83 @@ class TestPresetLookup:
         factory = _make_runtime_factory(test_cfg)
         await factory("thread-1", "test-local", mock_adapter, [])
 
-        mock_deps["NativeRuntime"].build.assert_called_once()
+        mock_deps["SessionEngine"].build.assert_called_once()
 
 
-class TestModelConfigOverride:
-    """Verify preset fields correctly override cfg.model."""
-
-    @pytest.mark.asyncio
-    async def test_local_preset_overrides(self, test_cfg, mock_adapter, mock_deps):
-        from hosts.web.run import _make_runtime_factory
-
-        factory = _make_runtime_factory(test_cfg)
-        await factory("thread-1", "test-local", mock_adapter, [])
-
-        call_kwargs = mock_deps["NativeRuntime"].build.call_args
-        preset_cfg = call_kwargs[0][0]
-
-        assert preset_cfg.model.name == "test-model"
-        assert preset_cfg.model.base_url == "http://127.0.0.1:1234/v1"
-        assert preset_cfg.model.api_key == ""
-        assert preset_cfg.model.provider is None
-        # Other fields from cfg.model preserved
-        assert preset_cfg.model.timeout == 30
-        assert preset_cfg.model.max_tokens == 2048
+class TestMemoryWiring:
+    """Web generic_chat 默认启用长期记忆工具。"""
 
     @pytest.mark.asyncio
-    async def test_remote_preset_with_env_key(self, test_cfg, mock_adapter, mock_deps):
-        from hosts.web.run import _make_runtime_factory
-
-        factory = _make_runtime_factory(test_cfg)
-        with patch.dict(os.environ, {"TEST_API_KEY": "sk-test-123"}):
-            await factory("thread-2", "test-remote", mock_adapter, [])
-
-        call_kwargs = mock_deps["NativeRuntime"].build.call_args
-        preset_cfg = call_kwargs[0][0]
-
-        assert preset_cfg.model.name == "claude-test"
-        assert preset_cfg.model.base_url == "https://api.anthropic.com"
-        assert preset_cfg.model.api_key == "sk-test-123"
-        assert preset_cfg.model.provider == "anthropic"
-        assert preset_cfg.model.reasoning_effort == "high"
-
-    @pytest.mark.asyncio
-    async def test_glm_preset_reads_provider_specific_key(self, test_cfg, mock_adapter, mock_deps):
-        from hosts.web.run import _make_runtime_factory
-        from infrastructure.config.models import LLMPresetConfig
-
-        glm_preset = LLMPresetConfig(
-            id="bigmodel-glm5",
-            display_name="智谱 GLM-5.1",
-            provider="openai_compatible",
-            base_url="https://open.bigmodel.cn/api/coding/paas/v4",
-            model="glm-5.1",
-            api_key_env="GLM_API_KEY",
-            reasoning_effort="high",
-        )
-        test_cfg.web = test_cfg.web.model_copy(
-            update={"llm_presets": [*test_cfg.web.llm_presets, glm_preset]}
-        )
-
-        factory = _make_runtime_factory(test_cfg)
-        with patch.dict(
-            os.environ,
-            {
-                "KONGMING_MODEL_API_KEY": "generic-key",
-                "GLM_API_KEY": "glm-key",
-            },
-        ):
-            await factory("thread-glm", "bigmodel-glm5", mock_adapter, [])
-
-        call_kwargs = mock_deps["NativeRuntime"].build.call_args
-        preset_cfg = call_kwargs[0][0]
-
-        assert preset_cfg.model.name == "glm-5.1"
-        assert preset_cfg.model.base_url == "https://open.bigmodel.cn/api/coding/paas/v4"
-        assert preset_cfg.model.api_key == "glm-key"
-        assert preset_cfg.model.provider == "openai_compatible"
-
-    @pytest.mark.asyncio
-    async def test_missing_env_key_gives_empty(self, test_cfg, mock_adapter, mock_deps):
-        from hosts.web.run import _make_runtime_factory
-
-        factory = _make_runtime_factory(test_cfg)
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("TEST_API_KEY", None)
-            await factory("thread-2", "test-remote", mock_adapter, [])
-
-        call_kwargs = mock_deps["NativeRuntime"].build.call_args
-        preset_cfg = call_kwargs[0][0]
-        assert preset_cfg.model.api_key == ""
-
-    @pytest.mark.asyncio
-    async def test_factory_reads_presets_added_after_factory_creation(
-        self, test_cfg, mock_adapter, mock_deps
+    async def test_default_memory_registers_tool_and_forwards_to_runtime(
+        self,
+        test_cfg,
+        mock_adapter,
+        mock_deps,
+        tmp_path,
+        monkeypatch,
     ):
+        from hosts.shared.memory_refresh_sink import MemoryRefreshSink
         from hosts.web.run import _make_runtime_factory
-        from infrastructure.config.models import LLMPresetConfig
+        from infrastructure.config.models import EvolutionConfig
+        from tools import ToolRegistry
+
+        monkeypatch.setenv("KONGMING_HOME", str(tmp_path))
+        test_cfg.evolution = EvolutionConfig()
+        assert test_cfg.evolution.memory.enabled is True
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / "MEMORY.md").write_text(
+            "默认记忆已加载",
+            encoding="utf-8",
+        )
+
+        registry = ToolRegistry()
+        mock_deps["build_default_registry"].return_value = registry
 
         factory = _make_runtime_factory(test_cfg)
-        dynamic_preset = LLMPresetConfig(
-            id="dynamic-glm",
-            display_name="动态 GLM",
-            provider="openai_compatible",
-            base_url="https://open.bigmodel.cn/api/coding/paas/v4",
-            model="glm-5.1",
-            api_key_env="GLM_API_KEY",
+        await factory("thread-memory", "test-local", mock_adapter, [])
+
+        assert "memory" in registry.names()
+        runtime_kwargs = mock_deps["SessionEngine"].build.call_args.kwargs
+        assert "memory" in runtime_kwargs["enabled_tool_names"]
+        assert "# memory\n" in runtime_kwargs["instructions"]
+        assert any(isinstance(sink, MemoryRefreshSink) for sink in runtime_kwargs["event_sinks"])
+        source_kwargs = mock_deps["load_instruction_sources"].call_args.kwargs
+        assert source_kwargs["memory_store"] is not None
+        assert source_kwargs["inject_memory"] is True
+
+    @pytest.mark.asyncio
+    async def test_disabled_memory_omits_tool_and_store(
+        self,
+        test_cfg,
+        mock_adapter,
+        mock_deps,
+        tmp_path,
+        monkeypatch,
+    ):
+        from hosts.shared.memory_refresh_sink import MemoryRefreshSink
+        from hosts.web.run import _make_runtime_factory
+        from infrastructure.config.models import EvolutionConfig, EvolutionMemoryConfig
+        from tools import ToolRegistry
+
+        monkeypatch.setenv("KONGMING_HOME", str(tmp_path))
+        test_cfg.evolution = EvolutionConfig(
+            memory=EvolutionMemoryConfig(enabled=False),
         )
-        test_cfg.web = test_cfg.web.model_copy(
-            update={"llm_presets": [*test_cfg.web.llm_presets, dynamic_preset]}
+        registry = ToolRegistry()
+        mock_deps["build_default_registry"].return_value = registry
+
+        factory = _make_runtime_factory(test_cfg)
+        await factory("thread-memory-disabled", "test-local", mock_adapter, [])
+
+        assert "memory" not in registry.names()
+        runtime_kwargs = mock_deps["SessionEngine"].build.call_args.kwargs
+        assert "memory" not in runtime_kwargs["enabled_tool_names"]
+        assert all(
+            not isinstance(sink, MemoryRefreshSink) for sink in runtime_kwargs["event_sinks"]
         )
-
-        with patch.dict(os.environ, {"GLM_API_KEY": "glm-key"}):
-            await factory("thread-dynamic", "dynamic-glm", mock_adapter, [])
-
-        call_kwargs = mock_deps["NativeRuntime"].build.call_args
-        preset_cfg = call_kwargs[0][0]
-        assert preset_cfg.model.name == "glm-5.1"
-        assert preset_cfg.model.api_key == "glm-key"
-
-
-class TestProviderFactoryPresetOverride:
-    """provider_factory 与 Web runtime 使用同一 preset key 语义。"""
-
-    def test_apply_preset_reads_preset_api_key_env(self, test_cfg):
-        from infrastructure.config.models import LLMPresetConfig
-        from infrastructure.llm_providers.provider_factory import apply_preset
-
-        preset = LLMPresetConfig(
-            id="bigmodel-glm5",
-            display_name="智谱 GLM-5.1",
-            provider="openai_compatible",
-            base_url="https://open.bigmodel.cn/api/coding/paas/v4",
-            model="glm-5.1",
-            api_key_env="GLM_API_KEY",
-        )
-        with patch.dict(
-            os.environ,
-            {
-                "KONGMING_MODEL_API_KEY": "generic-key",
-                "GLM_API_KEY": "glm-key",
-            },
-        ):
-            preset_cfg = apply_preset(test_cfg, preset)
-
-        assert preset_cfg.model.name == "glm-5.1"
-        assert preset_cfg.model.api_key == "glm-key"
-        assert preset_cfg.model.provider == "openai_compatible"
+        source_kwargs = mock_deps["load_instruction_sources"].call_args.kwargs
+        assert source_kwargs["memory_store"] is None
 
 
 class TestApprovalWiring:
@@ -377,59 +279,261 @@ class TestApprovalWiring:
         assert call.kwargs["prompt_fn"] is not None
 
 
-class TestSessionBridge:
-    """Verify SessionBridge is constructed with echo_final_content=False."""
+class TestHostDispatcher:
+    """Verify HostDispatcher 构造参数(runtime/session_id/queued_result_handler)。"""
 
     @pytest.mark.asyncio
-    async def test_echo_final_content_false(self, test_cfg, mock_adapter, mock_deps):
+    async def test_host_dispatcher_constructed_with_runtime_session_id(
+        self, test_cfg, mock_adapter, mock_deps
+    ):
         from hosts.web.run import _make_runtime_factory
 
         factory = _make_runtime_factory(test_cfg)
         await factory("thread-abc", "test-local", mock_adapter, [])
 
-        mock_deps["SessionBridge"].assert_called_once_with(
-            runtime=mock_deps["NativeRuntime"].build.return_value,
-            adapter=mock_adapter,
+        mock_deps["HostDispatcher"].assert_called_once_with(
+            runtime=mock_deps["SessionEngine"].build.return_value,
             session_id="thread-abc",
-            echo_final_content=False,
+            queued_result_handler=mock_adapter.render_result,
+            agent_tree_runtime_router=factory._agent_tree_runtime_router,
+            approval_canceller=None,
         )
 
 
-class TestSessionFactoryBootstrap:
-    """Verify web session bootstrap includes the rendered instruction snapshot."""
+class TestLifecycleHooks:
+    """Lifecycle hook registration from web runtime factory."""
 
     @pytest.mark.asyncio
-    async def test_session_bootstrap_carries_rendered_instructions(
-        self, test_cfg, mock_adapter, mock_deps
+    async def test_evolution_hook_registered_after_runtime_build(
+        self, test_cfg, mock_adapter, mock_deps, tmp_path
     ):
+        import evolution.lifecycle as evolution_lifecycle
         from hosts.web.run import _make_runtime_factory
 
-        session_obj = object()
-        with patch("sessions.build_session", return_value=session_obj) as mock_build_session:
-            factory = _make_runtime_factory(test_cfg)
-            await factory("thread-bootstrap", "test-local", mock_adapter, [])
+        class _EvolutionManagerStub:
+            enabled = True
+            private_tool_names = frozenset({"evolution_write"})
 
-            _args, kwargs = mock_deps["NativeRuntime"].build.call_args
-            instructions = kwargs["instructions"]
-            session_factory = kwargs["session_factory"]
-            assert session_factory("thread-bootstrap") is session_obj
+            def register_runtime_tools(self, _registry, *, event_sinks=()):
+                del event_sinks
+                return True
 
-        build_call = mock_build_session.call_args
-        assert build_call.args[1] == "thread-bootstrap"
-        bootstrap = build_call.kwargs["bootstrap"]
-        assert bootstrap.instruction_text == instructions
-        assert bootstrap.instruction_text_hash == (
-            "sha256:" + hashlib.sha256(instructions.encode()).hexdigest()
+            def enabled_tool_names(self, tool_names, *, lifecycle_bound):
+                from evolution.evolution_manager import EvolutionManager
+
+                return EvolutionManager.filter_runtime_tool_names(
+                    tool_names,
+                    lifecycle_bound=lifecycle_bound,
+                )
+
+        manager = _EvolutionManagerStub()
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                workspace_root=tmp_path,
+                kongming_home=tmp_path,
+                evolution_manager=manager,
+            ),
         )
-        assert bootstrap.instruction_sources == [
-            "runtime",
-            "workflow_catalog",
-            "agent_spec",
+        factory = _make_runtime_factory(test_cfg)
+        setattr(factory, "_app", app)
+        registration_calls = []
+
+        def _capture_lifecycle_registration(*, runtime, manager):  # type: ignore[no-untyped-def]
+            registration_calls.append((runtime, manager))
+            return True
+
+        with patch.object(
+            evolution_lifecycle,
+            "register_evolution_lifecycle_hook",
+            _capture_lifecycle_registration,
+        ):
+            await factory("thread-evolution", "test-local", mock_adapter, [])
+
+        runtime = mock_deps["SessionEngine"].build.return_value
+        assert registration_calls == [(runtime, manager)]
+        runtime.add_lifecycle_hook.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_web_main_registers_public_review_tool_and_scheduler_omits_it(
+        self,
+        test_cfg,
+        mock_adapter,
+        mock_deps,
+        tmp_path,
+    ):
+        from evolution.evolution_manager import EvolutionManager
+        from hosts.web.run import _make_runtime_factory
+        from infrastructure.config.models import EvolutionMemoryConfig
+        from tools import ToolRegistry
+
+        test_cfg.evolution = test_cfg.evolution.model_copy(
+            update={
+                "memory": EvolutionMemoryConfig(enabled=False),
+                "learning": test_cfg.evolution.learning.model_copy(
+                    update={
+                        "enabled": True,
+                        "auto_trigger_enabled": False,
+                        "root_path": str(tmp_path / "evolution"),
+                    }
+                ),
+            }
+        )
+        test_cfg.scheduler.enabled = True
+        registry = ToolRegistry()
+        mock_deps["build_default_registry"].return_value = registry
+        manager = EvolutionManager(config=test_cfg, kongming_home=tmp_path)
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                workspace_root=tmp_path,
+                kongming_home=tmp_path,
+                evolution_manager=manager,
+            )
+        )
+        factory = _make_runtime_factory(test_cfg)
+        setattr(factory, "_app", app)
+
+        await factory("thread-evolution-tools", "test-local", mock_adapter, [])
+
+        assert "request_evolution_review" in registry.names()
+        assert "evolution_write" in registry.names()
+        runtime_kwargs = mock_deps["SessionEngine"].build.call_args.kwargs
+        assert "request_evolution_review" in runtime_kwargs["enabled_tool_names"]
+        assert "evolution_write" not in runtime_kwargs["enabled_tool_names"]
+        scheduler_factory = getattr(factory, "_scheduler_runtime_factory")
+        with patch("scheduler.runtime_factory.build_scheduled_run_manager") as mock_bridge:
+            scheduler_factory(object())
+        scheduler_names = mock_bridge.call_args.kwargs["enabled_tool_names"]
+        assert "request_evolution_review" not in scheduler_names
+        assert "evolution_write" not in scheduler_names
+        await manager.aclose()
+
+
+class TestPluginToolEnableState:
+    """Web runtime factory 按插件 enabled bool 创建新 runtime 工具白名单。"""
+
+    @pytest.mark.asyncio
+    async def test_new_runtime_reads_latest_plugin_enabled_bool(
+        self, test_cfg, mock_adapter, mock_deps, tmp_path
+    ):
+        from hosts.web.plugin_management import PluginManagementManager, PluginToolStateStore
+        from hosts.web.run import _make_runtime_factory
+
+        mcp_tool = SimpleNamespace(
+            name="mcp__minimax__web_search",
+            description="Search with MiniMax MCP",
+            metadata={
+                "server_id": "minimax",
+                "mcp_tool_name": "web_search",
+                "canonical_name": "mcp__minimax__web_search",
+                "kongming_tool_name": "mcp__minimax__web_search",
+                "is_alias": False,
+                "title": "Web Search",
+            },
+        )
+        mock_deps["registry"].names.return_value = [
+            "read_file",
+            "mcp__minimax__web_search",
+            "evolution_write",
         ]
+        mock_deps["registry"].__iter__.return_value = iter([mcp_tool])
+        manager = PluginManagementManager(PluginToolStateStore(tmp_path / "plugin-tools.json"))
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                workspace_root=tmp_path,
+                kongming_home=tmp_path,
+                plugin_management_manager=manager,
+            )
+        )
+
+        factory = _make_runtime_factory(test_cfg)
+        setattr(factory, "_app", app)
+
+        await factory("thread-1", "test-local", mock_adapter, [])
+        first_kwargs = mock_deps["SessionEngine"].build.call_args.kwargs
+        assert first_kwargs["enabled_tool_names"] == [
+            "read_file",
+            "mcp__minimax__web_search",
+        ]
+
+        manager.set_enabled("mcp__minimax__web_search", False)
+        await factory("thread-2", "test-local", mock_adapter, [])
+        second_kwargs = mock_deps["SessionEngine"].build.call_args.kwargs
+        assert second_kwargs["enabled_tool_names"] == ["read_file"]
+
+    @pytest.mark.asyncio
+    async def test_management_sync_refreshes_plugin_store_without_building_runtime(
+        self, test_cfg, mock_adapter, mock_deps, tmp_path
+    ):
+        from hosts.web.plugin_management import PluginManagementManager, PluginToolStateStore
+        from hosts.web.run import _make_runtime_factory
+
+        mcp_tool = SimpleNamespace(
+            name="mcp__minimax__web_search",
+            description="Search with MiniMax MCP",
+            metadata={
+                "server_id": "minimax",
+                "mcp_tool_name": "web_search",
+                "canonical_name": "mcp__minimax__web_search",
+                "kongming_tool_name": "mcp__minimax__web_search",
+                "is_alias": False,
+                "title": "Web Search",
+            },
+        )
+        mock_deps["registry"].names.return_value = [
+            "read_file",
+            "mcp__minimax__web_search",
+            "evolution_write",
+        ]
+        mock_deps["registry"].__iter__.return_value = iter([mcp_tool])
+        manager = PluginManagementManager(PluginToolStateStore(tmp_path / "plugin-tools.json"))
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                workspace_root=tmp_path,
+                kongming_home=tmp_path,
+                plugin_management_manager=manager,
+            )
+        )
+
+        factory = _make_runtime_factory(test_cfg)
+        setattr(factory, "_app", app)
+
+        await factory.sync_plugin_tools_for_management()
+
+        plugins = manager.list_registered_plugins()
+        assert [plugin.id for plugin in plugins] == ["mcp__minimax__web_search"]
+        mock_deps["SessionEngine"].build.assert_not_called()
 
 
 class TestInstructionsCaching:
     """Verify instructions are loaded once and cached."""
+
+    @staticmethod
+    def _app_for_cwds(
+        *,
+        entries: dict[str, str],
+        workspace_root,
+    ) -> SimpleNamespace:
+        metas = [SimpleNamespace(id=thread_id, cwd=cwd) for thread_id, cwd in entries.items()]
+        thread_manager = SimpleNamespace(list_threads=lambda: list(metas))
+        return SimpleNamespace(
+            state=SimpleNamespace(
+                thread_manager=thread_manager,
+                workspace_root=workspace_root,
+            )
+        )
+
+    @staticmethod
+    def _runtime_sources_for_cwd():
+        from prompting.instructions.instruction_loader import InstructionSource
+
+        async def _fake_sources(**kwargs):
+            cwd = kwargs["cwd"]
+            return [
+                InstructionSource(origin="runtime", content=f"runtime cwd={cwd}"),
+                InstructionSource(origin="agent_spec", content="test instructions"),
+            ]
+
+        return _fake_sources
 
     @pytest.mark.asyncio
     async def test_instructions_loaded_once_for_multiple_cells(
@@ -444,11 +548,10 @@ class TestInstructionsCaching:
 
         mock_deps["assemble_instructions"].assert_not_called()
         assert mock_deps["load_instruction_sources"].call_count == 2
-        assert mock_deps["load_skill_specs"].call_count == 1
-        assert mock_deps["NativeRuntime"].build.call_count == 2
+        assert mock_deps["SessionEngine"].build.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_workflow_prompt_listing_is_pre_file_source_with_cache_key(
+    async def test_runtime_instructions_include_workflow_catalog(
         self, test_cfg, mock_adapter, mock_deps
     ):
         from hosts.web.run import _make_runtime_factory
@@ -456,94 +559,190 @@ class TestInstructionsCaching:
         factory = _make_runtime_factory(test_cfg)
         await factory("thread-1", "test-local", mock_adapter, [])
 
-        _args, kwargs = mock_deps["NativeRuntime"].build.call_args
+        _args, kwargs = mock_deps["SessionEngine"].build.call_args
         instructions = kwargs["instructions"]
         assert "# workflow_catalog" in instructions
         assert "describe_agent_workflow_strategy" in instructions
         assert "run_agent_workflow" in instructions
-        assert instructions.index("# workflow_catalog") < instructions.index("# agent_spec")
+        assert "# runtime\nruntime context" in instructions
+        assert "# agent_spec\ntest instructions" in instructions
 
-        cache_key = getattr(factory, "_workflow_prompt_cache_key")
-        assert cache_key.workflow_template_version == "workflow-prompt-catalog-template-v1"
-        assert cache_key.workflow_listing_hash
-        base_instructions = "# runtime\nruntime context\n\n# agent_spec\ntest instructions"
-        assert cache_key.base_instructions_hash == (
-            "sha256:" + hashlib.sha256(base_instructions.encode()).hexdigest()
+        cache_key = getattr(factory, "_instructions_cache_key")
+        assert cache_key == "sha256:" + hashlib.sha256(instructions.encode()).hexdigest()
+
+    @pytest.mark.asyncio
+    async def test_stable_base_instruction_hash_keeps_shared_assets_cached(
+        self, test_cfg, mock_adapter, mock_deps
+    ):
+        from hosts.web.run import _make_runtime_factory
+
+        factory = _make_runtime_factory(test_cfg)
+        await factory("thread-1", "test-local", mock_adapter, [])
+        await factory("thread-2", "test-local", mock_adapter, [])
+
+        assert mock_deps["assemble_instructions"].call_count == 0
+        assert mock_deps["load_instruction_sources"].call_count == 2
+        _args, kwargs = mock_deps["SessionEngine"].build.call_args
+        assert "# runtime\nruntime context" in kwargs["instructions"]
+        assert "# agent_spec\ntest instructions" in kwargs["instructions"]
+        assert "# workflow_catalog" in kwargs["instructions"]
+
+    @pytest.mark.asyncio
+    async def test_runtime_instructions_use_thread_cwd_when_metadata_set(
+        self, test_cfg, mock_adapter, mock_deps, tmp_path
+    ):
+        from hosts.web.run import _make_runtime_factory
+
+        project_dir = tmp_path / "project-a"
+        project_dir.mkdir()
+        fallback_root = tmp_path / "fallback"
+        fallback_root.mkdir()
+        mock_deps["load_instruction_sources"].side_effect = self._runtime_sources_for_cwd()
+
+        factory = _make_runtime_factory(test_cfg)
+        setattr(
+            factory,
+            "_app",
+            self._app_for_cwds(
+                entries={"thread-project": str(project_dir)},
+                workspace_root=fallback_root,
+            ),
+        )
+        await factory("thread-project", "test-local", mock_adapter, [])
+
+        _args, kwargs = mock_deps["SessionEngine"].build.call_args
+        assert f"# runtime\nruntime cwd={project_dir}" in kwargs["instructions"]
+        assert kwargs["tool_context_metadata"] == {"cwd": str(project_dir)}
+        assert mock_deps["load_instruction_sources"].call_args.kwargs["cwd"] == str(project_dir)
+        assert mock_deps["load_skill_specs"].call_args.kwargs["workspace"] == project_dir.resolve()
+
+    @pytest.mark.asyncio
+    async def test_runtime_instructions_fall_back_to_workspace_root_when_thread_cwd_empty(
+        self, test_cfg, mock_adapter, mock_deps, tmp_path
+    ):
+        from hosts.web.run import _make_runtime_factory
+
+        fallback_root = tmp_path / "kongming-home"
+        fallback_root.mkdir()
+        expected_cwd = fallback_root.resolve().as_posix()
+        mock_deps["load_instruction_sources"].side_effect = self._runtime_sources_for_cwd()
+
+        factory = _make_runtime_factory(test_cfg)
+        setattr(
+            factory,
+            "_app",
+            self._app_for_cwds(
+                entries={"thread-empty-cwd": ""},
+                workspace_root=fallback_root,
+            ),
+        )
+        await factory("thread-empty-cwd", "test-local", mock_adapter, [])
+
+        _args, kwargs = mock_deps["SessionEngine"].build.call_args
+        assert f"# runtime\nruntime cwd={expected_cwd}" in kwargs["instructions"]
+        assert kwargs["tool_context_metadata"] == {"cwd": expected_cwd}
+        assert mock_deps["load_instruction_sources"].call_args.kwargs["cwd"] == expected_cwd
+        assert (
+            mock_deps["load_skill_specs"].call_args.kwargs["workspace"] == fallback_root.resolve()
         )
 
     @pytest.mark.asyncio
-    async def test_workflow_prompt_listing_hash_change_refreshes_cache(
-        self, test_cfg, mock_adapter, mock_deps
+    async def test_runtime_instructions_do_not_bleed_between_thread_cwds(
+        self, test_cfg, mock_adapter, mock_deps, tmp_path
     ):
-        from application.agent_workflows.prompt_catalog import WorkflowPromptListingRender
         from hosts.web.run import _make_runtime_factory
 
-        first_render = WorkflowPromptListingRender(
-            text="# workflow catalog\nfirst",
-            origin="workflow_catalog",
-            template_version="workflow-prompt-catalog-template-v1",
-            listing_hash="hash-1",
-        )
-        second_render = WorkflowPromptListingRender(
-            text="# workflow catalog\nsecond",
-            origin="workflow_catalog",
-            template_version="workflow-prompt-catalog-template-v1",
-            listing_hash="hash-2",
+        project_a = tmp_path / "project-a"
+        project_b = tmp_path / "project-b"
+        project_a.mkdir()
+        project_b.mkdir()
+        mock_deps["load_instruction_sources"].side_effect = self._runtime_sources_for_cwd()
+
+        factory = _make_runtime_factory(test_cfg)
+        setattr(
+            factory,
+            "_app",
+            self._app_for_cwds(
+                entries={"thread-a": str(project_a), "thread-b": str(project_b)},
+                workspace_root=tmp_path,
+            ),
         )
 
-        with patch(
-            "application.agent_workflows.prompt_catalog.build_default_workflow_prompt_listing",
-            side_effect=[first_render, first_render, second_render, second_render],
-        ):
-            factory = _make_runtime_factory(test_cfg)
-            await factory("thread-1", "test-local", mock_adapter, [])
-            await factory("thread-2", "test-local", mock_adapter, [])
-            await factory("thread-3", "test-local", mock_adapter, [])
+        await factory("thread-a", "test-local", mock_adapter, [])
+        instructions_a = mock_deps["SessionEngine"].build.call_args.kwargs["instructions"]
+        await factory("thread-b", "test-local", mock_adapter, [])
+        instructions_b = mock_deps["SessionEngine"].build.call_args.kwargs["instructions"]
 
-        assert mock_deps["assemble_instructions"].call_count == 0
-        assert mock_deps["load_instruction_sources"].call_count == 3
-        assert mock_deps["load_skill_specs"].call_count == 2
-        _args, kwargs = mock_deps["NativeRuntime"].build.call_args
-        assert "# workflow_catalog\n# workflow catalog\nsecond" in kwargs["instructions"]
-        cache_key = getattr(factory, "_workflow_prompt_cache_key")
-        assert cache_key.workflow_listing_hash == "hash-2"
+        assert f"runtime cwd={project_a}" in instructions_a
+        assert f"runtime cwd={project_b}" in instructions_b
+        assert f"runtime cwd={project_b}" not in instructions_a
+        assert f"runtime cwd={project_a}" not in instructions_b
+
+    @pytest.mark.asyncio
+    async def test_scheduler_runtime_factory_keeps_own_thread_instructions(
+        self, test_cfg, mock_adapter, mock_deps, tmp_path
+    ):
+        from hosts.web.run import _make_runtime_factory
+
+        project_a = tmp_path / "project-a"
+        project_b = tmp_path / "project-b"
+        project_a.mkdir()
+        project_b.mkdir()
+        mock_deps["load_instruction_sources"].side_effect = self._runtime_sources_for_cwd()
+
+        factory = _make_runtime_factory(test_cfg)
+        setattr(
+            factory,
+            "_app",
+            self._app_for_cwds(
+                entries={"thread-a": str(project_a), "thread-b": str(project_b)},
+                workspace_root=tmp_path,
+            ),
+        )
+        await factory("thread-a", "test-local", mock_adapter, [])
+        scheduler_factory_a = getattr(factory, "_scheduler_runtime_factory")
+
+        await factory("thread-b", "test-local", mock_adapter, [])
+
+        with patch("scheduler.runtime_factory.build_scheduled_run_manager") as mock_bridge:
+            scheduler_factory_a(object())
+
+        _args, kwargs = mock_bridge.call_args
+        assert f"runtime cwd={project_a}" in kwargs["instructions"]
+        assert f"runtime cwd={project_b}" not in kwargs["instructions"]
 
     @pytest.mark.asyncio
     async def test_base_instructions_hash_change_refreshes_cache(
         self, test_cfg, mock_adapter, mock_deps
     ):
-        from application.agent_workflows.prompt_catalog import WorkflowPromptListingRender
         from hosts.web.run import _make_runtime_factory
         from prompting.instructions.instruction_loader import InstructionSource
 
-        render = WorkflowPromptListingRender(
-            text="# workflow catalog\nstable",
-            origin="workflow_catalog",
-            template_version="workflow-prompt-catalog-template-v1",
-            listing_hash="stable-hash",
-        )
-        base_one = [InstructionSource(origin="runtime", content="base-one")]
-        base_two = [InstructionSource(origin="runtime", content="base-two")]
+        base_one = [
+            InstructionSource(origin="runtime", content="base-one"),
+            InstructionSource(origin="workflow_catalog", content="workflow-one"),
+        ]
+        base_two = [
+            InstructionSource(origin="runtime", content="base-two"),
+            InstructionSource(origin="workflow_catalog", content="workflow-two"),
+        ]
         mock_deps["load_instruction_sources"].side_effect = [
             base_one,
             base_two,
-            base_two,
         ]
-        with patch(
-            "application.agent_workflows.prompt_catalog.build_default_workflow_prompt_listing",
-            return_value=render,
-        ):
-            factory = _make_runtime_factory(test_cfg)
-            await factory("thread-1", "test-local", mock_adapter, [])
-            await factory("thread-2", "test-local", mock_adapter, [])
+        factory = _make_runtime_factory(test_cfg)
+        await factory("thread-1", "test-local", mock_adapter, [])
+        await factory("thread-2", "test-local", mock_adapter, [])
 
         mock_deps["assemble_instructions"].assert_not_called()
         assert mock_deps["load_instruction_sources"].call_count == 2
-        assert mock_deps["load_skill_specs"].call_count == 2
-        cache_key = getattr(factory, "_workflow_prompt_cache_key")
-        assert cache_key.base_instructions_hash == (
-            "sha256:" + hashlib.sha256(b"# runtime\nbase-two").hexdigest()
+        assert getattr(factory, "_instructions_cache_key") == (
+            "sha256:"
+            + hashlib.sha256(b"# runtime\nbase-two\n\n# workflow_catalog\nworkflow-two").hexdigest()
         )
+        _args, kwargs = mock_deps["SessionEngine"].build.call_args
+        assert "# runtime\nbase-two" in kwargs["instructions"]
+        assert "# workflow_catalog\nworkflow-two" in kwargs["instructions"]
 
 
 class TestSchedulerRuntimeFactory:
@@ -562,7 +761,7 @@ class TestSchedulerRuntimeFactory:
         scheduler_factory = getattr(factory, "_scheduler_runtime_factory", None)
         assert scheduler_factory is not None
 
-        with patch("scheduler.runtime_factory.build_cron_execution_bridge") as mock_bridge:
+        with patch("scheduler.runtime_factory.build_scheduled_run_manager") as mock_bridge:
             dummy_store = object()
             scheduler_factory(dummy_store)
 
@@ -572,6 +771,66 @@ class TestSchedulerRuntimeFactory:
         assert kwargs["enabled_tool_names"] == ["read_file", "shell"]
         assert "# workflow_catalog" in kwargs["instructions"]
         assert "# agent_spec\ntest instructions" in kwargs["instructions"]
+
+    @pytest.mark.asyncio
+    async def test_scheduler_approval_factory_returns_interactive_leaf_for_thread_tasks(
+        self, test_cfg, mock_adapter, mock_deps
+    ):
+        from hosts.web.run import _make_runtime_factory
+
+        test_cfg.scheduler.enabled = True
+        factory = _make_runtime_factory(test_cfg)
+        await factory("thread-1", "test-local", mock_adapter, [])
+
+        scheduler_factory = getattr(factory, "_scheduler_runtime_factory", None)
+        assert scheduler_factory is not None
+
+        with patch("scheduler.runtime_factory.build_scheduled_run_manager") as mock_bridge:
+            scheduler_factory(object())
+
+        _, kwargs = mock_bridge.call_args
+        approval_factory = kwargs["interactive_approval_factory"]
+        task = SimpleNamespace(thread_id="thread-cron", delivery=None)
+
+        mock_deps["build_default_approval"].reset_mock()
+        mock_deps["build_safety_chain"].reset_mock()
+
+        approval = approval_factory(task)
+
+        assert approval is mock_deps["build_default_approval"].return_value
+        mock_deps["build_default_approval"].assert_called_once()
+        call = mock_deps["build_default_approval"].call_args
+        assert call.args == ("interactive",)
+        assert callable(call.kwargs["prompt_fn"])
+        mock_deps["build_safety_chain"].assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_scheduler_approval_factory_without_thread_uses_bridge_default(
+        self, test_cfg, mock_adapter, mock_deps
+    ):
+        from hosts.web.run import _make_runtime_factory
+
+        test_cfg.scheduler.enabled = True
+        factory = _make_runtime_factory(test_cfg)
+        await factory("thread-1", "test-local", mock_adapter, [])
+
+        scheduler_factory = getattr(factory, "_scheduler_runtime_factory", None)
+        assert scheduler_factory is not None
+
+        with patch("scheduler.runtime_factory.build_scheduled_run_manager") as mock_bridge:
+            scheduler_factory(object())
+
+        _, kwargs = mock_bridge.call_args
+        approval_factory = kwargs["interactive_approval_factory"]
+
+        mock_deps["build_default_approval"].reset_mock()
+        mock_deps["build_safety_chain"].reset_mock()
+
+        approval = approval_factory(SimpleNamespace(thread_id="", delivery=None))
+
+        assert approval is None
+        mock_deps["build_default_approval"].assert_not_called()
+        mock_deps["build_safety_chain"].assert_not_called()
 
 
 class TestEventSinks:
@@ -584,18 +843,25 @@ class TestEventSinks:
 
         factory = _make_runtime_factory(test_cfg)
         mock_sink = MagicMock()
+        test_cfg.session = test_cfg.session.model_copy(
+            update={"file_store_path": ".kongming/custom-sessions"}
+        )
 
         await factory("thread-1", "test-local", mock_adapter, [mock_sink])
 
         # Sinks list 包含调用方传入的 mock_sink + factory 自己装配的 JsonlTraceSink
-        # （按 thread_id 拆文件，文件名形如 trace.thread-1.jsonl）
-        call_kwargs = mock_deps["NativeRuntime"].build.call_args
+        # （按 thread_id 拆目录，落到对应 session 目录内的 trace.jsonl）
+        call_kwargs = mock_deps["SessionEngine"].build.call_args
         passed_sinks = call_kwargs[1]["event_sinks"]
         assert mock_sink in passed_sinks
         jsonl_sinks = [s for s in passed_sinks if isinstance(s, JsonlTraceSink)]
         assert len(jsonl_sinks) == 1
-        # 验证按 thread_id 拆文件
-        assert "thread-1" in str(jsonl_sinks[0].output_path)
+        # 验证 trace 进入 thread 的 session 目录
+        assert jsonl_sinks[0].output_path.parts[-3:] == (
+            "custom-sessions",
+            "thread-1",
+            "trace.jsonl",
+        )
 
     @pytest.mark.asyncio
     async def test_jsonl_sink_path_per_thread_isolation(self, test_cfg, mock_adapter, mock_deps):
@@ -606,15 +872,15 @@ class TestEventSinks:
         factory = _make_runtime_factory(test_cfg)
 
         await factory("thread-aaa111bbb222", "test-local", mock_adapter, [])
-        sinks_a = mock_deps["NativeRuntime"].build.call_args[1]["event_sinks"]
+        sinks_a = mock_deps["SessionEngine"].build.call_args[1]["event_sinks"]
         path_a = next(s for s in sinks_a if isinstance(s, JsonlTraceSink)).output_path
 
         await factory("thread-ccc333ddd444", "test-local", mock_adapter, [])
-        sinks_b = mock_deps["NativeRuntime"].build.call_args[1]["event_sinks"]
+        sinks_b = mock_deps["SessionEngine"].build.call_args[1]["event_sinks"]
         path_b = next(s for s in sinks_b if isinstance(s, JsonlTraceSink)).output_path
 
         assert path_a != path_b
-        assert "thread-aaa111bbb222" in str(path_a)
-        assert "thread-ccc333ddd444" in str(path_b)
-        # 父目录一致（拆文件不拆目录）
-        assert path_a.parent == path_b.parent
+        assert path_a.parts[-3:] == ("sessions", "thread-aaa111bbb222", "trace.jsonl")
+        assert path_b.parts[-3:] == ("sessions", "thread-ccc333ddd444", "trace.jsonl")
+        # 父目录按 thread 隔离
+        assert path_a.parent != path_b.parent

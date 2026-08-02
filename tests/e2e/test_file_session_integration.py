@@ -8,11 +8,19 @@ from pathlib import Path
 import pytest
 
 from core.agent_spec import AgentSpec
-from core.contracts import ApprovalDecision, ApprovalRequest, LLMRequest, LLMResponse
+from core.contracts import (
+    ApprovalDecision,
+    ApprovalRequest,
+    LLMRequest,
+    LLMResponse,
+    ProviderUsageFamily,
+    ProviderUsageSnapshot,
+)
 from core.message import Message
 from core.run_state import RunState
 from core.runner import Runner
 from infrastructure.config import Config
+from infrastructure.llm_providers.usage import ProviderUsageManager
 from sessions.file_session import FileSession
 from sessions.session_bootstrap import SessionBootstrap
 from sessions.session_store import build_session
@@ -39,7 +47,7 @@ def _default_config(
     file_store_path: str = ".kongming/test-sessions",
 ) -> Config:
     return Config(
-        model={"name": "test-model", "base_url": "http://127.0.0.1:1234"},
+        model={"preset_id": "test-model"},
         session={"backend": backend, "store_path": store_path, "file_store_path": file_store_path},
     )
 
@@ -51,10 +59,14 @@ def store_path(tmp_path: Path) -> str:
 
 class _StubLLM:
     async def complete(self, request: LLMRequest) -> LLMResponse:
+        usage = ProviderUsageManager().normalize(
+            family=ProviderUsageFamily.OPENAI_CHAT_COMPLETIONS,
+            raw_usage={"prompt_tokens": 12, "completion_tokens": 7, "total_tokens": 19},
+        )
         return LLMResponse(
             message=Message.assistant("hello from llm"),
             finish_reason="stop",
-            usage={"prompt_tokens": 12, "completion_tokens": 7, "total_tokens": 19},
+            usage=usage,
         )
 
 
@@ -201,11 +213,10 @@ class TestTC13AssistantUsagePersisted:
         ]
         assistant_record = message_records[-1]
         assert assistant_record["message"]["role"] == "assistant"
-        assert assistant_record["usage"] == {
-            "prompt_tokens": 12,
-            "completion_tokens": 7,
-            "total_tokens": 19,
-        }
+        persisted_usage = ProviderUsageSnapshot.from_payload(assistant_record["usage"])
+        assert persisted_usage.input_total_tokens.value == 12
+        assert persisted_usage.output_total_tokens.value == 7
+        assert persisted_usage.total_tokens.value == 19
         system_prompt_path = Path(store_path) / "usage-test" / "system_prompt.json"
         system_prompt = json.loads(system_prompt_path.read_text(encoding="utf-8"))
         assert system_prompt["record_type"] == "system_prompt"

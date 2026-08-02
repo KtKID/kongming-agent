@@ -11,10 +11,17 @@ interface UseThreadSubAgentsOptions {
   refreshMs?: number;
 }
 
-const ACTIVE_STATUSES = new Set(["running"]);
-const SUCCESS_STATUSES = new Set(["completed"]);
-const ERROR_STATUSES = new Set(["failed"]);
-const CANCELLED_STATUSES = new Set(["cancelled"]);
+const ACTIVE_STATUSES = new Set([
+  "active",
+  "in_progress",
+  "running",
+  "started",
+  "spawning",
+]);
+const SUCCESS_STATUSES = new Set(["completed", "done", "success", "succeeded"]);
+const ERROR_STATUSES = new Set(["error", "failed", "failure"]);
+const CANCELLED_STATUSES = new Set(["canceled", "cancelled"]);
+const PENDING_STATUSES = new Set(["pending", "queued", "waiting"]);
 const MAX_SUBAGENTS = 128;
 const MAX_SUBAGENT_NAME_LENGTH = 120;
 
@@ -40,9 +47,11 @@ function subAgentStatusMeta(status: string): {
   if (CANCELLED_STATUSES.has(normalized)) {
     return { label: "已取消", icon: "error", isActive: false };
   }
-  const originalStatus = status.trim();
+  if (PENDING_STATUSES.has(normalized)) {
+    return { label: "等待中", icon: "pending", isActive: false };
+  }
   return {
-    label: originalStatus ? `未知状态：${originalStatus}` : "未知状态",
+    label: status.trim() || "未知",
     icon: "pending",
     isActive: false,
   };
@@ -51,7 +60,6 @@ function subAgentStatusMeta(status: string): {
 function subAgentName(agent: ThreadSubAgentDTO): string {
   return (
     agent.task_name?.trim() ||
-    agent.name?.trim() ||
     agent.id?.trim() ||
     "子智能体"
   ).slice(0, MAX_SUBAGENT_NAME_LENGTH);
@@ -104,42 +112,26 @@ export function useThreadSubAgents(
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const requestSeq = useRef(0);
-  const abortController = useRef<AbortController | null>(null);
-  const hasLoaded = useRef(false);
 
   const fetchSubAgents = useCallback(async () => {
     if (!threadId || !enabled) return;
     const seq = requestSeq.current + 1;
     requestSeq.current = seq;
-    abortController.current?.abort();
-    const controller = new AbortController();
-    abortController.current = controller;
-    if (!hasLoaded.current) {
-      setIsLoading(true);
-    }
+    setIsLoading(true);
     setError(null);
     try {
-      const nextSubAgents = await apiGetThreadSubAgents(threadId, {
-        signal: controller.signal,
-      });
-      if (requestSeq.current === seq && !controller.signal.aborted) {
-        hasLoaded.current = true;
+      const nextSubAgents = await apiGetThreadSubAgents(threadId);
+      if (requestSeq.current === seq) {
         setItems(toThreadSubAgentDisplayItems(nextSubAgents));
       }
     } catch (err) {
-      if (controller.signal.aborted) {
-        return;
-      }
       if (requestSeq.current === seq) {
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
       }
     } finally {
-      if (requestSeq.current === seq && !controller.signal.aborted) {
+      if (requestSeq.current === seq) {
         setIsLoading(false);
-        if (abortController.current === controller) {
-          abortController.current = null;
-        }
       }
     }
   }, [enabled, threadId]);
@@ -147,9 +139,6 @@ export function useThreadSubAgents(
   useEffect(() => {
     if (!enabled || !threadId) {
       requestSeq.current += 1;
-      abortController.current?.abort();
-      abortController.current = null;
-      hasLoaded.current = false;
       setIsLoading(false);
       setError(null);
       setItems([]);
@@ -163,8 +152,6 @@ export function useThreadSubAgents(
 
     return () => {
       requestSeq.current += 1;
-      abortController.current?.abort();
-      abortController.current = null;
       window.clearInterval(timer);
     };
   }, [enabled, fetchSubAgents, refreshMs, threadId]);
