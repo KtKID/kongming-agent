@@ -15,6 +15,9 @@ class WebSearchResult:
     snippet: str
     provider_name: str
     provider_tool_name: str
+    domain: str = ""
+    published_date: str | None = None
+    score: float = 0.0
     published_at: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 

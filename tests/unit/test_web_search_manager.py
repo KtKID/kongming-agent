@@ -12,8 +12,13 @@ from typing import Any
 
 import pytest
 
-from application.web_search import WebSearchManager, build_web_search_tool
-from core.contracts import ToolContext, ToolResult
+from application.web_search import (
+    WebSearchManager,
+    build_missing_web_search_tool,
+    build_web_search_tool,
+)
+from core.contracts import PreparedToolCall, ToolContext, ToolResult
+from tests.support.tool_calls import execute_prepared_tool
 from tools import ToolRegistry
 
 
@@ -28,7 +33,8 @@ class _FakeSearchTool:
         """初始化 fake tool，输入为空，输出带 calls 列表的实例。"""
         self.calls: list[dict[str, Any]] = []
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    async def execute(self, prepared: PreparedToolCall, ctx: ToolContext) -> ToolResult:
+        args = prepared.arguments
         """记录调用并返回 fake 搜索结果。"""
         self.calls.append(dict(args))
         return ToolResult(
@@ -43,12 +49,14 @@ class _FakeSearchTool:
                         "title": "A title",
                         "snippet": "A snippet",
                         "published_at": "2026-06-13",
-                        "metadata": {"score": 0.9},
+                        "score": 0.91,
+                        "metadata": {"source": "fake"},
                     },
                     {
                         "link": "https://example.com/b",
                         "name": "B title",
                         "summary": "B snippet",
+                        "score": "0.42",
                     },
                 ],
                 "mcp_diagnostics": {"elapsed_ms": 7},
@@ -63,7 +71,8 @@ class _FakeOrganicSearchTool:
     description = "fake minimax organic web search"
     input_schema: dict[str, Any] = {"type": "object"}
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    async def execute(self, prepared: PreparedToolCall, ctx: ToolContext) -> ToolResult:
+        args = prepared.arguments
         """返回 organic JSON content，输入为搜索参数，输出 ToolResult。"""
         del args, ctx
         return ToolResult(
@@ -83,7 +92,8 @@ class _FakeProviderErrorSearchTool:
     description = "fake minimax provider error"
     input_schema: dict[str, Any] = {"type": "object"}
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    async def execute(self, prepared: PreparedToolCall, ctx: ToolContext) -> ToolResult:
+        args = prepared.arguments
         """返回 API 错误文本，输入搜索参数，输出 ToolResult。"""
         del args, ctx
         return ToolResult(
@@ -114,7 +124,8 @@ class _FakeConflictingDiagnosticsSearchTool:
     description = "fake conflicting diagnostics"
     input_schema: dict[str, Any] = {"type": "object"}
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    async def execute(self, prepared: PreparedToolCall, ctx: ToolContext) -> ToolResult:
+        args = prepared.arguments
         """返回冲突诊断，输入搜索参数，输出 ToolResult。"""
         del args, ctx
         return ToolResult(
@@ -128,6 +139,36 @@ class _FakeConflictingDiagnosticsSearchTool:
         )
 
 
+class _FakeNonFiniteScoreSearchTool:
+    """fake 搜索工具，返回非有限 score。"""
+
+    name = "mcp__minimax__web_search"
+    description = "fake non finite score"
+    input_schema: dict[str, Any] = {"type": "object"}
+
+    def __init__(self, score: object) -> None:
+        """初始化 fake tool，输入 score，输出实例。"""
+        self._score = score
+
+    async def execute(self, prepared: PreparedToolCall, ctx: ToolContext) -> ToolResult:
+        args = prepared.arguments
+        """返回非有限 score，输入搜索参数，输出 ToolResult。"""
+        del args, ctx
+        return ToolResult(
+            ok=True,
+            content="ok",
+            data={
+                "results": [
+                    {
+                        "url": "https://example.com/non-finite",
+                        "title": "Non finite",
+                        "score": self._score,
+                    }
+                ],
+            },
+        )
+
+
 class _ExplodingSearchTool:
     """fake 搜索工具，执行时抛异常。"""
 
@@ -135,7 +176,8 @@ class _ExplodingSearchTool:
     description = "fake exploding search"
     input_schema: dict[str, Any] = {"type": "object"}
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    async def execute(self, prepared: PreparedToolCall, ctx: ToolContext) -> ToolResult:
+        args = prepared.arguments
         """模拟底层 provider 抛错，输入搜索参数，输出 RuntimeError。"""
         del args, ctx
         raise RuntimeError("provider transport exploded")
@@ -163,8 +205,11 @@ async def test_web_search_manager_normalizes_fake_mcp_data() -> None:
     assert result.snippet == "A snippet"
     assert result.provider_name == "minimax_web_search"
     assert result.provider_tool_name == "mcp__minimax__web_search"
+    assert result.domain == "example.com"
+    assert result.published_date == "2026-06-13"
     assert result.published_at == "2026-06-13"
-    assert result.metadata["score"] == 0.9
+    assert result.score == 0.91
+    assert result.metadata["source"] == "fake"
     assert response.diagnostics["provider_name"] == "minimax_web_search"
     assert response.diagnostics["provider_tool_name"] == "mcp__minimax__web_search"
     assert response.diagnostics["elapsed_ms"] == 7
@@ -201,7 +246,8 @@ async def test_web_search_tool_marks_provider_text_error_as_failed() -> None:
     )
     tool = build_web_search_tool(manager)
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {"query": "minimax mcp", "max_results": 2},
         ToolContext(run_id="r", session_id="s", turn=1, call_id="c"),
     )
@@ -225,7 +271,8 @@ async def test_web_search_tool_converts_provider_exception_to_failed_result() ->
     )
     tool = build_web_search_tool(manager)
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {"query": "minimax mcp"},
         ToolContext(run_id="r", session_id="s", turn=1, call_id="c"),
     )
@@ -241,6 +288,31 @@ async def test_web_search_tool_converts_provider_exception_to_failed_result() ->
 
 @pytest.mark.asyncio
 @pytest.mark.unit
+async def test_missing_web_search_tool_returns_tool_missing_result() -> None:
+    """验证缺失态 web_search，输入查询参数，输出工具缺失 ToolResult。"""
+    tool = build_missing_web_search_tool(
+        provider_name="minimax_web_search",
+        candidate_tool_names=("mcp__minimax__web_search",),
+    )
+
+    result = await execute_prepared_tool(
+        tool,
+        {"query": "minimax mcp"},
+        ToolContext(run_id="r", session_id="s", turn=1, call_id="c"),
+    )
+
+    assert result.ok is False
+    assert result.error_message == "web_search 工具缺失：未连接 MCP 搜索工具或用户搜索工具。"
+    assert result.data is not None
+    assert result.data["query"] == "minimax mcp"
+    assert result.data["results"] == []
+    assert result.data["diagnostics"]["reason"] == "search_tool_missing"
+    assert result.data["diagnostics"]["provider_name"] == "minimax_web_search"
+    assert result.data["diagnostics"]["candidate_tool_names"] == ("mcp__minimax__web_search",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_web_search_manager_keeps_pessimistic_diagnostics() -> None:
     """验证 diagnostics 合并，输入冲突 ok 字段，输出任一失败即失败。"""
     manager = WebSearchManager(
@@ -250,7 +322,8 @@ async def test_web_search_manager_keeps_pessimistic_diagnostics() -> None:
     )
     tool = build_web_search_tool(manager)
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {"query": "diagnostics merge"},
         ToolContext(run_id="r", session_id="s", turn=1, call_id="c"),
     )
@@ -264,6 +337,22 @@ async def test_web_search_manager_keeps_pessimistic_diagnostics() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.unit
+@pytest.mark.parametrize("score", ["NaN", "Infinity", float("inf")])
+async def test_web_search_manager_replaces_non_finite_score(score: object) -> None:
+    """验证非有限 score 归零，输入 NaN/Infinity，输出 0.0。"""
+    manager = WebSearchManager(
+        _FakeNonFiniteScoreSearchTool(score),
+        provider_name="minimax_web_search",
+        provider_tool_name="mcp__minimax__web_search",
+    )
+
+    response = await manager.search("non finite")
+
+    assert response.results[0].score == 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
 async def test_build_web_search_tool_registers_and_executes_with_tool_registry() -> None:
     """验证 build_web_search_tool 可注册进 ToolRegistry 并调用。"""
     fake_tool = _FakeSearchTool()
@@ -272,7 +361,8 @@ async def test_build_web_search_tool_registers_and_executes_with_tool_registry()
     registry.register(build_web_search_tool(manager))
 
     tool = registry["web_search"]
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {"query": "kongming", "max_results": 2},
         ToolContext(run_id="r", session_id="s", turn=1, call_id="c"),
     )
@@ -283,20 +373,45 @@ async def test_build_web_search_tool_registers_and_executes_with_tool_registry()
         "https://example.com/a",
         "https://example.com/b",
     ]
+    assert result.data["results"][0]["domain"] == "example.com"
+    assert result.data["results"][0]["published_date"] == "2026-06-13"
+    assert result.data["results"][0]["score"] == 0.91
     assert result.data["diagnostics"]["result_count"] == 2
     assert "A title" in result.content
 
 
 @pytest.mark.unit
-def test_web_search_tool_schema_accepts_integer_or_string_max_results() -> None:
-    """验证 schema 与运行时一致，输入 max_results，输出 integer/string 均合法。"""
+def test_web_search_tool_schema_accepts_integer_or_string_limits() -> None:
+    """验证 schema 与运行时一致，输入数量限制，输出 integer/string 均合法。"""
     tool = build_web_search_tool(WebSearchManager(_FakeSearchTool()))
     max_results_schema = tool.input_schema["properties"]["max_results"]
+    top_k_schema = tool.input_schema["properties"]["top_k"]
 
     assert max_results_schema["anyOf"] == [
         {"type": "integer", "minimum": 1},
-        {"type": "string", "pattern": "^[1-9][0-9]*$"},
+        {"type": "string", "pattern": "^[1-9][0-9]{0,8}$"},
     ]
+    assert top_k_schema["anyOf"] == max_results_schema["anyOf"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_web_search_tool_accepts_top_k_alias() -> None:
+    """验证 top_k 入口，输入别名参数，输出同一 max_results 调用链。"""
+    fake_tool = _FakeSearchTool()
+    manager = WebSearchManager(fake_tool, provider_name="minimax_web_search")
+    tool = build_web_search_tool(manager)
+
+    result = await execute_prepared_tool(
+        tool,
+        {"query": "kongming", "top_k": "1"},
+        ToolContext(run_id="r", session_id="s", turn=1, call_id="c"),
+    )
+
+    assert result.ok is True
+    assert fake_tool.calls == [{"query": "kongming", "max_results": 1}]
+    assert result.data is not None
+    assert len(result.data["results"]) == 1
 
 
 @pytest.mark.asyncio
@@ -308,8 +423,47 @@ async def test_web_search_tool_rejects_invalid_max_results(max_results: object) 
     manager = WebSearchManager(fake_tool, provider_name="minimax_web_search")
     tool = build_web_search_tool(manager)
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {"query": "kongming", "max_results": max_results},
+        ToolContext(run_id="r", session_id="s", turn=1, call_id="c"),
+    )
+
+    assert result.ok is False
+    assert result.error_message == "max_results must be an integer >= 1"
+    assert fake_tool.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_web_search_tool_rejects_invalid_top_k() -> None:
+    """验证 top_k 非法时返回 ToolResult 错误。"""
+    fake_tool = _FakeSearchTool()
+    manager = WebSearchManager(fake_tool, provider_name="minimax_web_search")
+    tool = build_web_search_tool(manager)
+
+    result = await execute_prepared_tool(
+        tool,
+        {"query": "kongming", "top_k": "0"},
+        ToolContext(run_id="r", session_id="s", turn=1, call_id="c"),
+    )
+
+    assert result.ok is False
+    assert result.error_message == "top_k must be an integer >= 1"
+    assert fake_tool.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_web_search_tool_rejects_oversized_limit_string() -> None:
+    """验证超长数量字符串，输入 5000 位数字，输出 ToolResult 错误。"""
+    fake_tool = _FakeSearchTool()
+    manager = WebSearchManager(fake_tool, provider_name="minimax_web_search")
+    tool = build_web_search_tool(manager)
+
+    result = await execute_prepared_tool(
+        tool,
+        {"query": "kongming", "max_results": "9" * 5000},
         ToolContext(run_id="r", session_id="s", turn=1, call_id="c"),
     )
 
@@ -326,7 +480,7 @@ async def test_web_search_manager_rejects_invalid_max_results(max_results: objec
     fake_tool = _FakeSearchTool()
     manager = WebSearchManager(fake_tool, provider_name="minimax_web_search")
 
-    with pytest.raises(ValueError, match="max_results must be an integer >= 1"):
+    with pytest.raises(ValueError, match="max_results/top_k must be an integer >= 1"):
         await manager.search("kongming", max_results=max_results)  # type: ignore[arg-type]
 
     assert fake_tool.calls == []

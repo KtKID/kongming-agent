@@ -344,8 +344,8 @@ def _failed_record(candidate: ResearchSourceCandidate, exc: Exception) -> Resear
         status="failed",
         tier="weak",
         content_text=None,
-        error_code=exc.__class__.__name__.lower(),
-        error_message=_error_digest(exc),
+        error_code=_exception_error_code(exc),
+        error_message=_exception_error_message(exc),
         provider_name=candidate.provider_name,
         rank=candidate.rank,
     )
@@ -367,8 +367,8 @@ def _search_failed_record(
         status="failed",
         tier="weak",
         content_text=None,
-        error_code=exc.__class__.__name__.lower(),
-        error_message=_error_digest(exc),
+        error_code=_exception_error_code(exc),
+        error_message=_exception_error_message(exc),
         provider_name=provider_name,
         rank=0,
     )
@@ -392,6 +392,30 @@ def _duplicate_record(duplicate: DuplicateSource) -> ResearchSourceRecord:
         rank=candidate.rank,
         duplicate_of=duplicate.kept.source_id,
     )
+
+
+def _exception_error_code(exc: Exception) -> str:
+    """提取异常错误码，输入为异常，输出可审计 error_code。"""
+    value = _safe_exception_attr(exc, "error_code")
+    if isinstance(value, str) and value:
+        return value
+    return exc.__class__.__name__.lower()
+
+
+def _exception_error_message(exc: Exception) -> str:
+    """提取异常摘要，输入为异常，输出可审计错误文本。"""
+    value = _safe_exception_attr(exc, "error_message")
+    if isinstance(value, str) and value:
+        return value
+    return _error_digest(exc)
+
+
+def _safe_exception_attr(exc: Exception, name: str) -> object | None:
+    """安全读取异常属性，输入异常和属性名，输出属性值或 None。"""
+    try:
+        return getattr(exc, name, None)
+    except Exception:
+        return None
 
 
 def _duplicate_source_id(candidate: ResearchSourceCandidate, kept_source_id: str) -> str:
