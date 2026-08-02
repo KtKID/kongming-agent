@@ -42,14 +42,14 @@ from infrastructure.config.writer import (
 # fixtures
 # ---------------------------------------------------------------------------
 
-# 最小化 yaml：含 model（必填）+ 显式 model.temperature 用于断言 sources。
-# 不写 runner.max_turns，让它走 pydantic 默认值 = 10。
+# 最小化 yaml：含 model（必填）+ 显式 model.reasoning_effort 用于断言 sources。
+# 不写 runner.max_turns，让它走 pydantic 默认值 = 50。
 _MINI_YAML = """\
+config_schema_version: v0.6
 # kongming-agent test config
 model:
-  name: gpt-4o-mini
-  base_url: http://127.0.0.1:1234/v1
-  temperature: 0.5
+  preset_id: local-gemma-4-e4b-it
+  reasoning_effort: medium
 """
 
 
@@ -58,13 +58,7 @@ model:
 # 实际只清理那些**测试断言会触达**的 env：MODEL.* / RUNNER.* / SCHEDULER.* /
 # TRACE.* 等。若新增白名单字段，按需补齐这里。
 _ENV_VARS_TO_CLEAN: tuple[str, ...] = (
-    "KONGMING_MODEL_PROVIDER",
-    "KONGMING_MODEL_NAME",
-    "KONGMING_MODEL_BASE_URL",
-    "KONGMING_MODEL_API_KEY",
-    "KONGMING_MODEL_TIMEOUT",
-    "KONGMING_MODEL_MAX_TOKENS",
-    "KONGMING_MODEL_TEMPERATURE",
+    "KONGMING_MODEL_PRESET_ID",
     "KONGMING_MODEL_REASONING_EFFORT",
     "KONGMING_RUNNER_MAX_TURNS",
     "KONGMING_TRACE_RAW_LLM",
@@ -74,9 +68,8 @@ _ENV_VARS_TO_CLEAN: tuple[str, ...] = (
     "KONGMING_WEB_ENABLED",
     "KONGMING_WEB_HOST",
     "KONGMING_WEB_PORT",
-    "KONGMING_EVOLUTION_LEARNING_MODEL_NAME",
-    "KONGMING_EVOLUTION_LEARNING_BASE_URL",
-    "KONGMING_EVOLUTION_LEARNING_PROVIDER",
+    "KONGMING_EVOLUTION_LEARNING_AUTO_TRIGGER_ENABLED",
+    "KONGMING_EVOLUTION_LEARNING_PRESET_ID",
     "KONGMING_EVOLUTION_LEARNING_REASONING_EFFORT",
     "KONGMING_SCHEDULER_ENABLED",
     "KONGMING_SCHEDULER_INTERVAL",
@@ -154,9 +147,9 @@ def test_read_schema_returns_all_fields_and_groups(manager: ConfigManager) -> No
 def test_read_raw_returns_path_mtime_content(manager: ConfigManager, yaml_file: Path) -> None:
     resp: RawResponse = manager.read_raw()
     assert resp.path == str(yaml_file)
-    assert resp.content.splitlines()[0].startswith("config_schema_version: v0.5")
+    assert resp.content.splitlines()[0].startswith("config_schema_version: v0.6")
     assert "# kongming-agent test config" in resp.content
-    assert "temperature: 0.5" in resp.content
+    assert "reasoning_effort: medium" in resp.content
     # mtime 与 stat 一致（容忍浮点精度 1µs）
     assert abs(resp.mtime - yaml_file.stat().st_mtime) < 1e-6
 
@@ -167,22 +160,46 @@ def test_read_raw_returns_path_mtime_content(manager: ConfigManager, yaml_file: 
 
 
 def test_read_effective_yaml_vs_default(manager: ConfigManager) -> None:
-    """yaml 显式写的 model.temperature → source=yaml；未写的 runner.max_turns → default。"""
+    """yaml 显式写的 model effort → source=yaml；runner.max_turns → default。"""
     resp: EffectiveResponse = manager.read_effective()
 
     # yaml 显式写的字段
-    assert "model.temperature" in resp.values
-    assert resp.values["model.temperature"] == 0.5
-    assert resp.sources["model.temperature"] == "yaml"
+    assert resp.values["model.preset_id"] == "local-gemma-4-e4b-it"
+    assert resp.sources["model.preset_id"] == "yaml"
+    assert resp.values["model.reasoning_effort"] == "medium"
+    assert resp.sources["model.reasoning_effort"] == "yaml"
 
     # yaml 未写、走 pydantic 默认值的字段
     assert "runner.max_turns" in resp.values
-    # RunnerConfig.max_turns 默认 = 10
-    assert resp.values["runner.max_turns"] == 10
+    # RunnerConfig.max_turns 默认 = 50（src/infrastructure/config/models.py:403）
+    assert resp.values["runner.max_turns"] == 50
     assert resp.sources["runner.max_turns"] == "default"
 
     # env_overrides 应为空（autouse fixture 清掉了所有 KONGMING_*）
     assert resp.env_overrides == []
+
+
+def test_read_effective_evolution_reviewer_preset_defaults_to_inherit(
+    manager: ConfigManager,
+) -> None:
+    """reviewer 未显式配置 preset 时继承主模型。"""
+    resp = manager.read_effective()
+
+    assert resp.values["evolution.learning.preset_id"] is None
+    assert resp.sources["evolution.learning.preset_id"] == "default"
+
+
+def test_read_effective_auto_trigger_default_and_schema(manager: ConfigManager) -> None:
+    """cadence 自动触发默认开启，并通过 Web 配置 schema 暴露为可编辑布尔项。"""
+    resp = manager.read_effective()
+    meta = _schema.get_field_meta("evolution.learning.auto_trigger_enabled")
+
+    assert resp.values["evolution.learning.auto_trigger_enabled"] is True
+    assert resp.sources["evolution.learning.auto_trigger_enabled"] == "default"
+    assert meta is not None
+    assert meta.type == "bool"
+    assert meta.editable is True
+    assert meta.restart_required is True
 
 
 # ---------------------------------------------------------------------------
@@ -213,25 +230,53 @@ def test_read_effective_env_override_scheduler_extra(
     assert "scheduler.enabled" in resp.env_overrides
 
 
+def test_read_effective_env_override_evolution_reviewer_preset(
+    manager: ConfigManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """reviewer preset 支持独立 env 覆盖，不影响主模型选择。"""
+    monkeypatch.setenv("KONGMING_EVOLUTION_LEARNING_PRESET_ID", "bigmodel-glm5-1m")
+
+    resp = manager.read_effective()
+
+    assert resp.values["evolution.learning.preset_id"] == "bigmodel-glm5-1m"
+    assert resp.sources["evolution.learning.preset_id"] == "env"
+    assert "evolution.learning.preset_id" in resp.env_overrides
+    assert resp.values["model.preset_id"] == "local-gemma-4-e4b-it"
+
+
+def test_read_effective_env_override_auto_trigger(
+    manager: ConfigManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """auto_trigger_enabled 支持 loader 环境变量 round-trip。"""
+    monkeypatch.setenv("KONGMING_EVOLUTION_LEARNING_AUTO_TRIGGER_ENABLED", "false")
+
+    resp = manager.read_effective()
+
+    assert resp.values["evolution.learning.auto_trigger_enabled"] is False
+    assert resp.sources["evolution.learning.auto_trigger_enabled"] == "env"
+    assert "evolution.learning.auto_trigger_enabled" in resp.env_overrides
+
+
 # ---------------------------------------------------------------------------
 # 5) save_patch happy path
 # ---------------------------------------------------------------------------
 
 
 def test_save_patch_happy_path(manager: ConfigManager, yaml_file: Path) -> None:
-    """改 model.temperature 0.5→0.9：ok=True / mtime 推进 / yaml 内容改。"""
+    """改默认 effort：ok=True / mtime 推进 / yaml 内容改。"""
     old_mtime = yaml_file.stat().st_mtime
     # 等一小会儿让 mtime 必然推进（macOS APFS 是 ns，但 sleep 一下保险）
     time.sleep(0.01)
 
-    patch = [PatchItem(path="model.temperature", value=0.9)]
+    patch = [PatchItem(path="model.reasoning_effort", value="high")]
     resp: SavePatchResponse = manager.save_patch(patch, expected_mtime=old_mtime)
 
     assert resp.ok is True
     assert resp.new_mtime > old_mtime
     # 真实文件内容已改
-    assert "0.9" in yaml_file.read_text(encoding="utf-8")
-    # model.temperature 在 schema 内 restart_required=False → 不进列表
+    assert "reasoning_effort: high" in yaml_file.read_text(encoding="utf-8")
+    # model.reasoning_effort 下次运行生效，无需重启 Web。
     assert resp.restart_required_fields == []
 
 
@@ -251,17 +296,56 @@ def test_save_patch_restart_required_fields(manager: ConfigManager, yaml_file: P
     assert "evolution.memory.enabled" in resp.restart_required_fields
 
 
+def test_save_patch_auto_trigger_round_trip(manager: ConfigManager, yaml_file: Path) -> None:
+    """Web 配置 patch 可保存 cadence 开关，并由 loader 读回布尔值。"""
+    extended_yaml = _MINI_YAML + ("\nevolution:\n  learning:\n    auto_trigger_enabled: true\n")
+    yaml_file.write_text(extended_yaml, encoding="utf-8")
+    mtime = yaml_file.stat().st_mtime
+
+    resp = manager.save_patch(
+        [PatchItem(path="evolution.learning.auto_trigger_enabled", value=False)],
+        expected_mtime=mtime,
+    )
+
+    assert resp.ok is True
+    assert "evolution.learning.auto_trigger_enabled" in resp.restart_required_fields
+    assert manager.read_effective().values["evolution.learning.auto_trigger_enabled"] is False
+
+
+@pytest.mark.parametrize("invalid_value", ["sometimes", []])
+def test_save_patch_auto_trigger_rejects_invalid_values(
+    manager: ConfigManager,
+    yaml_file: Path,
+    invalid_value: object,
+) -> None:
+    """auto_trigger_enabled 拒绝未知布尔文本和错误容器类型。"""
+    extended_yaml = _MINI_YAML + ("\nevolution:\n  learning:\n    auto_trigger_enabled: true\n")
+    yaml_file.write_text(extended_yaml, encoding="utf-8")
+    mtime = yaml_file.stat().st_mtime
+
+    with pytest.raises(ValidationFailedError):
+        manager.save_patch(
+            [
+                PatchItem(
+                    path="evolution.learning.auto_trigger_enabled",
+                    value=invalid_value,
+                )
+            ],
+            expected_mtime=mtime,
+        )
+
+
 # ---------------------------------------------------------------------------
 # 6) save_patch validation 失败
 # ---------------------------------------------------------------------------
 
 
 def test_save_patch_validation_failed(manager: ConfigManager, yaml_file: Path) -> None:
-    """temperature=99 超出 [0, 2] → raise ValidationFailedError。原文件不动。"""
+    """非法 effort → raise ValidationFailedError。原文件保持原样。"""
     mtime = yaml_file.stat().st_mtime
     original = yaml_file.read_text(encoding="utf-8")
 
-    patch = [PatchItem(path="model.temperature", value=99)]
+    patch = [PatchItem(path="model.reasoning_effort", value="ultra")]
     with pytest.raises(ValidationFailedError) as exc_info:
         manager.save_patch(patch, expected_mtime=mtime)
 
@@ -285,6 +369,6 @@ def test_save_patch_conflict(manager: ConfigManager, yaml_file: Path) -> None:
     # 确认 mtime 真的变了
     assert yaml_file.stat().st_mtime > old_mtime
 
-    patch = [PatchItem(path="model.temperature", value=0.7)]
+    patch = [PatchItem(path="model.reasoning_effort", value="low")]
     with pytest.raises(ConflictError):
         manager.save_patch(patch, expected_mtime=old_mtime)

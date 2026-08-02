@@ -73,3 +73,38 @@ class TestEventBus:
         bus.unregister("thread-aabbccddeeff")
         bus.unregister("thread-aabbccddeeff")  # idempotent, no crash
         bus.unregister("thread-000000000000")  # never registered
+
+    @pytest.mark.asyncio
+    async def test_same_sink_reference_count_keeps_second_connection_route(self) -> None:
+        """同一 thread fanout sink 注册两次时，单次断连只释放一份引用。"""
+        bus = EvolutionEventBus()
+        sink = _RecordingSink()
+        thread_id = "thread-aabbccddeeff"
+        bus.register(thread_id, sink)
+        bus.register(thread_id, sink)
+
+        bus.unregister(thread_id, sink)
+        event = _make_event(thread_id)
+        await bus.emit(event)
+        assert sink.events == [event]
+
+        bus.unregister(thread_id, sink)
+        await bus.emit(_make_event(thread_id, count=2))
+        assert sink.events == [event]
+
+    @pytest.mark.asyncio
+    async def test_stale_sink_unregister_does_not_remove_replacement(self) -> None:
+        """旧连接断开时按身份注销，不影响后来替换的新 sink。"""
+        bus = EvolutionEventBus()
+        thread_id = "thread-aabbccddeeff"
+        old_sink = _RecordingSink()
+        new_sink = _RecordingSink()
+        bus.register(thread_id, old_sink)
+        bus.register(thread_id, new_sink)
+
+        bus.unregister(thread_id, old_sink)
+        event = _make_event(thread_id)
+        await bus.emit(event)
+
+        assert old_sink.events == []
+        assert new_sink.events == [event]

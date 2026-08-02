@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Literal, cast
 
+from core.clock import now_epoch_ms
 from core.message import Message
 
 TranscriptRole = Literal["user", "assistant", "tool", "system"]
@@ -16,6 +17,41 @@ DecisionTarget = Literal["memory", "skill"]
 DecisionApplyStatus = Literal["pending", "written", "skipped", "failed"]
 DecisionApplyMode = Literal["append", "update", "create", "ignore"]
 ApplyJobStatus = Literal["pending", "running", "finished", "failed"]
+MAX_MANUAL_REVIEW_FOCUS_CHARS = 500
+
+
+class ManualReviewQueueStatus(StrEnum):
+    """显式审查请求的幂等排队结果。"""
+
+    QUEUED = "queued"
+    ALREADY_QUEUED = "already_queued"
+
+
+class EvolutionReviewTrigger(StrEnum):
+    """进化审查的封闭触发来源。"""
+
+    MANUAL_TOOL = "manual_tool"
+    MANUAL_COMMAND = "manual_command"
+    CADENCE = "cadence"
+    CADENCE_EVOLUTION_MANAGER = "cadence_evolution_manager"
+
+
+@dataclass(frozen=True)
+class ManualReviewRequest:
+    """当前主 run 内等待 after-run 消费的显式审查请求。"""
+
+    session_id: str
+    run_id: str
+    focus: str | None
+    requested_at_ms: int
+
+
+@dataclass(frozen=True)
+class EvolutionReviewPlan:
+    """手动与自动触发合流后生成的单次审查计划。"""
+
+    trigger: EvolutionReviewTrigger
+    focus: str | None = None
 
 
 def _require_str(data: dict[str, Any], key: str) -> str:
@@ -733,7 +769,7 @@ def _normalize_review_result_payload(
     if not isinstance(normalized.get("reviewed_at_ms"), int):
         reviewed_at_ms = root_data.get("reviewed_at_ms")
         normalized["reviewed_at_ms"] = (
-            reviewed_at_ms if isinstance(reviewed_at_ms, int) else int(time.time() * 1000)
+            reviewed_at_ms if isinstance(reviewed_at_ms, int) else now_epoch_ms()
         )
     if (
         not isinstance(normalized.get("review_summary"), str)

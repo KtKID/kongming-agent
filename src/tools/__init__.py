@@ -11,6 +11,8 @@
 - 三个最小 builtin tool：:class:`ReadFileTool` / :class:`WriteFileTool` /
   :class:`ListDirTool`，配合工厂 :func:`build_file_tools`。
 - 一个最小 shell tool：:class:`ShellTool`，配合工厂 :func:`build_shell_tool`。
+- 一个联网正文读取 tool：:class:`WebFetchTool`，配合工厂
+  :func:`build_web_fetch_tool`。
 - :func:`build_default_registry`：一把梭地按配置开关装好整套 builtin 工具。
 - :func:`register_schedule_tool_if_enabled`：可选 helper，按 ``cfg.scheduler.enabled``
   外部 register schedule_tool；与 ``build_memory_tool`` 同款"外部 register"模式。
@@ -30,10 +32,12 @@ from typing import TYPE_CHECKING, Any, cast
 from core.contracts import EventSink, Tool
 from tools.agent_role_tool import AgentRoleManagerLike, build_agent_role_tools
 from tools.agent_workflow_tool import (
+    AgentTreeRuntimeRouter,
     AgentWorkflowHandle,
     build_agent_workflow_tool,
     build_describe_agent_workflow_strategy_tool,
     build_run_agent_workflow_tool,
+    build_spawn_subagent_tool,
 )
 from tools.builtin.file_tool import (
     ListDirTool,
@@ -42,6 +46,7 @@ from tools.builtin.file_tool import (
     build_file_tools,
 )
 from tools.builtin.shell_tool import ShellTool, build_shell_tool
+from tools.builtin.web_fetch_tool import WebFetchTool, build_web_fetch_tool
 from tools.runtime.approval import (
     AutoAllowApproval,
     AutoDenyApproval,
@@ -53,7 +58,6 @@ from tools.runtime.base import BaseBuiltinTool
 from tools.runtime.registry import ToolRegistry
 
 if TYPE_CHECKING:
-    from evolution.store import EvolutionStore
     from infrastructure.config.models import Config
     from scheduler.store import Store
 
@@ -66,12 +70,13 @@ def build_default_registry(
     shell_max_stream_bytes: int = 8000,
     shell_terminate_grace_seconds: float = 2.0,
     file_read_max_bytes: int = 65536,
+    web_fetch_enabled: bool = True,
     skill_specs: Mapping[str, Any] | None = None,
     skill_event_sinks: Sequence[EventSink] = (),
 ) -> ToolRegistry:
     """按 v1-mini 默认工具集组装一个 :class:`ToolRegistry`。
 
-    装配层（例如 ``runtime_assembly/native_runtime.py``）只需要读配置
+    装配层（例如 ``runtime_assembly/session_engine.py``）只需要读配置
     里的 ``tool.file.enabled`` / ``tool.shell.enabled`` 以及运行参数，
     然后把它们喂进来即可，不用在别的地方再写第二份"默认工具清单"。
 
@@ -91,6 +96,7 @@ def build_default_registry(
         shell_max_stream_bytes: stdout/stderr 各自最大字节数。
         shell_terminate_grace_seconds: 超时后 terminate 到 kill 之间等待秒数。
         file_read_max_bytes: ReadFileTool 默认读取上限字节数。
+        web_fetch_enabled: 是否注册联网正文读取工具 ``web_fetch``。
         skill_specs: 由 ``skill-loader-v0.1.6`` 装载得到的 ``name → SkillSpec``
             映射。``None`` 不注册；空 ``dict`` 也不注册（避免暴露空工具给模型）。
         skill_event_sinks: SkillTool 装配期 fan-out 用的事件 sink 序列；与
@@ -110,6 +116,7 @@ def build_default_registry(
             max_stream_bytes=shell_max_stream_bytes,
             terminate_grace_seconds=shell_terminate_grace_seconds,
         ),
+        *build_web_fetch_tool(enabled=web_fetch_enabled),
     ]
     if skill_specs:
         from tools.builtin.skill_tool import SkillTool
@@ -166,7 +173,7 @@ def register_schedule_tool_if_enabled(
         if cfg.scheduler.home is not None
         else (get_kongming_home() / "cron")
     )
-    store = Store(home)
+    store = Store(home, display_timezone=cfg.scheduler.default_timezone)
     # v0.3：把 cfg.scheduler 的默认 timezone / delivery channel 透传给 schedule_tool，
     # 让 LLM 创建任务时不必（也不应）猜时区，dispatcher 也不会因 delivery=None SKIPPED。
     registry.register(
@@ -179,41 +186,6 @@ def register_schedule_tool_if_enabled(
                 default_delivery_channel=cfg.scheduler.default_delivery_channel,
                 default_preset_id=default_preset_id,
                 thread_provisioner=thread_provisioner,
-            ),
-        )
-    )
-    return store
-
-
-def register_evolution_write_tool_if_enabled(
-    registry: ToolRegistry,
-    cfg: Config,
-    *,
-    event_sinks: Sequence[EventSink] = (),
-) -> EvolutionStore | None:
-    """按 ``cfg.evolution.learning.enabled`` 外部 register evolution_write。"""
-    if not cfg.evolution.learning.enabled:
-        return None
-
-    from evolution.state_store import EvolutionStateStore
-    from evolution.store import EvolutionStore, resolve_evolution_root
-    from tools.builtin.evolution_write_tool import build_evolution_write_tool
-
-    root_dir = resolve_evolution_root(cfg.evolution.learning.root_path)
-    state_store = EvolutionStateStore(root_dir)
-    store = EvolutionStore(
-        root_dir=root_dir,
-        state_store=state_store,
-        event_sinks=tuple(event_sinks),
-    )
-    registry.register(
-        cast(
-            Tool,
-            build_evolution_write_tool(
-                store,
-                min_confidence=cfg.evolution.learning.nutrient_confidence_threshold,
-                max_nutrients=cfg.evolution.learning.max_nutrients,
-                event_sinks=event_sinks,
             ),
         )
     )
@@ -237,6 +209,21 @@ def register_agent_role_tool(
     """Register agent role list/create tools with a shared manager."""
     for tool in build_agent_role_tools(manager):
         registry.register(cast(Tool, tool))
+
+
+def register_spawn_subagent_tool(
+    registry: ToolRegistry,
+    agent_tree_runtime_router: AgentTreeRuntimeRouter,
+    *,
+    parent_model: str = "",
+) -> None:
+    """Register the agent-tree spawn_subagent tool with a session-aware runtime router.
+
+    The router resolves the current agent tree dispatcher from ToolContext.session_id at run.
+    """
+    registry.register(
+        cast(Tool, build_spawn_subagent_tool(agent_tree_runtime_router, parent_model=parent_model))
+    )
 
 
 def register_task_progress_tool(
@@ -263,6 +250,7 @@ def register_choice_tool(
 __all__ = [
     "AutoAllowApproval",
     "AutoDenyApproval",
+    "AgentTreeRuntimeRouter",
     "AgentWorkflowHandle",
     "BaseBuiltinTool",
     "InteractiveApproval",
@@ -271,16 +259,19 @@ __all__ = [
     "ReadFileTool",
     "ShellTool",
     "ToolRegistry",
+    "WebFetchTool",
     "WriteFileTool",
     "build_default_approval",
     "build_default_registry",
     "build_describe_agent_workflow_strategy_tool",
     "build_file_tools",
     "build_shell_tool",
-    "register_evolution_write_tool_if_enabled",
+    "build_web_fetch_tool",
+    "build_spawn_subagent_tool",
     "register_agent_workflow_tool",
     "register_agent_role_tool",
     "register_schedule_tool_if_enabled",
+    "register_spawn_subagent_tool",
     "register_choice_tool",
     "register_task_progress_tool",
 ]

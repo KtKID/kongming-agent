@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from evolution.evolution_manager import EvolutionManager
 from evolution.models import EvolutionNutrient, ReviewResult, ReviewWritePayload
 from evolution.state_store import EvolutionStateStore
 from evolution.store import EvolutionStore
@@ -16,9 +17,9 @@ from infrastructure.config.models import Config
 
 
 class _FakeWS:
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: Config, manager: EvolutionManager) -> None:
         self.sent: list[dict[str, Any]] = []
-        self.app = SimpleNamespace(state=SimpleNamespace(config=cfg))
+        self.app = SimpleNamespace(state=SimpleNamespace(config=cfg, evolution_manager=manager))
 
     async def send_json(self, payload: dict[str, Any]) -> None:
         self.sent.append(payload)
@@ -79,9 +80,12 @@ async def test_send_evolution_replay_frames_replays_completed_notice(tmp_path: P
             trigger_reason="cadence",
         )
     )
-    ws = _FakeWS(_cfg(root_dir))
+    cfg = _cfg(root_dir)
+    manager = EvolutionManager(config=cfg, kongming_home=tmp_path)
+    ws = _FakeWS(cfg, manager)
 
     await _send_evolution_replay_frames(ws, _FakeCell("thread-xyz"))
+    await manager.aclose()
 
     assert len(ws.sent) == 1
     sent = ws.sent[0]

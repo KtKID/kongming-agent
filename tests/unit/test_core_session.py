@@ -107,3 +107,34 @@ async def test_advance_run_index_isolated_per_instance():
     assert await b.advance_run_index() == 1
     assert await a.advance_run_index() == 2
     assert await b.advance_run_index() == 2
+
+
+@pytest.mark.asyncio
+async def test_get_run_count_starts_at_zero():
+    """未 advance 过的 session，get_run_count 返回 0。"""
+    s = InMemorySession("sid")
+    assert await s.get_run_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_get_run_count_matches_last_advance():
+    """get_run_count 只读返回，与最后一次 advance_run_index 返回值相等，不递增。"""
+    s = InMemorySession("sid")
+    await s.advance_run_index()
+    await s.advance_run_index()
+    assert await s.get_run_count() == 2
+    # 重复只读不递增
+    assert await s.get_run_count() == 2
+    assert await s.advance_run_index() == 3
+    assert await s.get_run_count() == 3
+
+
+@pytest.mark.asyncio
+async def test_get_run_count_resets_on_clear():
+    """clear 后 run_count 归零，get_run_count 反映归零状态。"""
+    s = InMemorySession("sid")
+    await s.advance_run_index()
+    await s.advance_run_index()
+    assert await s.get_run_count() == 2
+    await s.clear()
+    assert await s.get_run_count() == 0

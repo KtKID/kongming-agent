@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
+from core.contracts.provider_usage import ProviderUsageSnapshot
 from core.message import Message
 
 
@@ -18,7 +19,12 @@ class Session(Protocol):
 
     session_id: str
 
-    async def append(self, message: Message, *, usage: dict[str, Any] | None = None) -> None:
+    async def append(
+        self,
+        message: Message,
+        *,
+        usage: ProviderUsageSnapshot | None = None,
+    ) -> None:
         """追加一条消息到会话末尾。
 
         ``usage`` 用于附着这条记录对应的 LLM token 统计。当前 runner 只在
@@ -52,6 +58,20 @@ class Session(Protocol):
           - advance 成功 + append 失败（极罕见）→ jsonl 少一条，run_count 跳号，
             仍唯一不撞
         - 事务化留给 v0.2+
+        """
+        ...
+
+    async def get_run_count(self) -> int:
+        """只读返回当前 run 编号，不递增、不持久化。
+
+        与 :meth:`advance_run_index` 共享同一持久化真源（FileSession 的
+        manifest.json、SQLiteSession 的 sessions 表、InMemorySession 的实例字段）。
+        cadence 等只读消费者应调用本方法，**不得另维护副本计数器**——否则会与
+        advance_run_index 的递增时机错位产生双源误差（典型场景：evolution 曾
+        关闭过的 session，副本计数器滞后于 manifest 真值）。
+
+        返回值与最后一次 ``advance_run_index()`` 的返回值相等；从未 advance 过
+        的 session 返回 0。
         """
         ...
 

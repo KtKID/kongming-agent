@@ -79,11 +79,7 @@ class FakeTM:
 def _cfg(root_dir: Path) -> Config:
     return Config.model_validate(
         {
-            "model": {
-                "name": "fake",
-                "base_url": "http://127.0.0.1:1234/v1",
-                "api_key": "",
-            },
+            "model": {"preset_id": "local-gemma-4-e4b-it"},
             "web": {"enabled": True, "dev_mode": True},
             "evolution": {
                 "learning": {
@@ -201,10 +197,8 @@ async def test_post_evolution_decision_updates_review_summary(tmp_path: Path) ->
         assert body["review"]["decisions"][0]["target"] == "skill"
         assert body["review"]["decisions"][0]["applied_status"] == "written"
         assert body["review"]["decisions"][0]["applied_mode"] == "create"
-        assert body["review"]["decisions"][0]["applied_path"].endswith(
-            "/.kongming/skills/workflow-one/SKILL.md"
-        )
         skill_path = workspace / ".kongming" / "skills" / "workflow-one" / "SKILL.md"
+        assert Path(body["review"]["decisions"][0]["applied_path"]) == skill_path
         assert skill_path.exists()
         assert "### Nutrient `nutrient-1`" in skill_path.read_text(encoding="utf-8")
 
@@ -246,6 +240,47 @@ async def test_post_evolution_decision_accept_memory_materializes_workspace_memo
         assert memory_path.exists()
         content = memory_path.read_text(encoding="utf-8")
         assert "summary one" in content or "content one" in content
+
+
+@pytest.mark.asyncio
+async def test_post_evolution_decision_ignore_keeps_workspace_unchanged(
+    tmp_path: Path,
+) -> None:
+    evolution_root = tmp_path / ".kongming" / "evolution"
+    workspace = tmp_path / "workspace"
+    await _seed_review(
+        evolution_root,
+        session_id="thread-000000000001",
+        run_id="run-parent-1",
+    )
+    tm = FakeTM(
+        [
+            ThreadMetadata(
+                id="thread-000000000001",
+                name="Demo",
+                preset_id="preset-a",
+                cwd=str(workspace),
+                created_at=1.0,
+                updated_at=2.0,
+                message_count=0,
+            )
+        ]
+    )
+    async with _login_client(tmp_path, tm, evolution_root) as client:
+        resp = await client.post(
+            "/api/threads/thread-000000000001/evolution/reviews/evo-review:run-parent-1/decisions",
+            json={"nutrient_id": "nutrient-1", "decision": "ignore"},
+            headers=CSRF_HEADERS,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        item = body["review"]["decisions"][0]
+        assert item["target"] is None
+        assert item["applied_status"] == "skipped"
+        assert item["applied_mode"] == "ignore"
+        assert item["applied_path"] is None
+        assert body["review"]["decision_summary"]["ignored"] == 1
+        assert list(workspace.rglob("*")) == []
 
 
 @pytest.mark.asyncio
