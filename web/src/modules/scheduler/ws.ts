@@ -11,16 +11,22 @@
  * - 暴露 `_resetForTesting()` 给单测复位 module-level 状态
  */
 
+import type {
+  CronRunCompletedFrame,
+  CronRunFinishedFrame,
+  CronRunStartedFrame,
+} from "@/protocol";
+
 const WS_BASE = (import.meta.env.VITE_WS_BASE as string | undefined) ?? "";
 
 const MAX_RETRY = 10;
 const MAX_BACKOFF_MS = 30_000;
 const WS_CLOSE_POLICY_VIOLATION = 1008;
 
-export type CronWSMessage = {
-  frame_type: string;
-  [key: string]: unknown;
-};
+export type CronWSMessage =
+  | CronRunStartedFrame
+  | CronRunFinishedFrame
+  | CronRunCompletedFrame;
 
 export type OnCronWSMessage = (msg: CronWSMessage) => void;
 

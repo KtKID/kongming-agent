@@ -44,13 +44,17 @@ from scheduler.domain import (
     ScheduleTrigger,
     SessionMode,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
 from scheduler.store import Store
 from scheduler.timing import to_iso, utc_now
+from tests.support.scheduled_runtime import (
+    RunnerBackedScheduledRuntime,
+    execute_bridge_for_test,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers（最小化复制，保持测试自包含）
@@ -93,13 +97,13 @@ def _make_task(
     task_id: str = "t-int",
     delivery: ScheduleDelivery | None = None,
     silent_marker_enabled: bool = True,
+    thread_id: str = "",
 ) -> ScheduledTask:
     now = to_iso(utc_now())
     return ScheduledTask(
         task_id=task_id,
         name=f"task-{task_id}",
-        enabled=True,
-        state=TaskState.SCHEDULED,
+        lifecycle=TaskLifecycleState.SCHEDULED,
         origin=TaskOrigin.CLI,
         trigger=ScheduleTrigger(trigger_type=TriggerType.INTERVAL, expr="5", timezone="UTC"),
         policy=TaskExecutionPolicy(
@@ -117,6 +121,7 @@ def _make_task(
         created_at=now,
         updated_at=now,
         delivery=delivery,
+        thread_id=thread_id,
     )
 
 
@@ -133,12 +138,13 @@ def _build_bridge(
     enabled_tool_names: Sequence[str] = (),
     event_sinks: Sequence[EventSink] = (),
 ) -> ExecutionBridge:
+    approval = _AllowApproval()
     return ExecutionBridge(
-        runner=runner,
+        runtime=RunnerBackedScheduledRuntime(runner, approval=approval),
         llm=_StubLLM(),  # type: ignore[arg-type]
         tools={},
         enabled_tool_names=enabled_tool_names,
-        inner_approval=_AllowApproval(),  # type: ignore[arg-type]
+        inner_approval=approval,  # type: ignore[arg-type]
         session_factory=lambda sid: InMemorySession(sid),
         event_sinks=event_sinks,
         agent_spec=AgentSpec(name="agent-x", instructions="you are an agent", default_model="m"),
@@ -175,7 +181,7 @@ async def test_bridge_without_dispatcher_keeps_v02_behavior(store: Store) -> Non
     task = _make_task(delivery=None)
     bridge = _build_bridge(store=store, runner=runner, dispatcher=None)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.status is RunStatus.COMPLETED
     # 未集成 dispatcher → 字段保持默认（v0.3 schema 默认 PENDING / None）
@@ -193,13 +199,29 @@ async def test_bridge_with_dispatcher_web_channel_delivers(store: Store) -> None
     task = _make_task(delivery=ScheduleDelivery(channel=DeliveryChannel.WEB))
     bridge = _build_bridge(store=store, runner=runner, dispatcher=dispatcher)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.status is RunStatus.COMPLETED
     assert run.delivery_status is DeliveryStatus.DELIVERED
     assert run.delivered_at == "2026-05-04T01:00:00+00:00"
     assert run.delivery_error is None
     assert len(web_sink.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_bridge_uses_fresh_session_id_independent_from_task_thread(store: Store) -> None:
+    runner = _CompletedRunner(final_text="hello fresh")
+    task = _make_task(thread_id="thread-aaaaaaaaaaaa")
+    bridge = _build_bridge(store=store, runner=runner, dispatcher=None)
+
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
+
+    assert run.status is RunStatus.COMPLETED
+    assert run.session_id is not None
+    assert run.session_id.startswith(f"sched-{task.task_id}-")
+    assert run.session_id != task.thread_id
+    stored = store.list_runs(task.task_id)
+    assert stored[-1].session_id == run.session_id
 
 
 @pytest.mark.asyncio
@@ -211,7 +233,7 @@ async def test_bridge_no_delivery_config_skipped(store: Store) -> None:
     task = _make_task(delivery=None)
     bridge = _build_bridge(store=store, runner=runner, dispatcher=dispatcher)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.delivery_status is DeliveryStatus.SKIPPED
     assert web_sink.calls == []
@@ -229,7 +251,7 @@ async def test_bridge_silent_marker_skips_delivery(store: Store) -> None:
     )
     bridge = _build_bridge(store=store, runner=runner, dispatcher=dispatcher)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     # bridge 自己把 [SILENT] 转成 RunStatus.SILENT；dispatcher 再依此 skip
     assert run.status is RunStatus.SILENT
@@ -250,7 +272,7 @@ async def test_bridge_sink_exception_does_not_break_run(store: Store) -> None:
     task = _make_task(delivery=ScheduleDelivery(channel=DeliveryChannel.WEB))
     bridge = _build_bridge(store=store, runner=runner, dispatcher=dispatcher)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     # 关键不变量：sink 异常**不污染** agent run.status
     assert run.status is RunStatus.COMPLETED
@@ -269,7 +291,7 @@ async def test_bridge_run_is_persisted_with_delivery_fields(store: Store) -> Non
     task = _make_task(delivery=ScheduleDelivery(channel=DeliveryChannel.WEB))
     bridge = _build_bridge(store=store, runner=runner, dispatcher=dispatcher)
 
-    run_returned = await bridge.execute(_make_reservation(task))
+    run_returned = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     # 重 load store 验证字段持久化
     fetched = store.get_latest_run(task.task_id)
@@ -299,7 +321,7 @@ async def test_bridge_dispatcher_self_crash_logs_traceback(store: Store) -> None
     task = _make_task(delivery=ScheduleDelivery(channel=DeliveryChannel.WEB))
     bridge = _build_bridge(store=store, runner=runner, dispatcher=broken)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.status is RunStatus.COMPLETED  # agent run 不被污染
     assert run.delivery_status is DeliveryStatus.FAILED
@@ -317,7 +339,7 @@ async def test_bridge_no_sink_for_channel_skipped(store: Store) -> None:
     task = _make_task(delivery=ScheduleDelivery(channel=DeliveryChannel.CLI))
     bridge = _build_bridge(store=store, runner=runner, dispatcher=dispatcher)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.delivery_status is DeliveryStatus.SKIPPED
     assert run.delivery_error is None  # SKIPPED 时不写 error

@@ -118,22 +118,37 @@ def compute_first_run_at(trigger: ScheduleTrigger, *, now: datetime | None = Non
         # ONCE 的 expr 已是 ISO 时间戳；非法 ISO 让上游/dataclass 处理
         return trigger.expr
 
+    return compute_next_run_at(trigger, after=now)
+
+
+def compute_next_run_at(trigger: ScheduleTrigger, *, after: datetime) -> str:
+    """给定 recurring trigger 和已消费触发点，计算下一匹配的 ISO8601 时刻。
+
+    ``after`` 是逻辑时间锚点：正常 cron fire 传原 ``next_run_at``，让每日
+    ``0 22 * * *`` 始终落在 22:00；stale 快进传当前时间，直接得到下一次未来
+    匹配。手动试运行不调用本函数，因此不会改变正式 cron cursor。
+    """
+    trigger_type = trigger.trigger_type
+
+    if trigger_type is TriggerType.ONCE:
+        raise ValueError("ONCE trigger 没有下一次触发时刻")
+
     if trigger_type is TriggerType.SECONDS:
         try:
             seconds = max(int(trigger.expr.strip()), 1)
         except (ValueError, AttributeError) as exc:
             raise ValueError(f"SECONDS expr 不是正整数: {trigger.expr!r}") from exc
-        return to_iso(now + timedelta(seconds=seconds))
+        return to_iso(after + timedelta(seconds=seconds))
 
     if trigger_type is TriggerType.INTERVAL:
         try:
             minutes = max(int(trigger.expr.strip()), 1)
         except (ValueError, AttributeError) as exc:
             raise ValueError(f"INTERVAL expr 不是正整数: {trigger.expr!r}") from exc
-        return to_iso(now + timedelta(minutes=minutes))
+        return to_iso(after + timedelta(minutes=minutes))
 
     if trigger_type is TriggerType.CRON:
-        from croniter import croniter  # type: ignore[import-untyped,unused-ignore]
+        from croniter import croniter  # type: ignore[import-untyped, unused-ignore]
 
         # 按 trigger.timezone 解释 cron 表达式；非法 IANA 名退回 UTC（base 自身 tz）
         tz: ZoneInfo | None
@@ -142,7 +157,7 @@ def compute_first_run_at(trigger: ScheduleTrigger, *, now: datetime | None = Non
         except (ZoneInfoNotFoundError, ValueError):
             tz = None
 
-        base = now.astimezone(tz) if tz is not None else now
+        base = after.astimezone(tz) if tz is not None else after
         expr = trigger.expr.strip()
         fields_count = len(expr.split())
         try:
@@ -164,6 +179,7 @@ def compute_first_run_at(trigger: ScheduleTrigger, *, now: datetime | None = Non
 
 __all__ = [
     "compute_first_run_at",
+    "compute_next_run_at",
     "grace_seconds_for_period",
     "is_stale_recurring",
     "is_within_oneshot_grace",

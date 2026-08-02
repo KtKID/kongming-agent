@@ -1,7 +1,8 @@
 """scheduled run 用例执行桥。
 
-把一个 :class:`scheduler.domain.DueTaskReservation` 转成一次 fresh
-``Runner.run()``，并把结果回写为 :class:`scheduler.domain.ScheduledRun`。
+把一个已准入的 :class:`scheduler.domain.DueTaskReservation` 转成一次 fresh
+``SessionEngine.run()`` 计划，并把结果回写为
+:class:`scheduler.domain.ScheduledRun`。
 
 设计要点（参见 ``docs/agent-cron-module-v0.1/03-core-workflows.md`` §3 / §4
 与 ``docs/agent-cron-module-v0.1/02-module-breakdown.md`` 模块 4）：
@@ -11,8 +12,8 @@
 - 把现有 :class:`core.contracts.ApprovalProvider` 包一层
   :class:`scheduler.safety_wrapper.ScheduleApprovalProvider`，cron run 命中
   consent 的高风险动作直接 deny → 工具失败 → 整 run failed(needs_approval)
-- ``InactivityWatchdog`` 作为 :class:`core.contracts.EventSink` 接入 runner
-  的 sink fan-out，在每个活动事件刷新 last_activity_ts；超时取消 runner 协程
+- ``InactivityWatchdog`` 作为本次 run 的 run-scoped sink 接入，在每个活动事件
+  刷新 last_activity_ts；超时取消 TaskRegistry 已登记的当前 Task
 - ``[SILENT]`` 投递抑制：final message 命中 ``[SILENT]`` 标记时
   ``ScheduledRun.status = SILENT``、``silent_suppressed=True``，仍正常落盘审计
 - 所有错误进 ``ScheduledRun.error_message`` / ``failure_reason``，不向上抛
@@ -29,25 +30,27 @@ import asyncio
 import contextlib
 import logging
 import time
-import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from core.agent_spec import AgentSpec
 from core.contracts import (
     ApprovalProvider,
     Event,
     EventSink,
+    InteractiveApprovalRebinder,
     LLMProvider,
+    RunExecutionOverrides,
     Session,
     Tool,
     ToolLookup,
 )
 from core.message import Message
 from core.result import Result
-from core.runner import Runner
+from infrastructure.config.model_catalog_manager import ModelCatalogManager
+from infrastructure.config.model_provider_catalog import ResolvedModelConfig
 from infrastructure.config.models import SchedulerApprovalConfig
 from scheduler.delivery import DeliveryDispatcher
 from scheduler.domain import (
@@ -62,14 +65,13 @@ from scheduler.domain import (
     TaskExecutionContext,
     resolve_effective_mode,
 )
-from scheduler.policy import apply_concurrency_policy
 from scheduler.safety_wrapper import ScheduleApprovalProvider
 from scheduler.silent import is_silent, strip_silent_prefix
 from scheduler.store import Store
 from scheduler.timing import to_iso, utc_now
 
 if TYPE_CHECKING:
-    from infrastructure.config.models import Config, LLMPresetConfig
+    from infrastructure.config.models import Config
     from infrastructure.tracing import JsonlTraceSink
 
 logger = logging.getLogger(__name__)
@@ -96,7 +98,7 @@ _FINAL_MESSAGE_EXCERPT_LIMIT = 512
 _DISALLOWED_TOOL_PREFIXES: tuple[str, ...] = ("schedule.", "cron.")
 """cron run 装配期裁掉的工具名前缀（防递归创建任务）。"""
 
-_DISALLOWED_TOOL_NAMES: frozenset[str] = frozenset({"schedule", "cron"})
+_DISALLOWED_TOOL_NAMES: frozenset[str] = frozenset({"schedule", "cron", "request_evolution_review"})
 """cron run 装配期裁掉的单字工具名（防递归创建任务）。
 
 v0.2 新增 :class:`tools.builtin.schedule_tool.ScheduleTool`，其 ``name`` 是单字
@@ -139,10 +141,10 @@ class InactivityWatchdog:
     （比如 ``approval.request`` 视为业务流程内部状态，不算活动）。
 
     使用方式：
-    1. 把 watchdog 实例 append 到 runner 的 event sinks 里
-    2. ``runner_task = asyncio.create_task(runner.run(...))``
-    3. ``watch_task = asyncio.create_task(watchdog.watch(runner_task))``
-    4. ``await runner_task``；finally ``watch_task.cancel()``
+    1. 把 watchdog 实例作为 run-scoped sink 传给 ``Runner.run(...)``
+    2. 取得 AgentManager / TaskRegistry 已注册的当前 Task
+    3. ``watch_task = asyncio.create_task(watchdog.watch(current_task))``
+    4. 当前 Task 直接 await ``SessionEngine.run``；finally 停止 watch task
 
     ``timeout_seconds is None`` / ``<= 0`` 时 watchdog 不取消任务（仍可作为
     sink 收事件，无副作用），用于"禁用 watchdog 但 sink 链路保持"场景。
@@ -277,7 +279,7 @@ class _CronAuditWriterSink:
     """v0.5.2: task 显式声明的 preset_id（空串表示未声明 preset → 走默认
     provider，即 cli/web 装配时由 ``cfg.model.*`` 构造的 ``self._llm``）。"""
     model_name: str = ""
-    """v0.5.2: 装配后实际生效的模型名（preset.model 或 cfg.model.name）。"""
+    """装配后由 resolved catalog snapshot 确定的实际远端模型名。"""
 
     async def emit(self, event: Event) -> None:
         if event.kind != "approval.cron.auto_allow":
@@ -305,45 +307,82 @@ class _CronAuditWriterSink:
 # ---------------------------------------------------------------------------
 
 
-class ExecutionBridge:
-    """把 due reservation 转成一次 fresh ``Runner.run()`` 并写回 ``ScheduledRun``。
+class ScheduledRunRuntime(Protocol):
+    """scheduled bridge 消费的 SessionEngine 单次运行门户。"""
 
-    该类是装配层：构造时收所有依赖；:meth:`execute` 不做装配只跑流程。
+    async def run(
+        self,
+        user_input: str,
+        *,
+        session_id: str | None = None,
+        agent_spec: AgentSpec | None = None,
+        max_turns: int | None = None,
+        enabled_tools: Sequence[Tool] | None = None,
+        event_context: dict[str, Any] | None = None,
+        thread_id: str | None = None,
+        agent_id: str = "",
+        execution_overrides: RunExecutionOverrides | None = None,
+    ) -> Result:
+        """通过 SessionEngine 的唯一 run 门户执行一次输入。"""
+        ...
+
+
+RunStartedCallback = Callable[[ScheduledTask, ScheduledRun], Awaitable[None]]
+
+
+class ExecutionBridge:
+    """把 due reservation 转成 SessionEngine run plan 并写回 ``ScheduledRun``。
+
+    Manager 完成业务准入和普通 thread Task 注册；本桥只负责 run-scoped
+    依赖快照、durable 状态、投递与审计。
     """
 
     def __init__(
         self,
         *,
-        runner: Runner,
+        runtime: ScheduledRunRuntime,
         llm: LLMProvider,
         tools: ToolLookup,
         enabled_tool_names: Sequence[str],
         inner_approval: ApprovalProvider,
         session_factory: Callable[[str], Session],
+        session_factory_for_agent: Callable[[str, AgentSpec], Session] | None = None,
         event_sinks: Sequence[EventSink],
         agent_spec: AgentSpec,
         store: Store,
         dispatcher: DeliveryDispatcher | None = None,
+        interactive_approval_factory: (
+            Callable[[ScheduledTask], ApprovalProvider | None] | None
+        ) = None,
+        tool_context_metadata: Mapping[str, Any] | None = None,
+        tool_context_metadata_factory: (
+            Callable[[ScheduledTask], Mapping[str, Any] | None] | None
+        ) = None,
         watchdog_poll_interval_seconds: float = _DEFAULT_POLL_INTERVAL,
-        preset_map: dict[str, LLMPresetConfig] | None = None,
+        model_catalog_manager: ModelCatalogManager | None = None,
+        default_model: ResolvedModelConfig | None = None,
         base_config: Config | None = None,
         trace_dir: Path | None = None,
     ) -> None:
-        self._runner = runner
+        self._runtime = runtime
         self._llm = llm
         self._tools = tools
         self._enabled_tool_names = tuple(enabled_tool_names)
         self._inner_approval = inner_approval
         self._session_factory = session_factory
+        self._session_factory_for_agent = session_factory_for_agent
         self._event_sinks: list[EventSink] = list(event_sinks)
         self._agent_spec = agent_spec
         self._store = store
         # v0.3 cron-delivery M3：投递路由器；None 时不调投递（保持 v0.2 行为）。
         # 装配方（cli/web）通过 runtime_factory 传入；M4/M5 提供具体 sink 实现。
         self._dispatcher = dispatcher
+        self._interactive_approval_factory = interactive_approval_factory
+        self._tool_context_metadata = dict(tool_context_metadata or {})
+        self._tool_context_metadata_factory = tool_context_metadata_factory
         self._watchdog_poll_interval_seconds = watchdog_poll_interval_seconds
-        # v0.4 per-task LLM preset：根据 task.preset_id 构建独立 provider。
-        self._preset_map = preset_map
+        self._model_catalog_manager = model_catalog_manager
+        self._default_model = default_model
         self._base_config = base_config
         # v0.4 per-run trace：每次 cron run 写独立 jsonl trace 文件。
         self._trace_dir = trace_dir
@@ -352,96 +391,89 @@ class ExecutionBridge:
     # per-task LLM provider 构建
     # ------------------------------------------------------------------
 
-    def _build_provider(self, preset_id: str) -> LLMProvider:
-        """根据 ``preset_id`` 构建独立 LLM provider。
+    def _build_session_for_agent(self, session_id: str, agent_spec: AgentSpec) -> Session:
+        if self._session_factory_for_agent is not None:
+            return self._session_factory_for_agent(session_id, agent_spec)
+        return self._session_factory(session_id)
 
-        两种合法路径：
+    def _resolve_model(self, preset_id: str) -> ResolvedModelConfig | None:
+        """为单个 cron run 解析独立 immutable 模型快照。"""
+        if not preset_id:
+            return self._default_model
+        if self._model_catalog_manager is None or self._base_config is None:
+            raise ValueError("model catalog manager is required for scheduled task presets")
+        return self._model_catalog_manager.resolve_runtime(
+            self._base_config.model,
+            preset_id=preset_id or None,
+        )
 
-        1. **未启用 preset 体系**（``preset_id`` 为空 **或** ``preset_map`` 为
-           ``None``）→ 返回 ``self._llm``，即 cli/web 装配时通过
-           :func:`infrastructure.llm_providers.provider_factory.build_provider` 用 ``cfg.model``
-           构造的**默认 provider**。``cfg.model`` 字段优先级（高 → 低）：
-
-           - env：``KONGMING_MODEL_BASE_URL`` / ``KONGMING_MODEL_NAME`` /
-             ``KONGMING_MODEL_API_KEY``（见 :class:`infrastructure.config.models.ModelConfig`）
-           - ``config/setting.yaml`` 的 ``model:`` 段
-           - dataclass 默认值
-
-           这条路径不是 fallback，是"未启用 preset 功能"的合法默认。
-
-        2. **启用了 preset 且命中**（``preset_id in preset_map``）→ 用 preset
-           覆盖 ``cfg.model`` 后构造独立 provider，调用方负责 ``aclose``。
-
-        **错配场景（v0.5.3 改）**：装配方启用了 preset 体系但
-        ``task.preset_id`` 在 ``preset_map`` 里找不到（key 拼错 / 配置漂移），
-        **不再静默 fallback 到默认 provider**，直接抛 :class:`ValueError`，由
-        :meth:`execute` 捕获转 FAILED run + 写日志，把错配暴露给用户。
-        """
-        # 未启用 preset 体系 → 走默认 provider（self._llm = cfg.model.*）
-        if not preset_id or not self._preset_map:
+    def _build_provider(self, model: ResolvedModelConfig, *, use_default: bool) -> LLMProvider:
+        """根据已解析快照构建 provider；默认快照复用装配期实例。"""
+        if use_default:
             return self._llm
-        # 启用了 preset 但 task 写的 preset_id 不存在 → 抛错，不偷换默认
-        if preset_id not in self._preset_map:
-            raise ValueError(
-                f"scheduled task preset_id {preset_id!r} not found in preset_map "
-                f"(available presets: {sorted(self._preset_map.keys())})"
-            )
-        from infrastructure.llm_providers.provider_factory import apply_preset, build_provider
+        if self._model_catalog_manager is None or self._base_config is None:
+            raise ValueError("model catalog manager is required for scheduled task presets")
+        from infrastructure.llm_providers.provider_factory import build_provider
 
-        preset = self._preset_map[preset_id]
-        cfg = apply_preset(self._base_config, preset)  # type: ignore[arg-type]
-        return build_provider(cfg)
+        return build_provider(
+            self._base_config,
+            catalog_manager=self._model_catalog_manager,
+            resolved_model=model,
+        )
 
-    def _resolve_effective_agent_spec(self, preset_id: str) -> AgentSpec:
-        """v0.5.3：preset 命中时返回覆盖了 ``default_model`` /
-        ``reasoning_effort`` 的 per-run :class:`AgentSpec`；否则返回装配期
-        ``self._agent_spec``。
+    def _resolve_tool_context_metadata(self, task: ScheduledTask) -> dict[str, Any]:
+        """合并 cron 装配期和 task 级工具上下文 metadata。"""
+        metadata = dict(self._tool_context_metadata)
+        if self._tool_context_metadata_factory is None:
+            return metadata
+        override = self._tool_context_metadata_factory(task)
+        if override:
+            metadata.update(dict(override))
+        return metadata
 
-        修复 v0.4 切 preset 时只换 provider 不换 agent_spec 的"半拉子" bug。
-        :class:`core.runner.Runner` 组装 :class:`core.contracts.LLMRequest`
-        时把 ``agent_spec.default_model`` 作为 ``request.model`` 透传给
-        provider；如果不在此处一起覆盖，请求体 ``"model"`` 字段仍是装配期
-        ``cfg.model.name``（env ``KONGMING_MODEL_NAME`` 默认值），导致
-        ``base_url=preset`` + ``model=默认`` 的错配——后端返回"模型不存在"。
-
-        ``reasoning_effort``：preset 未声明时保留 spec 现值，避免 ``None``
-        覆盖装配期已存在的设置。
-        """
-        if not preset_id or not self._preset_map or preset_id not in self._preset_map:
+    def _resolve_effective_agent_spec(self, model: ResolvedModelConfig | None) -> AgentSpec:
+        """用同一个模型快照生成 per-run AgentSpec。"""
+        if model is None:
             return self._agent_spec
-        preset = self._preset_map[preset_id]
-        # dataclasses.replace 对 **dict[str, str] 报 invariance 错；直接列出
-        # 字段保持类型安全，分支处理 reasoning_effort 是否为 None。
-        if preset.reasoning_effort is not None:
+        metadata = {**self._agent_spec.metadata, "model_preset_id": model.preset_id}
+        if model.default_reasoning_effort is not None:
             return replace(
                 self._agent_spec,
-                default_model=preset.model,
-                reasoning_effort=preset.reasoning_effort,
+                default_model=model.name,
+                reasoning_effort=model.default_reasoning_effort,
+                metadata=metadata,
             )
-        return replace(self._agent_spec, default_model=preset.model)
+        return replace(
+            self._agent_spec,
+            default_model=model.name,
+            reasoning_effort=None,
+            metadata=metadata,
+        )
 
-    def _resolve_run_audit_context(self, task: ScheduledTask) -> dict[str, str]:
+    def _resolve_run_audit_context(
+        self,
+        task: ScheduledTask,
+        model: ResolvedModelConfig | None = None,
+    ) -> dict[str, str]:
         """v0.5.2: 解析 cron run audit payload 中要附加的 model 上下文。
 
         返回 ``{preset_id, model_name, thread_id}``：
 
-        - ``preset_id``：task 显式声明（空串表示走默认）
-        - ``model_name``：preset 命中 → ``preset.model``；否则 fallback
-          ``cfg.model.name``；连 base_config 都缺失 → ``""``
+        - ``preset_id``：本次 run 的实际 preset ID
+        - ``model_name``：immutable snapshot 中的实际 remote model
 
         所有 cron run 相关 audit（run_started / run_finished / run_failed /
         run_silent_suppressed / run_inactivity_timeout / run_skipped_by_concurrency
         / run_approval_auto_allow）的 payload 都附加这些字段，
         让 audits.jsonl 自描述"这条 run 用了什么模型"。
         """
-        preset_id = task.preset_id or ""
-        model_name = ""
-        if preset_id and self._preset_map and preset_id in self._preset_map:
-            model_name = self._preset_map[preset_id].model
-        elif self._base_config is not None:
-            model_name = self._base_config.model.name
+        requested_preset_id = task.preset_id or ""
+        if model is None:
+            with contextlib.suppress(ValueError):
+                model = self._resolve_model(requested_preset_id)
+        model_name = model.name if model is not None else ""
         return {
-            "preset_id": preset_id,
+            "preset_id": model.preset_id if model is not None else requested_preset_id,
             "model_name": model_name,
             "thread_id": task.thread_id,
         }
@@ -450,7 +482,12 @@ class ExecutionBridge:
     # v0.5 approval wrapper 装配（per-task mode + audit sink 聚合）
     # ------------------------------------------------------------------
 
-    def _build_approval_wrapper(self, task: ScheduledTask) -> ScheduleApprovalProvider:
+    def _build_approval_wrapper(
+        self,
+        task: ScheduledTask,
+        *,
+        runtime_approval: ApprovalProvider | None = None,
+    ) -> ScheduleApprovalProvider:
         """解析 effective approval mode + 装配 wrapper（v0.5 新增辅助方法）。
 
         优先级（高 → 低）：
@@ -486,8 +523,26 @@ class ExecutionBridge:
         sink_chain.extend(self._event_sinks)
         audit_sink = _AggregateEventSink(tuple(sink_chain))
 
+        interactive_approval = (
+            self._interactive_approval_factory(task)
+            if self._interactive_approval_factory is not None
+            else None
+        )
+        runtime_inner = runtime_approval or self._inner_approval
+        if interactive_approval is None:
+            inner_approval = runtime_inner
+        else:
+            if not isinstance(runtime_inner, InteractiveApprovalRebinder):
+                raise TypeError("runtime approval must support interactive approval rebinding")
+            inner_approval = runtime_inner.with_interactive_approval(interactive_approval)
+        delivery_target = task.delivery.target if task.delivery is not None else None
+        has_thread_binding = bool(task.thread_id) or (
+            isinstance(delivery_target, str) and delivery_target.startswith("thread:")
+        )
+        consent_passthrough = interactive_approval is not None and has_thread_binding
+
         return ScheduleApprovalProvider(
-            inner=self._inner_approval,
+            inner=inner_approval,
             task_id=task.task_id,
             mode=effective_mode,
             policy=(
@@ -496,36 +551,23 @@ class ExecutionBridge:
                 else SchedulerApprovalConfig()
             ),
             event_sink=audit_sink,
+            consent_passthrough=consent_passthrough,
         )
 
-    # ------------------------------------------------------------------
-    # 公共入口
-    # ------------------------------------------------------------------
-
-    async def execute(self, reservation: DueTaskReservation) -> ScheduledRun:
-        """跑一次 due task；返回最终落盘的 :class:`ScheduledRun`。
-
-        前置：先应用 ``concurrency_policy`` 决定本次行为。
-        - ``skip`` (forbid + 已有 RUNNING)：合成一条 CANCELLED 行 + 写 audit，
-          直接返回，不启动 Runner
-        - ``replace``：:func:`apply_concurrency_policy` 已经把旧 RUNNING 行收尾
-          为 CANCELLED，本函数继续走正常 RUNNING 路径启动新 Runner
-        - ``proceed``：正常路径
-        """
+    async def execute_admitted(
+        self,
+        reservation: DueTaskReservation,
+        *,
+        run_id: str,
+        session_id: str,
+        cancel_reason_getter: Callable[[], str | None] | None = None,
+        event_context: dict[str, Any] | None = None,
+        agent_id: str = "",
+        on_started: RunStartedCallback | None = None,
+    ) -> ScheduledRun:
+        """执行已由 ScheduledRunManager 完成并发准入和 ID 分配的 run。"""
         task = reservation.task
         scheduled_for = reservation.scheduled_for
-
-        # 1) concurrency_policy 前置应用
-        decision = apply_concurrency_policy(task=task, store=self._store)
-        if decision.action == "skip":
-            return self._record_skipped_by_concurrency(
-                task=task,
-                scheduled_for=scheduled_for,
-                reason=decision.reason or "skipped by concurrency_policy",
-            )
-
-        session_id = task.thread_id or self._fresh_session_id(task.task_id)
-        run_id = self._fresh_run_id(task.task_id)
         started_at = to_iso(utc_now())
 
         # 装配 fresh request（domain 校验类型，不在 bridge 里重复）
@@ -561,9 +603,30 @@ class ExecutionBridge:
             failure_reason=None,
             delivery_error=None,
             silent_suppressed=False,
+            thread_id=task.thread_id,
+            reservation_id=reservation.reservation_id,
         )
-        self._store.append_run(running_record)
-        run_audit_ctx = self._resolve_run_audit_context(task)
+        try:
+            self._store.append_run(running_record)
+        except Exception as exc:
+            failed_run = self._record_start_failure(
+                reservation,
+                run_id=run_id,
+                session_id=session_id,
+                exc=exc,
+            )
+            return failed_run
+        if on_started is not None:
+            with contextlib.suppress(Exception):
+                await on_started(task, running_record)
+        resolved_model: ResolvedModelConfig | None = None
+        model_error: ValueError | None = None
+        try:
+            resolved_model = self._resolve_model(task.preset_id)
+        except ValueError as exc:
+            model_error = exc
+
+        run_audit_ctx = self._resolve_run_audit_context(task, resolved_model)
         self._store.append_audit(
             action="run_started",
             task_id=task.task_id,
@@ -576,12 +639,19 @@ class ExecutionBridge:
             },
         )
 
-        # v0.4 per-task provider：根据 task.preset_id 构建独立 provider
-        # v0.5.3：_build_provider 错配（preset_id 不在 preset_map）会抛
-        # ValueError；这里转 FAILED run + supersede RUNNING + 写收尾 audit，
-        # 不向上抛（符合模块约定 "所有错误进 ScheduledRun.error_message"）。
+        # 每个 run 只解析一次 immutable snapshot；unknown preset / credential
+        # 错误在请求前转为 FAILED run 并写审计。
         try:
-            provider = self._build_provider(task.preset_id)
+            if model_error is not None:
+                raise model_error
+            provider = (
+                self._llm
+                if resolved_model is None
+                else self._build_provider(
+                    resolved_model,
+                    use_default=not bool(task.preset_id),
+                )
+            )
         except ValueError as exc:
             logger.error(
                 "execute: task %s preset misconfigured: %s",
@@ -592,16 +662,14 @@ class ExecutionBridge:
                 running_record=running_record,
                 exc=exc,
             )
-            self._store.supersede_and_append_run(failed_run)
-            self._emit_finishing_audit(task=task, run=failed_run)
-            return failed_run
+            if self._persist_terminal_run(failed_run):
+                self._emit_finishing_audit(task=task, run=failed_run)
+                return failed_run
+            return self._read_terminal_winner(failed_run)
 
-        # v0.5.3 修复：preset 命中时 agent_spec.default_model 必须跟 preset.model
-        # 走，否则 LLMRequest.model 仍是装配期 cfg.model.name（env 默认），导致
-        # 实际请求 = preset.base_url + 默认 model name → 后端 400/不存在。
-        # provider 只覆盖 base_url + api_key + 内部 model_config.name；
-        # request.model 字段读 agent_spec.default_model，得在此处一并覆盖。
-        effective_agent_spec = self._resolve_effective_agent_spec(task.preset_id)
+        # per-run AgentSpec 与 provider 共用同一 snapshot，确保 request.model、
+        # reasoning effort 和审计 preset 始终一致。
+        effective_agent_spec = self._resolve_effective_agent_spec(resolved_model)
 
         is_per_task_provider = provider is not self._llm
 
@@ -613,7 +681,20 @@ class ExecutionBridge:
                 running_record=running_record,
                 llm=provider,
                 agent_spec=effective_agent_spec,
+                event_context=event_context,
+                agent_id=agent_id,
             )
+            if final_run.status is RunStatus.CANCELLED and cancel_reason_getter is not None:
+                requested_cancel_reason = cancel_reason_getter()
+                if requested_cancel_reason:
+                    final_run = replace(
+                        final_run,
+                        cancel_reason=requested_cancel_reason,
+                    )
+
+            terminal_winner = self._store.get_run(task.task_id, run_id)
+            if terminal_winner is not None and terminal_winner.status is not RunStatus.RUNNING:
+                return terminal_winner
 
             # v0.3 cron-delivery M3：投递阶段（在 supersede 之前合并 delivery 字段）
             if self._dispatcher is not None:
@@ -624,25 +705,45 @@ class ExecutionBridge:
                     await provider.aclose()
 
         # 状态机变更：用 supersede 写最终行
-        self._store.supersede_and_append_run(final_run)
+        if not self._persist_terminal_run(final_run):
+            return self._read_terminal_winner(final_run)
 
-        # v0.2 P0 修复（保险）：写回 task.last_run_at。
-        # ONCE 已经在 reserve_due_tasks 阶段归档（last_run_at 提前设置），
-        # 这里再补一次拿"实际完成时间"覆盖原值；recurring 之前完全没回写
-        # last_run_at，这里第一次有机会落盘。
-        # 不更新 state / enabled，避免 reserve 阶段已归档 ONCE 与本步冲突。
-        if final_run.finished_at is not None:
-            from scheduler.store import TaskNotFoundError as _TaskNotFound
-
-            with contextlib.suppress(_TaskNotFound):
-                self._store.update_task(
-                    task.task_id,
-                    last_run_at=final_run.finished_at,
-                )
-
-        # 写收尾 audit
         self._emit_finishing_audit(task=task, run=final_run)
         return final_run
+
+    def _persist_terminal_run(self, run: ScheduledRun) -> bool:
+        """条件收口 terminal run；首个 terminal 获胜并更新时间投影。"""
+        if not self._store.finish_run_if_running(run):
+            self._store.append_incident(
+                action="run_late_terminal_ignored",
+                task_id=run.task_id,
+                actor="scheduler",
+                payload={
+                    "run_id": run.run_id,
+                    "reservation_id": run.reservation_id,
+                    "late_status": run.status.value,
+                },
+            )
+            return False
+        self._update_task_last_run_at(run)
+        return True
+
+    def _update_task_last_run_at(self, run: ScheduledRun) -> None:
+        """把任意 durable terminal run 的完成时间投影回 task。"""
+        if run.finished_at is None:
+            return
+        from scheduler.store import TaskNotFoundError as _TaskNotFound
+
+        with contextlib.suppress(_TaskNotFound):
+            self._store.update_task(
+                run.task_id,
+                last_run_at=run.finished_at,
+            )
+
+    def _read_terminal_winner(self, proposed: ScheduledRun) -> ScheduledRun:
+        """读取 CAS 竞争的既有终态；异常缺失时保留提议值用于诊断。"""
+        existing = self._store.get_run(proposed.task_id, proposed.run_id)
+        return existing if existing is not None else proposed
 
     @staticmethod
     def _augment_wrapper_with_run_trace(
@@ -679,15 +780,16 @@ class ExecutionBridge:
         running_record: ScheduledRun,
         llm: LLMProvider,
         agent_spec: AgentSpec | None = None,
+        event_context: dict[str, Any] | None = None,
+        agent_id: str = "",
     ) -> ScheduledRun:
         """装配 fresh runner 调用 + watchdog；返回最终 ``ScheduledRun``。
 
-        v0.5.3：``agent_spec`` 参数允许 :meth:`execute` 在 preset 命中时按
-        ``preset.model`` / ``preset.reasoning_effort`` 替换默认 spec，让
-        :class:`core.contracts.LLMRequest` 里的 ``model`` 字段跟实际 provider
-        对齐。未传时回退到 ``self._agent_spec``（装配期 cfg.model.name）。
+        ``agent_spec`` 来自本次 run 的 immutable model snapshot；未传时使用
+        bridge 装配期默认 spec。
         """
         resolved_agent_spec = agent_spec if agent_spec is not None else self._agent_spec
+        tool_context_metadata = self._resolve_tool_context_metadata(task)
         # 1) 工具裁剪
         allowed_tool_names = frozenset(
             name for name in self._enabled_tool_names if not _is_disallowed_tool_name(name)
@@ -700,10 +802,7 @@ class ExecutionBridge:
             if name in self._tools:
                 enabled_tools.append(self._tools[name])
 
-        # 2) approval wrap（v0.5：抽到 _build_approval_wrapper 解析 effective mode + 聚合 sink）
-        wrapped_approval = self._build_approval_wrapper(task)
-
-        # 3) watchdog
+        # 2) watchdog
         timeout_seconds = task.policy.inactivity_timeout_seconds
         if timeout_seconds is None:
             timeout_seconds = DEFAULT_INACTIVITY_TIMEOUT
@@ -713,27 +812,34 @@ class ExecutionBridge:
         )
         watchdog.reset()
 
-        # 4) 把 watchdog 注入 runner 的 sink fan-out
-        #    runner._event_sinks 是 list；挂入 + finally 移除。
-        sinks_list: list[EventSink] = self._runner._event_sinks
-        sinks_list.append(watchdog)
+        # 3) 本次 run 的临时 sink：避免并发 cron run 污染共享 runner sink 列表。
+        run_event_sinks: list[EventSink] = [watchdog]
 
-        # 4b) v0.4 per-run trace sink：每次 cron run 独立 jsonl 记录
+        # 3b) v0.4 per-run trace sink：每次 cron run 独立 jsonl 记录
         trace_sink: JsonlTraceSink | None = None
         if self._trace_dir is not None:
             from infrastructure.tracing import JsonlTraceSink
 
             trace_path = self._trace_dir / f"cron-{request.run_id}.jsonl"
             trace_sink = JsonlTraceSink(trace_path, auto_flush=True)
-            sinks_list.append(trace_sink)
+            run_event_sinks.append(trace_sink)
 
-        # 4c) v0.5 修复：把 per-run trace sink 也注入 wrapped_approval.event_sink
-        wrapped_approval = self._augment_wrapper_with_run_trace(wrapped_approval, trace_sink)
+        # 3c) SessionEngine 先提供已装配 SafetyGatedApproval，本 transform 只在其
+        # 外层叠加 cron task mode，调用方无法用 run override 替换安全链。
+        def wrap_runtime_approval(
+            runtime_approval: ApprovalProvider,
+        ) -> ApprovalProvider:
+            """把 task 级 cron 策略叠加到 SessionEngine 的安全审批门户。"""
+            wrapper = self._build_approval_wrapper(
+                task,
+                runtime_approval=runtime_approval,
+            )
+            return self._augment_wrapper_with_run_trace(wrapper, trace_sink)
 
-        # 5) fresh session
-        session = self._session_factory(request.session_id)
+        # 4) fresh session
+        session = self._build_session_for_agent(request.session_id, resolved_agent_spec)
 
-        # 6) max_turns 解析（v0.5.1：task.policy.max_turns > cfg.scheduler.default_max_turns > 兜底）
+        # 5) max_turns 解析（v0.5.1：task.policy.max_turns > cfg.scheduler.default_max_turns > 兜底）
         if task.policy.max_turns is not None:
             max_turns = task.policy.max_turns
         elif self._base_config is not None:
@@ -741,31 +847,47 @@ class ExecutionBridge:
         else:
             max_turns = _FALLBACK_MAX_TURNS_NO_CONFIG
 
-        runner_task: asyncio.Task[Result] | None = None
         watch_task: asyncio.Task[None] | None = None
         try:
-            runner_task = asyncio.create_task(
-                self._runner.run(
-                    request.user_input,
-                    session=session,
-                    agent_spec=resolved_agent_spec,
-                    llm=llm,
-                    tools=filtered_tools_lookup,
-                    approval=wrapped_approval,
-                    max_turns=max_turns,
-                    run_id=request.run_id,
-                    enabled_tools=enabled_tools,
-                )
+            current_task = asyncio.current_task()
+            if current_task is None:
+                raise RuntimeError("scheduled run requires a registered asyncio Task")
+            registered_task = cast(asyncio.Task[Result], current_task)
+            watch_task = asyncio.create_task(
+                watchdog.watch(registered_task),
+                name=f"scheduled-run-watchdog-{request.run_id}",
             )
-            watch_task = asyncio.create_task(watchdog.watch(runner_task))
             try:
-                result = await runner_task
+                result = await self._runtime.run(
+                    request.user_input,
+                    session_id=request.session_id,
+                    agent_spec=resolved_agent_spec,
+                    max_turns=max_turns,
+                    enabled_tools=enabled_tools,
+                    event_context=event_context,
+                    thread_id=task.thread_id,
+                    agent_id=agent_id,
+                    execution_overrides=RunExecutionOverrides(
+                        session=session,
+                        llm=llm,
+                        tools=filtered_tools_lookup,
+                        approval_transform=wrap_runtime_approval,
+                        run_id=request.run_id,
+                        event_sinks=tuple(run_event_sinks),
+                        tool_context_metadata=tool_context_metadata,
+                    ),
+                )
             except asyncio.CancelledError:
-                # 仅 watchdog 命中时会触发；任何其他 cancel 都会被这里吞为
-                # inactivity_timeout（v0.1 不区分外部取消）。
+                # Runtime/Runner 合同会把 cancel 收口为 Result；此分支只覆盖
+                # runtime 在进入 Runner 前被取消的装配窗口。
                 return self._build_inactivity_record(
                     running_record=running_record,
                     triggered_by_watchdog=watchdog.triggered,
+                )
+            if watchdog.triggered:
+                return self._build_inactivity_record(
+                    running_record=running_record,
+                    triggered_by_watchdog=True,
                 )
             return self._classify_result(result, running_record=running_record)
         except Exception as exc:  # 防御式：runner 自己的异常已包成 Result
@@ -774,18 +896,12 @@ class ExecutionBridge:
                 exc=exc,
             )
         finally:
-            # 先停 watch（它若仍 sleep 会就此退出），再清理 sink 引用
+            # 先停 watch（它若仍 sleep 会就此退出），再关闭 per-run trace sink
             if watch_task is not None and not watch_task.done():
                 watch_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await watch_task
-            # 移除 watchdog（保证不会污染下次 execute）
-            with contextlib.suppress(ValueError):
-                sinks_list.remove(watchdog)
-            # 移除 per-run trace sink 并关闭
             if trace_sink is not None:
-                with contextlib.suppress(ValueError):
-                    sinks_list.remove(trace_sink)
                 await trace_sink.close()
 
     # ------------------------------------------------------------------
@@ -819,14 +935,16 @@ class ExecutionBridge:
                 failure_reason=failure_reason,
                 delivery_error=None,
                 silent_suppressed=False,
+                thread_id=running_record.thread_id,
+                reservation_id=running_record.reservation_id,
             )
 
-        # cancelled：v0.1 未明确单独建模；当作 failed/runner_exception 兜底
+        # cancelled：保留独立终态，供 replace/shutdown 精确展示和统计。
         if result.status == "cancelled":
             return ScheduledRun(
                 run_id=running_record.run_id,
                 task_id=running_record.task_id,
-                status=RunStatus.FAILED,
+                status=RunStatus.CANCELLED,
                 scheduled_for=running_record.scheduled_for,
                 started_at=running_record.started_at,
                 finished_at=finished_at,
@@ -834,9 +952,12 @@ class ExecutionBridge:
                 result_status=result.status,
                 final_message_excerpt=_truncate(final_text),
                 error_message="run cancelled",
-                failure_reason=RunFailureReason.RUNNER_EXCEPTION,
+                failure_reason=None,
                 delivery_error=None,
                 silent_suppressed=False,
+                thread_id=running_record.thread_id,
+                reservation_id=running_record.reservation_id,
+                cancel_reason=str(result.metadata.get("cancel_reason") or "user_interrupt"),
             )
 
         # completed：可能命中 [SILENT]
@@ -857,6 +978,8 @@ class ExecutionBridge:
                 failure_reason=None,
                 delivery_error=None,
                 silent_suppressed=True,
+                thread_id=running_record.thread_id,
+                reservation_id=running_record.reservation_id,
             )
 
         return ScheduledRun(
@@ -873,6 +996,8 @@ class ExecutionBridge:
             failure_reason=None,
             delivery_error=None,
             silent_suppressed=False,
+            thread_id=running_record.thread_id,
+            reservation_id=running_record.reservation_id,
         )
 
     @staticmethod
@@ -894,13 +1019,27 @@ class ExecutionBridge:
         running_record: ScheduledRun,
         triggered_by_watchdog: bool,
     ) -> ScheduledRun:
-        """watchdog 命中或外部 CancelledError → INACTIVITY_TIMEOUT。"""
+        """watchdog 命中 → INACTIVITY_TIMEOUT；外部 cancel → CANCELLED。"""
         finished_at = to_iso(utc_now())
-        msg = (
-            "inactivity timeout"
-            if triggered_by_watchdog
-            else "run cancelled (treated as inactivity timeout)"
-        )
+        if not triggered_by_watchdog:
+            return ScheduledRun(
+                run_id=running_record.run_id,
+                task_id=running_record.task_id,
+                status=RunStatus.CANCELLED,
+                scheduled_for=running_record.scheduled_for,
+                started_at=running_record.started_at,
+                finished_at=finished_at,
+                session_id=running_record.session_id,
+                result_status="cancelled",
+                final_message_excerpt=None,
+                error_message="run cancelled",
+                failure_reason=None,
+                delivery_error=None,
+                silent_suppressed=False,
+                thread_id=running_record.thread_id,
+                reservation_id=running_record.reservation_id,
+                cancel_reason="user_interrupt",
+            )
         return ScheduledRun(
             run_id=running_record.run_id,
             task_id=running_record.task_id,
@@ -911,10 +1050,13 @@ class ExecutionBridge:
             session_id=running_record.session_id,
             result_status=None,
             final_message_excerpt=None,
-            error_message=msg,
+            error_message="inactivity timeout",
             failure_reason=RunFailureReason.INACTIVITY_TIMEOUT,
             delivery_error=None,
             silent_suppressed=False,
+            thread_id=running_record.thread_id,
+            reservation_id=running_record.reservation_id,
+            cancel_reason="watchdog",
         )
 
     def _build_exception_record(
@@ -939,6 +1081,8 @@ class ExecutionBridge:
             failure_reason=RunFailureReason.RUNNER_EXCEPTION,
             delivery_error=None,
             silent_suppressed=False,
+            thread_id=running_record.thread_id,
+            reservation_id=running_record.reservation_id,
         )
 
     # ------------------------------------------------------------------
@@ -970,14 +1114,8 @@ class ExecutionBridge:
 
         assert self._dispatcher is not None  # caller 已判
         final_message = run.final_message_excerpt or ""
-        delivery_task = task
-        if task.thread_id and task.thread_id == run.session_id and task.delivery is not None:
-            delivery_task = replace(
-                task,
-                delivery=replace(task.delivery, target=None),
-            )
         try:
-            result = await self._dispatcher.deliver(delivery_task, run, final_message)
+            result = await self._dispatcher.deliver(task, run, final_message)
         except Exception as exc:
             # 极少见：dispatcher 自身崩（半坏对象 / mock 漏方法 / 内部装配 bug）
             # 写 traceback 后两帧（避免 RunRecord 单字段过大），帮定位
@@ -1028,15 +1166,22 @@ class ExecutionBridge:
             )
             return
         if run.status is RunStatus.INACTIVITY_TIMEOUT:
+            payload = {
+                **common,
+                "failure_reason": (run.failure_reason.value if run.failure_reason else None),
+                "error_message": run.error_message,
+            }
             self._store.append_audit(
                 action="run_inactivity_timeout",
                 task_id=task_id,
                 actor="scheduler",
-                payload={
-                    **common,
-                    "failure_reason": (run.failure_reason.value if run.failure_reason else None),
-                    "error_message": run.error_message,
-                },
+                payload=payload,
+            )
+            self._store.append_incident(
+                action="run_inactivity_timeout",
+                task_id=task_id,
+                actor="scheduler",
+                payload=payload,
             )
             return
         # FAILED / CANCELLED / ABANDONED 等
@@ -1045,16 +1190,24 @@ class ExecutionBridge:
             if run.failure_reason is RunFailureReason.NEEDS_APPROVAL
             else "run_failed"
         )
+        payload = {
+            **common,
+            "failure_reason": (run.failure_reason.value if run.failure_reason else None),
+            "error_message": run.error_message,
+        }
         self._store.append_audit(
             action=action,
             task_id=task_id,
             actor="scheduler",
-            payload={
-                **common,
-                "failure_reason": (run.failure_reason.value if run.failure_reason else None),
-                "error_message": run.error_message,
-            },
+            payload=payload,
         )
+        if action == "run_failed":
+            self._store.append_incident(
+                action=action,
+                task_id=task_id,
+                actor="scheduler",
+                payload=payload,
+            )
 
     # ------------------------------------------------------------------
     # concurrency=skip：合成 CANCELLED 行 + 写 audit
@@ -1066,6 +1219,10 @@ class ExecutionBridge:
         task: ScheduledTask,
         scheduled_for: str,
         reason: str,
+        run_id: str,
+        session_id: str | None = None,
+        reservation_id: str = "",
+        cancel_reason: str = "forbid_existing_run",
     ) -> ScheduledRun:
         """forbid 策略命中已有 RUNNING：不启动 Runner，落盘合成 CANCELLED 行。
 
@@ -1075,21 +1232,25 @@ class ExecutionBridge:
         """
         finished_at = to_iso(utc_now())
         synthesized = ScheduledRun(
-            run_id=self._fresh_run_id(task.task_id),
+            run_id=run_id,
             task_id=task.task_id,
             status=RunStatus.CANCELLED,
             scheduled_for=scheduled_for,
             started_at=None,
             finished_at=finished_at,
-            session_id=None,
-            result_status=None,
+            session_id=session_id,
+            result_status="cancelled",
             final_message_excerpt=None,
             error_message=reason,
             failure_reason=None,
             delivery_error=None,
             silent_suppressed=False,
+            thread_id=task.thread_id,
+            reservation_id=reservation_id,
+            cancel_reason=cancel_reason,
         )
         self._store.append_run(synthesized)
+        self._update_task_last_run_at(synthesized)
         audit_ctx = self._resolve_run_audit_context(task)
         self._store.append_audit(
             action="run_skipped_by_concurrency",
@@ -1104,17 +1265,107 @@ class ExecutionBridge:
         )
         return synthesized
 
-    # ------------------------------------------------------------------
-    # id helpers
-    # ------------------------------------------------------------------
+    def record_skipped_submission(
+        self,
+        reservation: DueTaskReservation,
+        *,
+        run_id: str,
+        session_id: str,
+        reason: str,
+        cancel_reason: str,
+    ) -> ScheduledRun:
+        """记录 Manager 准入阶段收口的 pending/FORBID reservation。"""
+        return self._record_skipped_by_concurrency(
+            task=reservation.task,
+            scheduled_for=reservation.scheduled_for,
+            reason=reason,
+            run_id=run_id,
+            session_id=session_id,
+            reservation_id=reservation.reservation_id,
+            cancel_reason=cancel_reason,
+        )
 
-    @staticmethod
-    def _fresh_session_id(task_id: str) -> str:
-        return f"sched-{task_id}-{uuid.uuid4().hex[:12]}"
+    def cancel_admitted_run(
+        self,
+        reservation: DueTaskReservation,
+        *,
+        run_id: str,
+        reason: str,
+    ) -> ScheduledRun | None:
+        """抢占已落 RUNNING 的终态，并返回当前 durable winner。"""
+        current = self._store.get_run(reservation.task.task_id, run_id)
+        if current is None or current.status is not RunStatus.RUNNING:
+            return current
+        try:
+            self._store.cancel_run(
+                run_id=run_id,
+                task_id=reservation.task.task_id,
+                error_message=reason,
+                cancel_reason=reason,
+            )
+        except ValueError:
+            return self._store.get_run(reservation.task.task_id, run_id)
+        self._store.append_audit(
+            action="run_cancelled",
+            task_id=reservation.task.task_id,
+            actor="scheduler",
+            payload={
+                "run_id": run_id,
+                "reservation_id": reservation.reservation_id,
+                "cancel_reason": reason,
+            },
+        )
+        winner = self._store.get_run(reservation.task.task_id, run_id)
+        if winner is not None:
+            self._update_task_last_run_at(winner)
+        return winner
 
-    @staticmethod
-    def _fresh_run_id(task_id: str) -> str:
-        return f"run-sched-{task_id}-{uuid.uuid4().hex[:12]}"
+    def _record_start_failure(
+        self,
+        reservation: DueTaskReservation,
+        *,
+        run_id: str,
+        session_id: str,
+        exc: Exception,
+    ) -> ScheduledRun:
+        """RUNNING 首写失败时补一条 FAILED 终态与 incident。"""
+        failed = ScheduledRun(
+            run_id=run_id,
+            task_id=reservation.task.task_id,
+            status=RunStatus.FAILED,
+            scheduled_for=reservation.scheduled_for,
+            started_at=None,
+            finished_at=to_iso(utc_now()),
+            session_id=session_id,
+            result_status="failed",
+            final_message_excerpt=None,
+            error_message=f"failed to persist RUNNING: {exc}",
+            failure_reason=RunFailureReason.RUNNER_EXCEPTION,
+            delivery_error=None,
+            silent_suppressed=False,
+            thread_id=reservation.task.thread_id,
+            reservation_id=reservation.reservation_id,
+        )
+        self._store.append_run(failed)
+        self._update_task_last_run_at(failed)
+        payload = {
+            "run_id": run_id,
+            "reservation_id": reservation.reservation_id,
+            "error": str(exc),
+        }
+        self._store.append_audit(
+            action="run_start_failed",
+            task_id=reservation.task.task_id,
+            actor="scheduler",
+            payload=payload,
+        )
+        self._store.append_incident(
+            action="run_start_failed",
+            task_id=reservation.task.task_id,
+            actor="scheduler",
+            payload=payload,
+        )
+        return failed
 
 
 # ---------------------------------------------------------------------------

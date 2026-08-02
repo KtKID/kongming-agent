@@ -27,6 +27,7 @@ cron run 跑完后，按 ``ScheduledTask.delivery.channel`` 把 ``final_message`
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -145,7 +146,27 @@ class TargetDeliverySink(Protocol):
     记入 ``delivery_error``。
     """
 
-    async def deliver_to_target(self, target: str, task_name: str, message: str) -> bool: ...
+    async def deliver_to_target(
+        self,
+        target: str,
+        task: ScheduledTask,
+        run: ScheduledRun,
+        message: str,
+    ) -> bool: ...
+
+
+@runtime_checkable
+class RunLifecycleSink(Protocol):
+    """cron run 生命周期通知协议。
+
+    ScheduledRunManager 在 RUNNING 持久化后发布 started，并在 TaskRegistry
+    Task 收口、live 索引清理后发布 finished。宿主据此广播实时状态帧。实现方
+    不得修改 store；失败由调用方吞掉，避免实时通知影响调度主链路。
+    """
+
+    async def run_started(self, task: ScheduledTask, run: ScheduledRun) -> None: ...
+
+    async def run_finished(self, task: ScheduledTask, run: ScheduledRun) -> None: ...
 
 
 class DeliveryDispatcher:
@@ -231,32 +252,20 @@ class DeliveryDispatcher:
             # type name 始终非空，DeliveryResult.failed 不会因 error_message 为空抛
             result = DeliveryResult.failed(f"{type(exc).__name__}: {exc}")
 
-        # 6) v0.4 target 定向投递（附加，不覆盖 channel sink 结果）
+        # 6) v0.4 target 定向投递（附加实时通知，不覆盖 channel sink 结果）
         if (
             task.delivery.target  # None 和空串都跳过
             and self._target_sink is not None
         ):
-            try:
-                ok = await self._target_sink.deliver_to_target(
-                    task.delivery.target, task.name, final_message
+            # target sink 只负责 live thread fanout；run session 与 channel
+            # broadcast 已经是主投递语义，避免写入 delivered + delivery_error。
+            with suppress(Exception):
+                await self._target_sink.deliver_to_target(
+                    task.delivery.target,
+                    task,
+                    run,
+                    final_message,
                 )
-                if not ok and result.status is not DeliveryStatus.FAILED:
-                    # target 不可达但 channel sink 已成功：记 delivery_error 但不降级
-                    result = DeliveryResult(
-                        status=result.status,
-                        delivered_at=result.delivered_at,
-                        error_message=f"target_unreachable: {task.delivery.target}",
-                        skip_reason=result.skip_reason,
-                    )
-            except Exception as exc:
-                # target sink 异常不覆盖已有 channel 投递结果；仅追加 error
-                if result.status is not DeliveryStatus.FAILED:
-                    result = DeliveryResult(
-                        status=result.status,
-                        delivered_at=result.delivered_at,
-                        error_message=f"target_{type(exc).__name__}: {exc}",
-                        skip_reason=result.skip_reason,
-                    )
 
         return result
 
@@ -274,5 +283,6 @@ __all__ = [
     "DeliveryDispatcher",
     "DeliveryResult",
     "DeliverySink",
+    "RunLifecycleSink",
     "TargetDeliverySink",
 ]

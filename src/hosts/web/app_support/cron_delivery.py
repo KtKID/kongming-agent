@@ -26,13 +26,35 @@ cron 触发完成后通过 :class:`web.websocket.cron.CronWSBroker` 把 ``cron.r
 from __future__ import annotations
 
 import logging
-from typing import Any
+import time
+import uuid
+from typing import Any, cast
 
+from typing_extensions import override
+
+from hosts.web.protocol import (
+    CronMessageAppendedFrame,
+    CronRunCompletedFrame,
+    CronRunFinishedFrame,
+    CronRunStartedFrame,
+    CronRunTerminalStatusValue,
+)
 from hosts.web.websocket.cron import CronWSBroker
 from scheduler.delivery import DeliveryResult, DeliverySink
-from scheduler.domain import ScheduledRun, ScheduledTask
+from scheduler.domain import RunStatus, ScheduledRun, ScheduledTask
 
 logger = logging.getLogger(__name__)
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _terminal_status_value(status: RunStatus) -> CronRunTerminalStatusValue:
+    """把已结束的 scheduler 状态收窄为 Web terminal wire 合同。"""
+    if status is RunStatus.RUNNING:
+        raise ValueError("running status cannot be emitted as a terminal cron frame")
+    return cast(CronRunTerminalStatusValue, status.value)
 
 
 class WebDeliverySink(DeliverySink):
@@ -49,12 +71,50 @@ class WebDeliverySink(DeliverySink):
 
         web_sink = WebDeliverySink(get_broker())
         dispatcher = DeliveryDispatcher(web_sink=web_sink)
-        # 透传给 build_cron_execution_bridge(dispatcher=dispatcher)
+        # 透传给 build_scheduled_run_manager(dispatcher=dispatcher)
     """
 
     def __init__(self, broker: CronWSBroker) -> None:
         self._broker = broker
 
+    async def run_started(self, task: ScheduledTask, run: ScheduledRun) -> None:
+        """广播 cron run 开始事件，供前端卡片实时显示执行中。"""
+        await self._broker.broadcast(
+            CronRunStartedFrame(
+                timestamp_ms=_now_ms(),
+                task_id=task.task_id,
+                task_name=task.name,
+                run_id=run.run_id,
+                thread_id=task.thread_id,
+                session_id=run.session_id,
+                scheduled_for=run.scheduled_for,
+                started_at=run.started_at,
+                status="running",
+            ).model_dump()
+        )
+
+    async def run_finished(self, task: ScheduledTask, run: ScheduledRun) -> None:
+        """广播 cron run 结束事件，供前端卡片回到空闲并刷新运行记录。"""
+        await self._broker.broadcast(
+            CronRunFinishedFrame(
+                timestamp_ms=_now_ms(),
+                task_id=task.task_id,
+                task_name=task.name,
+                run_id=run.run_id,
+                thread_id=task.thread_id,
+                session_id=run.session_id,
+                scheduled_for=run.scheduled_for,
+                started_at=run.started_at,
+                finished_at=run.finished_at,
+                status=_terminal_status_value(run.status),
+                final_message=run.final_message_excerpt,
+                error_message=run.error_message,
+                delivery_error=run.delivery_error,
+                next_run_at=task.next_run_at,
+            ).model_dump()
+        )
+
+    @override
     async def deliver(
         self,
         task: ScheduledTask,
@@ -68,19 +128,20 @@ class WebDeliverySink(DeliverySink):
         """
         delivery_target = task.delivery.target if task.delivery is not None else None
         await self._broker.broadcast(
-            {
-                "frame_type": "cron.run.completed",
-                "task_id": task.task_id,
-                "task_name": task.name,
-                "run_id": run.run_id,
-                "final_message": final_message,
-                "delivered_at_iso": run.finished_at,
-                "scheduled_for": run.scheduled_for,
-                "delivery_target": delivery_target,
-                # v0.5 web-cron-router：下游前端不必 N+1 refetch
-                "next_run_at": task.next_run_at,
-                "status": run.status.value,
-            }
+            CronRunCompletedFrame(
+                timestamp_ms=_now_ms(),
+                task_id=task.task_id,
+                task_name=task.name,
+                run_id=run.run_id,
+                thread_id=task.thread_id,
+                session_id=run.session_id,
+                final_message=final_message,
+                delivered_at_iso=run.finished_at,
+                scheduled_for=run.scheduled_for,
+                delivery_target=delivery_target,
+                next_run_at=task.next_run_at,
+                status=_terminal_status_value(run.status),
+            ).model_dump()
         )
         return DeliveryResult.delivered()
 
@@ -91,7 +152,13 @@ class ThreadTargetSink:
     def __init__(self, thread_manager: Any) -> None:
         self._tm = thread_manager
 
-    async def deliver_to_target(self, target: str, task_name: str, message: str) -> bool:
+    async def deliver_to_target(
+        self,
+        target: str,
+        task: ScheduledTask,
+        run: ScheduledRun,
+        message: str,
+    ) -> bool:
         """按 target 前缀路由到具体投递实现。
 
         当前仅支持 ``thread:<thread_id>`` 前缀；其他前缀静默返回 False。
@@ -99,9 +166,15 @@ class ThreadTargetSink:
         if not target.startswith("thread:"):
             return False
         thread_id = target[len("thread:") :]
-        formatted = f"\U0001f4cc [cron:{task_name}] {message}"
         try:
-            result = await self._tm.append_cron_message(thread_id, formatted)
+            result = await self._tm.append_cron_message(
+                thread_id,
+                message,
+                task_id=task.task_id,
+                run_id=run.run_id,
+                session_id=run.session_id,
+                task_name=task.name,
+            )
             return bool(result)
         except Exception as exc:
             logger.warning(
@@ -112,4 +185,28 @@ class ThreadTargetSink:
             return False
 
 
-__all__ = ["ThreadTargetSink", "WebDeliverySink"]
+def make_cron_message_frame(
+    *,
+    thread_id: str,
+    task_id: str,
+    run_id: str,
+    session_id: str,
+    content: str,
+    task_name: str = "",
+) -> dict[str, Any]:
+    """构造追加到 thread 的 cron 专用 WS 帧。"""
+    message_id = f"cron-msg-{uuid.uuid4().hex[:12]}"
+    frame = CronMessageAppendedFrame(
+        thread_id=thread_id,
+        content=content,
+        message_id=message_id,
+        task_id=task_id,
+        run_id=run_id,
+        session_id=session_id,
+        task_name=task_name,
+        timestamp_ms=_now_ms(),
+    )
+    return frame.model_dump()
+
+
+__all__ = ["ThreadTargetSink", "WebDeliverySink", "make_cron_message_frame"]
