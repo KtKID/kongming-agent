@@ -18,19 +18,17 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import cast
 
-from application.agent_workflows.strategies.deep_research.contracts import (
+from application.agent_workflows.strategies.deep_research import (
     ResearchSourceCandidate,
     ResearchSourceProvider,
     ResearchSourceQuery,
     ResearchSourceRecord,
     SourceStatus,
     SourceTier,
-)
-from application.agent_workflows.strategies.deep_research.dedupe import (
     canonicalize_url,
     stable_source_id,
 )
-from core.contracts import ToolContext, ToolResult
+from core.contracts import PreparedToolCall, ToolCallPreparer, ToolContext, ToolResult
 
 DEFAULT_SEARCH_TOOL_NAMES = (
     "deep_research_search",
@@ -86,6 +84,24 @@ class _StoredSearchPayload:
 
     content_text: str | None = None
     raw: Mapping[str, object] = field(default_factory=dict)
+
+
+class _StructuredToolFailure(RuntimeError):
+    """工具结构化失败，输入为 ToolResult.data，输出为 DeepResearch 可诊断异常。"""
+
+    def __init__(
+        self,
+        *,
+        tool_name: str,
+        payload: Mapping[str, object],
+        fallback_message: str,
+    ) -> None:
+        """初始化结构化失败，输入为工具名和 payload，输出为异常实例。"""
+        self.payload = dict(payload)
+        self.error_code = _structured_failure_error_code(payload, tool_name=tool_name)
+        message = _structured_failure_message(payload, fallback_message=fallback_message)
+        self.error_message = message
+        super().__init__(message)
 
 
 class WebResearchSourceProviderFactory:
@@ -252,6 +268,13 @@ class UserToolResearchSourceProviderAdapter:
                 },
                 tool_name=self._fetch_tool_name or "fetch",
             )
+        except _StructuredToolFailure as exc:
+            return _weak_record(
+                candidate,
+                status="failed",
+                error_code=exc.error_code,
+                error_message=str(exc),
+            )
         except Exception as exc:
             return _weak_record(
                 candidate,
@@ -274,15 +297,22 @@ async def _call_user_tool(tool: object, args: dict[str, object], *, tool_name: s
     """调用用户工具，输入为 Tool 或 callable 和参数，输出原始返回值。"""
     execute = getattr(tool, "execute", None)
     if callable(execute):
+        context = ToolContext(
+            run_id="web-deep-research-source-provider",
+            session_id="web-deep-research",
+            turn=0,
+            call_id=f"deep_research:{tool_name}",
+            metadata={"origin": "web_deep_research_source_provider"},
+        )
+        arguments = dict(args)
+        prepared = (
+            tool.prepare(arguments, context)
+            if isinstance(tool, ToolCallPreparer)
+            else PreparedToolCall(arguments=arguments)
+        )
         result = execute(
-            dict(args),
-            ToolContext(
-                run_id="web-deep-research-source-provider",
-                session_id="web-deep-research",
-                turn=0,
-                call_id=f"deep_research:{tool_name}",
-                metadata={"origin": "web_deep_research_source_provider"},
-            ),
+            prepared,
+            context,
         )
         value = await result if inspect.isawaitable(result) else result
         return _unwrap_tool_result(value, tool_name=tool_name)
@@ -300,6 +330,12 @@ def _unwrap_tool_result(value: object, *, tool_name: str) -> object:
     if isinstance(value, ToolResult):
         if not value.ok:
             message = value.error_message or value.content or f"tool failed: {tool_name}"
+            if isinstance(value.data, Mapping):
+                raise _StructuredToolFailure(
+                    tool_name=tool_name,
+                    payload=value.data,
+                    fallback_message=message,
+                )
             raise RuntimeError(message)
         return value.data if value.data is not None else {"content": value.content}
     return value
@@ -340,6 +376,58 @@ def _extract_fetch_payload(raw: object) -> Mapping[str, object]:
     if isinstance(raw, str):
         return {"content_text": raw}
     return {}
+
+
+def _structured_failure_error_code(payload: Mapping[str, object], *, tool_name: str) -> str:
+    """提取结构化失败代码，输入为 payload，输出 error_code。"""
+    payloads = _failure_payloads(payload)
+    for item in payloads:
+        reason = _text_field(item, "reason")
+        if reason:
+            return reason
+    for item in payloads:
+        status = _text_field(item, "status")
+        if status:
+            return status
+    return f"{tool_name}_failed"
+
+
+def _structured_failure_message(
+    payload: Mapping[str, object],
+    *,
+    fallback_message: str,
+) -> str:
+    """格式化结构化失败，输入为 payload，输出带 status/reason/suggestion 的文本。"""
+    parts: list[tuple[str, str]] = []
+    for item in _failure_payloads(payload):
+        for key in ("status", "reason", "suggestion", "error_message"):
+            value = _text_field(item, key)
+            if value and (key, value) not in parts:
+                parts.append((key, value))
+    if not parts:
+        return fallback_message
+    rendered = "; ".join(f"{key}={value}" for key, value in parts)
+    if fallback_message:
+        return f"{rendered}; message={fallback_message}"
+    return rendered
+
+
+def _failure_payloads(payload: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
+    """展开失败 payload，输入为工具 data，输出可诊断 mapping 候选。"""
+    queue: list[Mapping[str, object]] = [payload]
+    seen: set[int] = set()
+    expanded: list[Mapping[str, object]] = []
+    for item in queue:
+        marker = id(item)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        expanded.append(item)
+        for key in ("diagnostics", "failure", "error", "result", "data"):
+            child = item.get(key)
+            if isinstance(child, Mapping):
+                queue.append(child)
+    return tuple(expanded)
 
 
 def _candidate_from_mapping(

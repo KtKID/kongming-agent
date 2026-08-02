@@ -18,6 +18,7 @@ from application.agent_workflows.strategies.deep_research import (
 from application.agent_workflows.strategies.deep_research.source_provider import (
     ResearchSourceManager,
 )
+from core.contracts import ToolResult
 from hosts.web.research_source_provider import (
     MAX_STORED_SEARCH_PAYLOAD_KEYS,
     UserToolResearchSourceProviderAdapter,
@@ -26,7 +27,7 @@ from hosts.web.research_source_provider import (
 )
 from infrastructure.config.models import (
     Config,
-    ModelConfig,
+    ModelSelectionConfig,
     WebConfig,
     WebDeepResearchSourceProviderConfig,
 )
@@ -111,11 +112,7 @@ def test_factory_missing_tool_returns_fallback_status() -> None:
 def test_factory_reads_web_config_source_provider_fields() -> None:
     """验证 Config 字段读取，输入为 web.deep_research_source_provider，输出为匹配工具 provider。"""
     config = Config(
-        model=ModelConfig(
-            name="fake-model",
-            base_url="http://127.0.0.1:1234/v1",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         web=WebConfig(
             deep_research_source_provider=WebDeepResearchSourceProviderConfig(
                 provider_name="configured_provider",
@@ -331,6 +328,86 @@ async def test_user_tool_adapter_tool_errors_return_failed_weak_records() -> Non
     assert record.error_code == "runtimeerror"
     assert "fetch exploded" in str(record.error_message)
     assert record.url == "https://example.com/fail"
+
+
+@pytest.mark.asyncio
+async def test_user_tool_adapter_preserves_structured_fetch_failures() -> None:
+    """验证结构化 fetch 失败，输入为 ToolResult data，输出带 reason 和 suggestion 的 weak record。"""
+    search_tool = _FakeUserTool(
+        {"results": [{"url": "https://example.com/private", "title": "Private Source"}]}
+    )
+    fetch_tool = _FakeUserTool(
+        ToolResult(
+            ok=False,
+            content="blocked: internal IP",
+            data={
+                "status": "blocked",
+                "reason": "internal_ip_blocked:127.0.0.1",
+                "suggestion": "try another source",
+            },
+            error_message="blocked by safe URL guard",
+        )
+    )
+    provider = UserToolResearchSourceProviderAdapter(
+        name="user_tool",
+        search_tool=search_tool,
+        fetch_tool=fetch_tool,
+        search_tool_name="web_search",
+        fetch_tool_name="web_fetch",
+    )
+
+    candidates = await provider.search(_query())
+    record = await provider.fetch(candidates[0])
+
+    assert record.status == "failed"
+    assert record.tier == "weak"
+    assert record.error_code == "internal_ip_blocked:127.0.0.1"
+    assert record.error_message is not None
+    assert "status=blocked" in record.error_message
+    assert "reason=internal_ip_blocked:127.0.0.1" in record.error_message
+    assert "suggestion=try another source" in record.error_message
+
+
+@pytest.mark.asyncio
+async def test_user_tool_adapter_preserves_nested_structured_fetch_failures() -> None:
+    """验证嵌套结构化失败，输入 diagnostics.failure，输出嵌套 reason 和 suggestion。"""
+    search_tool = _FakeUserTool(
+        {"results": [{"url": "https://example.com/private", "title": "Private Source"}]}
+    )
+    fetch_tool = _FakeUserTool(
+        ToolResult(
+            ok=False,
+            content="nested blocked",
+            data={
+                "status": "error",
+                "diagnostics": {
+                    "failure": {
+                        "status": "blocked",
+                        "reason": "internal_ip_blocked:10.0.0.1",
+                        "suggestion": "try another source",
+                    }
+                },
+            },
+            error_message="nested blocked by safe URL guard",
+        )
+    )
+    provider = UserToolResearchSourceProviderAdapter(
+        name="user_tool",
+        search_tool=search_tool,
+        fetch_tool=fetch_tool,
+        search_tool_name="web_search",
+        fetch_tool_name="web_fetch",
+    )
+
+    candidates = await provider.search(_query())
+    record = await provider.fetch(candidates[0])
+
+    assert record.status == "failed"
+    assert record.error_code == "internal_ip_blocked:10.0.0.1"
+    assert record.error_message is not None
+    assert "status=blocked" in record.error_message
+    assert "reason=internal_ip_blocked:10.0.0.1" in record.error_message
+    assert "suggestion=try another source" in record.error_message
 
 
 @pytest.mark.asyncio

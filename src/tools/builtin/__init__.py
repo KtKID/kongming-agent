@@ -14,6 +14,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "ShellTool": ("tools.builtin.shell_tool", "ShellTool"),
     "SkillSecurityError": ("tools.builtin.skill_tool", "SkillSecurityError"),
     "SkillTool": ("tools.builtin.skill_tool", "SkillTool"),
+    "WebFetchTool": ("tools.builtin.web_fetch_tool", "WebFetchTool"),
     "WriteFileTool": ("tools.builtin.file_tool", "WriteFileTool"),
     "assert_no_command_substitution": (
         "tools.builtin.skill_tool",
@@ -27,6 +28,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "build_memory_tool": ("tools.builtin.memory_tool", "build_memory_tool"),
     "build_schedule_tool": ("tools.builtin.schedule_tool", "build_schedule_tool"),
     "build_shell_tool": ("tools.builtin.shell_tool", "build_shell_tool"),
+    "build_web_fetch_tool": ("tools.builtin.web_fetch_tool", "build_web_fetch_tool"),
     "substitute_vars": ("tools.builtin.skill_tool", "substitute_vars"),
 }
 

@@ -6,7 +6,7 @@
 关键执行流程：TestClient 创建 thread，经 `/ws/threads/{thread_id}` 发送 user.input，
 测试 bridge 触发 deep_research，最后读取 result/audit/sources/report 断言来源可追踪。
 关键函数：test_web_thread_deep_research_uses_user_search_provider 覆盖用户搜索工具路径；
-test_web_thread_deep_research_missing_search_tool_records_fallback 覆盖缺失工具 fallback 路径。
+test_web_thread_deep_research_missing_search_tool_returns_tool_missing 覆盖缺失工具结果路径。
 """
 
 from __future__ import annotations
@@ -19,7 +19,8 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from core.contracts import ToolContext, ToolResult
+from core.contracts import PreparedToolCall, ToolContext, ToolResult
+from core.result import Result
 from hosts.web import run as web_run
 from hosts.web.app import create_app
 from hosts.web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
@@ -28,8 +29,7 @@ from hosts.web.threads.manager import ThreadManager
 from infrastructure.config.models import (
     ApprovalConfig,
     Config,
-    LLMPresetConfig,
-    ModelConfig,
+    ModelSelectionConfig,
     SchedulerConfig,
     WebConfig,
     WorkflowConfig,
@@ -69,31 +69,40 @@ def test_web_thread_deep_research_uses_user_search_provider(
     assert any(row["action"] == "deep_research.workflow_started" for row in audit_rows)
 
 
-def test_web_thread_deep_research_missing_search_tool_records_fallback(
+def test_web_thread_deep_research_missing_search_tool_returns_tool_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证 Web thread 缺搜索工具路径，输入为空 registry，输出为 fallback diagnostics。"""
+    """验证 Web thread 缺搜索工具路径，输入为空 registry，输出为 web_search 工具缺失记录。"""
     harness = _make_web_harness(
         tmp_path,
         monkeypatch,
         registry=ToolRegistry(),
-        payload={"topic": "Web thread missing search tool"},
+        payload={
+            "topic": "Web thread missing search tool",
+        },
     )
 
     workflow_dir = harness.run_thread_message("run missing-provider deep research")
+    board_dir = workflow_dir / "deep_research"
     result_payload = _json(workflow_dir / "result.json")
     audit_rows = _jsonl(workflow_dir / "audit.jsonl")
+    sources = _jsonl(board_dir / "sources.jsonl")
+    report_markdown = (board_dir / "report.md").read_text(encoding="utf-8")
     diagnostic_events = [
         row for row in audit_rows if row["action"] == "deep_research.source_provider_diagnostics"
     ]
 
-    assert result_payload["deep_research"]["source_provider"] == "deterministic_research_source"
+    assert result_payload["deep_research"]["source_provider"] == "web_user_tool_research_source"
     diagnostics = result_payload["deep_research"]["source_provider_diagnostics"]
-    assert diagnostics["reason"] == "search_tool_missing"
-    assert diagnostics["fallback_reason"] == "no configured or default search tool is registered"
-    assert diagnostic_events[0]["payload"]["reason"] == "search_tool_missing"
-    assert "web_search" in diagnostic_events[0]["payload"]["missing_tools"]
+    assert diagnostics["reason"] == "ok"
+    assert diagnostics["search_tool_name"] == "web_search"
+    assert diagnostic_events[0]["payload"]["reason"] == "ok"
+    assert sources[0]["provider_name"] == "web_user_tool_research_source"
+    assert sources[0]["status"] == "failed"
+    assert sources[0]["error_code"] == "search_tool_missing"
+    assert "web_search 工具缺失" in sources[0]["error_message"]
+    assert "web_search 工具缺失" in report_markdown
 
 
 def _make_web_harness(
@@ -130,9 +139,12 @@ def _make_web_harness(
         _ORIGINAL_AGENT_WORKFLOW_BIND(self, manager, session_id=session_id)
 
     def fake_native_runtime_build(*_args: Any, **_kwargs: Any) -> _RuntimeWithSessions:
-        """构造测试 runtime，输入为 NativeRuntime.build 参数，输出带 _sessions 的 runtime。"""
+        """构造测试 runtime，输入为 SessionEngine.build 参数，输出带 _sessions 的 runtime。"""
         assert _kwargs["tools"] is registry
-        return _RuntimeWithSessions()
+        return _RuntimeWithSessions(
+            model_catalog_manager=_kwargs["model_catalog_manager"],
+            model_config=_kwargs["model_config"],
+        )
 
     monkeypatch.setattr("infrastructure.config.paths.get_kongming_home", lambda: home)
     monkeypatch.setattr(
@@ -149,11 +161,11 @@ def _make_web_harness(
     )
     monkeypatch.setattr("tools.build_default_registry", lambda **_kwargs: registry)
     monkeypatch.setattr(
-        "runtime_assembly.native_runtime.NativeRuntime.build",
+        "runtime_assembly.session_engine.SessionEngine.build",
         staticmethod(fake_native_runtime_build),
     )
     monkeypatch.setattr(
-        "hosts.shared.session_bridge.SessionBridge",
+        "hosts.shared.host_dispatcher.HostDispatcher",
         _bridge_class(state),
     )
     monkeypatch.setattr(AgentWorkflowHandle, "bind", capture_bind)
@@ -188,7 +200,7 @@ class _WebDeepResearchHarness:
                     "/api/threads",
                     json={
                         "name": "deep research smoke",
-                        "preset_id": "local",
+                        "preset_id": "local-gemma-4-e4b-it",
                         "backend_kind": "generic_chat",
                         "cwd": str(self._workspace_root),
                     },
@@ -232,34 +244,33 @@ class _BridgeState:
 
 
 def _bridge_class(state: _BridgeState) -> type:
-    """构造绑定共享状态的 bridge 类，输入为状态，输出为 SessionBridge 替身类。"""
+    """构造绑定共享状态的 HostDispatcher 替身类，输入为状态，输出为类。"""
 
-    class _DeepResearchBridge:
-        """Web SessionBridge 替身，用 deep_research workflow 替代外部 LLM。"""
+    class _DeepResearchDispatcher:
+        """Web HostDispatcher 替身，用 deep_research workflow 替代外部 LLM。
+
+        host-dispatch-consolidation：测试替身实现 HostDispatcher submit 语义。
+        submit(QUEUE) 触发 workflow。
+        """
 
         def __init__(
             self,
             *,
             runtime: Any,
-            adapter: Any,
             session_id: str,
-            echo_final_content: bool,
+            queued_result_handler: Any = None,
+            agent_tree_runtime_router: Any | None = None,
+            approval_canceller: Any | None = None,
         ) -> None:
-            """记录 bridge 参数，输入为 runtime/adapter/session，输出为实例属性。"""
+            """记录 dispatcher 参数，输入为 runtime/session/handler，输出为实例属性。"""
             self.runtime = runtime
-            self.adapter = adapter
             self.session_id = session_id
-            self.echo_final_content = echo_final_content
+            self.queued_result_handler = queued_result_handler
+            self.agent_tree_runtime_router = agent_tree_runtime_router
+            self.approval_canceller = approval_canceller
 
-        async def run_once(
-            self,
-            text: str,
-            *,
-            reasoning_effort: str | None = None,
-            attachments: list[dict[str, Any]] | None = None,
-        ) -> None:
-            """执行 deep_research workflow，输入为用户消息，输出为 workflow artifact。"""
-            del text, reasoning_effort, attachments
+        async def _run_deep_research(self) -> None:
+            """执行 deep_research workflow，输入当前 session，输出共享状态。"""
             try:
                 manager = state.managers[self.session_id]
                 result = await manager.run_workflow_payload(
@@ -275,13 +286,59 @@ def _bridge_class(state: _BridgeState) -> type:
             finally:
                 state.done.set()
 
-    return _DeepResearchBridge
+        async def run_text(
+            self,
+            text: str,
+            *,
+            attachments: list[dict[str, Any]] | None = None,
+            references: list[dict[str, Any]] | None = None,
+            metadata: dict[str, Any] | None = None,
+            repost_undelivered: bool = True,
+        ) -> Result:
+            """执行 deep_research workflow，输入用户消息，输出 completed Result。"""
+            del text, attachments, references, metadata, repost_undelivered
+            await self._run_deep_research()
+            return Result(
+                run_id=f"{self.session_id}-deep-research-smoke",
+                session_id=self.session_id,
+                status="completed",
+                final_message=None,
+                turn_count=1,
+            )
+
+        async def submit(
+            self,
+            text: str,
+            *,
+            mode: Any = None,
+            attachments: list[dict[str, Any]] | None = None,
+            references: list[dict[str, Any]] | None = None,
+            metadata: dict[str, Any] | None = None,
+        ) -> Any:
+            """执行 deep_research workflow，输入为用户消息，输出为 workflow artifact。
+
+            返回简单 receipt（merged=False）对齐生产 submit 契约。
+            """
+            from hosts.shared.host_dispatcher import SubmitReceipt  # 局部 import 避免顶层耦合
+
+            del text, mode, attachments, references, metadata
+            await self._run_deep_research()
+            return SubmitReceipt(merged=False)
+
+        async def aclose(self, *, drain: bool = True) -> None:
+            """关闭测试 dispatcher，输入 drain 标志，输出 None。"""
+            del drain
+
+    return _DeepResearchDispatcher
 
 
 class _RuntimeWithSessions:
     """测试 runtime，提供 WS history 读取所需的 _sessions 字段。"""
 
-    _sessions: dict[str, Any] = {}
+    def __init__(self, *, model_catalog_manager: Any, model_config: Any) -> None:
+        self._sessions: dict[str, Any] = {}
+        self.model_catalog_manager = model_catalog_manager
+        self.model_config = model_config
 
 
 class _WebSearchTool:
@@ -291,7 +348,8 @@ class _WebSearchTool:
     description = "fake web search for deep research web smoke"
     input_schema = {"type": "object", "properties": {"query": {"type": "string"}}}
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    async def execute(self, prepared: PreparedToolCall, ctx: ToolContext) -> ToolResult:
+        args = prepared.arguments
         """返回搜索结果，输入为查询参数和上下文，输出为 ToolResult。"""
         return ToolResult(
             ok=True,
@@ -315,7 +373,8 @@ class _WebFetchTool:
     description = "fake web fetch for deep research web smoke"
     input_schema = {"type": "object", "properties": {"url": {"type": "string"}}}
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    async def execute(self, prepared: PreparedToolCall, ctx: ToolContext) -> ToolResult:
+        args = prepared.arguments
         """返回正文结果，输入为 URL 参数和上下文，输出为 ToolResult。"""
         return ToolResult(
             ok=True,
@@ -333,11 +392,7 @@ class _WebFetchTool:
 def _config(tmp_path: Path, home: Path) -> Config:
     """构造 Web smoke 配置，输入为临时路径和 home，输出为 Config。"""
     cfg = Config(
-        model=ModelConfig(
-            name="base-model",
-            base_url="http://127.0.0.1:1234/v1",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         approval=ApprovalConfig(mode="auto_allow"),
         scheduler=SchedulerConfig(enabled=False),
         workflow=WorkflowConfig(enabled=False),
@@ -347,14 +402,6 @@ def _config(tmp_path: Path, home: Path) -> Config:
             initial_password="pwd",
             idle_timeout_seconds=1800,
             idle_check_interval_seconds=60,
-            llm_presets=[
-                LLMPresetConfig(
-                    id="local",
-                    display_name="Local",
-                    base_url="http://127.0.0.1:1234/v1",
-                    model="preset-model",
-                )
-            ],
         ),
     )
     cfg.session.file_store_path = str(home / "sessions")

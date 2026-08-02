@@ -11,12 +11,24 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from typing import Any, ClassVar
+from urllib.parse import urlparse
 
 from application.web_search.models import WebSearchResponse, WebSearchResult
-from core.contracts import ToolContext, ToolResult
+from core.contracts import (
+    PreparedToolCall,
+    ToolCallPreparer,
+    ToolContext,
+    ToolResult,
+)
+
+# 搜索结果预览长度先集中放在模块顶部，方便根据 eval 调整。
+_SEARCH_SNIPPET_MAX_CHARS = 300
+# 搜索数量字符串最多允许的十进制位数，避免超长数字触发 Python int 保护异常。
+_SEARCH_LIMIT_MAX_DIGITS = 9
 
 
 class WebSearchManager:
@@ -36,20 +48,27 @@ class WebSearchManager:
             getattr(search_tool, "name", "web_search_provider")
         )
 
-    async def search(self, query: str, max_results: int | None = None) -> WebSearchResponse:
+    async def search(
+        self,
+        query: str,
+        max_results: int | None = None,
+        *,
+        top_k: int | None = None,
+    ) -> WebSearchResponse:
         """执行网页搜索，输入 query 和可选数量限制，输出归一化 WebSearchResponse。"""
         normalized_query = str(query).strip()
         if not normalized_query:
             raise ValueError("query must be non-empty")
-        if max_results is not None:
-            normalized_max_results = _parse_positive_int(max_results, allow_string=False)
-            if normalized_max_results is None:
-                raise ValueError("max_results must be an integer >= 1")
-            max_results = normalized_max_results
+        requested_limit = max_results if max_results is not None else top_k
+        if requested_limit is not None:
+            normalized_limit = _parse_positive_int(requested_limit, allow_string=False)
+            if normalized_limit is None:
+                raise ValueError("max_results/top_k must be an integer >= 1")
+            requested_limit = normalized_limit
 
         args: dict[str, Any] = {"query": normalized_query}
-        if max_results is not None:
-            args["max_results"] = max_results
+        if requested_limit is not None:
+            args["max_results"] = requested_limit
 
         result = await self._execute_search_tool(args)
         tool_data = _result_data(result)
@@ -66,7 +85,7 @@ class WebSearchManager:
         if not items and content_payload is not None:
             items = _extract_search_items(content_payload)
 
-        limit = max_results if max_results is not None else len(items)
+        limit = requested_limit if requested_limit is not None else len(items)
         normalized_results: list[WebSearchResult] = []
         skipped: list[dict[str, Any]] = []
         for index, item in enumerate(items[: max(limit, 0)]):
@@ -87,19 +106,25 @@ class WebSearchManager:
         )
 
     async def _execute_search_tool(self, args: dict[str, Any]) -> object:
-        """调用底层搜索 Tool，输入参数 dict，输出 ToolResult 或兼容对象。"""
+        """准备并调用底层搜索 Tool，输出 ToolResult 或兼容对象。"""
         execute = getattr(self._search_tool, "execute", None)
         if not callable(execute):
-            raise TypeError("search_tool must provide execute(args, ctx)")
+            raise TypeError("search_tool must provide execute(prepared, ctx)")
+        context = ToolContext(
+            run_id="web-search-manager",
+            session_id="web-search",
+            turn=0,
+            call_id=f"web_search:{self._provider_tool_name}",
+            metadata={"origin": "application.web_search"},
+        )
+        prepared = (
+            self._search_tool.prepare(dict(args), context)
+            if isinstance(self._search_tool, ToolCallPreparer)
+            else PreparedToolCall(arguments=dict(args))
+        )
         value = execute(
-            args,
-            ToolContext(
-                run_id="web-search-manager",
-                session_id="web-search",
-                turn=0,
-                call_id=f"web_search:{self._provider_tool_name}",
-                metadata={"origin": "application.web_search"},
-            ),
+            prepared,
+            context,
         )
         return await value if inspect.isawaitable(value) else value
 
@@ -155,20 +180,31 @@ class WebSearchManager:
             or self._provider_tool_name
         )
         metadata = _metadata_for_item(item, rank=rank)
+        published_date = _text_field(
+            item,
+            "published_date",
+            "published_at",
+            "publishedAt",
+            "publish_time",
+            "published_time",
+            "date",
+        )
+        score = _float_field(item, "score", "ranking_score", "confidence")
+        if score is None:
+            score = _float_field(metadata, "score")
         return WebSearchResult(
             url=url,
             title=_text_field(item, "title", "name", "headline") or url,
-            snippet=_text_field(item, "snippet", "summary", "description", "content", "text") or "",
+            snippet=_truncate_text(
+                _text_field(item, "snippet", "summary", "description", "content", "text") or "",
+                max_chars=_SEARCH_SNIPPET_MAX_CHARS,
+            ),
             provider_name=provider_name,
             provider_tool_name=provider_tool_name,
-            published_at=_text_field(
-                item,
-                "published_at",
-                "publishedAt",
-                "publish_time",
-                "published_time",
-                "date",
-            ),
+            domain=_text_field(item, "domain", "host") or urlparse(url).netloc,
+            published_date=published_date,
+            score=score if score is not None else 0.0,
+            published_at=published_date,
             metadata=metadata,
         )
 
@@ -176,6 +212,18 @@ class WebSearchManager:
 def build_web_search_tool(manager: WebSearchManager) -> object:
     """构造 Kongming web_search Tool，输入 WebSearchManager，输出 Tool 实例。"""
     return _WebSearchTool(manager)
+
+
+def build_missing_web_search_tool(
+    *,
+    provider_name: str = "web_search",
+    candidate_tool_names: tuple[str, ...] = (),
+) -> object:
+    """构造缺失态 web_search Tool，输入 provider 和候选工具名，输出稳定失败工具。"""
+    return _MissingWebSearchTool(
+        provider_name=provider_name,
+        candidate_tool_names=candidate_tool_names,
+    )
 
 
 class _WebSearchTool:
@@ -190,9 +238,22 @@ class _WebSearchTool:
             "max_results": {
                 "anyOf": [
                     {"type": "integer", "minimum": 1},
-                    {"type": "string", "pattern": "^[1-9][0-9]*$"},
+                    {
+                        "type": "string",
+                        "pattern": f"^[1-9][0-9]{{0,{_SEARCH_LIMIT_MAX_DIGITS - 1}}}$",
+                    },
                 ],
                 "description": "Maximum number of search results to return.",
+            },
+            "top_k": {
+                "anyOf": [
+                    {"type": "integer", "minimum": 1},
+                    {
+                        "type": "string",
+                        "pattern": f"^[1-9][0-9]{{0,{_SEARCH_LIMIT_MAX_DIGITS - 1}}}$",
+                    },
+                ],
+                "description": "Alias for max_results.",
             },
         },
         "required": ["query"],
@@ -202,26 +263,26 @@ class _WebSearchTool:
         """初始化 Tool，输入 WebSearchManager，输出可注册工具。"""
         self._manager = manager
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        """执行 web_search，输入 Tool args/context，输出 ToolResult。"""
-        query = _optional_str(args.get("query"))
-        if not query:
-            return ToolResult(
-                ok=False,
-                content="web_search requires a non-empty query.",
-                error_message="query must be non-empty",
-            )
-        max_results = args.get("max_results")
-        if max_results is not None:
-            max_results = _parse_positive_int(max_results, allow_string=True)
-            if max_results is None:
-                return ToolResult(
-                    ok=False,
-                    content="web_search max_results must be an integer >= 1.",
-                    error_message="max_results must be an integer >= 1",
-                )
+    def prepare(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> PreparedToolCall:
+        """审批前校验 query/limit 并冻结规范化参数。"""
+        del context
+        return PreparedToolCall(arguments=_prepare_search_arguments(arguments))
+
+    async def execute(
+        self,
+        prepared: PreparedToolCall,
+        ctx: ToolContext,
+    ) -> ToolResult:
+        """执行 web_search，输入已准备调用/context，输出 ToolResult。"""
+        del ctx
+        query = str(prepared.arguments["query"])
+        requested_limit = prepared.arguments.get("max_results")
         try:
-            response = await self._manager.search(query, max_results=max_results)
+            response = await self._manager.search(query, max_results=requested_limit)
         except Exception as exc:
             error_message = _exception_message(exc)
             return ToolResult(
@@ -252,6 +313,102 @@ class _WebSearchTool:
         )
 
 
+class _MissingWebSearchTool:
+    """缺失底层 provider 时的稳定 web_search Tool。"""
+
+    name = "web_search"
+    description = "Search the web and return normalized URL, title, snippet, and provider data."
+    input_schema: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search query."},
+            "max_results": {
+                "anyOf": [
+                    {"type": "integer", "minimum": 1},
+                    {
+                        "type": "string",
+                        "pattern": f"^[1-9][0-9]{{0,{_SEARCH_LIMIT_MAX_DIGITS - 1}}}$",
+                    },
+                ],
+                "description": "Maximum number of search results to return.",
+            },
+            "top_k": {
+                "anyOf": [
+                    {"type": "integer", "minimum": 1},
+                    {
+                        "type": "string",
+                        "pattern": f"^[1-9][0-9]{{0,{_SEARCH_LIMIT_MAX_DIGITS - 1}}}$",
+                    },
+                ],
+                "description": "Alias for max_results.",
+            },
+        },
+        "required": ["query"],
+    }
+
+    def __init__(
+        self,
+        *,
+        provider_name: str,
+        candidate_tool_names: tuple[str, ...],
+    ) -> None:
+        """初始化缺失态工具，输入 provider 和候选工具名，输出可调用实例。"""
+        self._provider_name = provider_name
+        self._candidate_tool_names = tuple(candidate_tool_names)
+
+    def prepare(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> PreparedToolCall:
+        """审批前校验查询参数并返回统一快照。"""
+        del context
+        return PreparedToolCall(arguments=_prepare_search_arguments(arguments))
+
+    async def execute(
+        self,
+        prepared: PreparedToolCall,
+        ctx: ToolContext,
+    ) -> ToolResult:
+        """执行缺失态搜索，输入已准备参数，输出工具缺失结果。"""
+        del ctx
+        query = str(prepared.arguments["query"])
+        message = "web_search 工具缺失：未连接 MCP 搜索工具或用户搜索工具。"
+        return ToolResult(
+            ok=False,
+            content=message,
+            data={
+                "query": query,
+                "results": [],
+                "diagnostics": {
+                    "ok": False,
+                    "reason": "search_tool_missing",
+                    "error_message": message,
+                    "provider_name": self._provider_name,
+                    "candidate_tool_names": self._candidate_tool_names,
+                },
+            },
+            error_message=message,
+        )
+
+
+def _prepare_search_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """校验并规范化搜索 query 和 limit，输出审批/执行共同参数。"""
+    query = _optional_str(arguments.get("query"))
+    if not query:
+        raise ValueError("web_search query must be non-empty")
+    limit_name = "max_results" if arguments.get("max_results") is not None else "top_k"
+    requested_limit = arguments.get("max_results")
+    if requested_limit is None:
+        requested_limit = arguments.get("top_k")
+    if requested_limit is None:
+        return {"query": query}
+    parsed_limit = _parse_positive_int(requested_limit, allow_string=True)
+    if parsed_limit is None:
+        raise ValueError(f"{limit_name} must be an integer >= 1")
+    return {"query": query, "max_results": parsed_limit}
+
+
 def _parse_positive_int(value: object, *, allow_string: bool) -> int | None:
     """解析正整数，输入 tool 参数值，输出正整数或 None。"""
     if isinstance(value, bool):
@@ -262,7 +419,12 @@ def _parse_positive_int(value: object, *, allow_string: bool) -> int | None:
         stripped = value.strip()
         if not stripped.isdecimal():
             return None
-        parsed = int(stripped)
+        if len(stripped) > _SEARCH_LIMIT_MAX_DIGITS:
+            return None
+        try:
+            parsed = int(stripped)
+        except ValueError:
+            return None
         return parsed if parsed >= 1 else None
     return None
 
@@ -316,6 +478,13 @@ def _format_content(response: WebSearchResponse) -> str:
         snippet = f" - {result.snippet}" if result.snippet else ""
         lines.append(f"{index}. {result.title} ({result.url}){snippet}")
     return "\n".join(lines)
+
+
+def _truncate_text(text: str, *, max_chars: int) -> str:
+    """按字符数截断文本，输入原文和上限，输出短预览。"""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars]
 
 
 def _result_data(value: object) -> dict[str, Any]:
@@ -398,6 +567,28 @@ def _text_field(mapping: Mapping[str, Any], *keys: str) -> str | None:
         text = _optional_str(value)
         if text:
             return text
+    return None
+
+
+def _float_field(mapping: Mapping[str, Any], *keys: str) -> float | None:
+    """读取数值字段，输入 mapping 和候选 key，输出 float 或 None。"""
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            parsed = float(value)
+            return parsed if math.isfinite(parsed) else None
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                continue
+            try:
+                parsed = float(stripped)
+            except ValueError:
+                continue
+            if math.isfinite(parsed):
+                return parsed
     return None
 
 

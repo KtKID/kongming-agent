@@ -12,6 +12,7 @@ import pytest
 
 from application.agent_workflows.strategies.deep_research import (
     FakeResearchSourceProvider,
+    ResearchSourceCandidate,
     ResearchSourceManager,
     ResearchSourceQuery,
 )
@@ -27,6 +28,35 @@ class _AuditRecorder:
     def write_event(self, event: dict[str, object]) -> None:
         """记录审计事件，输入为事件 dict，输出为追加到内存列表。"""
         self.events.append(event)
+
+
+class _ExplodingAttributeError(RuntimeError):
+    """测试用异常，读取错误属性时抛错。"""
+
+    @property
+    def error_code(self) -> str:
+        """模拟 provider 暴露坏属性，输入为空，输出异常。"""
+        raise RuntimeError("error_code property exploded")
+
+    @property
+    def error_message(self) -> str:
+        """模拟 provider 暴露坏属性，输入为空，输出异常。"""
+        raise RuntimeError("error_message property exploded")
+
+
+class _ExplodingSearchProvider:
+    """测试用 provider，search 阶段抛出坏属性异常。"""
+
+    name = "exploding_search_provider"
+
+    async def search(self, query: ResearchSourceQuery) -> tuple[ResearchSourceCandidate, ...]:
+        """搜索时抛错，输入 query，输出异常。"""
+        del query
+        raise _ExplodingAttributeError("search unstable")
+
+    async def fetch(self, candidate: ResearchSourceCandidate) -> object:
+        """不会被调用，输入候选，输出异常。"""
+        raise AssertionError(f"fetch should not run: {candidate.url}")
 
 
 def _query(query_id: str = "q1", *, max_results: int = 10) -> ResearchSourceQuery:
@@ -95,6 +125,36 @@ async def test_collect_sources_records_fetch_failure_as_weak_source() -> None:
     assert records[0].error_code == "runtimeerror"
     assert "network down" in str(records[0].error_message)
     assert "deep_research.fetch_failed" in _actions(audit)
+
+
+@pytest.mark.asyncio
+async def test_collect_sources_handles_exception_error_properties_that_raise() -> None:
+    """验证异常属性二次抛错，输入 fetch 坏异常，输出稳定 failed record。"""
+    provider = FakeResearchSourceProvider(
+        search_index={"q1": [{"url": "https://example.com/fail", "title": "Fail"}]},
+        fetch_index={"https://example.com/fail": _ExplodingAttributeError("fetch unstable")},
+    )
+    manager = ResearchSourceManager(provider)
+
+    records = await manager.collect_sources([_query()], source_budget=5, fetch_budget=5)
+
+    assert len(records) == 1
+    assert records[0].status == "failed"
+    assert records[0].error_code == "_explodingattributeerror"
+    assert records[0].error_message == "fetch unstable"
+
+
+@pytest.mark.asyncio
+async def test_collect_sources_handles_search_exception_error_properties_that_raise() -> None:
+    """验证 search 异常属性二次抛错，输入 search 坏异常，输出稳定 failed record。"""
+    manager = ResearchSourceManager(_ExplodingSearchProvider())
+
+    records = await manager.collect_sources([_query()], source_budget=5, fetch_budget=5)
+
+    assert len(records) == 1
+    assert records[0].status == "failed"
+    assert records[0].error_code == "_explodingattributeerror"
+    assert records[0].error_message == "search unstable"
 
 
 @pytest.mark.asyncio
