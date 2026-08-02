@@ -12,8 +12,8 @@ v1-mini 的装配职责：
 
 - 不拼 token 精算：交给 provider 或后续 context_engine（v0.2+）
 - 不在 assembly 阶段读附件 bytes：附件引用透传，bytes 由 provider 通过
-  :class:`infrastructure.llm_providers.media_adapter.MediaPart` 的 lazy ``load_bytes()`` 按需读取
-- 不改变任何消息内容（除非 compactor 自己截断了 tool 结果）
+  :class:`core.contracts.MediaPart` 的 lazy ``load_bytes()`` 按需读取
+- 只在模型输入装配副本里前置 conversation reference 链接，session 原始消息保持不变
 
 附件透传（claude-image-paste-e2e §4）：
 
@@ -22,7 +22,7 @@ v1-mini 的装配职责：
 - assembly 的 :attr:`AssembledInput.metadata["attachments"]` 是**汇总视图**：
   把本轮所有 user 消息的 attachments 引用拍平到一个 list，便于 trace 观测；
   不参与 provider 输入构造（provider 直接遍历 ``messages[i].metadata``）
-- provider 通过 :func:`infrastructure.llm_providers.media_adapter.collect_media_parts_from_messages`
+- provider 通过 :func:`core.contracts.collect_media_parts_from_messages`
   把 ``messages`` 还原成 ``list[MediaPart]``（解耦：prompting 层不依赖 executors 层）
 
 返回的 :class:`AssembledInput` 是 frozen dataclass，只读；调用方要追加字段自己拿
@@ -37,6 +37,7 @@ from typing import Any
 from core.contracts import AssembledInput, MessageCompactor
 from core.message import Message
 from prompting.compaction.history_compactor import HistoryCompactor
+from prompting.context_sources.conversation_reference_manager import ConversationReferenceManager
 from prompting.instructions.instruction_loader import InstructionLoader, InstructionSource
 
 
@@ -47,14 +48,18 @@ class InputAssembler:
         self,
         *,
         compactor: MessageCompactor | None = None,
+        conversation_reference_manager: ConversationReferenceManager | None = None,
     ) -> None:
         """初始化。
 
         Args:
             compactor: 历史压缩器（满足 MessageCompactor Protocol 即可）；
                 未传则用默认参数的 :class:`HistoryCompactor`。
+            conversation_reference_manager: 可选 conversation reference 解析门户；
+                存在时会解析最新 user message 的显式引用并注入 prompt context。
         """
         self._compactor: MessageCompactor = compactor or HistoryCompactor()
+        self._conversation_reference_manager = conversation_reference_manager
 
     @property
     def compactor(self) -> MessageCompactor:
@@ -90,15 +95,22 @@ class InputAssembler:
             system_message = Message.system(system_text)
 
         compacted = await self._compactor.compact(history)
+        compacted_with_references = list(compacted)
+        reference_summary: list[dict[str, Any]] = []
+
+        if self._conversation_reference_manager is not None:
+            reference_summary = await self._prepend_reference_context_to_latest_user(
+                compacted_with_references
+            )
 
         final_messages: list[Message] = []
         if system_message is not None:
             final_messages.append(system_message)
-        final_messages.extend(compacted)
+        final_messages.extend(compacted_with_references)
 
         # 汇总本轮所有 user message 的 attachments 引用，便于 trace 观测。
         # 真正的输入构造由 provider 通过
-        # ``infrastructure.llm_providers.media_adapter.collect_media_parts_from_messages``
+        # ``core.contracts.collect_media_parts_from_messages``
         # 直接读 ``messages[i].metadata["attachments"]``，不消费此汇总字段——
         # 此字段仅供日志 / trace 看一眼"这一轮带了几张图"。
         attachments_summary: list[dict[str, Any]] = []
@@ -115,12 +127,59 @@ class InputAssembler:
             "added_system": system_message is not None,
             "instruction_sources": [s.origin for s in instructions],
             "attachments": attachments_summary,
+            "conversation_references": reference_summary,
         }
         return AssembledInput(
             system_message=system_message,
             messages=final_messages,
             metadata=metadata,
         )
+
+    async def _prepend_reference_context_to_latest_user(
+        self,
+        messages: list[Message],
+    ) -> list[dict[str, Any]]:
+        """解析最新 user message references，并前置到该消息 content。"""
+        manager = self._conversation_reference_manager
+        if manager is None:
+            return []
+
+        latest_user_index: int | None = None
+        latest_user: Message | None = None
+        for index in range(len(messages) - 1, -1, -1):
+            candidate = messages[index]
+            if candidate.role == "user":
+                latest_user_index = index
+                latest_user = candidate
+                break
+        if latest_user is None or latest_user_index is None:
+            return []
+
+        resolved = await manager.resolve_for_prompt(latest_user)
+        if not resolved:
+            return []
+        content = manager.render_prompt_context(resolved)
+        if not content.strip():
+            return []
+        summary = [
+            {
+                "id": item.reference_id,
+                "kind": item.kind,
+                "label": item.label,
+                "source_ref": item.source_ref,
+            }
+            for item in resolved
+        ]
+        original_content = latest_user.content or ""
+        messages[latest_user_index] = Message(
+            role=latest_user.role,
+            content=f"{content}\n\n{original_content}" if original_content else content,
+            tool_calls=latest_user.tool_calls,
+            tool_call_id=latest_user.tool_call_id,
+            name=latest_user.name,
+            metadata=latest_user.metadata,
+        )
+        return summary
 
 
 __all__ = [

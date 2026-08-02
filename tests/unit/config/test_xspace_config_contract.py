@@ -70,7 +70,7 @@ def test_xspace_runtime_config_loads_with_product_defaults() -> None:
     """x-space 产品配置必须能通过正式 Config 校验。"""
     cfg = load_config(XSPACE_CONFIG, load_env_file=False)
 
-    assert cfg.config_schema_version == "v0.5"
+    assert cfg.config_schema_version == "v0.6"
     assert cfg.web.enabled is True
     assert cfg.web.host == "127.0.0.1"
     assert cfg.web.port == 60000
@@ -78,7 +78,9 @@ def test_xspace_runtime_config_loads_with_product_defaults() -> None:
     assert cfg.web.dev_mode is False
     assert cfg.session.backend == "file"
     assert cfg.scheduler.default_timezone == "Asia/Shanghai"
-    assert cfg.model.api_key == ""
+    assert cfg.model.preset_id == "local-gemma-4-e4b-it"
+    assert cfg.model.reasoning_effort is None
+    assert cfg.evolution.learning.preset_id is None
     assert cfg.web.initial_password is None
 
 
@@ -113,10 +115,9 @@ def test_xspace_runtime_config_profile_policy_template_lists_pending_decisions()
         issue.path == "web.host" and issue.code == "xspace-keep-decision-required"
         for issue in review.issues
     )
-    assert any(
-        issue.path == "mcp.servers" and issue.code == "target-missing-decision-required"
-        for issue in review.issues
-    )
+    # mcp.servers 与主配置值一致（xspace 同步了 minimax server），不应再生成
+    # target-missing-decision-required；值一致的字段不进待决策列表。
+    assert not any(issue.path == "mcp.servers" for issue in review.issues)
     assert not any(issue.path == "web.server_origin" for issue in review.issues)
 
 

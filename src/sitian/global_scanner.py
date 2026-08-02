@@ -2,13 +2,13 @@
 司天全局扫描器——独立于 web scanner，纯 stdlib 实现。
 
 Role:
-    全局扫描 ~/.claude/projects 和 ~/.codex/sessions 目录结构，
+    全局扫描 ~/.claude/projects、~/.codex/sessions 和 Kongming FileSession 目录结构，
     列出所有最近活跃的项目和 session 摘要。
     独立于 web scanner：web 是 worktree 注册视角（只看已登记项目），
     sitian 是全局观察视角（扫描所有项目）。两者语义不同，不共用。
 
 Owns:
-    - Claude / Codex 项目目录扫描逻辑
+    - Claude / Codex / Kongming 项目目录扫描逻辑
     - session 索引解析（title / mtime / cwd 提取）
     - 项目排序（按 mtime desc）
 
@@ -23,7 +23,8 @@ Called by:
 Key outputs:
     - list_claude_projects_global() → list[SiTianProjectInfo]
     - list_codex_projects_global() → list[SiTianCodexProjectInfo]
-    - SiTianSessionInfo / SiTianCodexSessionInfo（session 摘要）
+    - list_kongming_generic_chat_projects() → list[SiTianKongmingProjectInfo]
+    - SiTianSessionInfo / SiTianCodexSessionInfo / SiTianKongmingSessionInfo（session 摘要）
 
 Change risks:
     - ~/.claude/projects 目录结构变化会破坏项目发现
@@ -36,7 +37,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 _TITLE_MAX_LEN = 60
 
@@ -98,6 +99,29 @@ class SiTianCodexProjectInfo:
     sessions: list[SiTianCodexSessionInfo]
 
 
+@dataclass(frozen=True)
+class SiTianKongmingSessionInfo:
+    """Kongming Web 通用频道的一条可分析 FileSession 摘要。"""
+
+    thread_id: str
+    title: str
+    cwd: str
+    last_modified: float
+    message_count: int
+    metadata_path: str
+    manifest_path: str
+    jsonl_path: str
+
+
+@dataclass(frozen=True)
+class SiTianKongmingProjectInfo:
+    """按规范化 cwd 归并的 Kongming Web 通用频道项目。"""
+
+    cwd: str
+    display_name: str
+    sessions: list[SiTianKongmingSessionInfo]
+
+
 def list_codex_projects_global(codex_home: Path | None = None) -> list[SiTianCodexProjectInfo]:
     home = (
         codex_home
@@ -132,7 +156,7 @@ def list_codex_projects_global(codex_home: Path | None = None) -> list[SiTianCod
         projects.append(
             SiTianCodexProjectInfo(
                 cwd=cwd,
-                display_name=cwd.rsplit("/", 1)[-1] if cwd else "unknown",
+                display_name=_display_name_from_cwd(cwd),
                 sessions=sessions,
             )
         )
@@ -142,10 +166,172 @@ def list_codex_projects_global(codex_home: Path | None = None) -> list[SiTianCod
     return projects
 
 
+def list_kongming_generic_chat_projects(
+    kongming_home: Path,
+    *,
+    top_n: int,
+    cutoff_ts: float | None,
+) -> list[SiTianKongmingProjectInfo]:
+    """扫描标准 Kongming home，返回最近的普通 generic_chat 项目。
+
+    该函数只读取落盘 JSON，不 import Web ThreadMetadata 或 FileSession 运行时类。
+    元数据负责筛选通道和提供标题，manifest 提供 cwd，JSONL 的 mtime 提供最近活跃时间。
+    """
+
+    home = kongming_home.expanduser().resolve()
+    if not home.is_dir():
+        raise FileNotFoundError(f"Kongming home does not exist: {home}")
+
+    metadata_root = home / "web" / "threads"
+    sessions_root = home / "sessions"
+    if not metadata_root.is_dir():
+        raise FileNotFoundError(f"Kongming ThreadMetadata root does not exist: {metadata_root}")
+    if not sessions_root.is_dir():
+        raise FileNotFoundError(f"Kongming FileSession root does not exist: {sessions_root}")
+
+    by_cwd: dict[str, list[SiTianKongmingSessionInfo]] = {}
+    try:
+        metadata_dirs = [entry for entry in os.scandir(metadata_root) if entry.is_dir()]
+    except OSError as exc:
+        raise OSError(f"failed to scan Kongming ThreadMetadata root: {metadata_root}") from exc
+
+    for entry in metadata_dirs:
+        session = _build_kongming_generic_chat_session(
+            metadata_path=Path(entry.path) / "metadata.json",
+            sessions_root=sessions_root,
+            cutoff_ts=cutoff_ts,
+        )
+        if session is None:
+            continue
+        by_cwd.setdefault(session.cwd, []).append(session)
+
+    projects: list[SiTianKongmingProjectInfo] = []
+    for cwd, sessions in by_cwd.items():
+        sessions.sort(key=lambda session: session.last_modified, reverse=True)
+        projects.append(
+            SiTianKongmingProjectInfo(
+                cwd=cwd,
+                display_name=_display_name_from_cwd(cwd),
+                sessions=sessions,
+            )
+        )
+    projects.sort(
+        key=lambda project: max(
+            (session.last_modified for session in project.sessions), default=0.0
+        ),
+        reverse=True,
+    )
+    return projects[:top_n]
+
+
 def _project_sort_key(p: SiTianProjectInfo) -> float:
     if not p.sessions:
         return 0.0
     return max(s.last_modified for s in p.sessions)
+
+
+def _build_kongming_generic_chat_session(
+    *,
+    metadata_path: Path,
+    sessions_root: Path,
+    cutoff_ts: float | None,
+) -> SiTianKongmingSessionInfo | None:
+    """把一份 metadata 与同 id FileSession 关联为可分析的会话摘要。"""
+
+    metadata = _load_json_object(metadata_path)
+    if metadata is None:
+        return None
+    if metadata.get("backend_kind") != "generic_chat" or metadata.get("thread_kind") != "chat":
+        return None
+
+    thread_id = metadata.get("id")
+    if not _is_safe_path_segment(thread_id):
+        return None
+
+    session_dir = sessions_root / thread_id
+    manifest_path = session_dir / "manifest.json"
+    manifest = _load_json_object(manifest_path)
+    if manifest is None:
+        return None
+    cwd_value = manifest.get("cwd")
+    format_value = manifest.get("format")
+    if not isinstance(cwd_value, str) or not cwd_value.strip():
+        return None
+    if not _is_safe_session_format(format_value):
+        return None
+
+    jsonl_path = session_dir / format_value
+    try:
+        stat = jsonl_path.stat()
+    except OSError:
+        return None
+    if not jsonl_path.is_file() or (cutoff_ts is not None and stat.st_mtime < cutoff_ts):
+        return None
+
+    title_value = metadata.get("name")
+    title = (
+        title_value.strip() if isinstance(title_value, str) and title_value.strip() else "(空会话)"
+    )
+    message_count = metadata.get("message_count")
+    normalized_count = (
+        message_count
+        if isinstance(message_count, int)
+        and not isinstance(message_count, bool)
+        and message_count >= 0
+        else 0
+    )
+    return SiTianKongmingSessionInfo(
+        thread_id=thread_id,
+        title=title,
+        cwd=_normalize_kongming_cwd(cwd_value),
+        last_modified=stat.st_mtime,
+        message_count=normalized_count,
+        metadata_path=str(metadata_path),
+        manifest_path=str(manifest_path),
+        jsonl_path=str(jsonl_path),
+    )
+
+
+def _load_json_object(path: Path) -> dict[str, Any] | None:
+    """读取一个 JSON object；缺失、损坏或非 object 时返回 None。"""
+
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _is_safe_path_segment(value: object) -> TypeGuard[str]:
+    """验证 thread id 可安全作为单层 FileSession 目录名。"""
+
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and Path(value).name == value
+        and value not in {".", ".."}
+    )
+
+
+def _is_safe_session_format(value: object) -> TypeGuard[str]:
+    """验证 manifest format 指向 session 目录内的一份 JSONL。"""
+
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and Path(value).name == value
+        and value.endswith(".jsonl")
+    )
+
+
+def _normalize_kongming_cwd(value: str) -> str:
+    """归一化 manifest cwd，保留不存在项目路径的稳定关联结果。"""
+
+    return os.path.realpath(os.path.expanduser(value.strip()))
 
 
 def _build_claude_project(name: str, project_path: Path) -> SiTianProjectInfo | None:
@@ -172,7 +358,7 @@ def _build_claude_project(name: str, project_path: Path) -> SiTianProjectInfo | 
 
     sessions.sort(key=lambda s: s.last_modified, reverse=True)
     cwd = real_cwds[0] if real_cwds else _decode_cwd(name)
-    display_name = cwd.rsplit("/", 1)[-1] if cwd else name
+    display_name = _display_name_from_cwd(cwd, fallback=name)
     return SiTianProjectInfo(name=name, cwd=cwd, display_name=display_name, sessions=sessions)
 
 
@@ -208,7 +394,7 @@ def _build_claude_session(jsonl_path: Path) -> tuple[SiTianSessionInfo, str] | N
                 if not real_cwd:
                     candidate = entry.get("cwd")
                     if isinstance(candidate, str) and candidate.strip():
-                        real_cwd = str(Path(candidate).expanduser())
+                        real_cwd = _recorded_cwd(candidate)
     except OSError:
         return None
 
@@ -266,9 +452,7 @@ def _build_codex_session(
                     payload = entry.get("payload", {})
                     if isinstance(payload, dict):
                         cwd = (
-                            str(Path(str(payload.get("cwd", ""))).expanduser())
-                            if payload.get("cwd")
-                            else ""
+                            _recorded_cwd(str(payload.get("cwd", ""))) if payload.get("cwd") else ""
                         )
                         cli_version = str(payload.get("cli_version", ""))
                 if title == "(空会话)" and entry_type == "user":
@@ -320,6 +504,20 @@ def _load_session_index(index_path: Path) -> dict[str, str]:
     return result
 
 
+def _recorded_cwd(value: str) -> str:
+    stripped = value.strip()
+    if not stripped:
+        return ""
+    return os.path.expanduser(stripped)
+
+
+def _display_name_from_cwd(cwd: str, *, fallback: str = "unknown") -> str:
+    stripped = cwd.rstrip("/\\")
+    if not stripped:
+        return fallback
+    return stripped.replace("\\", "/").rsplit("/", 1)[-1] or fallback
+
+
 def _find_rollout_files(sessions_dir: Path) -> list[Path]:
     results: list[Path] = []
     try:
@@ -350,8 +548,11 @@ def _decode_cwd(encoded_name: str) -> str:
 __all__ = [
     "SiTianCodexProjectInfo",
     "SiTianCodexSessionInfo",
+    "SiTianKongmingProjectInfo",
+    "SiTianKongmingSessionInfo",
     "SiTianProjectInfo",
     "SiTianSessionInfo",
     "list_claude_projects_global",
     "list_codex_projects_global",
+    "list_kongming_generic_chat_projects",
 ]

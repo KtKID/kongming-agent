@@ -14,7 +14,7 @@ Called by:
     - sitian 外部消费者（cli.py、store.py 延迟引用等）
 
 Key outputs:
-    - SiTianConfig, SiTianSourceConfig
+    - SiTianConfig, SiTianSourceConfig, SiTianSourceKind
     - 11 个 frozen dataclass（SiTianObservation, SiTianReport, …）
     - SiTianScanSource, SiTianScanBatch
     - SiTianRunOnce, SiTianRunLoop, SiTianReadState, SiTianRunResult
@@ -29,7 +29,7 @@ Change risks:
     - 循环引用风险：此文件 import 几乎所有兄弟模块
 """
 
-from sitian.config import SiTianConfig, SiTianSourceConfig
+from sitian.config import SiTianConfig, SiTianSourceConfig, SiTianSourceKind
 from sitian.models import (
     JsonValue,
     SiTianObservation,
@@ -66,6 +66,7 @@ __all__ = [
     "SiTianScanBatch",
     "SiTianScanSource",
     "SiTianSourceConfig",
+    "SiTianSourceKind",
     "SiTianSourceRuntimeState",
     "SiTianWorkItem",
     "SiTianWorkspaceBlocker",

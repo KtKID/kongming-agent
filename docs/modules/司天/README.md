@@ -29,6 +29,7 @@ ensure_layout → mkdir + 空 observations.jsonl + 空 workspace_state
   ↓
 按 kind 分派扫描（scanners.py + global_scanner.py + session_reader.py）：
   generic_channel  → rglob + include/exclude + mtime top 20
+  generic_chat     → ThreadMetadata 过滤 + FileSession manifest/JSONL 按 thread_id 关联 + 尾部消息读取
   claude_project   → 文件扫描 + session_reader 读最近活动消息
   codex_project    → 文件扫描 + codex session 关联
   claude_workspace → global_scanner.list_claude_projects_global top_n → 1+2N 条 observations
@@ -50,8 +51,8 @@ ensure_layout → mkdir + 空 observations.jsonl + 空 workspace_state
 | `models.py` | `SiTianObservation`, `SiTianSourceRuntimeState`, `SiTianWorkItem`, `SiTianWorkspaceSourcesSummary`, `SiTianWorkspaceBlocker`, `SiTianPendingApproval`, `SiTianWorkspaceRisk`, `SiTianWorkspaceState`, `SiTianAlert`, `SiTianProjectSnapshot`, `SiTianReport` 等 11 个 frozen dataclass | 运行时数据模型，含 `to_dict()` / `from_dict()` 序列化；V2 新增 `SiTianAlert` / `SiTianProjectSnapshot` / `SiTianReport`（analyzer 产出） |
 | `store.py` | `SiTianRecordsStore`, `resolve_sitian_root`, `decode_work_item_filename` | 异步文件存储层；atomic write + asyncio.Lock；管理 observations / runtime_state / workspace_state / work_items / scans / sitian_report / observations_hash 全部 I/O |
 | `scanners.py` | `SiTianScanSource`, `SiTianScanBatch` | 4 种 kind 的扫描实现；使用 `global_scanner.py` 和 `session_reader.py` 替代原 `web` 包依赖；scan 耗时审计字段 |
-| `global_scanner.py` | `SiTianSessionInfo`, `SiTianProjectInfo`, `SiTianCodexSessionInfo`, `SiTianCodexProjectInfo`, `list_claude_projects_global`, `list_codex_projects_global` | 自建全局扫描器（解耦 `web` 包依赖）：直接读 `~/.claude/projects` / `~/.codex/sessions` 目录结构；按 mtime 排序 + title 提取 |
-| `session_reader.py` | `read_claude_session_tail` | Claude session jsonl 逆序流式读取器；`_ReverseLineIterator` 从文件尾部逐块读，取最近 N 条消息文本（供扫描器填充 `recent_activity`） |
+| `global_scanner.py` | `SiTianSessionInfo`, `SiTianProjectInfo`, `SiTianCodexSessionInfo`, `SiTianCodexProjectInfo`, `SiTianKongmingSessionInfo`, `SiTianKongmingProjectInfo`, `list_claude_projects_global`, `list_codex_projects_global`, `list_kongming_generic_chat_projects` | 自建全局扫描器（解耦 `web` 包依赖）：直接读 `~/.claude/projects`、`~/.codex/sessions` 与 `<kongming_home>/web/threads + sessions`；按 mtime 排序 + title 提取 |
+| `session_reader.py` | `read_claude_session_tail`, `read_kongming_session_tail` | Claude 与 Kongming FileSession JSONL 逆序流式读取器；`_ReverseLineIterator` 从文件尾部逐块读，取最近 N 条 user/assistant 文本 |
 | `analyzer.py` | `sitian_analyze`, `report_to_markdown`, `compute_observations_hash` | LLM 分析层（V1 + V2 schema）：observations → LLM prompt → `SiTianReport`（alerts + session 行动队列 + project snapshots）；审计日志 + 项目级默认路径；`compute_observations_hash` 用于增量分析判断 |
 | `suggestions.py` | `SiTianMaterializeState`, `SiTianBuildSummaryMarkdown` | observations → work_items 归并 + 建议/blocker/risk 生成 + markdown 摘要 |
 | `service.py` | `SiTianRunOnce`, `SiTianRunLoop`, `SiTianReadState`, `SiTianRunResult` | 编排层：一轮扫描全链路（含 `_run_llm_analysis` 集成 analyzer）/ 循环模式 / 只读状态查询 |

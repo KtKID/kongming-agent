@@ -12,16 +12,21 @@
 - ``select_unit_tests``：把改动文件映射成可重复的 unit 测试集合。
 - ``build_test_env``：构造不依赖本机真实配置的 pytest 环境。
 - ``run_pytest``：执行最终 pytest 命令并返回退出码。
+- ``_pytest_timing_log_path``：生成本次 pytest item 级 JSONL 耗时日志路径。
+- ``_print_slowest_tests``：读取 JSONL 并打印最慢测试。
+- ``_print_latest_started_test``：超时时打印最后启动的测试。
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import signal
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 
 EXCLUDED_TEST_PREFIXES = (
@@ -46,34 +51,6 @@ WEB_SOURCE_TEST_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
 # 这些源码路径已有精确入口测试，命中后跳过模块级兜底展开，保持 push gate 快速。
 NARROW_SOURCE_TEST_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
-        "src/hosts/web/app.py",
-        (
-            "tests/unit/test_web_app_lifespan.py",
-            "tests/unit/test_web_run_factory.py",
-            "tests/unit/web/test_app_lock.py",
-            "tests/unit/web/test_web_lifespan_bootstrap.py",
-        ),
-    ),
-    (
-        "src/hosts/web/app_support/auto_approval_manager.py",
-        ("tests/unit/web/app_support/test_auto_approval_manager.py",),
-    ),
-    (
-        "src/hosts/web/integrations/claude_code/approval.py",
-        (
-            "tests/unit/web/integrations/claude_code/test_approval.py",
-            "tests/unit/web/integrations/claude_code/test_approval_smart_v1.py",
-            "tests/unit/web/integrations/claude_code/test_route_smart_approval.py",
-        ),
-    ),
-    (
-        "src/safety/auto_approval/",
-        (
-            "tests/unit/safety/test_approval_rules.py",
-            "tests/unit/safety/test_auto_approval_manager.py",
-        ),
-    ),
-    (
         "src/application/web_search/manager.py",
         (
             "tests/unit/test_web_search_manager.py",
@@ -88,6 +65,34 @@ NARROW_SOURCE_TEST_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     (
+        "src/hosts/web/app.py",
+        (
+            "tests/unit/test_web_app_lifespan.py",
+            "tests/unit/test_web_run_factory.py",
+            "tests/unit/web/test_app_lock.py",
+            "tests/unit/web/test_web_lifespan_bootstrap.py",
+        ),
+    ),
+    (
+        "src/hosts/web/app_support/auto_approval_manager.py",
+        ("tests/unit/web/app_support/test_auto_approval_manager.py",),
+    ),
+    (
+        "src/hosts/web/ctl.py",
+        (
+            "tests/unit/test_web_ctl.py",
+            "tests/unit/web/test_ctl_sidecar_contract.py",
+        ),
+    ),
+    (
+        "src/hosts/web/integrations/claude_code/approval.py",
+        (
+            "tests/unit/web/integrations/claude_code/test_approval.py",
+            "tests/unit/web/integrations/claude_code/test_approval_smart_v1.py",
+            "tests/unit/web/integrations/claude_code/test_route_smart_approval.py",
+        ),
+    ),
+    (
         "src/hosts/web/research_source_provider.py",
         (
             "tests/unit/test_web_deep_research_source_provider_factory.py",
@@ -95,10 +100,10 @@ NARROW_SOURCE_TEST_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     (
-        "src/hosts/web/ctl.py",
+        "src/safety/auto_approval/",
         (
-            "tests/unit/test_web_ctl.py",
-            "tests/unit/web/test_ctl_sidecar_contract.py",
+            "tests/unit/safety/test_approval_rules.py",
+            "tests/unit/safety/test_auto_approval_manager.py",
         ),
     ),
 )
@@ -476,7 +481,9 @@ def build_test_env(repo: Path, environ: Mapping[str, str] | None = None) -> dict
     env["KONGMING_HOME"] = str(home)
     env["KONGMING_E2E_REAL_MODEL"] = "0"
     env["KONGMING_SKIP_DOTENV"] = "1"
-    env["PYTHONPATH"] = _prepend_pythonpath(repo / "src", env.get("PYTHONPATH"))
+    env["PYTHONPATH"] = _prepend_pythonpath(
+        repo / "src", _prepend_pythonpath(repo, env.get("PYTHONPATH"))
+    )
     return env
 
 
@@ -512,33 +519,110 @@ def run_pytest(repo: Path, tests: Sequence[str]) -> int:
         print("pre-push: no unit tests selected")
         return 0
 
+    timing_log = _pytest_timing_log_path(repo)
+    env = build_test_env(repo)
+    env["KONGMING_PRE_PUSH_PYTEST_TIMING_LOG"] = str(timing_log)
     command = [
         "uv",
         "run",
         "pytest",
         *tests,
         "--import-mode=importlib",
+        "-p",
+        "scripts.prepush_pytest_timing",
         "--maxfail=5",
         "--tb=short",
-        "--durations=20",
+        "--durations=50",
         "-q",
         "-W",
         "ignore::pytest.PytestUnraisableExceptionWarning",
     ]
     print("pre-push pytest command:")
     print("  " + shlex.join(command))
+    print(f"pre-push pytest timing log: {timing_log}")
     proc = subprocess.Popen(
         command,
         cwd=repo,
-        env=build_test_env(repo),
+        env=env,
         start_new_session=True,
     )
     try:
-        return proc.wait(timeout=PYTEST_TIMEOUT_SECONDS)
+        exit_code = proc.wait(timeout=PYTEST_TIMEOUT_SECONDS)
+        _print_slowest_tests(timing_log)
+        return exit_code
     except subprocess.TimeoutExpired:
         _terminate_process_tree(proc)
         print(f"pre-push pytest timed out after {PYTEST_TIMEOUT_SECONDS} seconds", file=sys.stderr)
+        _print_slowest_tests(timing_log)
+        _print_latest_started_test(timing_log)
         return 124
+
+
+def _pytest_timing_log_path(repo: Path) -> Path:
+    """生成本次 pytest item 级耗时日志路径，关键输出是 JSONL 文件。"""
+
+    log_dir = repo / ".kongming" / "test-logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return log_dir / f"pre-push-pytest-tests-{timestamp}.jsonl"
+
+
+def _load_timing_records(log_path: Path) -> list[dict[str, object]]:
+    """读取 pytest timing JSONL，跳过损坏行，输出结构化事件列表。"""
+
+    if not log_path.is_file():
+        return []
+    records: list[dict[str, object]] = []
+    with log_path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(raw, dict):
+                records.append(raw)
+    return records
+
+
+def _print_slowest_tests(log_path: Path, *, limit: int = 20) -> None:
+    """按 nodeid 聚合 setup/call/teardown 耗时并打印最慢测试。"""
+
+    totals: dict[str, float] = {}
+    outcomes: dict[str, str] = {}
+    for record in _load_timing_records(log_path):
+        if record.get("event") != "test_phase":
+            continue
+        nodeid = record.get("nodeid")
+        duration = record.get("duration_s")
+        if not isinstance(nodeid, str) or not isinstance(duration, (int, float)):
+            continue
+        totals[nodeid] = totals.get(nodeid, 0.0) + float(duration)
+        outcome = record.get("outcome")
+        if isinstance(outcome, str):
+            outcomes[nodeid] = outcome
+    if not totals:
+        print("pre-push slowest tests: no completed test timing records")
+        return
+
+    print(f"pre-push slowest tests from {log_path}:")
+    for nodeid, duration in sorted(totals.items(), key=lambda item: item[1], reverse=True)[:limit]:
+        outcome = outcomes.get(nodeid, "unknown")
+        print(f"  {duration:8.3f}s {outcome:8s} {nodeid}")
+
+
+def _print_latest_started_test(log_path: Path) -> None:
+    """打印 timing 日志里最后开始的测试，用于定位超时卡住位置。"""
+
+    latest: dict[str, object] | None = None
+    for record in _load_timing_records(log_path):
+        if record.get("event") == "test_start":
+            latest = record
+    if latest is None:
+        print("pre-push latest started test: unavailable")
+        return
+    nodeid = latest.get("nodeid")
+    started = latest.get("time")
+    print(f"pre-push latest started test: {nodeid} at {started}")
 
 
 def _terminate_process_tree(proc: subprocess.Popen[bytes]) -> None:

@@ -89,6 +89,7 @@ def build_sitian_context_text(sitian_root: Path) -> str | None:
 def _build_channel_section(channel_dir: Path, channel_name: str, now: datetime) -> str | None:
     state_path = channel_dir / "workspace_state.json"
     summary_path = channel_dir / "latest_summary.md"
+    analysis_path = channel_dir / "latest_analysis.md"
 
     try:
         raw = state_path.read_text(encoding="utf-8")
@@ -170,6 +171,16 @@ def _build_channel_section(channel_dir: Path, channel_name: str, now: datetime) 
                 lines.append("")
                 lines.append("#### 最近摘要")
                 lines.append(summary_text)
+        except OSError:
+            pass
+
+    if analysis_path.is_file():
+        try:
+            analysis_text = analysis_path.read_text(encoding="utf-8").strip()
+            if analysis_text:
+                lines.append("")
+                lines.append("#### 最近分析")
+                lines.append(analysis_text)
         except OSError:
             pass
 

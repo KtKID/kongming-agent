@@ -1,13 +1,13 @@
 """
-司天扫描引擎——按 source kind 分派 4 种扫描实现。
+司天扫描引擎——按 source kind 分派 5 种扫描实现。
 
 Role:
-    接收 SiTianSourceConfig，按 kind（generic_channel / claude_project /
-    codex_project / claude_workspace）分派到对应扫描函数，
+    接收 SiTianSourceConfig，按 kind（generic_channel / generic_chat /
+    claude_project / codex_project / claude_workspace）分派到对应扫描函数，
     返回 SiTianScanBatch（含 SiTianObservation 列表 + 耗时审计）。
 
 Owns:
-    - 4 种 kind 的扫描逻辑（文件 rglob / claude session 关联 / workspace 展开）
+    - 5 种 kind 的扫描逻辑（文件 rglob / Kongming chat / Claude / Codex）
     - include/exclude 过滤、mtime 窗口、top N 裁剪
     - scan 耗时审计字段（duration_ms）
 
@@ -41,10 +41,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sitian.config import SiTianScannerConfig, SiTianSourceConfig
-from sitian.global_scanner import list_claude_projects_global, list_codex_projects_global
+from sitian.config import SiTianScannerConfig, SiTianSourceConfig, SiTianSourceKind
+from sitian.global_scanner import (
+    list_claude_projects_global,
+    list_codex_projects_global,
+    list_kongming_generic_chat_projects,
+)
 from sitian.models import SiTianObservation
-from sitian.session_reader import read_claude_session_tail
+from sitian.session_reader import read_claude_session_tail, read_kongming_session_tail
 
 _log = logging.getLogger("sitian.scanners")
 
@@ -52,6 +56,7 @@ _MAX_ARTIFACT_OBSERVATIONS = 20
 _MAX_SESSION_OBSERVATIONS = 20
 _MAX_SCAN_FILES = 2000
 _DEFAULT_CLAUDE_WORKSPACE_TOP_N = 10
+_DEFAULT_KONGMING_GENERIC_CHAT_TOP_N = 10
 # 单个 project 在 project obs.recentSessions 中最多展开多少条 session
 _MAX_RECENT_SESSIONS_PER_PROJECT = 20
 
@@ -72,25 +77,31 @@ async def SiTianScanSource(
 ) -> SiTianScanBatch:
     resolved_observed_at = observed_at or _utc_now_iso()
     effective_scanner_config = scanner_config or SiTianScannerConfig()
-    if source.kind == "generic_channel":
+    if source.kind == SiTianSourceKind.GENERIC_CHANNEL:
         observations = _SiTianScanGenericChannel(
             source,
             observed_at=resolved_observed_at,
             scanner_config=effective_scanner_config,
         )
-    elif source.kind == "claude_project":
+    elif source.kind == SiTianSourceKind.GENERIC_CHAT:
+        observations = _SiTianScanGenericChat(
+            source,
+            observed_at=resolved_observed_at,
+            scanner_config=effective_scanner_config,
+        )
+    elif source.kind == SiTianSourceKind.CLAUDE_PROJECT:
         observations = _SiTianScanClaudeProject(
             source,
             observed_at=resolved_observed_at,
             scanner_config=effective_scanner_config,
         )
-    elif source.kind == "codex_project":
+    elif source.kind == SiTianSourceKind.CODEX_PROJECT:
         observations = _SiTianScanCodexProject(
             source,
             observed_at=resolved_observed_at,
             scanner_config=effective_scanner_config,
         )
-    elif source.kind == "claude_workspace":
+    elif source.kind == SiTianSourceKind.CLAUDE_WORKSPACE:
         observations = _SiTianScanClaudeWorkspace(
             source,
             observed_at=resolved_observed_at,
@@ -126,6 +137,97 @@ def _SiTianScanGenericChannel(
         recent_files=recent_files,
         project_payload={"path": str(root_path), "channelKind": "generic_channel"},
     )
+
+
+def _SiTianScanGenericChat(
+    source: SiTianSourceConfig,
+    *,
+    observed_at: str,
+    scanner_config: SiTianScannerConfig,
+) -> list[SiTianObservation]:
+    """扫描 Kongming Web 普通通用频道并构造 Analyzer 现有合同。"""
+
+    kongming_home = Path(source.path).expanduser()
+    top_n = source.top_n or _DEFAULT_KONGMING_GENERIC_CHAT_TOP_N
+    cutoff_ts = _compute_window_cutoff_ts(
+        observed_at,
+        scanner_config.recent_session_window_days,
+    )
+    projects = list_kongming_generic_chat_projects(
+        kongming_home,
+        top_n=top_n,
+        cutoff_ts=cutoff_ts,
+    )
+
+    observations: list[SiTianObservation] = []
+    for rank, project in enumerate(projects, start=1):
+        recent_sessions: list[dict[str, Any]] = []
+        project_evidence_refs: list[str] = []
+        for session in project.sessions[:_MAX_RECENT_SESSIONS_PER_PROJECT]:
+            tail = read_kongming_session_tail(
+                Path(session.jsonl_path),
+                user_count=scanner_config.session_recent_user_messages,
+                assistant_count=scanner_config.session_recent_assistant_messages,
+                max_chars=scanner_config.session_message_max_chars,
+            )
+            has_requested_content = bool(tail["users"] or tail["assistants"])
+            zero_message_request = (
+                scanner_config.session_recent_user_messages == 0
+                and scanner_config.session_recent_assistant_messages == 0
+            )
+            if not has_requested_content and not zero_message_request:
+                continue
+
+            session_payload: dict[str, Any] = {
+                "threadId": session.thread_id,
+                "title": session.title,
+                "cwd": project.cwd,
+                "lastModifiedAt": _timestamp_to_iso(session.last_modified),
+                "messageCount": session.message_count,
+                "recentUserMessages": tail["users"],
+                "recentAssistantMessages": tail["assistants"],
+            }
+            evidence_refs = (
+                session.metadata_path,
+                session.manifest_path,
+                session.jsonl_path,
+            )
+            observations.append(
+                _observation(
+                    source=source,
+                    observed_at=observed_at,
+                    entity_type="thread",
+                    entity_key=session.thread_id,
+                    payload={**session_payload, "channelKind": "generic_chat"},
+                    evidence_refs=evidence_refs,
+                )
+            )
+            recent_sessions.append(session_payload)
+            project_evidence_refs.extend(evidence_refs)
+
+        if not recent_sessions:
+            continue
+        observations.append(
+            _observation(
+                source=source,
+                observed_at=observed_at,
+                entity_type="project",
+                entity_key=project.cwd,
+                payload={
+                    "rank": rank,
+                    "projectDirName": Path(project.cwd).name or project.display_name,
+                    "cwd": project.cwd,
+                    "displayName": project.display_name,
+                    "sessionCount": len(recent_sessions),
+                    "lastModifiedAt": recent_sessions[0]["lastModifiedAt"],
+                    "recentSessions": recent_sessions,
+                    "channelKind": "generic_chat",
+                    "sourceTags": list(source.tags),
+                },
+                evidence_refs=tuple(dict.fromkeys(project_evidence_refs)),
+            )
+        )
+    return observations
 
 
 def _SiTianScanClaudeProject(
@@ -491,7 +593,7 @@ def _parse_claude_session_file(session_file: Path) -> dict[str, Any] | None:
                 if not cwd:
                     candidate = payload.get("cwd")
                     if isinstance(candidate, str) and candidate.strip():
-                        cwd = str(Path(candidate).expanduser())
+                        cwd = os.path.expanduser(candidate.strip())
                 if title == "(empty session)":
                     candidate_title = _extract_claude_title(payload)
                     if candidate_title:

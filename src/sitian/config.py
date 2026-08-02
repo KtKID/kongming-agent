@@ -7,7 +7,7 @@ Role:
     切断 ``web → infrastructure.config → core`` 传递依赖。
 
 Owns:
-    - source kind 枚举（generic_channel / claude_project / codex_project / claude_workspace）
+    - source kind 枚举（generic_channel / generic_chat / claude_project / codex_project / claude_workspace）
     - output_subdir 路径验证
     - analyzer 配置（interests / prompt / LLM 参数）
     - scanner 配置（include / exclude / mtime 窗口）
@@ -34,9 +34,20 @@ Change risks:
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+class SiTianSourceKind(StrEnum):
+    """司天 source 的有限类型集合。"""
+
+    GENERIC_CHANNEL = "generic_channel"
+    GENERIC_CHAT = "generic_chat"
+    CLAUDE_PROJECT = "claude_project"
+    CODEX_PROJECT = "codex_project"
+    CLAUDE_WORKSPACE = "claude_workspace"
 
 
 class SiTianSourceConfig(BaseModel):
@@ -45,7 +56,7 @@ class SiTianSourceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
-    kind: Literal["generic_channel", "claude_project", "codex_project", "claude_workspace"]
+    kind: SiTianSourceKind
     path: str
     scan_interval_sec: int | None = Field(default=None, gt=0)
     top_n: int | None = Field(default=None, gt=0)
@@ -90,12 +101,8 @@ class SiTianAnalyzerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = Field(default=False)
-    model_name: str = Field(default="")
-    base_url: str = Field(default="")
-    api_key_env: str = Field(default="")
-    max_tokens: int = Field(default=2048, gt=0)
-    temperature: float = Field(default=0.3, ge=0.0, le=2.0)
-    timeout: int = Field(default=30, gt=0)
+    preset_id: str | None = None
+    reasoning_effort: Literal["none", "low", "medium", "high", "max"] | None = None
     max_context_chars: int = Field(default=50000, gt=0)
     skip_if_unchanged: bool = Field(default=True)
     full_log_enabled: bool = Field(default=False)
@@ -161,4 +168,5 @@ __all__ = [
     "SiTianInterestsConfig",
     "SiTianScannerConfig",
     "SiTianSourceConfig",
+    "SiTianSourceKind",
 ]
