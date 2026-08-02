@@ -31,6 +31,25 @@ def _is_path_within(base: Path, target: Path) -> bool:
     return True
 
 
+def _request_cwd(request: ApprovalRequest) -> Path:
+    raw = request.metadata.get("cwd")
+    try:
+        if isinstance(raw, Path):
+            return raw.expanduser().resolve(strict=False)
+        if isinstance(raw, str) and raw.strip():
+            return Path(raw).expanduser().resolve(strict=False)
+        return Path.cwd().resolve(strict=False)
+    except (OSError, RuntimeError):
+        return Path("/")
+
+
+def _resolve_request_path(raw_path: str, request: ApprovalRequest) -> Path:
+    path = Path(raw_path).expanduser()
+    if path.is_absolute():
+        return path.resolve(strict=False)
+    return (_request_cwd(request) / path).resolve(strict=False)
+
+
 def _is_allowed_cron_file_create(request: ApprovalRequest) -> bool:
     if request.tool_name != "write_file":
         return False
@@ -42,8 +61,8 @@ def _is_allowed_cron_file_create(request: ApprovalRequest) -> bool:
     if bool(request.arguments.get("append")):
         return False
 
-    cwd = Path.cwd().resolve()
-    target = Path(raw_path).expanduser().resolve()
+    cwd = _request_cwd(request)
+    target = _resolve_request_path(raw_path, request)
 
     if not _is_path_within(cwd, target):
         return False
@@ -61,12 +80,13 @@ class ScheduleApprovalProvider:
     决策分流：
 
     - ``hard_block`` 永远透传 rejected（安全不变量）。
-    - ``explicit_consent``：
+    - ``explicit_consent`` 且 ``matched_rule=default:ask``：
       - ``mode=TRUST``：转 approved + ``cron_trust_mode`` metadata，并 emit
         ``approval.cron.auto_allow`` 审计事件。
       - ``mode=FAIL_CLOSED``（默认）：保留现有 write_file 白名单（命中即放行），
         其余转 rejected + ``cron_fail_closed`` metadata。
-    - ``silent_allow`` / ``standard_allow`` / 其他：透传。
+    - builtin/destructive/rule-error ask：统一拒绝。
+    - 其他 explicit consent、silent allow、standard allow：透传。
     """
 
     inner: ApprovalProvider
@@ -74,6 +94,7 @@ class ScheduleApprovalProvider:
     mode: ApprovalMode = ApprovalMode.FAIL_CLOSED
     policy: SchedulerApprovalConfig = field(default_factory=SchedulerApprovalConfig)
     event_sink: EventSink | None = None
+    consent_passthrough: bool = False
 
     async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
         decision = await self.inner.decide(request)
@@ -84,14 +105,31 @@ class ScheduleApprovalProvider:
         if decision_class == _HARD_BLOCK_CLASS:
             return decision
 
-        # 2. explicit_consent 按 mode 分流
+        # 2. bypass-immune ask 在无 reviewer 的 cron 环境统一 fail closed。
+        matched_rule = str(decision.metadata.get("matched_rule", ""))
+        bypass_immune = bool(decision.metadata.get("bypass_immune", False))
+        if bypass_immune or matched_rule.startswith(("builtin:", "destructive:", "rule_error:")):
+            metadata = dict(decision.metadata)
+            metadata["cron_fail_closed"] = True
+            metadata["cron_task_id"] = self.task_id
+            return ApprovalDecision(
+                outcome="rejected",
+                reason=f"cron cannot bypass approval rule {matched_rule or 'unknown'}",
+                metadata=metadata,
+            )
+
+        # 3. mode 只处置 default:ask。
         if decision_class == _CONSENT_CLASS:
+            if self.consent_passthrough:
+                return decision
+            if matched_rule != "default:ask":
+                return decision
             if self.mode is ApprovalMode.TRUST:
                 return await self._wrap_trust_allow(decision, request)
             # mode == FAIL_CLOSED：保留现有 write_file 白名单 + 其他 rejected 逻辑
             return self._apply_fail_closed(decision, request)
 
-        # 3. silent_allow / standard_allow / 其他：透传
+        # 4. silent_allow / standard_allow / 其他：透传
         return decision
 
     async def _wrap_trust_allow(

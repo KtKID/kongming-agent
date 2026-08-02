@@ -1,210 +1,192 @@
-"""审批层统一入口（v0.5 阶段 1）。
+"""跨宿主统一人工审批管理器。
 
-所有通道（claude_code / generic_chat / cron / evolution / cli）的审批请求最终
-都进这个 manager。阶段 1 仅服务 generic_chat web；阶段 2-4 接入其他通道。
-
-设计真源：``docs/safety-approval-manager-v0.5/10-architecture.md``。
-
-字面值约定（spec 与 contract 漂移说明）：
-
-- spec 20-data-model 描述 ``ApprovalDecision.outcome`` 为 ``"allowed"`` / ``"rejected"``；
-- 实际 contract :data:`core.contracts.ApprovalOutcome` Literal 为
-  ``"approved"`` / ``"rejected"`` / ``"cancelled"`` / ``"pending"``。
-- manager 服从 **contract 真源**：所有构造 ``ApprovalDecision`` 的位置都用
-  ``"approved"`` / ``"rejected"``。spec 文档的字面值漂移留待 v0.5 协议演进
-  task 一起修，不在阶段 1 范围内擅自扩 Literal。
-- ``ApprovalAction`` 二态映射保持 spec 含义：用户选 allow → ACCEPT_ONCE，
-  用户选 deny → REJECT。
+Manager 持有 pending Future、超时任务与事件 fan-out。三步安全引擎把 danger、
+remember candidate、顶层 thread_id 和 revision 写入请求元数据；本模块在 pending
+创建时冻结这些值，并在 resolve 时经 PermissionsManager 执行 allow/deny 记忆写回。
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from core.clock import now_epoch_ms
 from core.contracts import ApprovalAction, ApprovalDecision, ApprovalRequest
+from infrastructure.config.paths import get_kongming_home
 from safety.approval.events import PendingApprovalView
-from safety.approval.rules import ApprovalRules
+from safety.approval.llm_reviewer import ApprovalLlmReviewer, LlmReviewDecision
+from safety.approval.permissions_errors import PermissionsError
+from safety.approval.permissions_manager import PermissionsManager
+from safety.approval.rule_models import RememberRule, Verdict
+from safety.approval.types import ApprovalMetadataKeys
+from safety.auto_approval.disposition import (
+    ApprovalDispositionMode,
+)
+from safety.auto_approval.policy import AutoApprovalPolicy
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# 数据模型
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class _PendingApproval:
-    """manager 内部 pending 审批的完整状态（不暴露给外部）。
-
-    字段对齐 spec ``20-data-model#1`` 完整 12 字段；阶段 1 generic_chat
-    大部分字段填 None，但 dataclass 字段必须有，避免阶段 2-4 通道接入时
-    再改 dataclass 形态。
-
-    Attributes:
-        request_id: 全局唯一 ID（uuid hex），用户决策回写时按这个查 future
-        channel: 通道名（generic_chat / claude_code / cron / evolution / cli）
-        thread_id: 通道内 thread 标识
-        cwd: 触发审批的工作目录
-        tool_name: 工具名（如 ``Bash`` / ``Edit``）
-        tool_input: 工具参数原始 dict
-        metadata: 额外 metadata（由调用方注入，透传给 EventSink）
-        severity: 'standard' / 'elevated'，rules.classify 返回
-        matched_rule: 命中的规则 ID（阶段 1 generic_chat 恒 None）
-        auto_approve_at_ms: 安全路径倒计时到点（阶段 1 generic_chat 恒 None）
-        auto_reject_at_ms: 危险路径倒计时到点（阶段 1 generic_chat 恒 None）
-        future: 等待用户决策的 Future；resolve / cancel / timeout 三路径都
-            通过 ``set_result`` 唤醒 ``request()`` 的 ``await``
-        arrived_at_ms: 到达 manager 的毫秒时间戳（用于 EventSink 渲染 / 排序）
-        timeout_ms: 用户决策超时阈值（毫秒）；None 用 manager 默认值
-    """
+    """Manager 私有的单条 pending 状态。"""
 
     request_id: str
     channel: str
     thread_id: str
+    agent_id: str
     cwd: str
     tool_name: str
     tool_input: dict[str, Any]
     metadata: dict[str, Any]
     severity: str
     matched_rule: str | None
-    auto_approve_at_ms: int | None
-    auto_reject_at_ms: int | None
+    danger: bool
+    remember_allowed: bool
+    remember_rule: RememberRule | None
+    remember_revision: int | None
     future: asyncio.Future[ApprovalDecision]
-    arrived_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
-    timeout_ms: int | None = None
-
-
-# ---------------------------------------------------------------------------
-# EventSink Protocol（manager 内部抽象，不放到 core.contracts）
-# ---------------------------------------------------------------------------
+    auto_approve_at_ms: int | None = None
+    arrived_at_ms: int = field(default_factory=now_epoch_ms)
+    timeout_ms: int = 60_000
 
 
 class ApprovalEventSink(Protocol):
-    """审批事件输出层抽象（manager 内部 Protocol）。
-
-    阶段 1：仅 :class:`safety.inbox.event_sink.InboxEventSink` 一种实现；
-    阶段 4：加 ``CLIEventSink``，Protocol 签名必须能覆盖所有可预见通道，
-    避免阶段 4 改 Protocol 破坏阶段 1 实现（spec 60-risk R4）。
-
-    设计原则：
-
-    - emit 失败不抛：所有 emit 调用都被 manager 用 ``asyncio.gather(..., return_exceptions=True)``
-      包裹，sink 内部也应吞自己的异常，审批主流程绝不因 sink 失败而断
-    - emit 是 async：允许 sink 内做 ws fan-out / 网络 IO
-    - sink 不持 state：每次调用都用 manager 传过来的 pending 上下文
-    """
+    """审批 pending 生命周期的宿主事件出口。"""
 
     async def emit_approval_required(self, *, pending: PendingApprovalView) -> None:
-        """通知 sink 有新 pending 审批需要用户决策。
-
-        Args:
-            pending: 新创建 pending 的公开只读视图，sink 据此展示审批请求并注册
-                按 request_id 路由的 resolve callback。
-        """
+        """发布一条新 pending。"""
         ...
 
     async def emit_approval_removed(self, *, request_id: str, reason: str) -> None:
-        """通知 sink 某条 pending 已结束（user_decided / timeout / cancelled）。
-
-        Args:
-            request_id: 对应已 emit 过 required 的 pending
-            reason: ``"user_decided"`` / ``"timeout"`` / ``"cancelled"``
-        """
+        """发布一条 pending 移除事件。"""
         ...
 
 
-# ---------------------------------------------------------------------------
-# Manager 主类
-# ---------------------------------------------------------------------------
+class ApprovalAuditSink(Protocol):
+    """LLM 倒计时放行的宿主审计出口。"""
+
+    def log_llm_auto_allow(
+        self,
+        *,
+        channel: str,
+        thread_id: str,
+        request_id: str,
+        cwd: str,
+        mode: str,
+        tool_name: str,
+        matched_rule: str | None,
+        model: str,
+        reason: str,
+        timeout_ms: int,
+    ) -> None:
+        """写入一条脱敏 LLM 放行审计事件。"""
+        ...
 
 
 class ApprovalManager:
-    """审批层统一入口（per-process 单例）。
-
-    阶段 1 仅服务 generic_chat web 通道；接口预留 ``channel`` 参数 +
-    :meth:`register_event_sink`，为阶段 2-4 接入更多通道做准备。
-
-    线程安全与资源回收（spec 60-risk R9/R10）：
-
-    - **R9 lock 安全**：``_lock`` 内只做 dict 增删 + subscriber 列表快照拷贝；
-      ``await future`` / ``await IO`` 必须在 lock 外（避免 lock-and-block 死锁）
-    - **R10 timeout 清理**：``resolve`` / ``cancel`` / ``timeout`` 三退出路径
-      在 ``request()`` 的 ``finally`` 都通过 :meth:`_cleanup_pending` 清
-      ``_pending`` + ``_timeout_tasks``，避免 timeout task 泄漏
-
-    Attributes:
-        _rules: per-channel + per-cwd 规则容器（策略层委托）
-        _event_sinks: 输出层 fan-out 目标列表（可动态注册）
-        _default_timeout_ms: 未指定超时时的默认值
-        _pending: ``request_id`` → ``_PendingApproval`` 映射
-        _timeout_tasks: ``request_id`` → ``asyncio.Task`` 映射（resolve/cancel 时取消）
-        _auto_approve_tasks: ``request_id`` → ``asyncio.Task`` 映射；阶段 1.5
-            generic_chat per-cwd 自动通过倒计时 task（rule_dec.auto_approve_at_ms
-            非 None 时创建；resolve / cancel / timeout 三退出路径都要 cancel + pop）
-        _lock: ``_pending`` / ``_timeout_tasks`` / ``_auto_approve_tasks`` /
-            ``_event_sinks`` 互斥锁
-    """
+    """持有跨通道 pending 状态并执行 thread permissions 记忆写回。"""
 
     def __init__(
         self,
         *,
-        rules: ApprovalRules,
+        permissions_manager: PermissionsManager,
         event_sinks: list[ApprovalEventSink] | None = None,
         default_timeout_ms: int = 60_000,
+        auto_approval_policy: AutoApprovalPolicy | None = None,
+        llm_reviewer: ApprovalLlmReviewer | None = None,
+        audit_sink: ApprovalAuditSink | None = None,
     ) -> None:
-        """构造 manager 单例。
-
-        Args:
-            rules: per-channel + per-cwd 规则容器（策略层委托；阶段 1 是空骨架）
-            event_sinks: 输出层 fan-out 目标
-                （阶段 1 InboxEventSink；阶段 4 加 CLIEventSink）
-            default_timeout_ms: 未指定超时时的默认值（与 WebHostAdapter._timeout 一致）
-        """
-        self._rules = rules
+        """绑定 permissions 门户、事件出口和失败关闭超时。"""
+        if default_timeout_ms <= 0:
+            raise ValueError("default_timeout_ms must be positive")
+        self._permissions = permissions_manager
         self._event_sinks: list[ApprovalEventSink] = list(event_sinks or [])
         self._default_timeout_ms = default_timeout_ms
+        self._auto_approval_policy = auto_approval_policy
+        self._llm_reviewer = llm_reviewer
+        self._audit_sink = audit_sink
         self._pending: dict[str, _PendingApproval] = {}
         self._timeout_tasks: dict[str, asyncio.Task[None]] = {}
         self._auto_approve_tasks: dict[str, asyncio.Task[None]] = {}
+        self._llm_review_tasks: dict[str, asyncio.Task[None]] = {}
+        self._resolving: set[str] = set()
         self._lock = asyncio.Lock()
 
-    def register_event_sink(self, sink: ApprovalEventSink) -> None:
-        """注册 EventSink（同步方法，装配期调用）。
+    @property
+    def permissions_manager(self) -> PermissionsManager:
+        """返回审批链与 Web REST 共享的 permissions 门户。"""
+        return self._permissions
 
-        Args:
-            sink: 实现 :class:`ApprovalEventSink` Protocol 的输出层实例
-        """
+    def register_event_sink(self, sink: ApprovalEventSink) -> None:
+        """在装配期注册一个审批事件接收器。"""
         self._event_sinks.append(sink)
 
     def has_event_sink_type(self, sink_type: type[object]) -> bool:
         """判断指定类型的事件接收器是否已经注册。"""
-        return any(isinstance(s, sink_type) for s in self._event_sinks)
+        return any(isinstance(sink, sink_type) for sink in self._event_sinks)
 
     @property
     def pending_count(self) -> int:
-        """当前 pending 审批数（仅供监控 / 测试断言用）。"""
+        """返回当前等待处理的审批数量。"""
         return len(self._pending)
+
+    def pending_count_for_thread(self, thread_id: str, *, channel: str | None = None) -> int:
+        """统计目标 thread 在可选通道内的 pending 数。"""
+        if not thread_id:
+            return 0
+        return sum(
+            1
+            for pending in self._pending.values()
+            if pending.thread_id == thread_id
+            and (channel is None or pending.channel == channel)
+            and not pending.future.done()
+        )
+
+    def has_pending_for_thread(self, thread_id: str, *, channel: str | None = None) -> bool:
+        """判断目标 thread 是否存在 pending。"""
+        return self.pending_count_for_thread(thread_id, channel=channel) > 0
 
     @property
     def timeout_task_count(self) -> int:
-        """当前 timeout task 数（应等于 pending_count；用于 R10 内存泄漏监控）。"""
+        """返回当前超时任务数量。"""
         return len(self._timeout_tasks)
 
     @property
     def auto_approve_task_count(self) -> int:
-        """当前 auto-approve task 数（阶段 1.5；R10 内存泄漏监控用）。
-
-        非 generic_chat / cwd config disabled 路径不创建 task，恒为 0；
-        启用自动通过且 pending 未结束的 request 才计数。
-        """
+        """返回 LLM allow 后仍处于可中断窗口的倒计时任务数量。"""
         return len(self._auto_approve_tasks)
+
+    @property
+    def llm_review_task_count(self) -> int:
+        """返回当前运行中的 LLM 复核任务数量。"""
+        return len(self._llm_review_tasks)
+
+    async def aclose(self) -> None:
+        """取消 pending、后台任务并释放 reviewer 持有的连接池。"""
+        request_ids = tuple(self._pending)
+        for request_id in request_ids:
+            self.cancel(request_id, reason="manager_shutdown")
+        async with self._lock:
+            tasks = tuple(
+                task
+                for task in (
+                    *self._timeout_tasks.values(),
+                    *self._auto_approve_tasks.values(),
+                    *self._llm_review_tasks.values(),
+                )
+                if task is not asyncio.current_task() and not task.done()
+            )
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if self._llm_reviewer is not None:
+            await self._llm_reviewer.aclose()
 
     async def request(
         self,
@@ -216,208 +198,166 @@ class ApprovalManager:
         tool_input: dict[str, Any],
         metadata: dict[str, Any] | None = None,
         timeout_ms: int | None = None,
+        agent_id: str = "",
     ) -> ApprovalDecision:
-        """请求用户审批。阻塞直到 resolve / timeout / cancel。
+        """创建 pending，发布展示事件并等待 resolve、cancel 或 timeout。"""
+        if not thread_id.strip():
+            raise ValueError("approval request requires a stable thread_id")
+        actual_timeout_ms = timeout_ms or self._default_timeout_ms
+        if actual_timeout_ms <= 0:
+            raise ValueError("timeout_ms must be positive")
 
-        流程：
-
-        1. ``rules.classify`` 拿初步决策（severity / matched_rule / auto_*_at_ms）
-        2. ``is_immediate=True`` → 直接 return（阶段 1 不触发；阶段 3 cron auto-allow 会）
-        3. 创建 ``_PendingApproval`` + Future + timeout task（lock 内）
-        4. fan-out 到所有 EventSink（lock 外 await）
-        5. ``await future`` 等用户决策（lock 外）
-        6. ``finally`` 清 ``_pending`` / ``_timeout_tasks``（R10）
-
-        Args:
-            channel: 通道名（generic_chat / claude_code / cron / evolution / cli）
-            thread_id: 通道内 thread 标识（cancel_by_thread 按这个批量取消）
-            cwd: 触发审批的工作目录
-            tool_name: 工具名（如 ``Bash`` / ``Edit``）
-            tool_input: 工具参数原始 dict
-            metadata: 额外 metadata（透传给 EventSink；默认 ``{}``）
-            timeout_ms: 用户决策超时（毫秒）；None 走 rules 返回或 manager 默认
-
-        Returns:
-            ``ApprovalDecision``，``outcome`` 为 ``"approved"`` / ``"rejected"``
-            （contract Literal 真源；spec 描述的 ``"allowed"`` 是文档漂移）
-        """
-        rule_dec = self._rules.classify(
-            channel=channel,
-            thread_id=thread_id,
-            cwd=cwd,
-            tool_name=tool_name,
-            tool_input=tool_input,
+        request_metadata = dict(metadata or {})
+        danger = request_metadata.get(ApprovalMetadataKeys.DANGER) is True
+        remember_rule = _remember_rule_from_metadata(request_metadata)
+        remember_thread_id = _optional_nonblank_string(
+            request_metadata.get(ApprovalMetadataKeys.REMEMBER_THREAD_ID)
         )
-
-        # 阶段 1 不会走 is_immediate 路径；为阶段 3 cron auto-allow 留接口
-        if rule_dec.is_immediate:
-            return ApprovalDecision(
-                outcome=rule_dec.immediate_outcome or "rejected",  # type: ignore[arg-type]
-                metadata={
-                    "source": "rule_immediate",
-                    "matched_rule": rule_dec.matched_rule,
-                },
+        remember_revision = _optional_revision(
+            request_metadata.get(ApprovalMetadataKeys.REMEMBER_REVISION)
+        )
+        remember_flag = request_metadata.get(ApprovalMetadataKeys.REMEMBER_ALLOWED) is True
+        remember_allowed = (
+            remember_flag
+            and not danger
+            and remember_rule is not None
+            and remember_thread_id == thread_id
+            and remember_revision is not None
+        )
+        if remember_flag and not remember_allowed:
+            logger.warning(
+                "approval remember context rejected during pending freeze request_thread=%s frozen_thread=%s",
+                thread_id,
+                remember_thread_id,
             )
 
-        request_id = uuid.uuid4().hex
-        actual_timeout_ms = timeout_ms or rule_dec.timeout_ms or self._default_timeout_ms
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[ApprovalDecision] = loop.create_future()
-
+        request_id = uuid.uuid4().hex
         pending = _PendingApproval(
             request_id=request_id,
             channel=channel,
             thread_id=thread_id,
+            agent_id=agent_id,
             cwd=cwd,
             tool_name=tool_name,
-            tool_input=tool_input,
-            metadata=metadata or {},
-            severity=rule_dec.severity,
-            matched_rule=rule_dec.matched_rule,
-            auto_approve_at_ms=rule_dec.auto_approve_at_ms,
-            auto_reject_at_ms=rule_dec.auto_reject_at_ms,
-            future=future,
+            tool_input=dict(tool_input),
+            metadata=request_metadata,
+            severity="danger" if danger else _severity_from_metadata(request_metadata),
+            matched_rule=_optional_nonblank_string(
+                request_metadata.get(ApprovalMetadataKeys.MATCHED_RULE)
+            ),
+            danger=danger,
+            remember_allowed=remember_allowed,
+            remember_rule=remember_rule if remember_allowed else None,
+            remember_revision=remember_revision if remember_allowed else None,
+            future=loop.create_future(),
             timeout_ms=actual_timeout_ms,
         )
 
-        # R9：lock 内只做 dict 增删 + sinks 快照拷贝；不 await
-        # asyncio.create_task 本身是同步调用（仅 schedule，不 await），允许在 lock 内
-        #
-        # 阶段 1.5 task #6 设计要点（auto-approve 与 timeout 生命周期对齐）：
-        #
-        # - cwd 未启用自动通过（``auto_approve_at_ms is None``）→ 走原 fail-closed
-        #   timeout 路径（_handle_timeout 到点 reject）
-        # - cwd 启用自动通过 → 主路径是 _handle_auto_approve 到点 approve；
-        #   timeout task 仍启动但 delay = auto_approve delay + 5s grace，作为
-        #   **兜底保险**（防 auto-approve task 异常 crash 导致 pending 永挂）。
-        #   正常路径 auto-approve 先触发 → cleanup cancel timeout task → 不会 race。
         async with self._lock:
             self._pending[request_id] = pending
-            timeout_delay = actual_timeout_ms / 1000.0
-            if rule_dec.auto_approve_at_ms is not None:
-                now_ms = int(time.time() * 1000)
-                auto_delay = max(0.0, (rule_dec.auto_approve_at_ms - now_ms) / 1000.0)
-                auto_task = asyncio.create_task(self._handle_auto_approve(request_id, auto_delay))
-                self._auto_approve_tasks[request_id] = auto_task
-                # timeout 兜底必须晚于 auto-approve（避免 race 输给 timeout）；
-                # 加 5s grace 给 auto-approve task 充足执行窗口
-                timeout_delay = max(timeout_delay, auto_delay + 5.0)
-            timeout_task = asyncio.create_task(self._handle_timeout(request_id, timeout_delay))
-            self._timeout_tasks[request_id] = timeout_task
-            sinks_snapshot = list(self._event_sinks)
+            self._timeout_tasks[request_id] = asyncio.create_task(
+                self._handle_timeout(request_id, actual_timeout_ms / 1000.0)
+            )
+            sinks = list(self._event_sinks)
 
-        # R9：lock 外 fan-out（emit 失败不影响主流程）
-        pending_view = _pending_to_view(
-            pending,
-            default_timeout_ms=self._default_timeout_ms,
-        )
         await asyncio.gather(
-            *(s.emit_approval_required(pending=pending_view) for s in sinks_snapshot),
+            *(sink.emit_approval_required(pending=_pending_to_view(pending)) for sink in sinks),
             return_exceptions=True,
         )
-
+        if self._is_llm_review_eligible(pending):
+            async with self._lock:
+                current = self._pending.get(request_id)
+                if current is not None and not current.future.done():
+                    self._llm_review_tasks[request_id] = asyncio.create_task(
+                        self._handle_llm_review(request_id)
+                    )
         try:
-            decision = await future
-            # 反推 fan_out reason（基于 metadata.source）
-            source = decision.metadata.get("source", "")
-            if source == "manager_timeout":
-                reason = "timeout"
-            elif source == "manager_cancel":
+            decision = await pending.future
+            source = decision.metadata.get("source")
+            reason = "timeout" if source == "manager_timeout" else "user_decided"
+            if source == "manager_cancel":
                 reason = "cancelled"
-            elif source == "rule_auto_allow":
+            elif source == "llm_auto_allow":
                 reason = "auto_allowed"
-            else:
-                reason = "user_decided"
             await self._cleanup_pending(request_id, fan_out_reason=reason)
             return decision
         except BaseException:
-            # 上层 cancel ``request()`` 的 task 时进这里：仍要清 pending 防泄漏
             await self._cleanup_pending(request_id, fan_out_reason="cancelled")
             raise
 
-    def resolve(self, request_id: str, decision: dict[str, Any]) -> bool:
-        """所有 UI 入口的决策回写点。
+    async def resolve(
+        self,
+        thread_id: str,
+        request_id: str,
+        decision: Mapping[str, object],
+    ) -> bool:
+        """校验 pending 身份，可选写本子，再完成用户决定。"""
+        async with self._lock:
+            pending = self._pending.get(request_id)
+            if (
+                pending is None
+                or pending.thread_id != thread_id
+                or pending.future.done()
+                or request_id in self._resolving
+            ):
+                return False
+            allow = decision.get("allow")
+            remember = decision.get("remember", False)
+            if not isinstance(allow, bool) or not isinstance(remember, bool):
+                return False
+            if remember and not pending.remember_allowed:
+                return False
+            if remember and not _remember_rule_matches_decision(
+                pending.remember_rule,
+                decision.get("rememberRule"),
+            ):
+                return False
+            self._resolving.add(request_id)
+            timeout_task = self._timeout_tasks.pop(request_id, None)
+        if timeout_task is not None and not timeout_task.done():
+            timeout_task.cancel()
 
-        被 :class:`safety.inbox.event_sink.InboxEventSink` 注册的 callback /
-        CLIEventSink stdin 回调等调用。本方法只 set_result Future，清理由
-        ``request()`` 的 finally 走 :meth:`_cleanup_pending` 完成。
+        if remember:
+            saved = await self._write_remembered_decision(pending, allow=allow)
+            if not saved:
+                await self._restore_after_failed_resolve(pending)
+                return False
 
-        Args:
-            request_id: 对应 :class:`_PendingApproval`.request_id
-            decision: dict，包含：
-
-                - ``allow`` (bool)：用户决策
-                - ``message`` (str, 可选)：用户备注
-                - ``rememberEntry`` (str, 可选)：claude_code 旧协议字段
-                - ``rememberScope`` (str, 可选)：``"session"`` / ``"persistent"``
-                  （阶段 1 generic_chat 不传；阶段 5 协议演进后支持）
-
-        Returns:
-            True = 找到 pending future 并 set_result；False = request_id 未知
-            （重复 resolve / 已 timeout / 已 cancelled）
-        """
-        pending = self._pending.get(request_id)
-        if pending is None or pending.future.done():
-            return False
-
-        allow = bool(decision.get("allow", False))
-        remember_scope = decision.get("rememberScope")
-        # spec 字面值用 'allowed'，contract Literal 用 'approved'；按 contract 真源
-        outcome: str = "approved" if allow else "rejected"
-        meta: dict[str, Any] = {
+        metadata: dict[str, Any] = {
             "source": "user",
             "decided_by": "user",
             "matched_rule": pending.matched_rule,
+            "remembered": remember,
+            ApprovalMetadataKeys.DANGER: pending.danger,
         }
-        if remember_scope == "session":
-            meta["remember_for_session"] = True
-        elif remember_scope == "persistent":
-            meta["remember_persistent"] = True
-        if msg := decision.get("message"):
-            meta["message"] = msg
-        if remember := decision.get("rememberEntry"):
-            meta["rememberEntry"] = remember
+        message = decision.get("message")
+        if isinstance(message, str) and message:
+            metadata["message"] = message
+        if remember and pending.remember_rule is not None:
+            metadata[ApprovalMetadataKeys.REMEMBER_RULE] = {
+                "expression": pending.remember_rule.expression,
+                "displayText": pending.remember_rule.display_text,
+                "scopeCwd": pending.remember_rule.scope_cwd,
+            }
+            metadata[ApprovalMetadataKeys.REMEMBER_THREAD_ID] = pending.thread_id
 
-        pending.future.set_result(
-            ApprovalDecision(outcome=outcome, metadata=meta)  # type: ignore[arg-type]
-        )
-
-        # generic-chat-session-grant：用户点「本次会话都同意」+ allow=True
-        # → 触发 thread 级授权写入；下次同 thread + cwd + tool 的
-        # classify 命中 _thread_overrides → 立即允许。
-        # 仅 allow=True + rememberScope="session" 时写入（拒绝时即使带
-        # rememberScope 也不写——拒绝没有记忆语义）。
-        if allow and remember_scope == "session":
-            try:
-                self._rules.add_session_grant(
-                    channel=pending.channel,
-                    thread_id=pending.thread_id,
-                    cwd=pending.cwd,
-                    tool_name=pending.tool_name,
+        async with self._lock:
+            self._resolving.discard(request_id)
+            if pending.future.done():
+                return False
+            pending.future.set_result(
+                ApprovalDecision(
+                    outcome="approved" if allow else "rejected",
+                    metadata=metadata,
                 )
-            except Exception:
-                # 失败开放：授权写入失败不影响本次 resolve 的成功结果
-                # （下次仍弹卡，等同没记住——可接受降级）
-                logger.exception(
-                    "add_session_grant failed: thread=%s cwd=%s tool=%s",
-                    pending.thread_id,
-                    pending.cwd,
-                    pending.tool_name,
-                )
+            )
         return True
 
     def cancel(self, request_id: str, reason: str = "cancelled") -> bool:
-        """取消 pending 审批（abort / shutdown / ws 断 路径）。
-
-        Args:
-            request_id: 对应 pending 的 ID
-            reason: 取消原因，写到 ``metadata.reason`` 便于 trace
-
-        Returns:
-            True = 找到 pending future 并 set_result(rejected)；False = 未知 request_id
-        """
+        """取消一条尚未进入 remember 写入阶段的 pending。"""
         pending = self._pending.get(request_id)
-        if pending is None or pending.future.done():
+        if pending is None or pending.future.done() or request_id in self._resolving:
             return False
         pending.future.set_result(
             ApprovalDecision(
@@ -428,58 +368,74 @@ class ApprovalManager:
         return True
 
     def cancel_by_thread(self, thread_id: str, reason: str = "cancelled") -> int:
-        """取消某 thread 名下所有 pending 审批（WebHostAdapter.close / cell evict 用）。
-
-        reviewer 必修 #4：避免用户关 tab 后 pending 卡 60s timeout
-        （spec 60-risk R10 内存泄漏现实诱因）。
-
-        generic-chat-session-grant：同时清掉该 thread 的 session grant
-        （:meth:`ApprovalRules.clear_thread_grants`）；与 pending cancel 同款
-        生命周期，防止 thread 关闭后 grant 残留造成内存泄漏。
-
-        Args:
-            thread_id: 要清理的 thread
-            reason: 写到每条 pending 的 metadata.reason
-
-        Returns:
-            实际取消的 pending 数量
-        """
-        # 拷贝列表避免迭代中改 dict
+        """取消目标 thread 当前可取消的全部 pending。"""
         targets = [
-            req_id
-            for req_id, p in self._pending.items()
-            if p.thread_id == thread_id and not p.future.done()
+            request_id
+            for request_id, pending in self._pending.items()
+            if pending.thread_id == thread_id and not pending.future.done()
         ]
-        count = 0
-        for req_id in targets:
-            if self.cancel(req_id, reason=reason):
-                count += 1
-        # 清 thread 级本次会话授权（R10 同款防内存泄漏）；失败不抛
+        return sum(self.cancel(request_id, reason=reason) for request_id in targets)
+
+    def cancel_by_agent(self, agent_id: str, reason: str = "cancelled") -> int:
+        """取消目标 agent 当前可取消的全部 pending。"""
+        targets = [
+            request_id
+            for request_id, pending in self._pending.items()
+            if pending.agent_id == agent_id and not pending.future.done()
+        ]
+        return sum(self.cancel(request_id, reason=reason) for request_id in targets)
+
+    async def _write_remembered_decision(
+        self,
+        pending: _PendingApproval,
+        *,
+        allow: bool,
+    ) -> bool:
+        """使用 pending 冻结的 candidate 与 revision 写入目标 thread。"""
+        if pending.remember_rule is None or pending.remember_revision is None:
+            return False
+        verdict = Verdict.ALLOW if allow else Verdict.DENY
         try:
-            self._rules.clear_thread_grants(thread_id)
-        except Exception:
-            logger.exception("clear_thread_grants failed: thread=%s", thread_id)
-        return count
+            entry = self._permissions.build_entry(
+                pending.remember_rule.expression,
+                verdict,
+                scope_cwd=pending.remember_rule.scope_cwd,
+            )
+            await self._permissions.write_entry(
+                pending.thread_id,
+                entry,
+                expected_revision=pending.remember_revision,
+            )
+        except (PermissionsError, ValueError):
+            logger.exception(
+                "approval remember write failed request_id=%s thread_id=%s",
+                pending.request_id,
+                pending.thread_id,
+            )
+            return False
+        return True
+
+    async def _restore_after_failed_resolve(self, pending: _PendingApproval) -> None:
+        """保存失败后恢复可重试状态与 fail-closed 超时任务。"""
+        async with self._lock:
+            self._resolving.discard(pending.request_id)
+            if pending.future.done() or pending.request_id not in self._pending:
+                return
+            self._timeout_tasks[pending.request_id] = asyncio.create_task(
+                self._handle_timeout(
+                    pending.request_id,
+                    pending.timeout_ms / 1000.0,
+                )
+            )
 
     async def _handle_timeout(self, request_id: str, timeout_seconds: float) -> None:
-        """timeout task 主体：等 N 秒后把 pending future set_result(rejected)。
-
-        reviewer 必修 #3：timeout 返回 fail-closed 拒绝
-        （与 :meth:`web.app_support.host_adapter.WebHostAdapter.prompt_approval` 的 TimeoutError
-        分支行为一致）。
-
-        被 cancel 时（``task.cancel()``）静默退出，不动 future。
-
-        Args:
-            request_id: pending 的 ID
-            timeout_seconds: 等待秒数
-        """
+        """到时后以拒绝结果关闭仍未处理的 pending。"""
         try:
             await asyncio.sleep(timeout_seconds)
         except asyncio.CancelledError:
             return
         pending = self._pending.get(request_id)
-        if pending is None or pending.future.done():
+        if pending is None or pending.future.done() or request_id in self._resolving:
             return
         pending.future.set_result(
             ApprovalDecision(
@@ -488,76 +444,157 @@ class ApprovalManager:
             )
         )
 
+    def _is_llm_review_eligible(self, pending: _PendingApproval) -> bool:
+        """仅让 llm 模式的 default:ask 进入复核任务。"""
+        if self._llm_reviewer is None or self._auto_approval_policy is None:
+            return False
+        if pending.matched_rule != "default:ask" or pending.danger:
+            return False
+        try:
+            return self._auto_approval_policy.mode_for(pending.cwd) is ApprovalDispositionMode.LLM
+        except Exception:
+            logger.exception("approval disposition lookup failed cwd=%s", pending.cwd)
+            return False
+
+    async def _handle_llm_review(self, request_id: str) -> None:
+        """运行 LLM；allow 后广播同一 request_id 的倒计时更新。"""
+        reviewer = self._llm_reviewer
+        policy = self._auto_approval_policy
+        if reviewer is None or policy is None:
+            return
+        pending = self._pending.get(request_id)
+        if pending is None or pending.future.done():
+            return
+        try:
+            result = await reviewer.review(
+                cwd=pending.cwd,
+                tool_name=pending.tool_name,
+                tool_input=pending.tool_input,
+                matched_rule=pending.matched_rule or "default:ask",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("approval llm review failed request_id=%s", request_id)
+            return
+        if result.decision is not LlmReviewDecision.ALLOW:
+            return
+        try:
+            if policy.mode_for(pending.cwd) is not ApprovalDispositionMode.LLM:
+                return
+        except Exception:
+            logger.exception("approval disposition recheck failed request_id=%s", request_id)
+            return
+
+        countdown_ms = self._llm_countdown_ms(pending.cwd)
+        async with self._lock:
+            current = self._pending.get(request_id)
+            if current is None or current.future.done():
+                return
+            current.auto_approve_at_ms = now_epoch_ms() + countdown_ms
+            current.metadata["llm_review"] = {
+                "model": result.model,
+                "reason": result.reason,
+                "decision": result.decision.value,
+            }
+            self._auto_approve_tasks[request_id] = asyncio.create_task(
+                self._handle_auto_approve(request_id, countdown_ms / 1000.0)
+            )
+            sinks = list(self._event_sinks)
+
+        self._record_llm_auto_allow(current, result.model, result.reason, countdown_ms)
+        await asyncio.gather(
+            *(sink.emit_approval_required(pending=_pending_to_view(current)) for sink in sinks),
+            return_exceptions=True,
+        )
+
+    def _llm_countdown_ms(self, cwd: str) -> int:
+        """从 per-cwd policy 读取倒计时，异常时采用全局规则默认值。"""
+        policy = self._auto_approval_policy
+        if policy is None:
+            return self._default_timeout_ms
+        try:
+            config = policy.get_config(cwd)
+            rule_set = policy.rule_set
+            return int(config.timeout_ms or rule_set.default_timeout_ms)
+        except Exception:
+            logger.exception("approval countdown lookup failed cwd=%s", cwd)
+            return self._default_timeout_ms
+
+    def _record_llm_auto_allow(
+        self,
+        pending: _PendingApproval,
+        model: str,
+        reason: str,
+        timeout_ms: int,
+    ) -> None:
+        """写入 LLM allow 进入倒计时的独立审计，异常不影响主链。"""
+        if self._audit_sink is None:
+            return
+        try:
+            self._audit_sink.log_llm_auto_allow(
+                channel=pending.channel,
+                thread_id=pending.thread_id,
+                request_id=pending.request_id,
+                cwd=pending.cwd,
+                mode=ApprovalDispositionMode.LLM.value,
+                tool_name=pending.tool_name,
+                matched_rule=pending.matched_rule,
+                model=model,
+                reason=reason,
+                timeout_ms=timeout_ms,
+            )
+        except Exception:
+            logger.exception(
+                "approval llm auto-allow audit failed request_id=%s", pending.request_id
+            )
+
     async def _handle_auto_approve(self, request_id: str, delay_seconds: float) -> None:
-        """auto-approve task 主体：等 N 秒后把 pending future set_result(approved)。
-
-        阶段 1.5 generic_chat per-cwd 自动通过倒计时；与 :meth:`_handle_timeout`
-        对称：sleep → 查 pending → set_result。差异：
-
-        - outcome 是 ``"approved"``（自动通过）而非 ``"rejected"``（fail-closed）
-        - ``metadata.source`` 是 ``"rule_auto_allow"``（让 request() 反推 reason 为
-          ``"auto_allowed"``，给 EventSink 区分自动通过路径 / 触发 audit 写入）
-
-        被 cancel 时（``task.cancel()`` 由 :meth:`_cleanup_pending` 三退出路径触发）
-        静默退出，不动 future。
-
-        **race fail-safe**：sleep 醒来后必查 ``pending.future.done()``——如果用户
-        在最后一刻手动 resolve / cancel / 上一秒 timeout 触发，future 已经被 set，
-        本方法直接 return 不再 set_result（避免 ``InvalidStateError``）。
-
-        Args:
-            request_id: pending 的 ID
-            delay_seconds: 等待秒数（``rule_dec.auto_approve_at_ms - now_ms``）
-        """
+        """等待用户可中断窗口结束后放行已获 LLM allow 的 pending。"""
         try:
             await asyncio.sleep(delay_seconds)
         except asyncio.CancelledError:
             return
         pending = self._pending.get(request_id)
-        if pending is None or pending.future.done():
+        if pending is None or pending.future.done() or request_id in self._resolving:
             return
         pending.future.set_result(
             ApprovalDecision(
                 outcome="approved",
                 metadata={
-                    "source": "rule_auto_allow",
+                    "source": "llm_auto_allow",
                     "reason": "auto_allow",
                     "matched_rule": pending.matched_rule,
+                    "llm_review": pending.metadata.get("llm_review"),
                 },
             )
         )
 
-    async def _cleanup_pending(self, request_id: str, *, fan_out_reason: str | None) -> None:
-        """三退出路径统一清理（R10）：pop ``_pending`` + cancel 并 pop
-        ``_timeout_tasks`` / ``_auto_approve_tasks``。
-
-        Args:
-            request_id: pending ID
-            fan_out_reason: 非 None 时调 ``emit_approval_removed`` fan-out；
-                None 时仅清理不广播
-        """
+    async def _cleanup_pending(self, request_id: str, *, fan_out_reason: str) -> None:
+        """统一删除 pending、超时任务和 resolving 标记并广播移除。"""
         async with self._lock:
             self._pending.pop(request_id, None)
+            self._resolving.discard(request_id)
             timeout_task = self._timeout_tasks.pop(request_id, None)
             auto_approve_task = self._auto_approve_tasks.pop(request_id, None)
-            sinks_snapshot = list(self._event_sinks)
-        if timeout_task and not timeout_task.done():
+            llm_review_task = self._llm_review_tasks.pop(request_id, None)
+            sinks = list(self._event_sinks)
+        if timeout_task is not None and not timeout_task.done():
             timeout_task.cancel()
-        if auto_approve_task and not auto_approve_task.done():
+        if auto_approve_task is not None and not auto_approve_task.done():
             auto_approve_task.cancel()
-        if fan_out_reason is not None:
-            await asyncio.gather(
-                *(
-                    s.emit_approval_removed(request_id=request_id, reason=fan_out_reason)
-                    for s in sinks_snapshot
-                ),
-                return_exceptions=True,
-            )
-
-
-# ---------------------------------------------------------------------------
-# 模块级单例
-# ---------------------------------------------------------------------------
+        if llm_review_task is not None and not llm_review_task.done():
+            llm_review_task.cancel()
+        await asyncio.gather(
+            *(
+                sink.emit_approval_removed(
+                    request_id=request_id,
+                    reason=fan_out_reason,
+                )
+                for sink in sinks
+            ),
+            return_exceptions=True,
+        )
 
 
 _singleton: ApprovalManager | None = None
@@ -565,48 +602,31 @@ _singleton: ApprovalManager | None = None
 
 def get_approval_manager(
     *,
-    rules: ApprovalRules | None = None,
+    permissions_manager: PermissionsManager | None = None,
     event_sinks: list[ApprovalEventSink] | None = None,
     default_timeout_ms: int = 60_000,
+    auto_approval_policy: AutoApprovalPolicy | None = None,
+    llm_reviewer: ApprovalLlmReviewer | None = None,
+    audit_sink: ApprovalAuditSink | None = None,
 ) -> ApprovalManager:
-    """获取或创建审批管理器单例。
-
-    首次调用必须传 ``rules``（懒构造）；之后调用忽略所有参数，
-    返回已构造实例。装配点（``src/hosts/web/run.py`` 等）首次调用时初始化；
-    其余只读。
-
-    Args:
-        rules: 首次调用时使用；None 时构造空骨架 ApprovalRules
-        event_sinks: 首次调用时使用
-        default_timeout_ms: 首次调用时使用
-
-    Returns:
-        进程级单例 ApprovalManager
-    """
+    """获取或创建进程级审批管理器单例。"""
     global _singleton
     if _singleton is None:
-        if rules is None:
-            # approval-rules-unified：ApprovalRules 不再持 default_timeout_ms，
-            # 走失败关闭默认 60s（policy=None 时安全网）。manager 自己的
-            # default_timeout_ms 仍按入参生效。
-            rules = ApprovalRules()
         _singleton = ApprovalManager(
-            rules=rules,
+            permissions_manager=permissions_manager or PermissionsManager(get_kongming_home()),
             event_sinks=event_sinks,
             default_timeout_ms=default_timeout_ms,
+            auto_approval_policy=auto_approval_policy,
+            llm_reviewer=llm_reviewer,
+            audit_sink=audit_sink,
         )
     return _singleton
 
 
 def reset_for_testing() -> None:
-    """**仅测试用**：重置单例到 None；测试 fixture 在 setup/teardown 用。"""
+    """仅供测试清除进程级单例。"""
     global _singleton
     _singleton = None
-
-
-# ---------------------------------------------------------------------------
-# make_manager_prompt_fn 工厂（评审必修 #2）
-# ---------------------------------------------------------------------------
 
 
 def make_manager_prompt_fn(
@@ -616,135 +636,144 @@ def make_manager_prompt_fn(
     channel: str = "generic_chat",
     default_cwd: str = "",
 ) -> Callable[[ApprovalRequest], Awaitable[ApprovalAction]]:
-    """生成提示函数，内部调 ``manager.request``；返回值映射成 :class:`ApprovalAction`。
+    """生成绑定顶层 thread 的 InteractiveApproval 动作提示函数。"""
 
-    替代现有 :meth:`web.app_support.host_adapter.WebHostAdapter.prompt_approval`
-    （推 per-thread WS 旧模态）。``src/hosts/web/run.py`` 装配点用法：
-
-    .. code-block:: python
-
-        prompt_fn = make_manager_prompt_fn(manager, thread_id, default_cwd=resolved_cwd)
-        approval = build_default_approval(mode, prompt_fn=prompt_fn)
-
-    二态映射(reviewer 必修 #2，阶段 1):
-
-    - ``decision.outcome="approved"`` → ``ApprovalAction.ACCEPT_ONCE``
-    - ``decision.outcome="rejected"`` → ``ApprovalAction.REJECT``
-    - ``decision.metadata["remember_for_session"]=True`` →
-      ``ApprovalAction.ACCEPT_FOR_SESSION``
-
-      .. warning::
-         阶段 1 generic_chat 前端 Card 已隐藏「本 session」按钮，
-         理论上不会触发此分支；留 TODO 标 stage 5 协议演进时接 GrantStore.put_session
-
-    CLI 通道的本 session 授权已由 :class:`ApprovalRules` 的线程级覆盖接管。
-    CLI 提示函数遇到 ``remember_for_session`` 时返回 ``ACCEPT_ONCE``，让后续
-    调用继续进入审批管理器规则层，保证阻断规则每次都有机会先判定。
-
-    返回的提示函数通过 ``__action_aware__`` 属性自动被
-    :class:`tools.runtime.approval.InteractiveApproval` 识别为动作感知函数
-    （返回 ApprovalAction）。
-
-    工作目录解析优先级（thread-cwd-fallback 任务 #3）:
-
-    1. ``req.metadata["cwd"]``：运行时显式传入，优先级最高
-    2. ``default_cwd``：装配时由调用方解析后传入的兜底值（通常是 thread.cwd
-       或 server 启动目录 ``app.state.workspace_root``）
-    3. ``""``：两者都空时落到空字符串（与改前行为一致，兼容老调用方）
-
-    Args:
-        manager: ApprovalManager 单例
-        thread_id: 该提示函数绑定的 thread（多 thread 一个 thread 一个提示函数）
-        channel: 通道名（默认 ``"generic_chat"``，阶段 2 改 ``"claude_code"``）
-        default_cwd: thread.cwd 空时的兜底工作目录（由装配点解析传入；
-            通常是 server 启动目录 ``app.state.workspace_root``）；
-            空字符串 = 不启用兜底（保持原行为，兼容旧调用方）
-
-    Returns:
-        动作感知提示函数，签名 ``(ApprovalRequest) -> Awaitable[ApprovalAction]``
-    """
-
-    async def prompt_fn(req: ApprovalRequest) -> ApprovalAction:
-        """从 ApprovalRequest 提取信息调 manager.request，映射回 ApprovalAction。"""
-        # 工作目录优先级：req.metadata.cwd（运行时显式传） > default_cwd（装配时 thread.cwd 解析后的值）
-        req_cwd = (req.metadata or {}).get("cwd", "")
-        resolved_cwd = req_cwd if req_cwd else default_cwd
-        request_metadata = dict(req.metadata) if req.metadata else {}
-        request_metadata.setdefault("run_id", req.run_id)
-        request_metadata.setdefault("session_id", req.session_id)
-        request_metadata.setdefault("turn", req.turn)
-        request_metadata.setdefault("call_id", req.call_id)
-        if req.reason:
-            request_metadata.setdefault("reason", req.reason)
+    async def prompt_fn(request: ApprovalRequest) -> ApprovalAction:
+        """将运行时请求提交 Manager，并映射为工具运行时 action。"""
+        raw_cwd = request.execution_scope.cwd
+        metadata_cwd = request.metadata.get("cwd")
+        cwd = (
+            raw_cwd
+            if isinstance(raw_cwd, str) and raw_cwd
+            else metadata_cwd
+            if isinstance(metadata_cwd, str) and metadata_cwd
+            else default_cwd
+        )
+        metadata = dict(request.metadata)
+        metadata.setdefault("run_id", request.run_id)
+        metadata.setdefault("session_id", request.session_id)
+        metadata.setdefault("turn", request.turn)
+        metadata.setdefault("call_id", request.call_id)
+        if request.reason:
+            metadata.setdefault("reason", request.reason)
+        agent_id = _agent_id_from_metadata(metadata)
         decision = await manager.request(
             channel=channel,
             thread_id=thread_id,
-            cwd=resolved_cwd,
-            tool_name=req.tool_name,
-            tool_input=dict(req.arguments),
-            metadata=request_metadata,
+            cwd=cwd,
+            tool_name=request.tool_name,
+            tool_input=dict(request.arguments),
+            metadata=metadata,
+            agent_id=agent_id,
         )
-        return _decision_to_action(
-            decision,
-            allow_session_action=channel != "cli",
-        )
+        return _decision_to_action(decision)
 
-    # 标记为动作感知函数（让 InteractiveApproval 走 ApprovalAction 分支）
     prompt_fn.__action_aware__ = True  # type: ignore[attr-defined]
     return prompt_fn
 
 
-def _decision_to_action(
-    decision: ApprovalDecision,
-    *,
-    allow_session_action: bool = True,
-) -> ApprovalAction:
-    """ApprovalDecision → ApprovalAction 二态映射（reviewer 必修 #2）。
-
-    阶段 1 仅二态（ACCEPT_ONCE / REJECT）；ACCEPT_FOR_SESSION 受协议帧 v0.5
-    支持后才能在 generic_chat 启用（spec 40-protocol-evolution）。
-
-    Args:
-        decision: manager.request 返回的 ApprovalDecision
-
-    Returns:
-        对应的 ApprovalAction；未知 outcome 一律映射为 REJECT（失败关闭）
-    """
+def _decision_to_action(decision: ApprovalDecision) -> ApprovalAction:
+    """把 Manager 最终决定映射为工具运行时一次性 action。"""
     if decision.outcome == "approved":
-        # TODO(stage 5)：协议帧 v0.5 上线后，按 decision.metadata.remember_for_session
-        # 返回 ACCEPT_FOR_SESSION（接 GrantStore.put_session）
-        if decision.metadata.get("remember_for_session") and allow_session_action:
-            return ApprovalAction.ACCEPT_FOR_SESSION
-        if decision.metadata.get("remember_persistent"):
-            return ApprovalAction.ACCEPT_PERSIST
         return ApprovalAction.ACCEPT_ONCE
     return ApprovalAction.REJECT
 
 
-def _pending_to_view(
-    pending: _PendingApproval,
-    *,
-    default_timeout_ms: int,
-) -> PendingApprovalView:
-    """把 manager 内部 pending 状态投影成公开只读视图。"""
+def _pending_to_view(pending: _PendingApproval) -> PendingApprovalView:
+    """将私有 pending 投影为宿主可读 DTO。"""
     return PendingApprovalView(
         request_id=pending.request_id,
         channel=pending.channel,
         thread_id=pending.thread_id,
+        agent_id=pending.agent_id,
         cwd=pending.cwd,
         tool_name=pending.tool_name,
         tool_input=pending.tool_input,
         metadata=pending.metadata,
         severity=pending.severity,
         matched_rule=pending.matched_rule,
-        auto_approve_at_ms=pending.auto_approve_at_ms,
-        auto_reject_at_ms=pending.auto_reject_at_ms,
+        danger=pending.danger,
+        remember_allowed=pending.remember_allowed,
         arrived_at_ms=pending.arrived_at_ms,
-        timeout_ms=pending.timeout_ms if pending.timeout_ms is not None else default_timeout_ms,
+        timeout_ms=pending.timeout_ms,
+        remember_rule=pending.remember_rule,
+        auto_approve_at_ms=pending.auto_approve_at_ms,
     )
 
 
+def _remember_rule_from_metadata(metadata: Mapping[str, Any]) -> RememberRule | None:
+    """从决策引擎元数据读取冻结的记忆候选。"""
+    value = metadata.get(ApprovalMetadataKeys.REMEMBER_RULE)
+    if not isinstance(value, Mapping):
+        return None
+    expression = value.get("expression")
+    display_text = value.get("displayText")
+    scope_cwd = value.get("scopeCwd")
+    if (
+        not isinstance(expression, str)
+        or not isinstance(display_text, str)
+        or (scope_cwd is not None and not isinstance(scope_cwd, str))
+    ):
+        return None
+    return RememberRule(
+        expression=expression,
+        display_text=display_text,
+        scope_cwd=scope_cwd,
+    )
+
+
+def _remember_rule_matches_decision(
+    frozen: RememberRule | None,
+    claimed: object,
+) -> bool:
+    """严格比较客户端回传与服务端 pending 候选，阻止 scope 篡改和缺失。"""
+    if frozen is None or not isinstance(claimed, Mapping):
+        return False
+    return (
+        set(claimed) == {"expression", "displayText", "scopeCwd"}
+        and claimed.get("expression") == frozen.expression
+        and claimed.get("displayText") == frozen.display_text
+        and claimed.get("scopeCwd") == frozen.scope_cwd
+    )
+
+
+def _optional_nonblank_string(value: object) -> str | None:
+    """把可选 wire 值收敛为非空字符串。"""
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
+def _optional_revision(value: object) -> int | None:
+    """把可选 wire 值收敛为非负 revision。"""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _severity_from_metadata(metadata: Mapping[str, Any]) -> str:
+    """读取普通审批展示强度，缺省返回 standard。"""
+    severity = metadata.get("severity")
+    if isinstance(severity, str) and severity:
+        return severity
+    return "standard"
+
+
+def _agent_id_from_metadata(metadata: Mapping[str, Any]) -> str:
+    """优先读取 agent_id，随后读取 parent_agent 展示身份。"""
+    agent_id = metadata.get("agent_id")
+    if isinstance(agent_id, str):
+        return agent_id
+    parent = metadata.get("parent_agent")
+    if isinstance(parent, Mapping):
+        parent_agent_id = parent.get("agent_id")
+        if isinstance(parent_agent_id, str):
+            return parent_agent_id
+    return ""
+
+
 __all__ = [
+    "ApprovalAuditSink",
     "ApprovalEventSink",
     "ApprovalManager",
     "PendingApprovalView",

@@ -22,7 +22,7 @@ import hosts.cli.main as cli_main
 from infrastructure.config.models import (
     ApprovalConfig,
     Config,
-    ModelConfig,
+    ModelSelectionConfig,
     RunnerConfig,
     SchedulerConfig,
     SessionConfig,
@@ -45,30 +45,51 @@ class _DummyRegistry:
         return []
 
 
-class _DummyBridge:
+class _DummyHostDispatcher:
     def __init__(
         self,
         *,
         runtime: object,
-        adapter: object,
         session_id: str,
-        echo_final_content: bool = True,
+        queued_result_handler: object = None,
+        agent_tree_runtime_router: object = None,
+        approval_canceller: object = None,
     ) -> None:
-        del runtime, adapter, echo_final_content
+        del runtime, queued_result_handler, agent_tree_runtime_router, approval_canceller
         self.session_id = session_id
+        self.agent_manager = object()
+        self.run_text = lambda *_, **__: None
 
     async def run_loop(self) -> None:
         return None
 
 
+class _DummyCLIInteractiveLoop:
+    def __init__(self, *, host_dispatcher, command_service, adapter=None) -> None:
+        self.host_dispatcher = host_dispatcher
+        self.command_service = command_service
+        self.adapter = adapter
+
+    async def run_loop(self) -> None:
+        return None
+
+
+class _RecoverableStore:
+    """记录 CLI startup 是否先执行 scheduler 恢复。"""
+
+    def __init__(self) -> None:
+        self.recovered = False
+        self.recover_calls = 0
+
+    def recover_stale_runs(self) -> int:
+        self.recovered = True
+        self.recover_calls += 1
+        return 1
+
+
 def _build_cfg(*, scheduler_enabled: bool) -> Config:
     return Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="stub-model",
-            base_url="http://127.0.0.1:1234",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         runner=RunnerConfig(max_turns=3),
         session=SessionConfig(backend="memory", store_path=".kongming/sessions.db"),
         trace=TraceConfig(output_path=".kongming/traces/test.jsonl"),
@@ -101,9 +122,15 @@ def _common_monkeypatches(
 
     monkeypatch.setattr(cli_main, "build_default_approval", lambda *_, **__: object())
     monkeypatch.setattr(
-        cli_main.NativeRuntime, "build", staticmethod(lambda *_, **__: _DummyRuntime())
+        cli_main.SessionEngine, "build", staticmethod(lambda *_, **__: _DummyRuntime())
     )
-    monkeypatch.setattr(cli_main, "SessionBridge", _DummyBridge)
+    monkeypatch.setattr(cli_main, "HostDispatcher", _DummyHostDispatcher)
+    monkeypatch.setattr(
+        cli_main,
+        "build_default_command_service",
+        lambda *, adapter, runtime_delegate: object(),
+    )
+    monkeypatch.setattr(cli_main, "CLIInteractiveLoop", _DummyCLIInteractiveLoop)
     monkeypatch.setattr(cli_main, "_generate_cli_session_id", lambda: "cli-test")
     monkeypatch.setattr(cli_main, "_print_banner", lambda *_, **__: None)
     monkeypatch.setattr(cli_main, "_discover_persistent_sessions", lambda _cfg: ([], None))
@@ -117,9 +144,15 @@ def _common_monkeypatches(
 
 async def test_cli_starts_ticker_when_scheduler_enabled(monkeypatch, tmp_path: Path) -> None:
     """scheduler.enabled=True + register helper 返回非空 store → ticker 起跑 + 优雅退出。"""
-    captured: dict[str, object] = {"ticker_calls": 0, "factory_calls": 0, "aclose_calls": 0}
+    monkeypatch.setenv("KONGMING_HOME", str(tmp_path))
+    captured: dict[str, object] = {
+        "ticker_calls": 0,
+        "factory_calls": 0,
+        "aclose_calls": 0,
+        "manager_aclose_calls": 0,
+    }
 
-    sentinel_store = object()
+    sentinel_store = _RecoverableStore()
     registry = _DummyRegistry()
     cfg = _build_cfg(scheduler_enabled=True)
     _common_monkeypatches(monkeypatch, registry, cfg, register_returns=sentinel_store)
@@ -128,24 +161,30 @@ async def test_cli_starts_ticker_when_scheduler_enabled(monkeypatch, tmp_path: P
         async def aclose(self) -> None:
             captured["aclose_calls"] = int(captured["aclose_calls"]) + 1  # type: ignore[arg-type]
 
-    def _fake_build_bridge(_cfg, _store, *, event_sinks=None, dispatcher=None, **_kwargs):
+    class _FakeScheduledRunManager:
+        async def aclose(self) -> None:
+            captured["manager_aclose_calls"] = int(captured["manager_aclose_calls"]) + 1  # type: ignore[arg-type]
+
+    def _fake_build_manager(_cfg, _store, *, event_sinks=None, dispatcher=None, **_kwargs):
         captured["factory_calls"] = int(captured["factory_calls"]) + 1  # type: ignore[arg-type]
         captured["bridge_store"] = _store
+        captured["store_recovered_before_bridge"] = _store.recovered
+        captured["factory_max_inflight"] = _cfg.scheduler.max_inflight
         # v0.3 M4/M5：cli/main.py 装配链路传 dispatcher；fake 接受但不强求非 None
         captured["dispatcher_set"] = dispatcher is not None
-        return _FakeTickerRuntime(), object()
+        return _FakeTickerRuntime(), _FakeScheduledRunManager()
 
     async def _fake_run_ticker_loop(_store, _bridge, stop_event: asyncio.Event, **kwargs) -> None:
         captured["ticker_calls"] = int(captured["ticker_calls"]) + 1  # type: ignore[arg-type]
         captured["interval"] = kwargs.get("interval")
-        captured["max_inflight"] = kwargs.get("max_inflight")
+        captured["ticker_max_inflight"] = kwargs.get("max_inflight")
         # 等 stop_event；本测验证退出路径优雅 set + await。
         await stop_event.wait()
 
     import scheduler.runtime_factory as rf
     import scheduler.ticker as tk
 
-    monkeypatch.setattr(rf, "build_cron_execution_bridge", _fake_build_bridge)
+    monkeypatch.setattr(rf, "build_scheduled_run_manager", _fake_build_manager)
     monkeypatch.setattr(tk, "run_ticker_loop", _fake_run_ticker_loop)
 
     await cli_main._run(
@@ -163,15 +202,20 @@ async def test_cli_starts_ticker_when_scheduler_enabled(monkeypatch, tmp_path: P
     assert captured["factory_calls"] == 1
     assert captured["ticker_calls"] == 1
     assert captured["bridge_store"] is sentinel_store
+    assert captured["store_recovered_before_bridge"] is True
+    assert sentinel_store.recover_calls == 1
     assert captured["interval"] == 0.1
-    assert captured["max_inflight"] == 2
+    assert captured["factory_max_inflight"] == 2
+    assert captured["ticker_max_inflight"] is None
     assert captured["aclose_calls"] == 1
+    assert captured["manager_aclose_calls"] == 1
 
 
 async def test_cli_does_not_start_ticker_when_scheduler_disabled(
     monkeypatch, tmp_path: Path
 ) -> None:
     """scheduler.enabled=False → register helper 返回 None → ticker 不起。"""
+    monkeypatch.setenv("KONGMING_HOME", str(tmp_path))
     captured: dict[str, int] = {"factory_calls": 0, "ticker_calls": 0}
 
     registry = _DummyRegistry()
@@ -189,7 +233,7 @@ async def test_cli_does_not_start_ticker_when_scheduler_disabled(
     import scheduler.runtime_factory as rf
     import scheduler.ticker as tk
 
-    monkeypatch.setattr(rf, "build_cron_execution_bridge", _fake_build_bridge)
+    monkeypatch.setattr(rf, "build_scheduled_run_manager", _fake_build_bridge)
     monkeypatch.setattr(tk, "run_ticker_loop", _fake_run_ticker_loop)
 
     await cli_main._run(
@@ -210,6 +254,7 @@ async def test_cli_does_not_start_ticker_when_scheduler_disabled(
 
 async def test_cli_skips_ticker_in_smoke_mode(monkeypatch, tmp_path: Path) -> None:
     """smoke 路径短路 chat REPL，也跳过 ticker（避免 smoke 半秒装配后 ticker 还在跑）。"""
+    monkeypatch.setenv("KONGMING_HOME", str(tmp_path))
     captured: dict[str, int] = {"factory_calls": 0, "ticker_calls": 0}
 
     sentinel_store = object()
@@ -232,7 +277,7 @@ async def test_cli_skips_ticker_in_smoke_mode(monkeypatch, tmp_path: Path) -> No
     import scheduler.runtime_factory as rf
     import scheduler.ticker as tk
 
-    monkeypatch.setattr(rf, "build_cron_execution_bridge", _fake_build_bridge)
+    monkeypatch.setattr(rf, "build_scheduled_run_manager", _fake_build_bridge)
     monkeypatch.setattr(tk, "run_ticker_loop", _fake_run_ticker_loop)
 
     await cli_main._run(

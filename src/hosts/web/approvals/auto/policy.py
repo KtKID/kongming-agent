@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from safety.auto_approval.policy import AutoApprovalPolicy, Decision
+from safety.auto_approval.policy import AutoApprovalPolicy
 
-__all__ = ["AutoApprovalPolicy", "Decision"]
+__all__ = ["AutoApprovalPolicy"]

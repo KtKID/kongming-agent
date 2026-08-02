@@ -8,8 +8,9 @@ CLI channels. Web-specific websocket handlers and audit output stay under
 from __future__ import annotations
 
 from safety.auto_approval.config_store import ConfigStore, ProjectConfig
+from safety.auto_approval.disposition import ApprovalDispositionMode, ApprovalDispositionResolver
 from safety.auto_approval.manager import AutoApprovalManager
-from safety.auto_approval.policy import AutoApprovalPolicy, Decision
+from safety.auto_approval.policy import AutoApprovalPolicy
 from safety.auto_approval.rules import (
     RuleDefinition,
     RuleSet,
@@ -20,8 +21,9 @@ from safety.auto_approval.rules import (
 __all__ = [
     "AutoApprovalPolicy",
     "AutoApprovalManager",
+    "ApprovalDispositionMode",
+    "ApprovalDispositionResolver",
     "ConfigStore",
-    "Decision",
     "ProjectConfig",
     "RuleDefinition",
     "RuleSet",

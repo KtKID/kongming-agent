@@ -9,13 +9,13 @@ import pytest
 from application.subagents.permissions import (
     SCOPED_WORKDIR_MODE,
     ScopedFileTool,
-    SubAgentApprovalProvider,
     SubAgentGrant,
     SubAgentToolAuditHook,
 )
-from core.contracts import ApprovalDecision, ApprovalRequest, ToolContext
+from core.contracts import ToolContext
 from core.message import Message, ToolCall
 from core.run_state import RunState
+from tests.support.tool_calls import execute_prepared_tool
 from tools.builtin.file_tool import build_file_tools
 
 
@@ -29,11 +29,6 @@ class _Writer:
 
     def write_subagent_creation(self, record: object) -> None:
         raise AssertionError("not needed in this test")
-
-
-class _UpstreamApproval:
-    async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
-        return ApprovalDecision(outcome="approved", reason="upstream")
 
 
 def _grant(tmp_path: Path) -> SubAgentGrant:
@@ -69,20 +64,29 @@ async def test_scoped_file_tool_rewrites_relative_paths_for_read_write_list(
     tools = _wrapped_tools(grant)
     ctx = ToolContext(run_id="run", session_id="child", turn=1, call_id="call")
 
-    written = await tools["write_file"].execute(
+    written = await execute_prepared_tool(
+        tools["write_file"],
         {"path": "result.txt", "content": "ok"},
         ctx,
     )
     assert written.ok is True
     assert (grant.working_dir / "result.txt").read_text(encoding="utf-8") == "ok"
 
-    read = await tools["read_file"].execute({"path": "result.txt"}, ctx)
+    read = await execute_prepared_tool(
+        tools["read_file"],
+        {"path": "result.txt"},
+        ctx,
+    )
     assert read.ok is True
     assert read.content == "ok"
     assert read.data is not None
     assert read.data["path"] == str(grant.working_dir / "result.txt")
 
-    listed = await tools["list_dir"].execute({"path": "."}, ctx)
+    listed = await execute_prepared_tool(
+        tools["list_dir"],
+        {"path": "."},
+        ctx,
+    )
     assert listed.ok is True
     assert listed.data is not None
     assert listed.data["path"] == str(grant.working_dir)
@@ -90,17 +94,27 @@ async def test_scoped_file_tool_rewrites_relative_paths_for_read_write_list(
 
 
 @pytest.mark.asyncio
-async def test_scoped_file_tool_rejects_parent_and_symlink_escape(tmp_path: Path) -> None:
+async def test_scoped_file_tool_rejects_parent_escape(tmp_path: Path) -> None:
+    """父目录逃逸在内部工具执行前被拒绝，输入为相对路径，输出为无文件副作用。"""
     grant = _grant(tmp_path)
     tools = _wrapped_tools(grant)
     ctx = ToolContext(run_id="run", session_id="child", turn=1, call_id="call")
 
-    parent_escape = await tools["write_file"].execute(
+    parent_escape = await execute_prepared_tool(
+        tools["write_file"],
         {"path": "../outside.txt", "content": "bad"},
         ctx,
     )
     assert parent_escape.ok is False
     assert not (grant.task_run_dir / "outside.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_scoped_file_tool_rejects_symlink_escape(tmp_path: Path) -> None:
+    """符号链接逃逸在内部工具执行前被拒绝，输入为外部目录链接，输出为无文件副作用。"""
+    grant = _grant(tmp_path)
+    tools = _wrapped_tools(grant)
+    ctx = ToolContext(run_id="run", session_id="child", turn=1, call_id="call")
 
     outside_dir = tmp_path / "outside"
     outside_dir.mkdir()
@@ -110,56 +124,13 @@ async def test_scoped_file_tool_rejects_parent_and_symlink_escape(tmp_path: Path
         if getattr(exc, "winerror", None) == 1314:
             pytest.skip("Windows symlink privilege is required for symlink escape coverage")
         raise
-    symlink_escape = await tools["write_file"].execute(
+    symlink_escape = await execute_prepared_tool(
+        tools["write_file"],
         {"path": "link/escape.txt", "content": "bad"},
         ctx,
     )
     assert symlink_escape.ok is False
     assert not (outside_dir / "escape.txt").exists()
-
-
-@pytest.mark.asyncio
-async def test_subagent_approval_provider_audits_approved_and_rejected_paths(
-    tmp_path: Path,
-) -> None:
-    grant = _grant(tmp_path)
-    writer = _Writer(tmp_path)
-    approval = SubAgentApprovalProvider(
-        grant=grant,
-        audit_writer=writer,
-        upstream=_UpstreamApproval(),
-    )
-
-    approved = await approval.decide(
-        ApprovalRequest(
-            run_id="run",
-            session_id="child",
-            turn=1,
-            call_id="call-ok",
-            tool_name="write_file",
-            arguments={"path": "result.txt", "content": "ok"},
-        )
-    )
-    rejected = await approval.decide(
-        ApprovalRequest(
-            run_id="run",
-            session_id="child",
-            turn=1,
-            call_id="call-bad",
-            tool_name="write_file",
-            arguments={"path": "../outside.txt", "content": "bad"},
-        )
-    )
-
-    assert approved.outcome == "approved"
-    assert rejected.outcome == "rejected"
-    payloads = [event["payload"] for event in writer.events]
-    assert [payload["decision"] for payload in payloads] == ["approved", "rejected"]
-    assert [payload["decision_source"] for payload in payloads] == [
-        "grant_allow",
-        "scope_deny",
-    ]
-    assert all(payload["action"] == "subagent_approval_decided" for payload in payloads)
 
 
 @pytest.mark.asyncio

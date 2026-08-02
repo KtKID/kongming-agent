@@ -32,11 +32,19 @@ class ProviderError(AgentError):
     """
 
 
+class LLMToolCallContractError(AgentError):
+    """LLM assistant 响应违反显式工具调用合同。"""
+
+
 class ToolError(AgentError):
     """工具执行失败。
 
     工具实现内部抛出的异常由 runner 包成 ToolError 回填，避免裸异常中断主链路。
     """
+
+
+class ToolPreparationError(ToolError):
+    """工具在审批前无法生成稳定 prepared call。"""
 
 
 class ApprovalRejected(AgentError):
@@ -81,8 +89,10 @@ __all__ = [
     "ApprovalRejected",
     "CapabilityDenied",
     "ConfigError",
+    "LLMToolCallContractError",
     "MaxTurnsExceededError",
     "PermissionDenied",
     "ProviderError",
     "ToolError",
+    "ToolPreparationError",
 ]

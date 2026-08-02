@@ -2,13 +2,13 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { ApprovalToastQueue } from "../ApprovalToastQueue";
 import { useApprovalInboxStore } from "../useApprovalInbox";
-import type { ApprovalInboxItem } from "../types";
+import type { ApprovalInboxItem } from "@/protocol";
 
 /**
  * smart-approval-manager-stage1 task #7：跨 channel 混合 Queue 排序。
  *
  * 验证 selectSorted 在 claude_code + generic_chat（+ 任意未来 channel）混合时仍按既有规则：
- * - 危险卡（blockedByRule 非空）置顶
+ * - danger 卡置顶
  * - 同组内按 arrivedAtMs 递增（旧 → 新）
  *
  * 这是「按钮显隐」改造之外的回归保险：channel 字段不参与排序。
@@ -28,14 +28,15 @@ function makeItem(
     threadId: `thread-${requestId}`,
     toolName: "Bash",
     toolInput: { cmd: "x" },
-    autoApproveAtMs: null,
-    autoRejectAtMs: null,
     blockedByRule: null,
     isElevated: false,
+    danger: false,
+    rememberAllowed: false,
     channel: "claude_code",
     cwd: "/p",
     arrivedAtMs: 0,
     timeoutMs: null,
+    rememberRule: null,
     ...overrides,
   };
 }
@@ -47,7 +48,7 @@ function seed(items: ApprovalInboxItem[]) {
 }
 
 beforeEach(() => {
-  useApprovalInboxStore.setState({ byRequestId: {} });
+  useApprovalInboxStore.getState().clear();
 });
 
 describe("ApprovalToastQueue mixed-channel sorting", () => {
@@ -64,7 +65,7 @@ describe("ApprovalToastQueue mixed-channel sorting", () => {
     expect(order).toEqual(["a", "b", "c"]);
   });
 
-  it("危险卡（blockedByRule 非空）跨 channel 仍置顶", () => {
+  it("danger 卡跨 channel 仍置顶", () => {
     seed([
       makeItem("safe1", {
         channel: "generic_chat",
@@ -74,6 +75,7 @@ describe("ApprovalToastQueue mixed-channel sorting", () => {
       makeItem("danger", {
         channel: "claude_code",
         arrivedAtMs: 500,
+        danger: true,
         blockedByRule: "Bash(rm:*)",
       }),
       makeItem("safe2", {
@@ -99,6 +101,7 @@ describe("ApprovalToastQueue mixed-channel sorting", () => {
       makeItem("danger-gc-late", {
         channel: "generic_chat",
         arrivedAtMs: 80,
+        danger: true,
         blockedByRule: "rule-x",
       }),
       makeItem("safe-gc", {
@@ -109,6 +112,7 @@ describe("ApprovalToastQueue mixed-channel sorting", () => {
       makeItem("danger-cc-early", {
         channel: "claude_code",
         arrivedAtMs: 20,
+        danger: true,
         blockedByRule: "rule-y",
       }),
     ]);

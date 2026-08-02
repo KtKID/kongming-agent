@@ -29,9 +29,12 @@ def to_inbox_payload(
     arrived_at_ms: int,
     timeout_ms: int,
     severity: str = "standard",
+    blocked_by_rule: str | None = None,
+    danger: bool = False,
+    remember_allowed: bool = False,
+    remember_rule: Mapping[str, str | None] | None = None,
     auto_approve_at_ms: int | None = None,
     auto_reject_at_ms: int | None = None,
-    blocked_by_rule: str | None = None,
 ) -> dict[str, Any]:
     """构造 inbox.add 帧的 payload dict。
 
@@ -63,14 +66,17 @@ def to_inbox_payload(
         "threadId": thread_id,
         "toolName": tool_name,
         "toolInput": dict(tool_input),
+        "timeoutMs": timeout_ms,
         "autoApproveAtMs": auto_approve_at_ms,
         "autoRejectAtMs": auto_reject_at_ms,
-        "timeoutMs": timeout_ms,
         "blockedByRule": blocked_by_rule,
         "isElevated": severity == "elevated",
         "channel": channel,
         "cwd": cwd,
         "arrivedAtMs": arrived_at_ms,
+        "danger": danger,
+        "rememberAllowed": remember_allowed,
+        "rememberRule": dict(remember_rule) if remember_rule is not None else None,
     }
 
 
@@ -87,7 +93,7 @@ async def emit_remove_safe(
     Args:
         broadcaster: 已实例化的 ApprovalInboxBroadcaster
         request_id: 对应已发出的 add 帧
-        reason: "user_decided" | "timeout" | "cancelled"
+        reason: "user_decided" | "timeout" | "cancelled" | "auto_allowed" | "auto_rejected"
     """
     try:
         await broadcaster.emit_remove(request_id, reason)

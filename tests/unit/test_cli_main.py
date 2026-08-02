@@ -5,11 +5,11 @@ from pathlib import Path
 from click.testing import CliRunner
 
 import hosts.cli.main as cli_main
-from core.contracts import ApprovalDecision, ToolResult
+from core.contracts import ApprovalDecision, PreparedToolCall, ToolResult
 from infrastructure.config.models import (
     ApprovalConfig,
     Config,
-    ModelConfig,
+    ModelSelectionConfig,
     RunnerConfig,
     SchedulerConfig,
     SessionConfig,
@@ -23,6 +23,12 @@ class _FakeUUID:
 
 class _DummyRuntime:
     """最小 runtime stub：满足 CLI `_run` try/finally 调 `await runtime.aclose()` 的合约。"""
+
+    def __init__(self) -> None:
+        self.lifecycle_hooks = []
+
+    def add_lifecycle_hook(self, hook) -> None:
+        self.lifecycle_hooks.append(hook)
 
     async def aclose(self) -> None:
         return None
@@ -47,8 +53,8 @@ class _WorkflowSmokeTool:
     def __init__(self) -> None:
         self.calls = []
 
-    async def execute(self, args, ctx):
-        self.calls.append((args, ctx))
+    async def execute(self, prepared: PreparedToolCall, ctx):
+        self.calls.append((dict(prepared.arguments), ctx))
         return ToolResult(
             ok=False,
             content="工具执行失败：run_agent_workflow",
@@ -66,6 +72,18 @@ class _WorkflowSmokeTools:
         if name != "run_agent_workflow":
             raise KeyError(name)
         return self.tool
+
+
+class _DummyCLIInteractiveLoop:
+    """CLIInteractiveLoop 测试替身：host-dispatch-consolidation 后不再依赖 bridge。"""
+
+    def __init__(self, *, host_dispatcher, command_service, adapter=None) -> None:
+        self.host_dispatcher = host_dispatcher
+        self.command_service = command_service
+        self.adapter = adapter
+
+    async def run_loop(self) -> None:
+        return None
 
 
 class _WorkflowSmokeRuntime(_DummyRuntime):
@@ -125,24 +143,45 @@ async def test_run_workflow_smoke_approves_and_executes_run_agent_workflow(capsy
     assert "[workflow-smoke] ok" in capsys.readouterr().out
 
 
-async def test_run_exposes_workflow_and_role_tools_to_cli_llm(monkeypatch) -> None:
+async def test_run_exposes_workflow_and_role_tools_to_cli_llm(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     """CLI 正常装配时应把 workflow 工具和角色工具一起暴露给 LLM。"""
     captured: dict = {}
+    kongming_home = tmp_path / "kongming-home"
+    legacy_agent_config = kongming_home / "config" / "agent.toml"
+    legacy_agent_config.parent.mkdir(parents=True)
+    legacy_agent_config.write_text(
+        """
+[[agents]]
+id = 1
+nickname = "legacy"
+model = "legacy-model"
+role_desc = "legacy config should stay ignored"
+reasoning_effort = "medium"
+max_turns = 3
+""".strip(),
+        encoding="utf-8",
+    )
+    bridges: list[object] = []
 
-    class _DummyBridge:
+    class _DummyHostDispatcher:
         def __init__(
             self,
             *,
             runtime,
-            adapter,
-            session_id: str,
-            echo_final_content: bool = True,
-        ) -> None:
-            del runtime, adapter, echo_final_content
+            session_id,
+            queued_result_handler=None,
+            agent_tree_runtime_router=None,
+            approval_canceller=None,
+        ):
+            del runtime, queued_result_handler, approval_canceller
             self.session_id = session_id
-
-        async def run_loop(self) -> None:
-            return None
+            self.agent_manager = object()
+            self.agent_tree_runtime_router = agent_tree_runtime_router
+            self.run_text = lambda *_, **__: None
+            bridges.append(self)
 
     async def _fake_assemble_instructions(_cfg, _files, *, skill_listing=""):
         del skill_listing
@@ -151,20 +190,56 @@ async def test_run_exposes_workflow_and_role_tools_to_cli_llm(monkeypatch) -> No
     async def _no_skills(*_args, **_kwargs):
         return []
 
+    runtime = _DummyRuntime()
+
     def _capture_build(_cfg, **kwargs):
         captured.update(kwargs)
-        return _DummyRuntime()
+        return runtime
 
-    monkeypatch.setattr(cli_main, "_load_config_or_exit", lambda _: _build_cfg())
+    import evolution.lifecycle as evolution_lifecycle
+
+    registration_calls: list[tuple[object, object]] = []
+
+    def _capture_lifecycle_registration(*, runtime, manager):  # type: ignore[no-untyped-def]
+        registration_calls.append((runtime, manager))
+        return True
+
+    enabled_cfg = _build_cfg().model_copy(
+        update={
+            "evolution": _build_cfg().evolution.model_copy(
+                update={
+                    "learning": _build_cfg().evolution.learning.model_copy(
+                        update={
+                            "enabled": True,
+                            "root_path": str(kongming_home / "evolution"),
+                        }
+                    )
+                }
+            )
+        }
+    )
+    monkeypatch.setattr(cli_main, "_load_config_or_exit", lambda _: enabled_cfg)
     monkeypatch.setattr(cli_main, "_assemble_instructions", _fake_assemble_instructions)
     monkeypatch.setattr(cli_main, "load_skill_specs", _no_skills)
     monkeypatch.setattr(cli_main, "format_skill_listing", lambda _specs: "")
     monkeypatch.setattr(cli_main, "build_default_approval", lambda *_, **__: object())
-    monkeypatch.setattr(cli_main.NativeRuntime, "build", staticmethod(_capture_build))
-    monkeypatch.setattr(cli_main, "SessionBridge", _DummyBridge)
+    monkeypatch.setattr(cli_main.SessionEngine, "build", staticmethod(_capture_build))
+    monkeypatch.setattr(cli_main, "HostDispatcher", _DummyHostDispatcher)
+    monkeypatch.setattr(
+        cli_main,
+        "build_default_command_service",
+        lambda *, adapter, runtime_delegate: object(),
+    )
+    monkeypatch.setattr(cli_main, "CLIInteractiveLoop", _DummyCLIInteractiveLoop)
     monkeypatch.setattr(cli_main, "_generate_cli_session_id", lambda: "cli-workflow-tools")
+    monkeypatch.setattr(cli_main, "get_kongming_home", lambda: kongming_home)
     monkeypatch.setattr(cli_main, "_print_banner", lambda *_, **__: None)
     monkeypatch.setattr(cli_main, "_discover_persistent_sessions", lambda _cfg: ([], None))
+    monkeypatch.setattr(
+        evolution_lifecycle,
+        "register_evolution_lifecycle_hook",
+        _capture_lifecycle_registration,
+    )
 
     await cli_main._run(
         config_path=None,
@@ -182,25 +257,39 @@ async def test_run_exposes_workflow_and_role_tools_to_cli_llm(monkeypatch) -> No
     registry = captured["tools"]
     assert "run_agent_workflow" in enabled_tool_names
     assert "run_parallel_subagents" in enabled_tool_names
+    assert "spawn_subagent" in enabled_tool_names
     assert "list_agent_roles" in enabled_tool_names
     assert "create_agent_role" in enabled_tool_names
+    assert "request_evolution_review" in enabled_tool_names
+    assert "evolution_write" not in enabled_tool_names
     assert "run_agent_workflow" in registry
     assert "run_parallel_subagents" in registry
+    assert "spawn_subagent" in registry
     assert "list_agent_roles" in registry
     assert "create_agent_role" in registry
+    assert "request_evolution_review" in registry
+    assert "evolution_write" in registry
     workflow_tool = registry["run_agent_workflow"]
+    spawn_tool = registry["spawn_subagent"]
     role_tool = registry["create_agent_role"]
     assert workflow_tool._handle.manager.role_manager is role_tool._manager  # type: ignore[attr-defined]
+    session_manager = workflow_tool._handle._managers_by_session_id["cli-workflow-tools"]  # type: ignore[attr-defined]
+    assert session_manager.role_manager is role_tool._manager
+    assert session_manager._current_agent_manager() is bridges[0].agent_manager
+    assert (  # type: ignore[attr-defined]
+        spawn_tool._agent_tree_runtime_router is bridges[0].agent_tree_runtime_router
+    )
+    assert role_tool._manager._config_path == kongming_home / "agent.toml"  # type: ignore[attr-defined]
+    roles = role_tool._manager.list_roles()  # type: ignore[attr-defined]
+    assert [role.role_id for role in roles] == ["1", "2", "3", "4"]
+    assert all(role.nickname != "legacy" for role in roles)
+    assert len(registration_calls) == 1
+    assert registration_calls[0][0] is runtime
 
 
 def _build_cfg() -> Config:
     return Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="stub-model",
-            base_url="http://127.0.0.1:1234",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         runner=RunnerConfig(max_turns=3),
         session=SessionConfig(backend="memory", store_path=".kongming/sessions.db"),
         trace=TraceConfig(output_path=".kongming/traces/test.jsonl"),
@@ -220,7 +309,7 @@ async def test_run_registers_mcp_runtime_tools_and_closes_manager(monkeypatch) -
         description = "fake mcp web search"
         input_schema = {"type": "object", "properties": {}}
 
-        async def execute(self, _args, _ctx):
+        async def execute(self, _prepared: PreparedToolCall, _ctx):
             return ToolResult(ok=True, content="ok")
 
     class _FakeMcpRuntimeRegistrationManager:
@@ -239,17 +328,20 @@ async def test_run_registers_mcp_runtime_tools_and_closes_manager(monkeypatch) -
         async def aclose(self) -> None:
             self.closed = True
 
-    class _DummyBridge:
+    class _DummyHostDispatcher:
         def __init__(
             self,
             *,
             runtime,
-            adapter,
-            session_id: str,
-            echo_final_content: bool = True,
-        ) -> None:
-            del runtime, adapter, echo_final_content
+            session_id,
+            queued_result_handler=None,
+            agent_tree_runtime_router=None,
+            approval_canceller=None,
+        ):
+            del runtime, queued_result_handler, agent_tree_runtime_router, approval_canceller
             self.session_id = session_id
+            self.agent_manager = object()
+            self.run_text = lambda *_, **__: None
 
         async def run_loop(self) -> None:
             return None
@@ -275,8 +367,14 @@ async def test_run_registers_mcp_runtime_tools_and_closes_manager(monkeypatch) -
         "McpRuntimeRegistrationManager",
         _FakeMcpRuntimeRegistrationManager,
     )
-    monkeypatch.setattr(cli_main.NativeRuntime, "build", staticmethod(_capture_build))
-    monkeypatch.setattr(cli_main, "SessionBridge", _DummyBridge)
+    monkeypatch.setattr(cli_main.SessionEngine, "build", staticmethod(_capture_build))
+    monkeypatch.setattr(cli_main, "HostDispatcher", _DummyHostDispatcher)
+    monkeypatch.setattr(
+        cli_main,
+        "build_default_command_service",
+        lambda *, adapter, runtime_delegate: object(),
+    )
+    monkeypatch.setattr(cli_main, "CLIInteractiveLoop", _DummyCLIInteractiveLoop)
     monkeypatch.setattr(cli_main, "_generate_cli_session_id", lambda: "cli-mcp-tools")
     monkeypatch.setattr(cli_main, "_print_banner", lambda *_, **__: None)
     monkeypatch.setattr(cli_main, "_discover_persistent_sessions", lambda _cfg: ([], None))
@@ -311,18 +409,21 @@ async def test_run_prefers_explicit_session_id(monkeypatch) -> None:
         def names(self) -> list[str]:
             return []
 
-    class _DummyBridge:
+    class _DummyHostDispatcher:
         def __init__(
             self,
             *,
             runtime,
-            adapter,
-            session_id: str,
-            echo_final_content: bool = True,
-        ) -> None:
-            del runtime, adapter, echo_final_content
+            session_id,
+            queued_result_handler=None,
+            agent_tree_runtime_router=None,
+            approval_canceller=None,
+        ):
+            del runtime, queued_result_handler, agent_tree_runtime_router, approval_canceller
             captured["session_id"] = session_id
             self.session_id = session_id
+            self.agent_manager = object()
+            self.run_text = lambda *_, **__: None
 
         async def run_loop(self) -> None:
             return None
@@ -336,9 +437,15 @@ async def test_run_prefers_explicit_session_id(monkeypatch) -> None:
     monkeypatch.setattr(cli_main, "build_default_registry", lambda **_: _DummyRegistry())
     monkeypatch.setattr(cli_main, "build_default_approval", lambda *_, **__: object())
     monkeypatch.setattr(
-        cli_main.NativeRuntime, "build", staticmethod(lambda *_, **__: _DummyRuntime())
+        cli_main.SessionEngine, "build", staticmethod(lambda *_, **__: _DummyRuntime())
     )
-    monkeypatch.setattr(cli_main, "SessionBridge", _DummyBridge)
+    monkeypatch.setattr(cli_main, "HostDispatcher", _DummyHostDispatcher)
+    monkeypatch.setattr(
+        cli_main,
+        "build_default_command_service",
+        lambda *, adapter, runtime_delegate: object(),
+    )
+    monkeypatch.setattr(cli_main, "CLIInteractiveLoop", _DummyCLIInteractiveLoop)
     monkeypatch.setattr(cli_main, "_generate_cli_session_id", lambda: "cli-generated")
     monkeypatch.setattr(cli_main, "_print_banner", lambda *_, **__: None)
     monkeypatch.setattr(cli_main, "_discover_persistent_sessions", lambda _cfg: ([], None))
@@ -358,7 +465,7 @@ async def test_run_prefers_explicit_session_id(monkeypatch) -> None:
     assert captured["session_id"] == "manual-session"
 
 
-async def test_run_reasoning_effort_overrides_config(monkeypatch) -> None:
+async def test_run_reasoning_effort_overrides_config(monkeypatch, tmp_path: Path) -> None:
     """--reasoning-effort CLI 参数应覆盖 cfg.model.reasoning_effort。"""
     captured: dict = {}
 
@@ -369,22 +476,36 @@ async def test_run_reasoning_effort_overrides_config(monkeypatch) -> None:
         def names(self) -> list[str]:
             return []
 
-    class _DummyBridge:
+    class _DummyHostDispatcher:
         def __init__(
             self,
             *,
             runtime,
-            adapter,
-            session_id: str,
-            echo_final_content: bool = True,
-        ) -> None:
-            del runtime, adapter, session_id, echo_final_content
+            session_id,
+            queued_result_handler=None,
+            agent_tree_runtime_router=None,
+            approval_canceller=None,
+        ):
+            del runtime, queued_result_handler, session_id, agent_tree_runtime_router
+            del approval_canceller
             self.session_id = "x"
+            self.agent_manager = object()
+            self.run_text = lambda *_, **__: None
 
         async def run_loop(self) -> None:
             return None
 
-    monkeypatch.setattr(cli_main, "_load_config_or_exit", lambda _: _build_cfg())
+    cfg = _build_cfg().model_copy(
+        update={
+            "model": ModelSelectionConfig(
+                preset_id="bigmodel-glm5-1m",
+                reasoning_effort="high",
+            )
+        }
+    )
+    monkeypatch.setenv("GLM_API_KEY", "test-glm-key")
+    monkeypatch.setenv("KONGMING_HOME", str(tmp_path))
+    monkeypatch.setattr(cli_main, "_load_config_or_exit", lambda _: cfg)
 
     async def _fake_assemble_instructions(_cfg, _files, *, skill_listing=""):
         return "system", [], None
@@ -397,8 +518,14 @@ async def test_run_reasoning_effort_overrides_config(monkeypatch) -> None:
         captured["reasoning_effort"] = cfg.model.reasoning_effort
         return _DummyRuntime()
 
-    monkeypatch.setattr(cli_main.NativeRuntime, "build", staticmethod(_capture_build))
-    monkeypatch.setattr(cli_main, "SessionBridge", _DummyBridge)
+    monkeypatch.setattr(cli_main.SessionEngine, "build", staticmethod(_capture_build))
+    monkeypatch.setattr(cli_main, "HostDispatcher", _DummyHostDispatcher)
+    monkeypatch.setattr(
+        cli_main,
+        "build_default_command_service",
+        lambda *, adapter, runtime_delegate: object(),
+    )
+    monkeypatch.setattr(cli_main, "CLIInteractiveLoop", _DummyCLIInteractiveLoop)
     monkeypatch.setattr(cli_main, "_generate_cli_session_id", lambda: "cli-x")
     monkeypatch.setattr(cli_main, "_print_banner", lambda *_, **__: None)
     monkeypatch.setattr(cli_main, "_discover_persistent_sessions", lambda _cfg: ([], None))
@@ -412,10 +539,10 @@ async def test_run_reasoning_effort_overrides_config(monkeypatch) -> None:
         smoke=False,
         instructions_files=[],
         trace_enabled=False,
-        reasoning_effort="low",
+        reasoning_effort="none",
     )
 
-    assert captured["reasoning_effort"] == "low"
+    assert captured["reasoning_effort"] == "none"
 
 
 def test_cli_help_shows_reasoning_effort_option() -> None:
@@ -424,6 +551,7 @@ def test_cli_help_shows_reasoning_effort_option() -> None:
     result = runner.invoke(cli_main.main, ["--help"])
     assert result.exit_code == 0
     assert "reasoning-effort" in result.output
+    assert "none/low/medium/high/max" in result.output
 
 
 def test_cli_help_shows_debug_option() -> None:
@@ -501,7 +629,7 @@ async def test_run_list_sessions_prints_and_skips_runtime_build(monkeypatch, cap
     def _unexpected_build(*_args, **_kwargs):
         raise AssertionError("runtime should not build for --list-sessions")
 
-    monkeypatch.setattr(cli_main.NativeRuntime, "build", staticmethod(_unexpected_build))
+    monkeypatch.setattr(cli_main.SessionEngine, "build", staticmethod(_unexpected_build))
 
     await cli_main._run(
         config_path=None,
@@ -530,18 +658,21 @@ async def test_run_resume_last_uses_most_recent_session(monkeypatch) -> None:
         def names(self) -> list[str]:
             return []
 
-    class _DummyBridge:
+    class _DummyHostDispatcher:
         def __init__(
             self,
             *,
             runtime,
-            adapter,
-            session_id: str,
-            echo_final_content: bool = True,
-        ) -> None:
-            del runtime, adapter, echo_final_content
+            session_id,
+            queued_result_handler=None,
+            agent_tree_runtime_router=None,
+            approval_canceller=None,
+        ):
+            del runtime, queued_result_handler, agent_tree_runtime_router, approval_canceller
             captured["session_id"] = session_id
             self.session_id = session_id
+            self.agent_manager = object()
+            self.run_text = lambda *_, **__: None
 
         async def run_loop(self) -> None:
             return None
@@ -565,9 +696,15 @@ async def test_run_resume_last_uses_most_recent_session(monkeypatch) -> None:
     monkeypatch.setattr(cli_main, "build_default_registry", lambda **_: _DummyRegistry())
     monkeypatch.setattr(cli_main, "build_default_approval", lambda *_, **__: object())
     monkeypatch.setattr(
-        cli_main.NativeRuntime, "build", staticmethod(lambda *_, **__: _DummyRuntime())
+        cli_main.SessionEngine, "build", staticmethod(lambda *_, **__: _DummyRuntime())
     )
-    monkeypatch.setattr(cli_main, "SessionBridge", _DummyBridge)
+    monkeypatch.setattr(cli_main, "HostDispatcher", _DummyHostDispatcher)
+    monkeypatch.setattr(
+        cli_main,
+        "build_default_command_service",
+        lambda *, adapter, runtime_delegate: object(),
+    )
+    monkeypatch.setattr(cli_main, "CLIInteractiveLoop", _DummyCLIInteractiveLoop)
     monkeypatch.setattr(cli_main, "_print_banner", lambda *_, **__: None)
     monkeypatch.setattr(
         cli_main,
@@ -640,7 +777,7 @@ async def test_run_rejects_missing_explicit_session(monkeypatch) -> None:
 
 
 async def test_run_debug_passes_prompt_debug_sink(monkeypatch) -> None:
-    """--debug 进入 _run 后应给 NativeRuntime.build 注入 prompt debug sink。"""
+    """--debug 进入 _run 后应给 SessionEngine.build 注入 prompt debug sink。"""
     captured: dict = {}
 
     class _DummyRegistry:
@@ -650,17 +787,21 @@ async def test_run_debug_passes_prompt_debug_sink(monkeypatch) -> None:
         def names(self) -> list[str]:
             return []
 
-    class _DummyBridge:
+    class _DummyHostDispatcher:
         def __init__(
             self,
             *,
             runtime,
-            adapter,
-            session_id: str,
-            echo_final_content: bool = True,
-        ) -> None:
-            del runtime, adapter, session_id, echo_final_content
+            session_id,
+            queued_result_handler=None,
+            agent_tree_runtime_router=None,
+            approval_canceller=None,
+        ):
+            del runtime, queued_result_handler, session_id, agent_tree_runtime_router
+            del approval_canceller
             self.session_id = "x"
+            self.agent_manager = object()
+            self.run_text = lambda *_, **__: None
 
         async def run_loop(self) -> None:
             return None
@@ -678,8 +819,14 @@ async def test_run_debug_passes_prompt_debug_sink(monkeypatch) -> None:
         captured.update(kwargs)
         return _DummyRuntime()
 
-    monkeypatch.setattr(cli_main.NativeRuntime, "build", staticmethod(_capture_build))
-    monkeypatch.setattr(cli_main, "SessionBridge", _DummyBridge)
+    monkeypatch.setattr(cli_main.SessionEngine, "build", staticmethod(_capture_build))
+    monkeypatch.setattr(cli_main, "HostDispatcher", _DummyHostDispatcher)
+    monkeypatch.setattr(
+        cli_main,
+        "build_default_command_service",
+        lambda *, adapter, runtime_delegate: object(),
+    )
+    monkeypatch.setattr(cli_main, "CLIInteractiveLoop", _DummyCLIInteractiveLoop)
     monkeypatch.setattr(cli_main, "_generate_cli_session_id", lambda: "cli-debug")
     monkeypatch.setattr(cli_main, "_print_banner", lambda *_, **__: None)
     monkeypatch.setattr(cli_main, "_discover_persistent_sessions", lambda _cfg: ([], None))

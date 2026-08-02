@@ -34,20 +34,17 @@ import asyncio
 import contextlib
 import logging
 import re
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 
-from hosts.web.approvals.auto.ws_handlers import (
-    build_auto_approval_state_msg,
-    handle_auto_approval_query,
-    handle_auto_approval_toggle,
-)
 from hosts.web.auth.middleware import SESSION_COOKIE_NAME, verify_session_cookie
-from hosts.web.integrations.claude_code.approval import ApprovalBridge
+from hosts.web.integrations.claude_code.contracts import ClaudeApprovalFactoryProtocol
 from hosts.web.integrations.claude_code.normalizer import ClaudeNormalizer
 from hosts.web.integrations.claude_code.service import ClaudeCodeService
+from hosts.web.protocol import ErrorFrame
 from hosts.web.protocol.rest_models import UserInputAttachment
 from hosts.web.shared.reconnectable_writer import ReconnectableWebSocketWriter
 from hosts.web.shared.session_manager import SessionManager
@@ -234,24 +231,20 @@ async def claude_code_ws(
     bound_claude_tid: str = getattr(meta, "claude_thread_id", "") if meta is not None else ""
 
     normalizer = ClaudeNormalizer()
-    # smart-approval-v1 装配：从 app.state 取 policy/audit（未装配时 None → 走老行为）
-    auto_approval_policy = getattr(websocket.app.state, "auto_approval_policy", None)
-    auto_approval_audit = getattr(websocket.app.state, "auto_approval_audit", None)
-    # smart-approval-v2-inbox 装配：全局 inbox broadcaster（未装配时 None → 走 v1 行为，仅本 thread WS 弹窗）
-    inbox_broadcaster = getattr(websocket.app.state, "approval_inbox_broadcaster", None)
-    approval = ApprovalBridge(
+    approval_factory = getattr(
+        websocket.app.state,
+        "approval_runtime_manager",
+        None,
+    )
+    if not isinstance(approval_factory, ClaudeApprovalFactoryProtocol):
+        raise RuntimeError("approval_runtime_manager is not configured")
+    approval_thread_id = bound_thread_id or f"claude-{id(websocket):x}"
+    approval = approval_factory.build_claude_bridge(
         normalizer,
         sessions,
-        policy=auto_approval_policy,
-        audit=auto_approval_audit,
         cwd=bound_cwd,
-        thread_id=bound_thread_id,
-        channel="claude_code",
-        inbox_broadcaster=inbox_broadcaster,
+        thread_id=approval_thread_id,
     )
-    # v2-inbox: 注册 thread_id → bridge 映射，让前端 inbox.resolve 帧能路由回此 bridge
-    if inbox_broadcaster is not None and bound_thread_id:
-        inbox_broadcaster.register_bridge(bound_thread_id, approval)
     # v0.2 透传 thread_manager（可能为 None — 老路径 / 未配置时仍能运行）
     tm_for_service: ThreadManagerProtocol | None = getattr(
         websocket.app.state,
@@ -291,26 +284,12 @@ async def claude_code_ws(
     )
 
     # 2.7 evolution hook: register event route
+    evo_sink = None
     if evolution_manager is not None and evolution_manager.enabled and bound_thread_id:
         from hosts.web.websocket.event_sink import WSEventSink
 
         evo_sink = WSEventSink(ws=websocket, thread_id=bound_thread_id)
         evolution_manager.register_event_route(bound_thread_id, evo_sink)
-
-    # 2.8 smart-approval-v1: 连接建立后主动 push 一次 state（前端 toggle 初始状态）
-    if auto_approval_policy is not None and bound_cwd:
-        try:
-            await websocket.send_json(
-                build_auto_approval_state_msg(auto_approval_policy, bound_cwd),
-            )
-        except Exception as exc:
-            log_network_exception(
-                "hosts.web.integrations.claude_code.route",
-                "initial_auto_approval_state_failed",
-                exc,
-                thread_id=bound_thread_id,
-                cwd=bound_cwd,
-            )
 
     # 3. 主循环
     try:
@@ -329,7 +308,6 @@ async def claude_code_ws(
                 writer,
                 data,
                 service,
-                approval,
                 sessions,
                 bg_tasks,
                 bound_thread_id=bound_thread_id,
@@ -385,11 +363,7 @@ async def claude_code_ws(
         )
         # evolution hook: unregister event route on any exit path
         if evolution_manager is not None and evolution_manager.enabled and bound_thread_id:
-            evolution_manager.unregister_event_route(bound_thread_id)
-        # v2-inbox: unregister bridge（仅在 registry 里是本 bridge 时才删；
-        # 多 tab 同 thread 时新连接会覆盖，老连接断时不应误删新的）
-        if inbox_broadcaster is not None and bound_thread_id:
-            inbox_broadcaster.unregister_bridge(bound_thread_id, approval)
+            evolution_manager.unregister_event_route(bound_thread_id, evo_sink)
 
 
 async def _dispatch(
@@ -397,7 +371,6 @@ async def _dispatch(
     writer: ReconnectableWebSocketWriter,
     data: dict[str, Any],
     service: ClaudeCodeService,
-    approval: ApprovalBridge,
     sessions: SessionManager,
     bg_tasks: set[asyncio.Task[Any]],
     *,
@@ -501,11 +474,7 @@ async def _dispatch(
         return
 
     if msg_type == "claude-permission-response":
-        request_id = data.get("requestId")
-        if not isinstance(request_id, str):
-            await _send_error(websocket, "claude-permission-response.requestId required")
-            return
-        approval.resolve(request_id, data)
+        await _send_error(websocket, "use approval.inbox.resolve on /ws/thread-status")
         return
 
     if msg_type == "abort-session":
@@ -562,19 +531,17 @@ async def _dispatch(
         )
         return
 
-    # smart-approval-v1: per-cwd toggle 开关 + 回执 state
-    # 真正的 toggle/query/state 构造逻辑迁到 web.approvals.auto.ws_handlers，
-    # 让 generic_chat 等其他通道复用。route 这里只负责从 app.state 取 policy
-    # 并透传，保留命令路由分发职责。
-    if msg_type == "auto-approval-toggle":
-        policy = getattr(websocket.app.state, "auto_approval_policy", None)
-        await handle_auto_approval_toggle(websocket, data, policy)
-        return
+    if msg_type in {"auto-approval-set-mode", "auto-approval-query"}:
+        from hosts.web.approvals.auto.ws_handlers import (
+            handle_auto_approval_query,
+            handle_auto_approval_set_mode,
+        )
 
-    if msg_type == "auto-approval-query":
-        # 前端按 cwd 主动拉一次 state（切 thread / 重连后用）
         policy = getattr(websocket.app.state, "auto_approval_policy", None)
-        await handle_auto_approval_query(websocket, data, policy)
+        if msg_type == "auto-approval-set-mode":
+            await handle_auto_approval_set_mode(websocket, data, policy)
+        else:
+            await handle_auto_approval_query(websocket, data, policy)
         return
 
     await _send_error(websocket, f"unknown command type: {msg_type!r}")
@@ -596,6 +563,24 @@ async def _send_error(websocket: WebSocket, error_message: str) -> None:
             "send_error_frame_failed",
             exc,
             error_message=error_message,
+        )
+
+
+async def _send_auto_approval_disabled(websocket: WebSocket) -> None:
+    """向旧倒计时客户端返回稳定的功能停用错误码。"""
+    try:
+        frame = ErrorFrame(
+            error_code="feature_disabled",
+            message="智能审批倒计时已停用。",
+            reason="auto_approval_disabled",
+            timestamp_ms=int(time.time() * 1000),
+        )
+        await websocket.send_json(frame.model_dump())
+    except Exception as exc:
+        log_network_exception(
+            "hosts.web.integrations.claude_code.route",
+            "send_auto_approval_disabled_failed",
+            exc,
         )
 
 

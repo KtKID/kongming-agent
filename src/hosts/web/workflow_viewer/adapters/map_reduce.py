@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from typing_extensions import override
+
 from hosts.web.workflow_viewer.adapters.unknown import UnknownWorkflowViewerAdapter
 from hosts.web.workflow_viewer.artifact_reader import WorkflowArtifactReader
 from hosts.web.workflow_viewer.models import (
@@ -17,6 +19,7 @@ from hosts.web.workflow_viewer.models import (
 class MapReduceWorkflowViewerAdapter(UnknownWorkflowViewerAdapter):
     mode = "map_reduce"
 
+    @override
     def project(self, bundle: WorkflowArtifactBundle) -> WorkflowModeProjection:
         base = super().project(bundle)
         reader = WorkflowArtifactReader(bundle.workflow_dir)

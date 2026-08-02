@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from hosts.web.approvals.auto.audit import AuditLogger
 from safety.auto_approval.config_store import ConfigStore, ProjectConfig
-from safety.auto_approval.policy import AutoApprovalPolicy, Decision
+from safety.auto_approval.policy import AutoApprovalPolicy
 from safety.auto_approval.rules import (
     RuleDefinition,
     load_default_rules,
@@ -36,7 +36,6 @@ __all__ = [
     "AuditLogger",
     "AutoApprovalPolicy",
     "ConfigStore",
-    "Decision",
     "ProjectConfig",
     "RuleDefinition",
     "load_default_rules",

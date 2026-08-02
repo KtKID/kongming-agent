@@ -36,17 +36,12 @@ from infrastructure.config.models import Config
 def _make_cfg(*, dev_mode: bool = True) -> Config:
     return Config.model_validate(
         {
-            "model": {
-                "name": "fake",
-                "base_url": "http://127.0.0.1:1234/v1",
-                "api_key": "",
-            },
+            "model": {"preset_id": "local-gemma-4-e4b-it"},
             "web": {
                 "enabled": True,
                 "dev_mode": dev_mode,
                 "idle_timeout_seconds": 1800,
                 "idle_check_interval_seconds": 60,
-                "pending_approval_timeout_seconds": 60,
             },
         }
     )
@@ -219,18 +214,13 @@ def test_password_not_configured_raises(tmp_path: Path, monkeypatch: pytest.Monk
 def test_initial_password_from_config_bootstraps_hash(tmp_path: Path) -> None:
     cfg = Config.model_validate(
         {
-            "model": {
-                "name": "fake",
-                "base_url": "http://127.0.0.1:1234/v1",
-                "api_key": "",
-            },
+            "model": {"preset_id": "local-gemma-4-e4b-it"},
             "web": {
                 "enabled": True,
                 "dev_mode": True,
                 "initial_password": "bootstrap-password",
                 "idle_timeout_seconds": 1800,
                 "idle_check_interval_seconds": 60,
-                "pending_approval_timeout_seconds": 60,
             },
         }
     )
@@ -313,11 +303,7 @@ def test_lifespan_startup_recovers_pending_evolution_apply_jobs(tmp_path: Path) 
 
     cfg = Config.model_validate(
         {
-            "model": {
-                "name": "fake",
-                "base_url": "http://127.0.0.1:1234/v1",
-                "api_key": "",
-            },
+            "model": {"preset_id": "local-gemma-4-e4b-it"},
             "web": {"enabled": True, "dev_mode": True},
             "evolution": {
                 "learning": {

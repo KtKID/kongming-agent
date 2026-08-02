@@ -18,11 +18,8 @@
  * - `:section` 不在后端 schema.groups 中 → 同上
  * - 重定向用 `Navigate replace`，避免污染浏览器历史
  *
- * ## SafetySection 签名不一致
- *
- * SafetySection 一期不接受 `fields` prop（safety 字段全部是 list/dict，
- * 全量只读由 SafetyRulesView 接管），其它专用 section 都按 `{ fields }` 接收。
- * 未专门实现的后端 group 走 GenericConfigSection 兜底。
+ * SafetySection 与其它专用 section 一样接收后端 schema 过滤后的 fields；
+ * 它只渲染 LLM 审批复核器配置；处置模式通过聊天页按 cwd 设置。
  *
  * ## 数据流不直连 fetch
  *
@@ -59,7 +56,7 @@ function renderSection(section: string, label: string, fields: FieldMeta[]): Rea
     case "host_observ":
       return <HostObservSection fields={fields} />;
     case "safety":
-      return <SafetySection />;
+      return <SafetySection fields={fields} />;
     default:
       return (
         <GenericConfigSection groupId={section} label={label} fields={fields} />

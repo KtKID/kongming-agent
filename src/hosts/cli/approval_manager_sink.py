@@ -39,7 +39,11 @@ class CLIApprovalEventSink:
                 pending.request_id,
                 pending.tool_name,
             )
-            self._manager.resolve(pending.request_id, {"allow": False})
+            await self._manager.resolve(
+                pending.thread_id,
+                pending.request_id,
+                {"allow": False, "remember": False},
+            )
             return
 
         try:
@@ -48,7 +52,11 @@ class CLIApprovalEventSink:
             logger.exception("CLI 审批提示失败，自动拒绝。request_id=%s", pending.request_id)
             action = ApprovalAction.REJECT
 
-        self._manager.resolve(pending.request_id, _action_to_manager_payload(action))
+        await self._manager.resolve(
+            pending.thread_id,
+            pending.request_id,
+            _action_to_manager_payload(action),
+        )
 
     async def emit_approval_removed(self, *, request_id: str, reason: str) -> None:
         """终端 UI 无需移除事件；请求完成与用户输入同步发生。"""
@@ -62,8 +70,8 @@ def _pending_to_request(pending: PendingApprovalView) -> ApprovalRequest:
     metadata["approval_request_id"] = pending.request_id
     metadata["severity"] = pending.severity
     metadata["timeout_ms"] = pending.timeout_ms
-    metadata["auto_approve_at_ms"] = pending.auto_approve_at_ms
-    metadata["auto_reject_at_ms"] = pending.auto_reject_at_ms
+    metadata["danger"] = pending.danger
+    metadata["remember_allowed"] = pending.remember_allowed
     if pending.matched_rule is not None:
         metadata["matched_rule"] = pending.matched_rule
         metadata["blocked_by_rule"] = pending.matched_rule
@@ -81,13 +89,18 @@ def _pending_to_request(pending: PendingApprovalView) -> ApprovalRequest:
 
 
 def _action_to_manager_payload(action: ApprovalAction) -> dict[str, Any]:
+    """把 CLI action 转换为 thread remember 二态。"""
     if action in {
         ApprovalAction.ACCEPT_ONCE,
         ApprovalAction.ACCEPT_FOR_SESSION,
         ApprovalAction.ACCEPT_PERSIST,
     }:
-        return {"allow": True}
-    return {"allow": False}
+        return {
+            "allow": True,
+            "remember": action
+            in {ApprovalAction.ACCEPT_FOR_SESSION, ApprovalAction.ACCEPT_PERSIST},
+        }
+    return {"allow": False, "remember": False}
 
 
 def _coerce_int(value: object, *, default: int) -> int:

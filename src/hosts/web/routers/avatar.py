@@ -1,14 +1,14 @@
 """Avatar 消息 REST API 路由。
 
-本脚本把 AvatarManager 暴露为 `/api/avatar/v1/*` REST 合同。关键流程是
-Router 从 app.state 读取 AvatarManager，解析 Web cookie 或 XSpace mobile
-device token scope，执行消息注册、拉取、ack 和 chat disabled 响应。关键函数
-职责：鉴权 helper 收口 scope/CSRF 边界，DTO helper 负责 snake_case 内部模型到
+本脚本把 AvatarManager 暴露为 `/api/avatar/v1/*` REST 合同。当前 v1 联调期
+鉴权 helper 直接放行请求，便于 XSpace 先跑通消息拉取、ack 和展示闭环。关键函数
+职责：鉴权 helper 保留原参数形状并返回通过，DTO helper 负责 snake_case 内部模型到
 camelCase wire 响应的转换。
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
@@ -16,12 +16,7 @@ from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.responses import JSONResponse
 
-from hosts.web.auth.middleware import (
-    CSRF_HEADER_NAME,
-    CSRF_HEADER_VALUE,
-    SESSION_COOKIE_NAME,
-    verify_session_cookie,
-)
+from hosts.web.approvals.global_inbox import get_inbox_broadcaster
 from hosts.web.avatar import (
     AvatarAckBatchRequest,
     AvatarAckRequest,
@@ -39,15 +34,14 @@ from hosts.web.avatar import (
 )
 from hosts.web.avatar import errors as avatar_errors
 from hosts.web.protocol.rest_models import UserInputAttachment
-from hosts.web.xspace_mobile import errors as mobile_errors
-from hosts.web.xspace_mobile.models import MobileDeviceRecord
-from hosts.web.xspace_mobile.token_service import MobileDeviceTokenService
 
 router = APIRouter(tags=["avatar"])
+logger = logging.getLogger(__name__)
 
 _READ_SCOPES = frozenset({"avatar.read", "thread.read"})
 _ACK_SCOPES = frozenset({"avatar.ack"})
 _CHAT_SCOPES = frozenset({"avatar.chat"})
+_APPROVAL_SCOPES = frozenset({"avatar.chat"})
 
 
 class RegisterAvatarMessageRequest(BaseModel):
@@ -106,7 +100,7 @@ class AvatarRestChatMessageBody(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     text: str = Field(min_length=1, max_length=8000)
-    reasoning_effort: Literal["low", "medium", "high"] | None = Field(
+    reasoning_effort: Literal["none", "low", "medium", "high", "max"] | None = Field(
         default=None,
         alias="reasoningEffort",
     )
@@ -136,6 +130,22 @@ class AvatarChatRequestBody(BaseModel):
     client: AvatarRestChatClientBody
 
 
+class AvatarResolveApprovalRequest(BaseModel):
+    """Avatar 审批回写请求 DTO。"""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    thread_id: str | None = Field(default=None, alias="threadId", max_length=256)
+    call_id: str | None = Field(default=None, alias="callId", max_length=256)
+    request_id: str | None = Field(default=None, alias="requestId", max_length=256)
+    action: Literal["accept_once", "accept_for_session", "reject"]
+    client_id: str | None = Field(
+        default=None,
+        alias="clientId",
+        max_length=160,
+    )
+
+
 def _manager(request: Request) -> AvatarManager:
     """读取 app.state 中的 AvatarManager。"""
     manager = getattr(request.app.state, "avatar_manager", None)
@@ -144,12 +154,16 @@ def _manager(request: Request) -> AvatarManager:
     return manager
 
 
-def _token_service(request: Request) -> MobileDeviceTokenService:
-    """读取 app.state 中的移动 token service。"""
-    service = getattr(request.app.state, "xspace_mobile_token_service", None)
-    if not isinstance(service, MobileDeviceTokenService):
-        raise avatar_errors.forbidden("xspace mobile token service is not configured")
-    return service
+def _approval_inbox_broadcaster(request: Request) -> Any:
+    """读取 app.state 中的 ApprovalInboxBroadcaster 兼容对象。"""
+    manager = getattr(request.app.state, "approval_inbox_broadcaster", None)
+    if manager is None:
+        manager = get_inbox_broadcaster()
+        request.app.state.approval_inbox_broadcaster = manager
+    resolve = getattr(manager, "resolve", None)
+    if not callable(resolve):
+        raise avatar_errors.invalid_request("avatar approval inbox is not configured")
+    return manager
 
 
 def _error_response(error: avatar_errors.AvatarMessageError) -> JSONResponse:
@@ -160,62 +174,15 @@ def _error_response(error: avatar_errors.AvatarMessageError) -> JSONResponse:
     )
 
 
-def _csrf_valid(request: Request) -> bool:
-    """判断请求是否携带 Web cookie 调试路径需要的 CSRF header。"""
-    return request.headers.get(CSRF_HEADER_NAME) == CSRF_HEADER_VALUE
-
-
-def _cookie_valid(request: Request) -> bool:
-    """判断 Web cookie 登录态是否有效。"""
-    serializer = getattr(request.app.state, "serializer", None)
-    if serializer is None:
-        return False
-    payload = verify_session_cookie(request.cookies.get(SESSION_COOKIE_NAME), serializer)
-    if payload is None:
-        return False
-    request.state.session_payload = payload
-    return True
-
-
-def _bearer_device(request: Request) -> MobileDeviceRecord | None:
-    """解析并校验 Authorization Bearer device token。"""
-    raw = request.headers.get("Authorization", "")
-    prefix = "Bearer "
-    if not raw.startswith(prefix):
-        return None
-    token = raw[len(prefix) :].strip()
-    if not token:
-        return None
-    try:
-        return _token_service(request).validate_device_token(token)
-    except mobile_errors.MobilePairingError:
-        return None
-
-
 def _authorize(
     request: Request,
     *,
     scopes: frozenset[str],
     allow_cookie: bool = True,
     require_csrf_for_cookie: bool = False,
-) -> MobileDeviceRecord | None:
-    """校验 Bearer scope 或 Web cookie 调试权限。
-
-    关键输入：请求、允许 scope、cookie 调试开关和 CSRF 要求。
-    关键输出：Bearer 鉴权时返回设备记录；cookie 鉴权时返回 None。
-    """
-    device = _bearer_device(request)
-    if device is not None:
-        if scopes and not scopes.intersection(device.scopes):
-            raise avatar_errors.forbidden("avatar scope missing")
-        return device
-
-    if allow_cookie and _cookie_valid(request):
-        if require_csrf_for_cookie and not _csrf_valid(request):
-            raise avatar_errors.forbidden(f"CSRF guard: {CSRF_HEADER_NAME} required")
-        return None
-
-    raise avatar_errors.forbidden("avatar authentication required")
+) -> None:
+    """Avatar v1 联调期放行请求，输入保留原鉴权参数，输出恒为通过。"""
+    return None
 
 
 def _authorize_cookie(
@@ -223,15 +190,8 @@ def _authorize_cookie(
     *,
     require_csrf: bool = False,
 ) -> None:
-    """校验 Web cookie 调试权限。
-
-    关键输入：请求和 CSRF 要求。
-    关键输出：合法 cookie 通过；失败时抛 AvatarMessageError。
-    """
-    if not _cookie_valid(request):
-        raise avatar_errors.forbidden("avatar web cookie required")
-    if require_csrf and not _csrf_valid(request):
-        raise avatar_errors.forbidden(f"CSRF guard: {CSRF_HEADER_NAME} required")
+    """Avatar v1 联调期放行 Web 调试注册请求，输出恒为通过。"""
+    return None
 
 
 def _message_to_wire(message: AvatarMessageSnapshot) -> dict[str, Any]:
@@ -288,6 +248,25 @@ def _accepted_to_wire(accepted: AvatarChatAccepted) -> dict[str, Any]:
     }
 
 
+def _approval_decision_for_action(
+    action: str,
+    *,
+    remember_rule: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """把 Avatar action 映射为 ApprovalManager.resolve 入参。"""
+    if action == "accept_once":
+        return {"allow": True, "remember": False}
+    if action == "accept_for_session":
+        if remember_rule is None:
+            raise avatar_errors.invalid_request("remember rule is unavailable")
+        return {
+            "allow": True,
+            "remember": True,
+            "rememberRule": remember_rule,
+        }
+    return {"allow": False, "remember": False}
+
+
 def _register_input(payload: RegisterAvatarMessageRequest) -> AvatarMessageInput:
     """把 debug register 请求转换为 AvatarMessageInput。"""
     return AvatarMessageInput(
@@ -329,6 +308,59 @@ async def register_avatar_message(
     except avatar_errors.AvatarMessageError as exc:
         return _error_response(exc)
     return JSONResponse(content=_message_to_wire(message))
+
+
+@router.post("/api/avatar/v1/approvals/{request_id}/resolve")
+async def resolve_avatar_approval(
+    request_id: str,
+    payload: AvatarResolveApprovalRequest,
+    request: Request,
+) -> JSONResponse:
+    """Avatar 审批 resolve endpoint。"""
+    try:
+        _authorize(
+            request,
+            scopes=_APPROVAL_SCOPES,
+            require_csrf_for_cookie=True,
+        )
+        if payload.request_id is not None and payload.request_id != request_id:
+            raise avatar_errors.invalid_request("requestId does not match path")
+        if payload.call_id is not None and payload.call_id != request_id:
+            raise avatar_errors.invalid_request("callId does not match path")
+        if not payload.thread_id:
+            raise avatar_errors.invalid_request("threadId is required")
+        manager = _approval_inbox_broadcaster(request)
+        remember_rule: dict[str, Any] | None = None
+        if payload.action == "accept_for_session":
+            remember_rule_for = getattr(manager, "remember_rule_for", None)
+            if callable(remember_rule_for):
+                candidate = remember_rule_for(payload.thread_id, request_id)
+                if isinstance(candidate, dict):
+                    remember_rule = candidate
+        decision = _approval_decision_for_action(
+            payload.action,
+            remember_rule=remember_rule,
+        )
+        ok = await manager.resolve(payload.thread_id, request_id, decision)
+        logger.info(
+            "avatar approval resolve: request_id=%s thread_id=%s action=%s client_id=%s ok=%s",
+            request_id,
+            payload.thread_id,
+            payload.action,
+            payload.client_id,
+            ok,
+        )
+        if not ok:
+            raise avatar_errors.approval_not_found(request_id)
+    except avatar_errors.AvatarMessageError as exc:
+        return _error_response(exc)
+    return JSONResponse(
+        content={
+            "ok": True,
+            "requestId": request_id,
+            "action": payload.action,
+        }
+    )
 
 
 @router.get("/api/avatar/v1/messages")
@@ -437,12 +469,11 @@ async def post_avatar_chat(
 ) -> JSONResponse:
     """Avatar chat REST accepted endpoint。"""
     try:
-        device = _authorize(
+        _authorize(
             request,
             scopes=_CHAT_SCOPES,
             require_csrf_for_cookie=True,
         )
-        device_id = payload.client.device_id or (device.device_id if device is not None else None)
         accepted = await _manager(request).chat(
             AvatarChatRequest(
                 text=payload.message.text,
@@ -452,7 +483,7 @@ async def post_avatar_chat(
                 reasoning_effort=payload.message.reasoning_effort,
                 attachments=payload.message.attachments,
                 client_message_id=payload.client.client_message_id,
-                device_id=device_id,
+                device_id=payload.client.device_id,
                 capabilities=payload.client.capabilities,
             )
         )

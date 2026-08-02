@@ -1,11 +1,9 @@
 import { useEffect } from "react";
-import { Zap, ZapOff } from "lucide-react";
-import { Switch } from "@/components/ui/switch";
 import {
   type AutoApprovalSocket,
   queryAutoApproval,
   selectCwdState,
-  toggleAutoApproval,
+  setAutoApprovalMode,
   useAutoApprovalStore,
 } from "./useAutoApproval";
 
@@ -27,7 +25,7 @@ interface Props {
   socket?: AutoApprovalSocket | null;
 }
 
-export function AutoApprovalToggle({ cwd, socket }: Props) {
+export function AutoApprovalModeSelector({ cwd, socket }: Props) {
   const state = useAutoApprovalStore(selectCwdState(cwd));
 
   // 挂载 / cwd 变更 / socket 变更 → 主动 query 一次
@@ -38,36 +36,31 @@ export function AutoApprovalToggle({ cwd, socket }: Props) {
 
   if (!cwd || !socket) return null;
 
-  const enabled = state?.enabled ?? false;
-  const seconds = Math.round((state?.timeoutMs ?? 10000) / 1000);
-
-  const onChange = (next: boolean) => {
-    toggleAutoApproval(socket, cwd, next);
+  const mode = state?.mode ?? "user";
+  const onChange = (next: string) => {
+    if (next === "user" || next === "llm" || next === "full_trust") {
+      setAutoApprovalMode(socket, cwd, next);
+    }
   };
 
   return (
     <label
       className="inline-flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-xs text-muted-foreground hover:bg-muted/60"
       title={`智能审批 · 当前 project: ${cwd}`}
-      data-testid="auto-approval-toggle"
+      data-testid="approval-mode-selector"
     >
-      {enabled ? (
-        <Zap className="h-3.5 w-3.5 text-primary" />
-      ) : (
-        <ZapOff className="h-3.5 w-3.5 opacity-50" />
-      )}
-      <span className={enabled ? "text-primary" : ""}>
-        智能审批
-        {enabled ? (
-          <span className="ml-1 text-[10px] opacity-80">{seconds}s</span>
-        ) : null}
-      </span>
-      <Switch
-        checked={enabled}
-        onCheckedChange={onChange}
-        aria-label="切换智能审批"
-        data-testid="auto-approval-switch"
-      />
+      <span>审批模式</span>
+      <select
+        aria-label="审批模式"
+        className="h-6 rounded border border-input bg-background px-1 text-xs"
+        value={mode}
+        onChange={(event) => onChange(event.target.value)}
+        data-testid="approval-mode-select"
+      >
+        <option value="user">用户审批</option>
+        <option value="llm">LLM 复核</option>
+        <option value="full_trust">完全信任</option>
+      </select>
     </label>
   );
 }

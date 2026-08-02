@@ -20,6 +20,9 @@ class ToolContext:
         turn: 工具被调用所在的 turn，从 1 开始计数。
         call_id: 对应的 :class:`core.message.ToolCall.call_id`。
         metadata: 装配层注入的额外上下文（例如 cwd、env 快照），core 不解释内容。
+        agent_id: 调用该工具的 agent id（agent-tree-v0.1 模块 G）。单 agent
+            场景默认 ``""``，由 runner 在 ToolContext 构建处填入真实值；工具
+            实现可读 ``ctx.agent_id`` 判断被哪个 agent 调用（不加 epoch）。
     """
 
     run_id: str
@@ -27,6 +30,26 @@ class ToolContext:
     turn: int
     call_id: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    agent_id: str = ""
+
+
+@dataclass(frozen=True)
+class ToolExecutionScope:
+    """工具准备阶段冻结的实际执行边界。
+
+    ``cwd`` 表示工具真正执行时使用的 canonical absolute working directory。
+    没有目录语义的工具保留 ``None``。
+    """
+
+    cwd: str | None = None
+
+
+@dataclass(frozen=True)
+class PreparedToolCall:
+    """审批与执行共同消费的工具调用快照。"""
+
+    arguments: dict[str, Any]
+    execution_scope: ToolExecutionScope = field(default_factory=ToolExecutionScope)
 
 
 @dataclass(frozen=True)
@@ -60,8 +83,25 @@ class Tool(Protocol):
     description: str
     input_schema: dict[str, Any]
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        """执行一次工具调用。必须是 async。"""
+    async def execute(
+        self,
+        prepared: PreparedToolCall,
+        ctx: ToolContext,
+    ) -> ToolResult:
+        """执行一次已准备的工具调用。必须是 async。
+
+        调用方必须在审批前完成参数校验、默认填充与语义归一化，并把冻结事实
+        放入 :class:`PreparedToolCall`。执行入口只消费该快照。
+        """
+        ...
+
+
+@runtime_checkable
+class ToolCallPreparer(Protocol):
+    """可在审批前把模型参数解析为稳定执行事实的工具合同。"""
+
+    def prepare(self, arguments: dict[str, Any], context: ToolContext) -> PreparedToolCall:
+        """纯函数、幂等地返回审批与执行共用的 prepared call。"""
         ...
 
 
@@ -81,8 +121,11 @@ class ToolLookup(Protocol):
 # ---------------------------------------------------------------------------
 # Approval 相关支撑类型
 __all__ = [
+    "PreparedToolCall",
     "Tool",
+    "ToolCallPreparer",
     "ToolContext",
+    "ToolExecutionScope",
     "ToolLookup",
     "ToolResult",
 ]

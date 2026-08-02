@@ -23,10 +23,12 @@ import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from hosts.web.integrations.claude_code.approval import ApprovalBridge
 from hosts.web.integrations.claude_code.normalizer import ClaudeNormalizer
 from hosts.web.integrations.claude_code.service import ClaudeCodeService
 from hosts.web.shared.session_manager import SessionManager
+from tests.unit.web.integrations.claude_code._approval_test_support import (
+    build_test_approval_bridge as ApprovalBridge,
+)
 
 
 class _FakeWriter:

@@ -46,6 +46,14 @@ import time
 from pathlib import Path
 from typing import Any, Literal
 
+from core.contracts import Event
+
+
+def _now_epoch_ms() -> int:
+    """返回审计记录使用的 Unix 毫秒时间戳。"""
+    return int(time.time() * 1000)
+
+
 # 合法 outcome（用于 helper 校验，运行时只警告不抛）
 Outcome = Literal[
     "denied",
@@ -104,7 +112,7 @@ class AuditLogger:
         即使后续 decision 因连接断开等原因未落盘，也能查到 request 本身。
         """
         record = {
-            "ts_ms": ts_ms if ts_ms is not None else int(time.time() * 1000),
+            "ts_ms": ts_ms if ts_ms is not None else _now_epoch_ms(),
             "channel": channel,
             "thread_id": thread_id,
             "cwd": cwd,
@@ -143,7 +151,7 @@ class AuditLogger:
         # 不抛——审计不能因字段错误阻断主流程；非白名单值带 unknown: 前缀
         outcome_safe = outcome if outcome in _VALID_OUTCOMES else f"unknown:{outcome}"
 
-        now_ms = int(time.time() * 1000)
+        now_ms = _now_epoch_ms()
         record = {
             "ts_ms": ts_ms if ts_ms is not None else now_ms,
             "channel": channel,
@@ -163,6 +171,51 @@ class AuditLogger:
             },
         }
         self._append_line(record)
+
+    def log_llm_auto_allow(
+        self,
+        *,
+        channel: str,
+        thread_id: str,
+        request_id: str,
+        cwd: str,
+        mode: str,
+        tool_name: str,
+        matched_rule: str | None,
+        model: str,
+        reason: str,
+        timeout_ms: int,
+    ) -> None:
+        """记录 LLM allow 进入用户可中断倒计时窗口的高优先级审计。"""
+        self._append_line(
+            {
+                "ts_ms": _now_epoch_ms(),
+                "event": "approval.llm.auto_allow",
+                "priority": "high",
+                "channel": channel,
+                "thread_id": thread_id,
+                "request_id": request_id,
+                "cwd": cwd,
+                "mode": mode,
+                "tool_name": tool_name,
+                "matched_rule": matched_rule,
+                "model": model,
+                "reason": reason,
+                "timeout_ms": timeout_ms,
+            }
+        )
+
+    async def emit(self, event: Event) -> None:
+        """把标准 EventSink 事件追加到同一安全审计 JSONL。"""
+        self._append_line(
+            {
+                "ts_ms": _now_epoch_ms(),
+                "event": event.kind,
+                "run_id": event.run_id,
+                "turn": event.turn,
+                "payload": dict(event.payload),
+            }
+        )
 
     def read_all(self) -> list[dict[str, Any]]:
         """读取所有审计行（测试用，生产慎用——文件可能极大）。"""

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from typing_extensions import override
+
 PUBLIC_ERROR_CODE_BY_INTERNAL_CODE: dict[str, str] = {
     "invalid_request": "invalid_pairing_payload",
     "claim_not_found": "pairing_not_found",
@@ -59,6 +61,7 @@ class MobilePairingError(Exception):
     message: str
     retryable: bool = False
 
+    @override
     def __str__(self) -> str:
         """返回开发者可读错误文本。
 

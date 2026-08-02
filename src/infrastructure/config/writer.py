@@ -12,7 +12,7 @@
 - 写完跑 :func:`infrastructure.config.load_config` 做 pydantic 校验 — 校验失败立刻
   删临时文件，原文件**不动**，把错误翻译成 ``[{"path", "message"}]`` 抛出
 
-参考：``safety.grants.persister`` 已有 ruamel round-trip 模式（追加列表场景，
+使用临时文件 + 原子替换完成 YAML 写回（追加列表场景，
 不带 mtime / 校验 / pydantic 闭环；本模块是"任意字段定点修改 + 校验回滚"的
 更通用版本，不复用其代码）。
 

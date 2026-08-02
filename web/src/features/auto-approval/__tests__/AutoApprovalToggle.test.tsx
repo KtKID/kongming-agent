@@ -1,100 +1,32 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
-import { AutoApprovalToggle } from "../AutoApprovalToggle";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { AutoApprovalModeSelector } from "../AutoApprovalToggle";
 import { useAutoApprovalStore } from "../useAutoApproval";
 
 beforeEach(() => {
   useAutoApprovalStore.getState().clear();
 });
 
-describe("AutoApprovalToggle", () => {
-  it("没传 cwd → 不渲染", () => {
-    const { container } = render(
-      <AutoApprovalToggle cwd={undefined} socket={{ send: vi.fn() }} />,
-    );
-    expect(container.firstChild).toBeNull();
+describe("AutoApprovalModeSelector", () => {
+  it("缺少 cwd 或 socket 时不渲染", () => {
+    expect(render(<AutoApprovalModeSelector socket={{ send: vi.fn() }} />).container.firstChild).toBeNull();
+    expect(render(<AutoApprovalModeSelector cwd="/p" socket={null} />).container.firstChild).toBeNull();
   });
 
-  it("没传 socket → 不渲染", () => {
-    const { container } = render(
-      <AutoApprovalToggle cwd="/p" socket={null} />,
-    );
-    expect(container.firstChild).toBeNull();
-  });
-
-  it("挂载时主动 query 后端状态", () => {
+  it("挂载查询模式，并以 user 作为保守默认值", () => {
     const send = vi.fn();
-    render(<AutoApprovalToggle cwd="/p" socket={{ send }} />);
+    render(<AutoApprovalModeSelector cwd="/p" socket={{ send }} />);
     expect(send).toHaveBeenCalledWith({ frame_type: "auto-approval-query", cwd: "/p" });
+    expect((screen.getByTestId("approval-mode-select") as HTMLSelectElement).value).toBe("user");
   });
 
-  it("默认状态（store 没条目）显示 enabled=false", () => {
-    render(<AutoApprovalToggle cwd="/p" socket={{ send: vi.fn() }} />);
-    const sw = screen.getByTestId("auto-approval-switch") as HTMLButtonElement;
-    expect(sw.getAttribute("aria-checked")).toBe("false");
-  });
-
-  it("store 已有启用状态时显示 enabled + 秒数", () => {
-    useAutoApprovalStore.getState().applyStateFrame({
-      frame_type: "auto_approval_state",
-      channel: "claude_code",
-      cwd: "/p",
-      enabled: true,
-      timeoutMs: 8000,
-      ruleOverrides: {},
-    });
-    render(<AutoApprovalToggle cwd="/p" socket={{ send: vi.fn() }} />);
-    const sw = screen.getByTestId("auto-approval-switch") as HTMLButtonElement;
-    expect(sw.getAttribute("aria-checked")).toBe("true");
-    expect(screen.getByText("8s")).toBeTruthy();
-  });
-
-  it("点 switch 时发 toggle 帧", () => {
+  it("选择 LLM 与完全信任时发送三态协议值", () => {
     const send = vi.fn();
-    render(<AutoApprovalToggle cwd="/p" socket={{ send }} />);
-    // 清掉 mount 时的 query
+    render(<AutoApprovalModeSelector cwd="/p" socket={{ send }} />);
     send.mockClear();
-    const sw = screen.getByTestId("auto-approval-switch");
-    fireEvent.click(sw);
-    expect(send).toHaveBeenCalledWith({
-      frame_type: "auto-approval-toggle",
-      cwd: "/p",
-      enabled: true,
-    });
-  });
-
-  it("toggle send 返回 false 时不做 optimistic 更新", () => {
-    const send = vi.fn((frame: unknown) => {
-      if (
-        typeof frame === "object" &&
-        frame !== null &&
-        "frame_type" in frame &&
-        frame.frame_type === "auto-approval-toggle"
-      ) {
-        return false;
-      }
-      return true;
-    });
-    render(<AutoApprovalToggle cwd="/p" socket={{ send }} />);
-    send.mockClear();
-
-    fireEvent.click(screen.getByTestId("auto-approval-switch"));
-
-    expect(send).toHaveBeenCalledWith({
-      frame_type: "auto-approval-toggle",
-      cwd: "/p",
-      enabled: true,
-    });
-    expect(useAutoApprovalStore.getState().byCwd["/p"]).toBeUndefined();
-  });
-
-  it("cwd 变化时重新 query", () => {
-    const send = vi.fn();
-    const { rerender } = render(
-      <AutoApprovalToggle cwd="/p1" socket={{ send }} />,
-    );
-    send.mockClear();
-    rerender(<AutoApprovalToggle cwd="/p2" socket={{ send }} />);
-    expect(send).toHaveBeenCalledWith({ frame_type: "auto-approval-query", cwd: "/p2" });
+    fireEvent.change(screen.getByTestId("approval-mode-select"), { target: { value: "llm" } });
+    fireEvent.change(screen.getByTestId("approval-mode-select"), { target: { value: "full_trust" } });
+    expect(send).toHaveBeenNthCalledWith(1, { frame_type: "auto-approval-set-mode", cwd: "/p", mode: "llm" });
+    expect(send).toHaveBeenNthCalledWith(2, { frame_type: "auto-approval-set-mode", cwd: "/p", mode: "full_trust" });
   });
 });

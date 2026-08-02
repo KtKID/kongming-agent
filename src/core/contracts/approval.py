@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from core.contracts.tool_runtime import ToolExecutionScope
+
 ApprovalOutcome = Literal["approved", "rejected", "cancelled", "pending"]
 
 
@@ -16,7 +18,8 @@ class ApprovalRequest:
     Attributes:
         run_id / session_id / turn / call_id: 定位该次调用的运行坐标。
         tool_name: 待审批的工具名。
-        arguments: 模型发起的参数。审批端可以据此展示给人看。
+        arguments: preparation 后冻结的参数。审批端可以据此展示给人看。
+        execution_scope: preparation 后冻结的实际执行边界。
         reason: 装配层给出的补充理由（例如"命中 permission=ask 规则"）。
         metadata: 额外信息，例如涉及文件路径、执行命令等摘要。
     """
@@ -27,6 +30,7 @@ class ApprovalRequest:
     call_id: str
     tool_name: str
     arguments: dict[str, Any] = field(default_factory=dict)
+    execution_scope: ToolExecutionScope = field(default_factory=ToolExecutionScope)
     reason: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -52,8 +56,7 @@ class ApprovalDecision:
     - ``matched_rule``: 命中规则的字符串描述（如 ``"deny:~/.ssh/"``、
       ``"grant:tests/integration/"``）。
     - ``reason``: 人读理由（用于 trace / UI 展示）。
-    - ``grant_scope``: ``session`` / ``config`` —— 仅 ``decision_source=session/config``
-      的 silent_allow 携带，标识 grant 持久化范围。
+    - ``remember``: 人工审批是否把规则写入当前 thread permissions。
     - ``boundary_kind``: ``host`` / ``sandbox`` —— v0.1.4 实现恒为 ``host``，
       为未来 sandbox 落地预留。
     - ``suggested_alternatives``: ``list[str]`` —— 仅 hard_block 时携带，
@@ -88,6 +91,18 @@ class ApprovalProvider(Protocol):
         ...
 
 
+@runtime_checkable
+class InteractiveApprovalRebinder(Protocol):
+    """保留安全决策链，仅替换最终人工审批 Provider 的门户能力。"""
+
+    def with_interactive_approval(
+        self,
+        interactive_approval: ApprovalProvider,
+    ) -> ApprovalProvider:
+        """返回复用原安全策略、绑定新人工审批终点的 ApprovalProvider。"""
+        ...
+
+
 class ApprovalAction(StrEnum):
     """v0.1.4 安全链审批结果的结构化 action。
 
@@ -96,15 +111,15 @@ class ApprovalAction(StrEnum):
     选择"本会话允许"或"持久化到配置"。
 
     - ``ACCEPT_ONCE``：一次性允许，不缓存 grant
-    - ``ACCEPT_FOR_SESSION``：允许并写入本会话 ``GrantStore``，session 结束失效
-    - ``ACCEPT_PERSIST``：允许并提议写回项目 yaml 配置（CLI 应做二次确认）
+    - ``ACCEPT_FOR_SESSION``：旧命名，当前语义为允许并记住到 thread permissions
+    - ``ACCEPT_PERSIST``：旧命名，当前同样映射为允许并记住
     - ``REJECT``：拒绝
 
     映射到 :class:`ApprovalDecision`：
 
     - ``ACCEPT_ONCE`` → ``outcome="approved"``，``metadata.grant_scope`` 缺省
-    - ``ACCEPT_FOR_SESSION`` → ``outcome="approved"``，``metadata.grant_scope="session"``
-    - ``ACCEPT_PERSIST`` → ``outcome="approved"``，``metadata.grant_scope="config"``
+    - ``ACCEPT_FOR_SESSION`` / ``ACCEPT_PERSIST`` → ``outcome="approved"``，
+      ``metadata.remember=true``
     - ``REJECT`` → ``outcome="rejected"``
 
     向后兼容：v0.1.3 旧 bool 返回路径由 adapter 自动映射为
@@ -126,4 +141,5 @@ __all__ = [
     "ApprovalOutcome",
     "ApprovalProvider",
     "ApprovalRequest",
+    "InteractiveApprovalRebinder",
 ]

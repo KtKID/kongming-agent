@@ -24,6 +24,7 @@ helper（首次装配时把 InboxEventSink 注入 manager._event_sinks）。
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -37,7 +38,7 @@ from safety.approval.manager import (
     make_manager_prompt_fn,
     reset_for_testing,
 )
-from safety.approval.rules import ApprovalRules
+from safety.approval.permissions_manager import PermissionsManager
 from safety.inbox.event_sink import InboxEventSink
 
 pytestmark = pytest.mark.asyncio
@@ -54,6 +55,7 @@ def _reset_singletons():
 
 
 def _make_integrated_setup(
+    tmp_path: Path,
     *,
     default_timeout_ms: int = 10_000,
 ) -> tuple[ApprovalManager, ApprovalInboxBroadcaster]:
@@ -64,9 +66,7 @@ def _make_integrated_setup(
     """
     broadcaster = ApprovalInboxBroadcaster()
     manager = ApprovalManager(
-        # approval-rules-unified：ApprovalRules 不再持 timeout；policy=None
-        # 时走 fail-closed 60s（本 e2e 测覆盖 user 路径，不依赖 auto-approve）。
-        rules=ApprovalRules(),
+        permissions_manager=PermissionsManager(tmp_path),
         default_timeout_ms=default_timeout_ms,
     )
     sink = InboxEventSink(broadcaster=broadcaster, manager=manager)
@@ -98,7 +98,7 @@ def _make_approval_request(
 # ---------------------------------------------------------------------------
 
 
-async def test_full_path_user_allow_returns_accept_once() -> None:
+async def test_full_path_user_allow_returns_accept_once(tmp_path: Path) -> None:
     """场景 1：generic_chat prompt_fn → manager.request → broadcaster.emit_add →
     模拟前端 ws 收到帧 → broadcaster.resolve(allow=True) → manager.resolve →
     future set_result → prompt_fn 返回 ACCEPT_ONCE。
@@ -108,7 +108,7 @@ async def test_full_path_user_allow_returns_accept_once() -> None:
     - manager.pending_count == 0（cleanup 跑过）
     - manager.timeout_task_count == 0（timeout task 被 cancel）
     """
-    manager, broadcaster = _make_integrated_setup()
+    manager, broadcaster = _make_integrated_setup(tmp_path)
 
     prompt_fn = make_manager_prompt_fn(manager, thread_id="t-allow")
 
@@ -127,7 +127,7 @@ async def test_full_path_user_allow_returns_accept_once() -> None:
         )
         # 通过 broadcaster.resolve 走真实路由路径（thread_id → manager.resolve）
         req_id = next(iter(manager._pending.keys()))
-        ok = broadcaster.resolve("t-allow", req_id, {"allow": True})
+        ok = await broadcaster.resolve("t-allow", req_id, {"allow": True})
         assert ok, "broadcaster.resolve should find the target callback"
 
     resolve_task = asyncio.create_task(simulate_user_resolve())
@@ -144,7 +144,7 @@ async def test_full_path_user_allow_returns_accept_once() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_cell_evict_cancels_manager_pending_returns_reject() -> None:
+async def test_cell_evict_cancels_manager_pending_returns_reject(tmp_path: Path) -> None:
     """场景 2：用户关 tab → :meth:`WebHostAdapter.close` 调
     :meth:`ApprovalManager.cancel_by_thread` → 所有该 thread 名下 pending → REJECT。
 
@@ -152,7 +152,7 @@ async def test_cell_evict_cancels_manager_pending_returns_reject() -> None:
     本测试直接调 ``manager.cancel_by_thread``（与 WebHostAdapter.close 内部行为一致），
     不依赖 WebHostAdapter 实例，避免 ws / fanout 干扰。
     """
-    manager, _broadcaster = _make_integrated_setup()
+    manager, _broadcaster = _make_integrated_setup(tmp_path)
 
     prompt_fn = make_manager_prompt_fn(manager, thread_id="t-evict")
 
@@ -180,14 +180,14 @@ async def test_cell_evict_cancels_manager_pending_returns_reject() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_timeout_returns_reject_fail_closed() -> None:
+async def test_timeout_returns_reject_fail_closed(tmp_path: Path) -> None:
     """场景 3：超时未决策 → fail-closed REJECT
     （与 :meth:`WebHostAdapter.prompt_approval` 的 TimeoutError 分支行为一致）。
 
     reviewer 必修 #3：timeout 返回 ``ApprovalAction.REJECT`` 且不卡 pending。
     用极短 timeout（100ms）触发，避免测试阻塞。
     """
-    manager, _broadcaster = _make_integrated_setup(default_timeout_ms=100)
+    manager, _broadcaster = _make_integrated_setup(tmp_path, default_timeout_ms=100)
 
     prompt_fn = make_manager_prompt_fn(manager, thread_id="t-timeout")
 
@@ -203,13 +203,13 @@ async def test_timeout_returns_reject_fail_closed() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_full_path_user_deny_returns_reject() -> None:
+async def test_full_path_user_deny_returns_reject(tmp_path: Path) -> None:
     """场景 4：用户点拒绝 → manager.resolve(allow=False) → REJECT。
 
     与场景 1 路径对称，仅 decision dict allow=False；
     断言 prompt_fn 映射为 ``ApprovalAction.REJECT``。
     """
-    manager, broadcaster = _make_integrated_setup()
+    manager, broadcaster = _make_integrated_setup(tmp_path)
 
     prompt_fn = make_manager_prompt_fn(manager, thread_id="t-deny")
 
@@ -221,7 +221,7 @@ async def test_full_path_user_deny_returns_reject() -> None:
         assert manager.pending_count > 0
         assert "t-deny" in broadcaster._resolve_targets
         req_id = next(iter(manager._pending.keys()))
-        ok = broadcaster.resolve("t-deny", req_id, {"allow": False, "message": "user denied"})
+        ok = await broadcaster.resolve("t-deny", req_id, {"allow": False, "message": "user denied"})
         assert ok
 
     deny_task = asyncio.create_task(simulate_user_deny())

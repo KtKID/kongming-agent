@@ -32,6 +32,27 @@ async def test_auto_allow_approval_returns_approved() -> None:
 
 
 @pytest.mark.unit
+async def test_auto_allow_approval_rejects_bypass_immune_ask() -> None:
+    provider = AutoAllowApproval()
+    request = ApprovalRequest(
+        run_id="r",
+        session_id="s",
+        turn=1,
+        call_id="c",
+        tool_name="run_shell",
+        metadata={
+            "matched_rule": "builtin:bash_sudo",
+            "rule_source": "builtin",
+            "bypass_immune": True,
+        },
+    )
+    decision = await provider.decide(request)
+    assert decision.outcome == "rejected"
+    assert decision.metadata["matched_rule"] == "builtin:bash_sudo"
+    assert decision.metadata["bypass_immune"] is True
+
+
+@pytest.mark.unit
 async def test_auto_deny_approval_returns_rejected() -> None:
     provider = AutoDenyApproval()
     decision = await provider.decide(_req())

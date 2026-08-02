@@ -16,7 +16,7 @@
 
 6. ``DEFAULT_HARD_DENY_COMMANDS`` / ``DEFAULT_APPROVAL_REQUIRED_COMMANDS`` /
    ``DEFAULT_SENSITIVE_PATHS`` / ``DEFAULT_SKILL_CALL_RULES`` / 现有
-   ``DEFAULT_ALLOW_TOOLS_SILENT`` 不被新增常量影响（回归锚点）
+   canonical consent-then-trust 清单保持稳定（回归锚点）
 """
 
 from __future__ import annotations
@@ -26,9 +26,8 @@ from typing import Any
 import pytest
 
 from core.contracts import ApprovalDecision, ApprovalRequest
-from infrastructure.config.models import ApprovalConfig, Config, ModelConfig
+from infrastructure.config.models import ApprovalConfig, Config, ModelSelectionConfig
 from safety.approval.default_rules import (
-    DEFAULT_ALLOW_TOOLS_SILENT,
     DEFAULT_APPROVAL_REQUIRED_COMMANDS,
     DEFAULT_CONSENT_THEN_TRUST_TOOLS,
     DEFAULT_HARD_DENY_COMMANDS,
@@ -51,12 +50,7 @@ from safety.guards.consent import ConsentResolver
 
 def _cfg() -> Config:
     return Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="m",
-            base_url="http://127.0.0.1:1234",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         approval=ApprovalConfig(mode="interactive"),
     )
 
@@ -207,90 +201,13 @@ async def test_schedule_tool_consent_passes_through_rejection() -> None:
 
 
 # ---------------------------------------------------------------------------
-# §3 SafetyGatedApproval 闭环：consent → grant 写回 GrantStore（capability=tool:schedule）
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_schedule_tool_consent_writes_session_grant(tmp_path: Any) -> None:
-    """schedule capability 闭环第一段：首次 standard consent + 用户授予
-    session grant 后，:class:`SafetyGatedApproval._maybe_write_session_grant`
-    把一条 ``GrantKey(capability='tool:schedule', matcher='*')`` 写入
-    GrantStore 的 session 桶。
-
-    与 memory tool 同款（Grant capability 命名约定参考 ``chain.py``
-    ``SafetyGatedApproval._maybe_write_session_grant``）。
-
-    Known gap：当前 :class:`TrustResolver._lookup_grant` 在
-    schedule/memory 这类"非 file/shell"工具上会因 ``_derive_capability_and_target``
-    返回 ``(None, None)`` 而提前 return None，未触达第 2 步的 ``tool:`` 通配
-    查询；该缺口与 memory tool 共有，由 trust.py 修复（不在本任务范围）。
-    本测试只锁定 grant **写入**正确，不假设 trust 第二轮 silent_allow。
-    """
-    from safety.approval.chain import SafetyGatedApproval
-    from safety.approval.decision_engine import SafetyDecisionEngine
-    from safety.approval.types import BoundaryKind, GrantKey
-    from safety.boundaries.resolver import BoundaryResolver
-    from safety.grants.store import GrantStore
-    from safety.guards.hard_block import HardBlockGuard
-    from safety.guards.trust import TrustResolver
-
-    cfg = _cfg()
-    # FakeApproval 模拟用户首次点"本 session 同意"：返回 grant_scope=session
-    fake = FakeApproval(
-        outcome="approved",
-        downstream_metadata={ApprovalMetadataKeys.GRANT_SCOPE: "session"},
-    )
-    boundary = BoundaryResolver.from_project_root(project_root=tmp_path)
-    grants = GrantStore.from_config(cfg)
-    hard_block = HardBlockGuard.from_config(cfg)
-    trust = TrustResolver(boundary, grants)
-    consent = ConsentResolver.from_config(cfg, interactive_approval=fake)
-    engine = SafetyDecisionEngine(
-        hard_block=hard_block,
-        boundary=boundary,
-        trust=trust,
-        consent=consent,
-    )
-    gated = SafetyGatedApproval(engine=engine, grant_store=grants)
-
-    first_request = _req(
-        tool_name="schedule",
-        arguments={"action": "create", "name": "daily", "schedule": "every 1h"},
-        call_id="call-1",
-    )
-    first_decision = await gated.decide(first_request)
-    # 首次走 explicit_consent / standard
-    assert first_decision.outcome == "approved"
-    md1 = first_decision.metadata
-    assert md1[ApprovalMetadataKeys.DECISION_CLASS] == "explicit_consent"
-    assert md1[ApprovalMetadataKeys.DECISION_SOURCE] == "standard"
-    assert md1[ApprovalMetadataKeys.GRANT_SCOPE] == "session"
-    assert len(fake.decided_requests) == 1
-
-    # 关键断言：grant 已被写入 session 桶，capability=tool:schedule，matcher=*
-    expected_key = GrantKey(
-        capability="tool:schedule",
-        matcher="*",
-        boundary_kind=BoundaryKind.HOST,
-    )
-    grant = grants.get(expected_key, session_id="s1")
-    assert grant is not None, "session grant for schedule should be written by SafetyGatedApproval"
-    assert grant.scope == "session"
-    assert grant.session_id == "s1"
-    # 跨 session 严格隔离：另一 session_id 不应命中
-    assert grants.get(expected_key, session_id="other") is None
-
-
-# ---------------------------------------------------------------------------
 # §4 现有 capability 规则不受影响（回归锚点）
 # ---------------------------------------------------------------------------
 
 
 def test_existing_default_tables_unaffected_by_consent_then_trust_tools() -> None:
     """新增 ``DEFAULT_CONSENT_THEN_TRUST_TOOLS`` 不破坏现有四张默认规则表与
-    ``DEFAULT_ALLOW_TOOLS_SILENT`` 集合。
+    canonical consent-then-trust 集合。
 
     锁定锚点：
     - hard_deny_commands 仍含 ``host-root-delete``
@@ -315,14 +232,4 @@ def test_existing_default_tables_unaffected_by_consent_then_trust_tools() -> Non
 
     assert DEFAULT_SKILL_CALL_RULES == ()
 
-    assert set(DEFAULT_ALLOW_TOOLS_SILENT) == {
-        "read_file",
-        "list_dir",
-        "list_agent_roles",
-        "create_agent_role",
-        "update_task_progress",
-    }
-    # 关键回归：schedule / memory 不应被错误地放进 allow_tools_silent
-    # （否则用户首次也不会被询问，破坏 consent-then-trust 语义）
-    assert "schedule" not in DEFAULT_ALLOW_TOOLS_SILENT
-    assert "memory" not in DEFAULT_ALLOW_TOOLS_SILENT
+    assert set(DEFAULT_CONSENT_THEN_TRUST_TOOLS) == {"schedule", "memory"}

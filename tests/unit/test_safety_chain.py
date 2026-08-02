@@ -1,427 +1,354 @@
-"""unit：safety.approval.chain v0.1.4 薄壳形态 + build_safety_chain 装配。
+"""验证 v0.6 三模式审批链的 12 格决策矩阵。
 
-验证：
-
-- :class:`SafetyGatedApproval` 调 :class:`SafetyDecisionEngine` 后装饰
-  ``metadata.stage`` 兼容字段。
-- :func:`build_safety_chain` 函数签名向上游零变更，传 capability_policy /
-  permission_policy 也不抛异常。
-- v0.1.3 → v0.1.4 stage 映射规则：``hard_block→capability`` /
-  ``silent_allow→无`` / ``explicit_consent+standard→permission`` /
-  ``explicit_consent+elevated→approval``。
+本文件覆盖 DangerGuard、全局 approval mode、thread permissions 和人工审批终点
+的固定优先级，并校验 auto 回落事件、root thread_id 归属及 remember 冻结上下文。
 """
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
-from core.contracts import ApprovalDecision, ApprovalRequest
-from infrastructure.config import load_config
-from infrastructure.config.models import ApprovalConfig, Config, ModelConfig
-from safety.approval.chain import (
-    SafetyChainError,
-    SafetyGatedApproval,
-    _decorate_stage_compat,
-    build_safety_chain,
-)
-from safety.approval.decision_engine import SafetyDecisionEngine
-from safety.approval.types import ApprovalMetadataKeys, BoundaryKind, DecisionSource
-from safety.grants.store import GrantStore
-from safety.policies.capability import CapabilityPolicy, CapabilitySet
-from safety.policies.permission import PermissionPolicy
+from core.contracts import ApprovalDecision, ApprovalRequest, Event, ToolExecutionScope
+from infrastructure.config.models import Config, ModelSelectionConfig
+from runtime_assembly.session_engine import SessionEngine
+from safety.approval.chain import build_safety_chain
+from safety.approval.permissions_manager import PermissionsManager
+from safety.approval.rule_models import PermissionRuleRecord
+from safety.approval.types import ApprovalMetadataKeys
+from safety.auto_approval.disposition import ApprovalDispositionMode
 
 
-class _FixedApproval:
-    """底层占位 ApprovalProvider：按构造参数返回固定 outcome。"""
+@dataclass
+class _RecordingApproval:
+    """记录进入人工审批终点的请求，并返回可配置决定。"""
 
-    def __init__(self, outcome: str = "approved") -> None:
-        self._outcome = outcome
-        self.requests: list[ApprovalRequest] = []
+    outcome: str = "approved"
+    requests: list[ApprovalRequest] = field(default_factory=list)
 
     async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        """保存审批请求并返回固定用户决定。"""
         self.requests.append(request)
-        return ApprovalDecision(outcome=self._outcome, reason=f"fixed-{self._outcome}")  # type: ignore[arg-type]
+        if self.outcome == "approved":
+            return ApprovalDecision(outcome="approved", metadata={"source": "user"})
+        return ApprovalDecision(outcome="rejected", metadata={"source": "user"})
 
 
-def _req(tool_name: str = "read_file", path: str | None = None) -> ApprovalRequest:
-    args: dict[str, object] = {}
-    if path is not None:
-        args["path"] = path
-    return ApprovalRequest(
-        run_id="r",
-        session_id="s",
-        turn=1,
-        call_id="c",
-        tool_name=tool_name,
-        arguments=args,
-    )
+@dataclass
+class _RecordingEventSink:
+    """记录安全链发出的结构化审计事件。"""
+
+    events: list[Event] = field(default_factory=list)
+
+    async def emit(self, event: Event) -> None:
+        """保存单条事件。"""
+        self.events.append(event)
 
 
-def _cfg() -> Config:
+@dataclass(frozen=True)
+class _ModeResolver:
+    """测试用 cwd 处置模式门户。"""
+
+    mode: ApprovalDispositionMode
+
+    def mode_for(self, cwd: str) -> ApprovalDispositionMode:
+        """为任意 cwd 返回固定模式。"""
+        return self.mode
+
+
+def _config() -> Config:
+    """构造使用本地模型地址的最小配置。"""
     return Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="m",
-            base_url="http://127.0.0.1:1234",
-            api_key="",
-        ),
-        approval=ApprovalConfig(mode="interactive"),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
     )
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_SETTING_YAML = _REPO_ROOT / "config" / "setting.yaml"
-
-
-# ---------------------------------------------------------------------------
-# build_safety_chain：函数签名向上游零变更
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_build_safety_chain_returns_gated_approval() -> None:
-    underlying = _FixedApproval("approved")
-    chain = build_safety_chain(_cfg(), interactive_approval=underlying)
-    assert isinstance(chain, SafetyGatedApproval)
-
-
-@pytest.mark.unit
-def test_build_safety_chain_accepts_legacy_policy_kwargs() -> None:
-    """v0.1.3 兼容期：仍可显式传 capability / permission policy，不抛异常。"""
-    underlying = _FixedApproval("approved")
-    cap = CapabilityPolicy(CapabilitySet(deny=frozenset({"shell"})))
-    perm = PermissionPolicy(rules=())
-    chain = build_safety_chain(
-        _cfg(),
-        interactive_approval=underlying,
-        capability_policy=cap,
-        permission_policy=perm,
+def _request(kind: str, *, cwd: Path) -> ApprovalRequest:
+    """按矩阵类别构造 danger、deny、allow 或未命中请求。"""
+    canonical_cwd = cwd.resolve().as_posix()
+    if kind == "hard_block":
+        tool_name = "run_shell"
+        arguments: dict[str, object] = {
+            "command": "rm -rf /",
+            "cwd": canonical_cwd,
+        }
+    elif kind in {"deny", "allow"}:
+        tool_name = "read_file"
+        arguments = {"path": str(cwd / "notes.md")}
+    else:
+        tool_name = "list_dir"
+        arguments = {"path": str(cwd / "unmatched")}
+    return ApprovalRequest(
+        run_id="run-matrix",
+        session_id="child-session",
+        turn=1,
+        call_id=f"call-{kind}",
+        tool_name=tool_name,
+        arguments=arguments,
+        execution_scope=ToolExecutionScope(cwd=canonical_cwd if tool_name == "run_shell" else None),
+        metadata={"cwd": canonical_cwd, "thread_id": "root-thread"},
     )
-    assert isinstance(chain, SafetyGatedApproval)
 
 
-@pytest.mark.unit
-async def test_build_safety_chain_smoke_decide_does_not_raise() -> None:
-    """装配出来的 chain 能完成一次 decide 闭环（不验证具体 outcome）。"""
-    underlying = _FixedApproval("approved")
-    chain = build_safety_chain(_cfg(), interactive_approval=underlying)
-    decision = await chain.decide(_req(tool_name="read_file", path="/tmp/test.txt"))
-    assert decision.outcome in {"approved", "rejected"}
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("tool_name", ["list_agent_roles", "create_agent_role"])
-async def test_agent_role_tools_are_silent_allowed(tool_name: str) -> None:
-    """验证角色工具在仓库默认配置中静默放行，输入为 tool 名，输出 silent_allow。"""
-    underlying = _FixedApproval("rejected")
-    cfg = load_config(_SETTING_YAML, load_env_file=False)
-    assert tool_name in cfg.safety.allow_tools_silent
-    chain = build_safety_chain(cfg, interactive_approval=underlying)
-
-    decision = await chain.decide(_req(tool_name=tool_name))
-
-    assert decision.outcome == "approved"
-    assert decision.metadata[ApprovalMetadataKeys.DECISION_CLASS] == "silent_allow"
-    assert underlying.requests == []
-
-
-# ---------------------------------------------------------------------------
-# stage 兼容映射
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_stage_compat_hard_block_maps_to_capability() -> None:
-    """hard_block 不带 stage 时，装饰器补 stage='capability'。"""
-    decision = ApprovalDecision(
-        outcome="rejected",
-        metadata={
-            ApprovalMetadataKeys.DECISION_CLASS: "hard_block",
-        },
-    )
-    decorated = _decorate_stage_compat(decision)
-    assert decorated.metadata[ApprovalMetadataKeys.STAGE] == "capability"
-
-
-@pytest.mark.unit
-def test_stage_compat_explicit_consent_standard_maps_to_permission() -> None:
-    decision = ApprovalDecision(
-        outcome="approved",
-        metadata={
-            ApprovalMetadataKeys.DECISION_CLASS: "explicit_consent",
-            ApprovalMetadataKeys.DECISION_SOURCE: "standard",
-        },
-    )
-    decorated = _decorate_stage_compat(decision)
-    assert decorated.metadata[ApprovalMetadataKeys.STAGE] == "permission"
-
-
-@pytest.mark.unit
-def test_stage_compat_explicit_consent_elevated_maps_to_approval() -> None:
-    decision = ApprovalDecision(
-        outcome="approved",
-        metadata={
-            ApprovalMetadataKeys.DECISION_CLASS: "explicit_consent",
-            ApprovalMetadataKeys.DECISION_SOURCE: "elevated",
-        },
-    )
-    decorated = _decorate_stage_compat(decision)
-    assert decorated.metadata[ApprovalMetadataKeys.STAGE] == "approval"
-
-
-@pytest.mark.unit
-def test_stage_compat_silent_allow_does_not_set_stage() -> None:
-    """silent_allow 是 v0.1.4 新概念，v0.1.3 没有对应 stage，不写 stage。"""
-    decision = ApprovalDecision(
-        outcome="approved",
-        metadata={
-            ApprovalMetadataKeys.DECISION_CLASS: "silent_allow",
-            ApprovalMetadataKeys.DECISION_SOURCE: "intrinsic",
-        },
-    )
-    decorated = _decorate_stage_compat(decision)
-    assert ApprovalMetadataKeys.STAGE not in decorated.metadata
-
-
-@pytest.mark.unit
-def test_stage_compat_existing_stage_not_overwritten() -> None:
-    """guard 自行写过 stage（HardBlockGuard / ConsentResolver）时，不覆盖。"""
-    decision = ApprovalDecision(
-        outcome="rejected",
-        metadata={
-            ApprovalMetadataKeys.STAGE: "capability",
-            ApprovalMetadataKeys.DECISION_CLASS: "hard_block",
-        },
-    )
-    decorated = _decorate_stage_compat(decision)
-    # 应保持不变（同一引用语义足够）
-    assert decorated.metadata[ApprovalMetadataKeys.STAGE] == "capability"
-
-
-# ---------------------------------------------------------------------------
-# SafetyGatedApproval 薄壳：engine 异常包装
-# ---------------------------------------------------------------------------
-
-
-class _RaisingEngine:
-    """模拟 SafetyDecisionEngine 抛异常的 stub。"""
-
-    async def decide(self, request, runtime):  # type: ignore[no-untyped-def]
-        raise RuntimeError("simulated engine failure")
-
-
-@pytest.mark.unit
-async def test_safety_gated_approval_wraps_engine_exception() -> None:
-    """engine 抛异常时，门面包成 SafetyChainError。"""
-    chain = SafetyGatedApproval(
-        engine=_RaisingEngine(),  # type: ignore[arg-type]
-        grant_store=GrantStore(),
-    )
-    with pytest.raises(SafetyChainError):
-        await chain.decide(_req())
-
-
-@pytest.mark.unit
-def test_legacy_decide_raises_runtime_error() -> None:
-    """v0.1.3 fallback 已删除，调用 _legacy_decide 必抛 RuntimeError。"""
-    chain = SafetyGatedApproval(
-        engine=_RaisingEngine(),  # type: ignore[arg-type]
-        grant_store=GrantStore(),
-    )
-    with pytest.raises(RuntimeError, match=r"legacy v0\.1\.3 path removed"):
-        chain._legacy_decide(_req())
-
-
-# ---------------------------------------------------------------------------
-# build_safety_chain：trace_emitter / event_sinks 装配
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-async def test_build_safety_chain_with_explicit_trace_emitter() -> None:
-    """显式传 trace_emitter 时，event_sinks 被忽略，使用传入的 emitter。"""
-    captured: list[tuple[str, str]] = []
-
-    def _capture(event_kind, decision, request):  # type: ignore[no-untyped-def]
-        captured.append((event_kind, request.tool_name))
-
-    underlying = _FixedApproval("approved")
-    chain = build_safety_chain(
-        _cfg(),
-        interactive_approval=underlying,
-        trace_emitter=_capture,
-    )
-    # write_file → 走 boundary/consent 路径，会触发 emit
-    await chain.decide(_req(tool_name="write_file", path="/tmp/some-test.txt"))
-    # 至少应该有一个事件被 emit（具体类型由实际链路决定）
-    assert len(captured) >= 1
-
-
-@pytest.mark.unit
-def test_safety_decision_engine_directly_wired() -> None:
-    """SafetyDecisionEngine 类可被直接构造并注入 SafetyGatedApproval。"""
-    from safety.boundaries.resolver import BoundaryResolver
-    from safety.grants.store import GrantStore
-    from safety.guards.consent import ConsentResolver
-    from safety.guards.hard_block import HardBlockGuard
-    from safety.guards.trust import TrustResolver
-
-    cfg = _cfg()
-    underlying = _FixedApproval("approved")
-    boundary = BoundaryResolver.from_project_root()
-    grants = GrantStore.from_config(cfg)
-    engine = SafetyDecisionEngine(
-        hard_block=HardBlockGuard.from_config(cfg),
-        boundary=boundary,
-        trust=TrustResolver(boundary, grants),
-        consent=ConsentResolver.from_config(cfg, interactive_approval=underlying),
-    )
-    chain = SafetyGatedApproval(engine=engine, grant_store=grants)
-    assert chain._engine is engine
-    assert chain.grant_store is grants
-
-
-# ---------------------------------------------------------------------------
-# v0.1.6 ACCEPT_FOR_SESSION 写回 GrantStore（修 v0.1.4 死代码）
-# ---------------------------------------------------------------------------
-
-
-class _SessionGrantingEngine:
-    """stub engine 直接返回 ``approved + grant_scope=session`` decision。
-
-    用于隔离测试 :meth:`SafetyGatedApproval._maybe_write_session_grant`，
-    不依赖 ConsentResolver / InteractiveApproval 完整链路。
-    """
-
-    async def decide(self, request, runtime):  # type: ignore[no-untyped-def]
-        return ApprovalDecision(
-            outcome="approved",
-            reason="stub session grant",
-            metadata={
-                ApprovalMetadataKeys.GRANT_SCOPE: "session",
-                ApprovalMetadataKeys.DECISION_CLASS: "explicit_consent",
-                ApprovalMetadataKeys.DECISION_SOURCE: "standard",
-            },
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", list(ApprovalDispositionMode))
+@pytest.mark.parametrize("kind", ["hard_block", "deny", "allow", "unmatched"])
+async def test_three_modes_decision_matrix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: ApprovalDispositionMode,
+    kind: str,
+) -> None:
+    """三种模式乘四类请求均遵循 Danger → mode → permissions 顺序。"""
+    monkeypatch.setenv("KONGMING_HOME", str(tmp_path / ".kongming"))
+    permissions = PermissionsManager(tmp_path / ".kongming")
+    if kind == "deny":
+        await permissions.replace(
+            "root-thread",
+            allow=[],
+            deny=[PermissionRuleRecord(expression="read_file", scope_cwd=None)],
+            expected_revision=0,
+        )
+    elif kind == "allow":
+        await permissions.replace(
+            "root-thread",
+            allow=[PermissionRuleRecord(expression="read_file", scope_cwd=None)],
+            deny=[],
+            expected_revision=0,
         )
 
+    interactive = _RecordingApproval()
+    events: list[tuple[str, ApprovalDecision]] = []
 
-def _session_request(
-    *,
-    session_id: str = "thread-A",
-    tool_name: str = "read_file",
-) -> ApprovalRequest:
-    return ApprovalRequest(
-        run_id="r",
-        session_id=session_id,
+    def _trace(
+        event_kind: str,
+        decision: ApprovalDecision,
+        request: ApprovalRequest,
+    ) -> None:
+        """收集决策事件并验证事件仍指向原请求。"""
+        assert request.call_id == f"call-{kind}"
+        events.append((event_kind, decision))
+
+    chain = build_safety_chain(
+        _config(),
+        interactive_approval=interactive,
+        permissions_manager=permissions,
+        trace_emitter=_trace,
+        disposition_resolver=_ModeResolver(mode),
+    )
+    decision = await chain.decide(_request(kind, cwd=tmp_path))
+
+    source = decision.metadata[ApprovalMetadataKeys.DECISION_SOURCE]
+    if kind == "hard_block":
+        assert decision.outcome == "rejected"
+        assert source == "intrinsic"
+        assert interactive.requests == []
+    elif mode is ApprovalDispositionMode.FULL_TRUST:
+        assert decision.outcome == "approved"
+        assert source == "full_trust"
+        assert interactive.requests == []
+    elif kind == "deny":
+        assert decision.outcome == "rejected"
+        assert source == "permissions"
+        assert interactive.requests == []
+    elif kind == "allow":
+        assert decision.outcome == "approved"
+        assert source == "permissions"
+        assert interactive.requests == []
+    else:
+        assert decision.outcome == "approved"
+        assert source == "user_approval"
+        assert len(interactive.requests) == 1
+        metadata = interactive.requests[0].metadata
+        assert metadata[ApprovalMetadataKeys.REMEMBER_ALLOWED] is True
+        assert metadata[ApprovalMetadataKeys.REMEMBER_THREAD_ID] == "root-thread"
+        assert metadata[ApprovalMetadataKeys.REMEMBER_REVISION] == 0
+
+
+@pytest.mark.asyncio
+async def test_deny_wins_allow_in_user_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同表达式位于两边时 deny 保持最高 permissions 优先级。"""
+    monkeypatch.setenv("KONGMING_HOME", str(tmp_path / ".kongming"))
+    permissions = PermissionsManager(tmp_path / ".kongming")
+    await permissions.replace(
+        "root-thread",
+        allow=[PermissionRuleRecord(expression="read_file", scope_cwd=None)],
+        deny=[PermissionRuleRecord(expression="read_file", scope_cwd=None)],
+        expected_revision=0,
+    )
+    interactive = _RecordingApproval()
+    chain = build_safety_chain(
+        _config(),
+        interactive_approval=interactive,
+        permissions_manager=permissions,
+        disposition_resolver=_ModeResolver(ApprovalDispositionMode.USER),
+    )
+
+    decision = await chain.decide(_request("allow", cwd=tmp_path))
+
+    assert decision.outcome == "rejected"
+    assert decision.metadata[ApprovalMetadataKeys.DECISION_SOURCE] == "permissions"
+    assert interactive.requests == []
+
+
+@pytest.mark.asyncio
+async def test_hard_block_precedes_scoped_shell_allow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """exact cwd Shell allow 仍无法绕过 DangerGuard hard block。"""
+    monkeypatch.setenv("KONGMING_HOME", str(tmp_path / ".kongming"))
+    canonical_cwd = tmp_path.resolve().as_posix()
+    permissions = PermissionsManager(tmp_path / ".kongming")
+    await permissions.replace(
+        "root-thread",
+        allow=[
+            PermissionRuleRecord(
+                expression="run_shell(rm:*)",
+                scope_cwd=canonical_cwd,
+            )
+        ],
+        deny=[],
+        expected_revision=0,
+    )
+    interactive = _RecordingApproval()
+    chain = build_safety_chain(
+        _config(),
+        interactive_approval=interactive,
+        permissions_manager=permissions,
+        disposition_resolver=_ModeResolver(ApprovalDispositionMode.USER),
+    )
+    request = ApprovalRequest(
+        run_id="run-danger-scope",
+        session_id="child-session",
         turn=1,
-        call_id="c1",
-        tool_name=tool_name,
-        arguments={"path": "/tmp/x"},
+        call_id="call-danger-scope",
+        tool_name="run_shell",
+        arguments={"command": "rm -rf /"},
+        execution_scope=ToolExecutionScope(cwd=canonical_cwd),
+        metadata={"cwd": canonical_cwd, "thread_id": "root-thread"},
     )
 
+    decision = await chain.decide(request)
 
-@pytest.mark.unit
-async def test_session_grant_writeback_after_consent() -> None:
-    """v0.1.6 修复：approved + grant_scope=session 触发 put_session 写回。"""
-    grants = GrantStore()
-    chain = SafetyGatedApproval(
-        engine=_SessionGrantingEngine(),  # type: ignore[arg-type]
-        grant_store=grants,
+    assert decision.outcome == "rejected"
+    assert decision.metadata[ApprovalMetadataKeys.DECISION_SOURCE] == "intrinsic"
+    assert interactive.requests == []
+
+
+@pytest.mark.asyncio
+async def test_scoped_shell_allow_audit_contains_execution_and_rule_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """permissions 命中事件同时记录 prepared cwd 与规则 cwd。"""
+    monkeypatch.setenv("KONGMING_HOME", str(tmp_path / ".kongming"))
+    canonical_cwd = tmp_path.resolve().as_posix()
+    permissions = PermissionsManager(tmp_path / ".kongming")
+    await permissions.replace(
+        "root-thread",
+        allow=[
+            PermissionRuleRecord(
+                expression="run_shell(git status:*)",
+                scope_cwd=canonical_cwd,
+            )
+        ],
+        deny=[],
+        expected_revision=0,
+    )
+    sink = _RecordingEventSink()
+    chain = build_safety_chain(
+        _config(),
+        interactive_approval=_RecordingApproval(),
+        permissions_manager=permissions,
+        event_sinks=[sink],
+        disposition_resolver=_ModeResolver(ApprovalDispositionMode.USER),
+    )
+    request = ApprovalRequest(
+        run_id="run-audit-scope",
+        session_id="child-session",
+        turn=1,
+        call_id="call-audit-scope",
+        tool_name="run_shell",
+        arguments={"command": "git status --short"},
+        execution_scope=ToolExecutionScope(cwd=canonical_cwd),
+        metadata={"cwd": canonical_cwd, "thread_id": "root-thread"},
     )
 
-    decision = await chain.decide(_session_request(session_id="thread-A"))
+    decision = await chain.decide(request)
+    await asyncio.sleep(0)
+
     assert decision.outcome == "approved"
-
-    # 验证 grant 落到 thread-A 桶
-    sess = grants.session_grants("thread-A")
-    assert len(sess) == 1
-    grant = sess[0]
-    assert grant.session_id == "thread-A"
-    assert grant.scope == "session"
-    # 命名约定对齐 from_config 的 allow_tools_silent 路径
-    assert grant.key.capability == "tool:read_file"
-    assert grant.key.matcher == "*"
-    assert grant.key.boundary_kind == BoundaryKind.HOST
-    assert grant.source == DecisionSource.SESSION
+    event = next(item for item in sink.events if item.kind == "tool.silently_allowed")
+    assert event.payload["execution_scope_cwd"] == canonical_cwd
+    assert event.payload["matched_rule_scope_cwd"] == canonical_cwd
 
 
-@pytest.mark.unit
-async def test_session_grant_writeback_isolates_by_session_id() -> None:
-    """thread-A 写的 grant 不应落到 thread-B 桶（修 P1 跨 thread 泄漏）。"""
-    grants = GrantStore()
-    chain = SafetyGatedApproval(
-        engine=_SessionGrantingEngine(),  # type: ignore[arg-type]
-        grant_store=grants,
+@pytest.mark.asyncio
+async def test_cli_falls_back_to_stable_session_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """缺少 Web thread_id 时以稳定 session id 冻结 remember 归属。"""
+    monkeypatch.setenv("KONGMING_HOME", str(tmp_path / ".kongming"))
+    interactive = _RecordingApproval(outcome="rejected")
+    chain = build_safety_chain(
+        _config(),
+        interactive_approval=interactive,
+        permissions_manager=PermissionsManager(tmp_path / ".kongming"),
+        disposition_resolver=_ModeResolver(ApprovalDispositionMode.USER),
+    )
+    request = _request("unmatched", cwd=tmp_path)
+    request = ApprovalRequest(
+        run_id=request.run_id,
+        session_id="stable-cli-session",
+        turn=request.turn,
+        call_id=request.call_id,
+        tool_name=request.tool_name,
+        arguments=request.arguments,
+        metadata={"cwd": str(tmp_path)},
     )
 
-    await chain.decide(_session_request(session_id="thread-A"))
+    decision = await chain.decide(request)
 
-    # thread-A 桶有；thread-B 桶空
-    assert len(grants.session_grants("thread-A")) == 1
-    assert grants.session_grants("thread-B") == ()
-
-
-@pytest.mark.unit
-async def test_session_grant_skipped_when_outcome_not_approved() -> None:
-    """rejected decision 即使 metadata.grant_scope=session 也不写 GrantStore。"""
-
-    class _RejectingEngine:
-        async def decide(self, request, runtime):  # type: ignore[no-untyped-def]
-            return ApprovalDecision(
-                outcome="rejected",
-                reason="user rejected",
-                metadata={ApprovalMetadataKeys.GRANT_SCOPE: "session"},
-            )
-
-    grants = GrantStore()
-    chain = SafetyGatedApproval(
-        engine=_RejectingEngine(),  # type: ignore[arg-type]
-        grant_store=grants,
+    assert decision.outcome == "rejected"
+    assert (
+        interactive.requests[0].metadata[ApprovalMetadataKeys.REMEMBER_THREAD_ID]
+        == "stable-cli-session"
     )
 
-    await chain.decide(_session_request())
 
-    assert grants.session_grants() == (), "rejected 决策不应写 session grant"
-
-
-@pytest.mark.unit
-async def test_session_grant_skipped_when_session_id_empty() -> None:
-    """session_id 为空字符串时（防御性）不写 grant。"""
-    grants = GrantStore()
-    chain = SafetyGatedApproval(
-        engine=_SessionGrantingEngine(),  # type: ignore[arg-type]
-        grant_store=grants,
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "expected_rule"),
+    [
+        ("hard_block", "host-root-delete"),
+        ("unmatched", "default:ask"),
+    ],
+)
+async def test_session_engine_without_interactive_host_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    expected_rule: str,
+) -> None:
+    """缺少人工审批宿主时，danger 与普通未命中都不能被占位 Provider 放行。"""
+    monkeypatch.setenv("KONGMING_HOME", str(tmp_path / ".kongming"))
+    runtime = SessionEngine.build(
+        _config(),
+        permissions_manager=PermissionsManager(tmp_path / ".kongming"),
+        disposition_resolver=_ModeResolver(ApprovalDispositionMode.USER),
     )
+    try:
+        decision = await runtime.approval.decide(_request(kind, cwd=tmp_path))
+    finally:
+        await runtime.aclose()
 
-    # 空字符串 session_id：不写 grant，不抛错
-    await chain.decide(_session_request(session_id=""))
-
-    assert grants.session_grants() == ()
-
-
-@pytest.mark.unit
-async def test_session_grant_skipped_when_grant_scope_not_session() -> None:
-    """grant_scope 不是 session（如 once）时不应写 GrantStore。"""
-
-    class _OnceEngine:
-        async def decide(self, request, runtime):  # type: ignore[no-untyped-def]
-            return ApprovalDecision(
-                outcome="approved",
-                reason="approved once",
-                metadata={
-                    # 不带 grant_scope，相当于 ACCEPT_ONCE 路径
-                    ApprovalMetadataKeys.DECISION_CLASS: "explicit_consent",
-                },
-            )
-
-    grants = GrantStore()
-    chain = SafetyGatedApproval(
-        engine=_OnceEngine(),  # type: ignore[arg-type]
-        grant_store=grants,
-    )
-
-    await chain.decide(_session_request())
-
-    assert grants.session_grants() == (), "ACCEPT_ONCE 不应写 session grant"
+    assert decision.outcome == "rejected"
+    assert decision.metadata[ApprovalMetadataKeys.MATCHED_RULE] == expected_rule

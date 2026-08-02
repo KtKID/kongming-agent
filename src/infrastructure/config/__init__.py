@@ -18,11 +18,12 @@ kongming-agent 的**唯一**配置入口。其他模块（executors / host / cli
 from __future__ import annotations
 
 from infrastructure.config.errors import ConfigLoadError, ConfigValidationError
-from infrastructure.config.loader import load_config
+from infrastructure.config.loader import load_config, resolve_config_path
 from infrastructure.config.manager import ConfigManager
 from infrastructure.config.migrations import MigrationResult, migrate_config_if_needed
 from infrastructure.config.models import (
     CURRENT_CONFIG_SCHEMA_VERSION,
+    ApiKeyHeader,
     ApprovalConfig,
     CompactorConfig,
     Config,
@@ -33,9 +34,12 @@ from infrastructure.config.models import (
     McpConfig,
     McpServerConfig,
     McpToolAliasConfig,
-    ModelConfig,
+    ModelSelectionConfig,
     RetryConfig,
     RunnerConfig,
+    SafetyApprovalConfig,
+    SafetyApprovalLlmConfig,
+    SafetyConfig,
     SchedulerConfig,
     SessionConfig,
     ShellToolConfig,
@@ -45,10 +49,15 @@ from infrastructure.config.models import (
     WorkflowConfig,
 )
 from infrastructure.config.paths import (
+    builtin_agent_config_template_path,
+    default_kongming_home_agent_config_path,
     default_kongming_home_config_path,
+    find_existing_kongming_home_agent_config,
     find_existing_kongming_home_config,
     get_kongming_home,
+    kongming_home_agent_config_candidates,
     kongming_home_config_candidates,
+    materialize_kongming_home_agent_config,
     resolve_kongming_path,
 )
 from infrastructure.config.profile_manager import (
@@ -60,6 +69,7 @@ from infrastructure.config.profile_manager import (
 
 __all__ = [
     "ApprovalConfig",
+    "ApiKeyHeader",
     "CompactorConfig",
     "Config",
     "ConfigSchemaVersion",
@@ -74,25 +84,34 @@ __all__ = [
     "McpConfig",
     "McpServerConfig",
     "McpToolAliasConfig",
-    "ModelConfig",
+    "ModelSelectionConfig",
     "ProfileDecision",
     "ProfileReview",
     "ProfileReviewIssue",
     "RetryConfig",
     "RunnerConfig",
     "SchedulerConfig",
+    "SafetyApprovalConfig",
+    "SafetyApprovalLlmConfig",
+    "SafetyConfig",
     "SessionConfig",
     "ShellToolConfig",
     "ToolConfig",
     "TraceConfig",
     "WebSearchConfig",
     "WorkflowConfig",
+    "builtin_agent_config_template_path",
+    "default_kongming_home_agent_config_path",
     "default_kongming_home_config_path",
+    "find_existing_kongming_home_agent_config",
     "find_existing_kongming_home_config",
     "get_kongming_home",
+    "kongming_home_agent_config_candidates",
     "kongming_home_config_candidates",
     "load_config",
+    "materialize_kongming_home_agent_config",
     "MigrationResult",
     "migrate_config_if_needed",
     "resolve_kongming_path",
+    "resolve_config_path",
 ]

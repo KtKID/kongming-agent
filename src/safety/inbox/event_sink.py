@@ -128,6 +128,7 @@ class InboxEventSink:
             # 60_000 防御未来调用方直构假对象时漏字段，保证前端 timeoutMs
             # 始终是 int。
             timeout_ms = pending.timeout_ms if pending.timeout_ms is not None else 60_000
+            remember_rule = pending.remember_rule
             payload = to_inbox_payload(
                 channel=pending.channel,
                 thread_id=pending.thread_id,
@@ -138,9 +139,19 @@ class InboxEventSink:
                 arrived_at_ms=pending.arrived_at_ms,
                 timeout_ms=timeout_ms,
                 severity=pending.severity,
-                auto_approve_at_ms=pending.auto_approve_at_ms,
-                auto_reject_at_ms=pending.auto_reject_at_ms,
                 blocked_by_rule=pending.matched_rule,
+                danger=pending.danger,
+                remember_allowed=pending.remember_allowed,
+                remember_rule=(
+                    {
+                        "expression": remember_rule.expression,
+                        "displayText": remember_rule.display_text,
+                        "scopeCwd": remember_rule.scope_cwd,
+                    }
+                    if remember_rule is not None
+                    else None
+                ),
+                auto_approve_at_ms=getattr(pending, "auto_approve_at_ms", None),
             )
             self._broadcaster.register_resolve_target(
                 pending.thread_id,
@@ -168,7 +179,8 @@ class InboxEventSink:
 
         Args:
             request_id: 对应 ``emit_approval_required`` 时的 ``pending.request_id``
-            reason: ``"user_decided"`` / ``"timeout"`` / ``"cancelled"``
+            reason: ``"user_decided"`` / ``"timeout"`` / ``"cancelled"`` /
+                ``"auto_allowed"`` / ``"auto_rejected"``
 
         **设计折中（阶段 1 简化）**：
         ``register_resolve_target`` 在 ``emit_approval_required`` 注册的是

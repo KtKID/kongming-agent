@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing_extensions import override
+
 from hosts.web.workflow_viewer.adapters.unknown import UnknownWorkflowViewerAdapter
 from hosts.web.workflow_viewer.models import (
     WorkflowArtifactBundle,
@@ -13,6 +15,7 @@ from hosts.web.workflow_viewer.models import (
 class ParallelWorkflowViewerAdapter(UnknownWorkflowViewerAdapter):
     mode = "parallel"
 
+    @override
     def project(self, bundle: WorkflowArtifactBundle) -> WorkflowModeProjection:
         base = super().project(bundle)
         panel = WorkflowPanelDTO(

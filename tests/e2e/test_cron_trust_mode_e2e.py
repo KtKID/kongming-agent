@@ -37,7 +37,32 @@ from core.contracts import (
 )
 from scheduler.domain import ApprovalMode
 from scheduler.store import Store
-from tools.builtin.schedule_tool import build_schedule_tool
+from tests.support.tool_calls import execute_prepared_tool
+from tools.builtin.schedule_tool import ScheduleTool, build_schedule_tool
+
+
+class _FakeThreadProvisioner:
+    """为 schedule create 提供确定性的专属 thread。"""
+
+    async def create_scheduled_task_thread(
+        self,
+        *,
+        task_id: str,
+        name: str,
+        preset_id: str,
+        cwd: str = "",
+    ) -> str:
+        del task_id, name, preset_id, cwd
+        return "thread-bbbbbbbbbbbb"
+
+    async def delete_thread(self, thread_id: str, *, keep_history: bool = False) -> None:
+        del thread_id, keep_history
+
+
+def _build_schedule_tool(store: Store) -> ScheduleTool:
+    """构造带 scheduled-thread provisioner 的真实 schedule tool。"""
+    return build_schedule_tool(store, thread_provisioner=_FakeThreadProvisioner())
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -55,7 +80,7 @@ class FakeInner:
     decision_class: str
     decision_source: str = ""
     outcome: str = "rejected"
-    matched_rule: str = "shell.execute_script"
+    matched_rule: str = "default:ask"
     reason: str = "test"
 
     async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
@@ -92,7 +117,7 @@ def _build_real_bridge(*, store: Store, inner: FakeInner) -> ExecutionBridge:
     用 ``MagicMock`` —— 因为我们只调 ``_build_approval_wrapper`` + wrapper.decide。
     """
     return ExecutionBridge(
-        runner=MagicMock(),
+        runtime=MagicMock(),
         llm=MagicMock(),
         tools={},
         enabled_tool_names=(),
@@ -125,8 +150,9 @@ async def test_trust_create_then_wrapper_auto_allows_consent_and_writes_audit(
     """
     # 步骤 1: schedule_tool create approval_mode=trust
     store = Store(home_dir=tmp_path / "cron")
-    tool = build_schedule_tool(store)
-    result = await tool.execute(
+    tool = _build_schedule_tool(store)
+    result = await execute_prepared_tool(
+        tool,
         {
             "action": "create",
             "name": "trust e2e task",
@@ -152,7 +178,7 @@ async def test_trust_create_then_wrapper_auto_allows_consent_and_writes_audit(
         decision_class="explicit_consent",
         decision_source="standard",
         outcome="rejected",
-        matched_rule="shell.execute_script",
+        matched_rule="default:ask",
     )
     bridge = _build_real_bridge(store=store, inner=inner)
     wrapper = bridge._build_approval_wrapper(task)
@@ -181,7 +207,7 @@ async def test_trust_create_then_wrapper_auto_allows_consent_and_writes_audit(
     assert payload["tool_name"] == "run_shell"
     assert payload["original_decision_class"] == "explicit_consent"
     assert payload["original_decision_source"] == "standard"
-    assert payload["matched_rule"] == "shell.execute_script"
+    assert payload["matched_rule"] == "default:ask"
     assert isinstance(payload["arguments_digest"], str)
     assert payload["arguments_digest"].startswith("sha256:")
 
@@ -203,8 +229,9 @@ async def test_trust_mode_silent_allow_passthrough_no_audit(tmp_path: Path) -> N
     不污染审计流。
     """
     store = Store(home_dir=tmp_path / "cron")
-    tool = build_schedule_tool(store)
-    result = await tool.execute(
+    tool = _build_schedule_tool(store)
+    result = await execute_prepared_tool(
+        tool,
         {
             "action": "create",
             "name": "trust silent",

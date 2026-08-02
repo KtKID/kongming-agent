@@ -1,94 +1,53 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+/** ApprovalToastCard 按服务端 rememberAllowed 渲染，channel 不参与本地安全判断。 */
+
 import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+
+import type { ApprovalInboxItem } from "@/protocol";
 import { ApprovalToastCard } from "../ApprovalToastCard";
-import { useApprovalInboxStore } from "../useApprovalInbox";
-import { resetSender } from "../senderRef";
-import type { ApprovalInboxItem } from "../types";
 
-/**
- * smart-approval-manager-stage1 task #7：channel 控制「本 session」按钮显隐。
- *
- * 设计要点（与 ApprovalToastCard 内 CHANNELS_WITH_SESSION_GRANT 白名单对齐）：
- * - 白名单内（claude_code）→ 渲染三按钮
- * - 白名单外（generic_chat / 未知 channel）→ 只渲染两按钮
- *
- * 验证抓手：复用现有 data-testid（approval-inbox-btn-reject / -allow-once / -allow-session）。
- */
-
-// 同 Card 既有单测：避免 CountdownBar 定时器
-vi.mock("@/features/auto-approval", () => ({
-  CountdownBar: () => <div data-testid="mock-countdown-bar" />,
-}));
+vi.mock("@/features/auto-approval", () => ({ CountdownBar: () => null }));
 
 function makeItem(overrides: Partial<ApprovalInboxItem> = {}): ApprovalInboxItem {
   return {
-    requestId: "req-channel-test",
-    threadId: "thread-channel-test-xyz",
-    toolName: "Bash",
-    toolInput: { cmd: "ls" },
-    autoApproveAtMs: null,
-    autoRejectAtMs: null,
+    requestId: "req-channel",
+    threadId: "thread-channel",
+    toolName: "read_file",
+    toolInput: { path: "README.md" },
     blockedByRule: null,
     isElevated: false,
-    channel: "claude_code",
-    cwd: "/tmp",
+    danger: false,
+    rememberAllowed: true,
+    channel: "generic_chat",
+    cwd: "/workspace",
     arrivedAtMs: 1_000,
     timeoutMs: null,
+    rememberRule: {
+      expression: "read_file(README.md)",
+      displayText: "允许读取 README.md",
+      scopeCwd: null,
+    },
     ...overrides,
   };
 }
 
-beforeEach(() => {
-  useApprovalInboxStore.setState({ byRequestId: {} });
-  resetSender();
-});
+describe("ApprovalToastCard remember capability", () => {
+  it.each(["generic_chat", "claude_code", "cron"])(
+    "%s 通道在 rememberAllowed=true 时显示两个记忆动作",
+    (channel) => {
+      render(<ApprovalToastCard item={makeItem({ channel })} />);
+      expect(screen.getByTestId("approval-inbox-btn-allow-remember")).toBeInTheDocument();
+      expect(screen.getByTestId("approval-inbox-btn-deny-remember")).toBeInTheDocument();
+    },
+  );
 
-describe("ApprovalToastCard channel-based button visibility", () => {
-  it("claude_code 通道显示三按钮（白名单内）", () => {
-    render(<ApprovalToastCard item={makeItem({ channel: "claude_code" })} />);
-    expect(
-      screen.getByTestId("approval-inbox-btn-reject"),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByTestId("approval-inbox-btn-allow-once"),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByTestId("approval-inbox-btn-allow-session"),
-    ).toBeInTheDocument();
-  });
-
-  it("generic_chat 通道显示三按钮（fix-report-20260520-generic-chat-session-grant 后已加入白名单）", () => {
-    render(<ApprovalToastCard item={makeItem({ channel: "generic_chat" })} />);
-    expect(
-      screen.getByTestId("approval-inbox-btn-reject"),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByTestId("approval-inbox-btn-allow-once"),
-    ).toBeInTheDocument();
-    // 本 session 现在也显示（生效后真正写 ApprovalRules._thread_overrides）
-    expect(
-      screen.getByTestId("approval-inbox-btn-allow-session"),
-    ).toBeInTheDocument();
-  });
-
-  it("未知 channel（如 cron）保守隐藏「本 session」按钮（白名单外）", () => {
-    render(<ApprovalToastCard item={makeItem({ channel: "cron" })} />);
-    expect(
-      screen.queryByTestId("approval-inbox-btn-allow-session"),
-    ).not.toBeInTheDocument();
-    // 二态仍可用，确保 cron 仍能正常决议（只是不能 remember-session）
-    expect(
-      screen.getByTestId("approval-inbox-btn-reject"),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByTestId("approval-inbox-btn-allow-once"),
-    ).toBeInTheDocument();
-  });
-
-  it("空字符串 channel 保守隐藏「本 session」按钮", () => {
-    render(<ApprovalToastCard item={makeItem({ channel: "" })} />);
-    expect(
-      screen.queryByTestId("approval-inbox-btn-allow-session"),
-    ).not.toBeInTheDocument();
+  it("rememberAllowed=false 时隐藏两个记忆动作", () => {
+    render(
+      <ApprovalToastCard
+        item={makeItem({ rememberAllowed: false, rememberRule: null })}
+      />,
+    );
+    expect(screen.queryByTestId("approval-inbox-btn-allow-remember")).toBeNull();
+    expect(screen.queryByTestId("approval-inbox-btn-deny-remember")).toBeNull();
   });
 });

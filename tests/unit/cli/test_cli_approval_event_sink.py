@@ -1,30 +1,37 @@
-"""``CLIApprovalEventSink`` 的单元测试。"""
+"""CLIApprovalEventSink 的人工审批投影与失败关闭测试。
+
+关键流程：真实 ApprovalManager 创建 pending，CLI sink 投影 ApprovalRequest，
+终端动作再经 manager.resolve 收口，覆盖允许、拒绝和通道隔离。
+"""
 
 from __future__ import annotations
 
-import asyncio
-from types import SimpleNamespace
-from typing import Any
+from pathlib import Path
 
 from core.contracts import ApprovalAction, ApprovalRequest
 from hosts.cli.approval_manager_sink import CLIApprovalEventSink
-from safety.approval import PendingApprovalView
-from safety.approval.manager import ApprovalManager, _PendingApproval
-from safety.approval.rules import ApprovalRules
+from safety.approval.events import PendingApprovalView
+from safety.approval.manager import ApprovalManager
+from safety.approval.permissions_manager import PermissionsManager
 
 
-def _pending(
-    loop: asyncio.AbstractEventLoop,
-    *,
-    severity: str = "standard",
-    matched_rule: str | None = None,
-    auto_approve_at_ms: int | None = None,
-    auto_reject_at_ms: int | None = None,
-    timeout_ms: int | None = 60_000,
-) -> _PendingApproval:
-    future = loop.create_future()
-    return _PendingApproval(
-        request_id="req-1",
+def _manager(tmp_path: Path) -> ApprovalManager:
+    """构造使用临时 thread permissions 本子的审批门户。"""
+    return ApprovalManager(permissions_manager=PermissionsManager(tmp_path))
+
+
+async def test_cli_sink_accept_once_resolves_allow_payload(tmp_path: Path) -> None:
+    """终端单次允许会完成真实 pending，并保留 root thread 身份。"""
+    manager = _manager(tmp_path)
+    captured: list[ApprovalRequest] = []
+
+    async def prompt(request: ApprovalRequest) -> ApprovalAction:
+        """记录投影请求并返回单次允许。"""
+        captured.append(request)
+        return ApprovalAction.ACCEPT_ONCE
+
+    manager.register_event_sink(CLIApprovalEventSink(manager, prompt))
+    decision = await manager.request(
         channel="cli",
         thread_id="cli-session",
         cwd="/proj",
@@ -35,190 +42,72 @@ def _pending(
             "session_id": "cli-session",
             "turn": 1,
             "call_id": "call-1",
-            "reason": "needs approval",
         },
-        severity=severity,
-        matched_rule=matched_rule,
-        auto_approve_at_ms=auto_approve_at_ms,
-        auto_reject_at_ms=auto_reject_at_ms,
-        future=future,
-        timeout_ms=timeout_ms,
     )
 
-
-def _view_for(pending: _PendingApproval, **overrides: Any) -> PendingApprovalView:
-    data: dict[str, Any] = {
-        "request_id": pending.request_id,
-        "channel": pending.channel,
-        "thread_id": pending.thread_id,
-        "cwd": pending.cwd,
-        "tool_name": pending.tool_name,
-        "tool_input": pending.tool_input,
-        "metadata": pending.metadata,
-        "severity": pending.severity,
-        "matched_rule": pending.matched_rule,
-        "auto_approve_at_ms": pending.auto_approve_at_ms,
-        "auto_reject_at_ms": pending.auto_reject_at_ms,
-        "arrived_at_ms": pending.arrived_at_ms,
-        "timeout_ms": pending.timeout_ms if pending.timeout_ms is not None else 60_000,
-    }
-    data.update(overrides)
-    return PendingApprovalView(**data)
-
-
-# 验证终端返回单次允许时，CLI 接收器回写审批管理器。
-async def test_cli_sink_accept_once_resolves_allow_payload() -> None:
-    manager = ApprovalManager(rules=ApprovalRules())
-    captured: list[ApprovalRequest] = []
-
-    async def prompt(request: ApprovalRequest) -> ApprovalAction:
-        captured.append(request)
-        return ApprovalAction.ACCEPT_ONCE
-
-    pending = _pending(asyncio.get_running_loop())
-    manager._pending[pending.request_id] = pending
-    sink = CLIApprovalEventSink(manager, prompt)
-
-    await sink.emit_approval_required(pending=_view_for(pending))
-
-    assert pending.future.done()
-    decision = pending.future.result()
     assert decision.outcome == "approved"
-    assert "remember_for_session" not in decision.metadata
-    assert "remember_persistent" not in decision.metadata
-    assert captured[0].run_id == "run-1"
     assert captured[0].session_id == "cli-session"
-    assert captured[0].call_id == "call-1"
-    assert captured[0].metadata["cwd"] == "/proj"
     assert captured[0].metadata["approval_channel"] == "cli"
-    assert captured[0].metadata["timeout_ms"] == 60_000
+    assert captured[0].metadata["danger"] is False
+    assert captured[0].metadata["remember_allowed"] is False
 
 
-# 验证 CLI 接收器会把安全路径自动同意 deadline 透传给终端 prompt。
-async def test_cli_sink_projects_auto_approve_metadata() -> None:
-    manager = ApprovalManager(rules=ApprovalRules())
-    captured: list[ApprovalRequest] = []
+async def test_cli_sink_reject_action_rejects_pending(tmp_path: Path) -> None:
+    """终端拒绝动作会按失败关闭语义完成 pending。"""
+    manager = _manager(tmp_path)
 
-    async def prompt(request: ApprovalRequest) -> ApprovalAction:
-        captured.append(request)
-        return ApprovalAction.ACCEPT_ONCE
-
-    pending = _pending(
-        asyncio.get_running_loop(),
-        severity="standard",
-        auto_approve_at_ms=54_321,
-        timeout_ms=10_000,
-    )
-    manager._pending[pending.request_id] = pending
-    sink = CLIApprovalEventSink(manager, prompt)
-
-    await sink.emit_approval_required(pending=_view_for(pending))
-
-    assert pending.future.done()
-    assert pending.future.result().outcome == "approved"
-    assert captured[0].metadata["severity"] == "standard"
-    assert captured[0].metadata["auto_approve_at_ms"] == 54_321
-    assert captured[0].metadata["auto_reject_at_ms"] is None
-    assert captured[0].metadata["timeout_ms"] == 10_000
-
-
-# 验证 CLI 接收器会把危险规则、自动拒绝 deadline 和超时配置透传给终端 prompt。
-async def test_cli_sink_projects_auto_reject_metadata() -> None:
-    manager = ApprovalManager(rules=ApprovalRules())
-    captured: list[ApprovalRequest] = []
-
-    async def prompt(request: ApprovalRequest) -> ApprovalAction:
-        captured.append(request)
+    async def prompt(_request: ApprovalRequest) -> ApprovalAction:
+        """返回显式拒绝。"""
         return ApprovalAction.REJECT
 
-    pending = _pending(
-        asyncio.get_running_loop(),
-        severity="elevated",
-        matched_rule="bash_rm_any",
-        auto_reject_at_ms=12_345,
-        timeout_ms=10_000,
+    manager.register_event_sink(CLIApprovalEventSink(manager, prompt))
+    decision = await manager.request(
+        channel="cli",
+        thread_id="cli-session",
+        cwd="/proj",
+        tool_name="run_shell",
+        tool_input={"command": "ls"},
     )
-    manager._pending[pending.request_id] = pending
-    sink = CLIApprovalEventSink(manager, prompt)
-
-    await sink.emit_approval_required(pending=_view_for(pending))
-
-    assert pending.future.done()
-    assert pending.future.result().outcome == "rejected"
-    assert captured[0].metadata["severity"] == "elevated"
-    assert captured[0].metadata["matched_rule"] == "bash_rm_any"
-    assert captured[0].metadata["blocked_by_rule"] == "bash_rm_any"
-    assert captured[0].metadata["auto_reject_at_ms"] == 12_345
-    assert captured[0].metadata["timeout_ms"] == 10_000
+    assert decision.outcome == "rejected"
 
 
-# 验证终端审批提示抛异常时，接收器会按失败关闭自动拒绝。
-async def test_cli_sink_prompt_exception_rejects() -> None:
-    manager = ApprovalManager(rules=ApprovalRules())
+async def test_cli_sink_prompt_exception_rejects(tmp_path: Path) -> None:
+    """终端输入异常时自动拒绝并清理 pending。"""
+    manager = _manager(tmp_path)
 
     async def prompt(_request: ApprovalRequest) -> ApprovalAction:
+        """模拟终端输入通道失败。"""
         raise RuntimeError("标准输入失败")
 
-    pending = _pending(asyncio.get_running_loop())
-    manager._pending[pending.request_id] = pending
-    sink = CLIApprovalEventSink(manager, prompt)
-
-    await sink.emit_approval_required(pending=_view_for(pending))
-
-    assert pending.future.done()
-    assert pending.future.result().outcome == "rejected"
-
-
-# 验证待处理请求无法投影成 ApprovalRequest 时，接收器会自动拒绝。
-async def test_cli_sink_projection_exception_rejects() -> None:
-    manager = ApprovalManager(rules=ApprovalRules())
-    called = False
-
-    async def prompt(_request: ApprovalRequest) -> ApprovalAction:
-        nonlocal called
-        called = True
-        return ApprovalAction.ACCEPT_ONCE
-
-    pending = _pending(asyncio.get_running_loop())
-    manager._pending[pending.request_id] = pending
-    sink = CLIApprovalEventSink(manager, prompt)
-    bad_view = SimpleNamespace(
-        request_id=pending.request_id,
-        channel=pending.channel,
-        thread_id=pending.thread_id,
-        cwd=pending.cwd,
-        tool_name=pending.tool_name,
-        tool_input=None,
-        metadata=pending.metadata,
-        severity=pending.severity,
-        matched_rule=pending.matched_rule,
-        auto_approve_at_ms=pending.auto_approve_at_ms,
-        auto_reject_at_ms=pending.auto_reject_at_ms,
-        timeout_ms=pending.timeout_ms,
+    manager.register_event_sink(CLIApprovalEventSink(manager, prompt))
+    decision = await manager.request(
+        channel="cli",
+        thread_id="cli-session",
+        cwd="/proj",
+        tool_name="run_shell",
+        tool_input={"command": "ls"},
     )
-
-    await sink.emit_approval_required(pending=bad_view)  # type: ignore[arg-type]
-
-    assert called is False
-    assert pending.future.done()
-    assert pending.future.result().outcome == "rejected"
+    assert decision.outcome == "rejected"
+    assert manager.pending_count == 0
 
 
-# 验证 CLI 接收器只处理 cli 通道，其他通道保持原待处理状态。
-async def test_cli_sink_ignores_other_channels() -> None:
-    manager = ApprovalManager(rules=ApprovalRules())
+async def test_cli_sink_ignores_other_channels(tmp_path: Path) -> None:
+    """CLI sink 对其他宿主的公开 pending 快照保持无副作用。"""
+    manager = _manager(tmp_path)
     called = False
 
     async def prompt(_request: ApprovalRequest) -> ApprovalAction:
+        """标记意外的 CLI prompt 调用。"""
         nonlocal called
         called = True
         return ApprovalAction.ACCEPT_ONCE
 
-    pending = _pending(asyncio.get_running_loop())
-    manager._pending[pending.request_id] = pending
     sink = CLIApprovalEventSink(manager, prompt)
-
-    await sink.emit_approval_required(pending=_view_for(pending, channel="generic_chat"))
-
+    await sink.emit_approval_required(
+        pending=PendingApprovalView(
+            request_id="req-1",
+            channel="generic_chat",
+            thread_id="thread-a",
+        )
+    )
     assert called is False
-    assert pending.future.done() is False

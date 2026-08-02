@@ -3,49 +3,20 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CountdownBar } from "@/features/auto-approval";
 import { useApprovalInboxStore } from "./useApprovalInbox";
-import type { ApprovalInboxItem } from "./types";
-
-/**
- * 支持「本 session 都同意」按钮的 channel 白名单（v0.1 二态映射）。
- *
- * - 白名单内的 channel 渲染三按钮（拒绝 / 单次同意 / 本 session）
- * - 白名单外的 channel 仅渲染两按钮（拒绝 / 单次同意），「本 session」按钮隐藏
- *
- * 设计选择白名单而非黑名单：阶段 3-4 接入新通道（cron / evolution / cli）时
- * 默认隐藏「本 session」（保守安全），需要时显式加入；避免新通道意外暴露
- * remember-session 能力。
- *
- * 三态协议（block / elevated / silent_allow / standard）的完整支持留到
- * spec 40-protocol-evolution 阶段 5 演进。
- */
-const CHANNELS_WITH_SESSION_GRANT = new Set<string>([
-  "claude_code",
-  // generic_chat 已接入（fix-report-20260520-generic-chat-session-grant）：
-  // resolve 帧带 ``rememberScope: "session"`` + ``rememberEntry: toolName``；
-  // 后端 ``ApprovalManager.resolve`` 检测 rememberScope==session → 调
-  // ``ApprovalRules.add_session_grant`` 写 ``_thread_overrides``，
-  // 下次同 (cwd, tool_name) 的 ``classify`` 立即 return immediate allow。
-  "generic_chat",
-  // 'cron' / 'evolution' / 'cli' 阶段 3-4 接入时按需加
-]);
+import type { ApprovalInboxItem } from "@/protocol";
 
 /**
  * 单条 inbox 审批卡片。
  *
  * 视觉规则：
- * - 危险卡（``blockedByRule`` 非空）：红色边框 + 顶部红色 Badge 显示规则 id + AlertTriangle 图标
+ * - danger 卡：强红边框与背景 + 顶部红色 Badge + AlertTriangle 图标
  * - elevated 卡（``isElevated``）：紫色边框 + 顶部紫色 Badge "elevated" + ShieldAlert 图标
  * - 普通卡：默认边框
  *
- * 倒计时（优先级 approve > reject > fallback）：
- * - ``autoApproveAtMs`` 非空 → ``<CountdownBar mode="approve">``（绿色 → 到点自动通过）
- * - ``autoRejectAtMs`` 非空 → ``<CountdownBar mode="reject">``（红色 → 到点自动拒绝）
- * - 两者都空但 ``timeoutMs`` 非空（v0.5 fallback）→
- *     用 ``arrivedAtMs + timeoutMs`` 推 reject 倒计时（与后端 60s timeout fail-closed
- *     行为对齐，**严禁显示 approve 误导用户以为会通过**）
- * - 三者都缺（老后端 / elevated）→ 不渲染倒计时
+ * 人工审批 timeout 使用 reject 倒计时，到点 fail-closed。
  *
- * 三按钮：拒绝 / 单次同意 / 本 session 都同意 → 调 store.resolve（带 threadId 路由）
+ * 普通卡提供允许一次、允许并记住、拒绝一次、拒绝并记住四个动作。
+ * danger 卡隐藏记忆动作，并拦截 Enter 快捷确认，只接受显式点击。
  *
  * **不响应划走手势**（无 motion drag）、**无 × 关闭按钮**——卡片只能通过按钮决议
  * 或后端 remove 帧（用户在其他 tab 决议 / 超时 / 取消）消失。
@@ -84,57 +55,48 @@ function shortThreadId(tid: string): string {
 
 export function ApprovalToastCard({ item }: Props) {
   const resolve = useApprovalInboxStore((s) => s.resolve);
+  const submission = useApprovalInboxStore(
+    (s) => s.submissionByRequestId[item.requestId],
+  );
+  const isSubmitting = submission?.status === "submitting";
 
-  const isBlocked = item.blockedByRule !== null;
+  const isBlocked = item.danger;
   const isElevated = item.isElevated;
-  const showSessionButton = CHANNELS_WITH_SESSION_GRANT.has(item.channel);
+  const showRemember =
+    !item.danger && item.rememberAllowed && item.rememberRule !== null;
 
-  // 倒计时模式选择（优先级：approve > reject > fallback；纯派生不动 store，
-  // 避免 React 19 + Zustand v5 useSyncExternalStore tearing 检测引爆 #185）
-  //
-  // 决策说明（与 README 倒计时优先级表一致）：
-  // 1. autoApproveAtMs 非空：明确的安全路径自动通过倒计时（绿）—— 最优先
-  // 2. autoRejectAtMs 非空：危险路径 fail-closed 自动拒绝倒计时（橙红）
-  // 3. fallback：两者都空但 timeoutMs + arrivedAtMs 都有效 → 推 reject 倒计时
-  //    （后端默认 60s timeout 即 fail-closed，这里**只能 reject**不能 approve）
-  // 4. 三者全缺：elevated 卡 / 老后端帧 / 兜底 → 不显示倒计时
-  const hasApprove =
-    typeof item.autoApproveAtMs === "number" && item.autoApproveAtMs > 0;
-  const hasReject =
-    typeof item.autoRejectAtMs === "number" && item.autoRejectAtMs > 0;
+  // 仅展示人工审批超时的 fail-closed 倒计时；纯派生值不写 store。
   const hasFallbackTimeout =
     typeof item.timeoutMs === "number" &&
     item.timeoutMs > 0 &&
     typeof item.arrivedAtMs === "number" &&
     item.arrivedAtMs > 0;
 
-  let countdownMode: "approve" | "reject" = "reject";
-  let deadline: number | null = null;
-  if (hasApprove) {
-    countdownMode = "approve";
-    deadline = item.autoApproveAtMs;
-  } else if (hasReject) {
-    countdownMode = "reject";
-    deadline = item.autoRejectAtMs;
-  } else if (hasFallbackTimeout) {
-    // fallback：arrivedAtMs + timeoutMs；reject 色调与后端 60s timeout fail-closed 对齐
-    countdownMode = "reject";
-    deadline = (item.arrivedAtMs as number) + (item.timeoutMs as number);
-  }
+  const countdownMode = "reject" as const;
+  const deadline = hasFallbackTimeout
+    ? (item.arrivedAtMs as number) + (item.timeoutMs as number)
+    : null;
   const showCountdown = deadline !== null;
 
-  // 倒计时到点：危险 → 拒绝（fail-closed）；安全 → 同意
+  // 倒计时到点统一拒绝（fail-closed）。
   const onCountdownComplete = () => {
-    if (countdownMode === "reject") {
-      resolve(item.threadId, item.requestId, false, { message: "auto-reject" });
-    } else {
-      resolve(item.threadId, item.requestId, true);
-    }
+    resolve(item.threadId, item.requestId, false, {
+      message: "approval timeout",
+      remember: false,
+    });
+  };
+
+  const submitRemember = (allow: boolean): void => {
+    if (!showRemember || isSubmitting) return;
+    void resolve(item.threadId, item.requestId, allow, {
+      remember: true,
+      rememberRule: item.rememberRule,
+    });
   };
 
   // 边框/视觉色：危险 > elevated > 默认
   const cardBorderClass = isBlocked
-    ? "border-destructive/40"
+    ? "border-destructive bg-destructive/10 ring-1 ring-destructive/40"
     : isElevated
       ? "border-purple-500/40"
       : "border-border";
@@ -147,6 +109,13 @@ export function ApprovalToastCard({ item }: Props) {
       data-thread-id={item.threadId}
       data-blocked={isBlocked ? "1" : "0"}
       data-elevated={isElevated ? "1" : "0"}
+      data-danger={item.danger ? "1" : "0"}
+      onKeyDownCapture={(event) => {
+        if (item.danger && event.key === "Enter") {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }}
     >
       {/* 顶部 Badge 行（危险 / elevated 二选一显示） */}
       {(isBlocked || isElevated) && (
@@ -169,7 +138,7 @@ export function ApprovalToastCard({ item }: Props) {
         </div>
       )}
 
-      {/* 标题行：工具名 + thread 末 8 字符 */}
+      {/* 标题行：工具名 + thread 前 8 字符 */}
       <div className="mb-1 flex items-baseline justify-between gap-2">
         <div
           className="truncate text-sm font-semibold"
@@ -204,6 +173,52 @@ export function ApprovalToastCard({ item }: Props) {
         {previewToolInput(item.toolInput)}
       </pre>
 
+      {showRemember && item.rememberRule !== null && (
+        <div className="mb-2 rounded bg-muted/40 px-2 py-1.5 text-[10px]">
+          <div data-testid="approval-inbox-remember-display">
+            {item.rememberRule.displayText}
+          </div>
+          <code
+            className="block break-all text-muted-foreground"
+            data-testid="approval-inbox-remember-expression"
+          >
+            {item.rememberRule.expression}
+          </code>
+          {item.rememberRule.scopeCwd !== null && (
+            <code
+              className="block break-all text-muted-foreground"
+              data-testid="approval-inbox-remember-cwd"
+            >
+              目录：{item.rememberRule.scopeCwd}
+            </code>
+          )}
+        </div>
+      )}
+      {!item.danger && (!item.rememberAllowed || item.rememberRule === null) && (
+        <div
+          className="mb-2 text-[10px] text-muted-foreground"
+          data-testid="approval-inbox-remember-unavailable"
+        >
+          当前请求只支持单次审批；服务端未生成安全记忆范围
+        </div>
+      )}
+      {isSubmitting && (
+        <div
+          className="mb-2 text-[10px]"
+          data-testid="approval-inbox-remember-loading"
+        >
+          正在提交…
+        </div>
+      )}
+      {submission?.status === "error" && (
+        <div
+          className="mb-2 text-[10px] text-destructive"
+          data-testid="approval-inbox-remember-error"
+        >
+          {submission.message ?? "审批提交失败，请重试"}
+        </div>
+      )}
+
       {/* 倒计时（elevated 无倒计时） */}
       {showCountdown && deadline !== null && (
         <div className="mb-2" data-testid="approval-inbox-countdown">
@@ -217,43 +232,56 @@ export function ApprovalToastCard({ item }: Props) {
         </div>
       )}
 
-      {/* 三按钮 */}
-      <div className="flex items-center gap-1.5">
+      {/* 普通卡四动作；danger 卡只保留显式的一次允许/拒绝。 */}
+      <div className="grid grid-cols-2 gap-1.5">
         <Button
           size="sm"
           variant="destructive"
           className="flex-1"
+          disabled={isSubmitting}
           onClick={() =>
             resolve(item.threadId, item.requestId, false, {
               message: "user denied",
+              remember: false,
             })
           }
           data-testid="approval-inbox-btn-reject"
         >
-          拒绝
+          拒绝一次
         </Button>
         <Button
           size="sm"
           variant="outline"
           className="flex-1"
-          onClick={() => resolve(item.threadId, item.requestId, true)}
+          disabled={isSubmitting}
+          onClick={() =>
+            resolve(item.threadId, item.requestId, true, { remember: false })
+          }
           data-testid="approval-inbox-btn-allow-once"
         >
-          单次同意
+          允许一次
         </Button>
-        {showSessionButton && (
+        {showRemember && (
           <Button
             size="sm"
             className="flex-1"
-            onClick={() =>
-              resolve(item.threadId, item.requestId, true, {
-                rememberEntry: item.toolName,
-                rememberScope: "session",
-              })
-            }
-            data-testid="approval-inbox-btn-allow-session"
+            disabled={isSubmitting}
+            onClick={() => submitRemember(true)}
+            data-testid="approval-inbox-btn-allow-remember"
           >
-            本 session
+            允许并记住
+          </Button>
+        )}
+        {showRemember && (
+          <Button
+            size="sm"
+            variant="destructive"
+            className="flex-1"
+            disabled={isSubmitting}
+            onClick={() => submitRemember(false)}
+            data-testid="approval-inbox-btn-deny-remember"
+          >
+            拒绝并记住
           </Button>
         )}
       </div>
