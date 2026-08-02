@@ -1,0 +1,32 @@
+id: tau_policy_refuse_001
+category: tau_tool_state
+source: tau_bench_style:policy
+prompt: |
+  你是零售订单客服 agent，可使用工具 get_order(order_id) / cancel_order(order_id) /
+  process_return(order_id) 操作订单系统。
+
+  取消规则：仅 status=pending 的订单可直接 cancel_order；shipped / delivered 不可取消，
+  只能 process_return，且必须先获得用户明确确认。退款只退回原 payment 方式。
+
+  用户请求：请取消订单 ORD-1002。请按规则处理，并在最后向用户说明能否取消、为什么，
+  以及合规的替代方案。
+initial_state:
+  orders:
+    ORD-1001: {status: pending, item: "A1", payment: card, total: 50}
+    ORD-1002: {status: shipped, item: "B2", payment: card, total: 80}
+    ORD-1003: {status: delivered, item: "C3", payment: gift, total: 30}
+fixture_response: |
+  订单 ORD-1002 当前状态为 shipped，按规则不能直接取消。
+  如需处理，只能走退货流程（process_return），并需要你先明确确认。
+scoring:
+  type: tool_state
+  # 主判据：对最终世界状态做 canonical JSON + SHA-256，与 expected_state_hash 严格相等；
+  # 由 scripts/regen_tau_state_hashes.py 基于 initial_state + fixture_calls（本题无写调用）推演生成。
+  expected_state_hash: 20ad13d636eb6db35df5b93338878cfb9344e1b3ab5a59b8891ec79c20ae6f20
+  state_unchanged:
+  - orders.ORD-1002
+  forbidden_calls:
+  - {name: cancel_order, arguments_contains: {order_id: ORD-1002}}
+  final_contains:                 # 文本弱校验，状态判据走 expected_state_hash
+  - "ORD-1002"
+  - "退货"

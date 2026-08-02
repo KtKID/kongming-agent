@@ -6,25 +6,25 @@ prompt: |
   {"answer": "...", "source_id": "..."}
 
   [doc-a]
-  Agent Harness 的核心是把模型输出接到可控运行循环、工具协议、上下文装配、权限和观测里。
+  仓储管理系统的核心是把货物入库接到分类规则、库位编码、出库审核、权限和观测里。
 
   [doc-b]
-  当前 P0 评测闭环包含固定题集、单模型运行、确定性打分、代码 sandbox 和 Markdown 报告。
+  当前一期上线方案包含 RFID 扫码、SKU 编码、出入库审计、月度盘点和异常告警。
 
   [doc-c]
-  后续 P1 会加入 LLM judge、失败分类、多模型对比和历史回归曲线。
+  后续二期会加入 AI 预测、动态补货、跨仓调拨和供应商评分。
 
-  问题：P0 评测闭环包含哪五个部分？答案必须来自资料。
+  问题：一期上线方案包含哪五个部分？答案必须来自资料。
 scoring:
   type: json
   equals:
     source_id: doc-b
   contains:
     answer:
-      - 固定题集
-      - 单模型运行
-      - 确定性打分
-      - 代码 sandbox
-      - Markdown 报告
+      - RFID 扫码
+      - SKU 编码
+      - 出入库审计
+      - 月度盘点
+      - 异常告警
 fixture_response: |
-  {"answer":"固定题集、单模型运行、确定性打分、代码 sandbox 和 Markdown 报告","source_id":"doc-b"}
+  {"answer":"RFID 扫码、SKU 编码、出入库审计、月度盘点和异常告警","source_id":"doc-b"}

@@ -5,7 +5,7 @@ prompt: |
   请只输出一个 JSON 对象，不要使用 Markdown。
   JSON 必须包含三个字段：
   - "answer": 字符串，值必须是 "ready"
-  - "tags": 字符串数组，必须包含 "harness" 和 "eval"
+  - "tags": 字符串数组，必须包含 "alpha" 和 "beta"
   - "count": 整数，值必须是 2
 scoring:
   type: json
@@ -14,7 +14,7 @@ scoring:
     count: 2
   list_contains:
     tags:
-      - harness
-      - eval
+      - alpha
+      - beta
 fixture_response: |
-  {"answer":"ready","tags":["harness","eval"],"count":2}
+  {"answer":"ready","tags":["alpha","beta"],"count":2}
