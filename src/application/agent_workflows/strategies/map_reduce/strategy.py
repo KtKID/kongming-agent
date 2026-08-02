@@ -42,7 +42,7 @@ from application.agent_workflows.strategies.map_reduce.reducer import MapReduceR
 from application.agent_workflows.strategies.map_reduce.validator import (
     MapReduceMapperOutputValidator,
 )
-from application.subagents.manager import SubAgentRun, SubAgentTask
+from application.agent_workflows.task_models import SubAgentRun, SubAgentTask
 from application.subagents.permissions import SubAgentPermissionSpec, to_jsonable
 
 
@@ -200,6 +200,7 @@ class MapReduceStrategy:
         assigned_tasks = self._manager.prepare_subagent_tasks(
             workflow_dir=context.workflow_dir,
             tasks=raw_tasks,
+            parent_agent=context.parent_agent,
         )
         manifests = self._materialize_inputs(context, spec, shards, assigned_tasks)
         prompt_builder = MapperPromptBuilder()
@@ -444,7 +445,7 @@ class MapReduceStrategy:
             }
         )
 
-        from application.agent_workflows.manager import AgentWorkflowResult
+        from application.agent_workflows.models import AgentWorkflowResult
 
         return AgentWorkflowResult(
             workflow_id=context.workflow_id,

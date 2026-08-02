@@ -18,28 +18,28 @@ def code_review_role_presets() -> tuple[AgentRolePreset, ...]:
     return (
         AgentRolePreset(
             role_id="architecture_reviewer",
-            title="架构 Agent",
-            role="从模块边界、公开门户、依赖方向、扩展点和演进成本审查设计。",
+            nickname="架构 Agent",
+            role_desc="从模块边界、公开门户、依赖方向、扩展点和演进成本审查设计。",
         ),
         AgentRolePreset(
             role_id="code_quality_reviewer",
-            title="代码质量 Agent",
-            role="从命名、一致性、抽象层级、复杂度、可读性和维护成本审查实现。",
+            nickname="代码质量 Agent",
+            role_desc="从命名、一致性、抽象层级、复杂度、可读性和维护成本审查实现。",
         ),
         AgentRolePreset(
             role_id="test_reviewer",
-            title="测试 Agent",
-            role="从测试入口、边界条件、回归风险、可观测断言和缺失用例审查方案。",
+            nickname="测试 Agent",
+            role_desc="从测试入口、边界条件、回归风险、可观测断言和缺失用例审查方案。",
         ),
         AgentRolePreset(
             role_id="performance_reviewer",
-            title="性能 Agent",
-            role="从热路径、IO 次数、缓存、并发、资源占用和规模上限审查风险。",
+            nickname="性能 Agent",
+            role_desc="从热路径、IO 次数、缓存、并发、资源占用和规模上限审查风险。",
         ),
         AgentRolePreset(
             role_id="safety_stability_reviewer",
-            title="安全/稳定性 Agent",
-            role="从权限边界、异常处理、数据一致性、失败恢复和误用防护审查风险。",
+            nickname="安全/稳定性 Agent",
+            role_desc="从权限边界、异常处理、数据一致性、失败恢复和误用防护审查风险。",
         ),
     )
 

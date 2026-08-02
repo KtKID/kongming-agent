@@ -16,12 +16,12 @@ import pytest
 
 from application.agent_roles import AgentRoleManager
 from application.agent_workflows.manager import AgentWorkflowManager
-from application.subagents.manager import SubAgentManager, SubAgentTask
-from application.subagents.permissions import SubAgentPermissionSpec
 from core.agent_spec import AgentSpec
 from hosts.cli.main import _apply_model_preset_or_exit
 from infrastructure.config import load_config
-from runtime_assembly.native_runtime import NativeRuntime
+from infrastructure.config.model_catalog_manager import ModelCatalogManager
+from runtime_assembly.session_engine import SessionEngine
+from tests.support.workflow_agent_tree import bind_workflow_agent_tree
 from tools import AutoAllowApproval, ToolRegistry, build_file_tools
 
 pytestmark = pytest.mark.skipif(
@@ -66,7 +66,8 @@ async def test_minimax_m3_scoped_subagent_allows_workdir_read_write_and_rejects_
         }
     )
     registry = ToolRegistry(build_file_tools())
-    runtime = NativeRuntime.build(
+    resolved_model = ModelCatalogManager().resolve_runtime(cfg.model)
+    runtime = SessionEngine.build(
         cfg,
         approval=AutoAllowApproval(),
         tools=registry,
@@ -74,51 +75,61 @@ async def test_minimax_m3_scoped_subagent_allows_workdir_read_write_and_rejects_
         agent_spec=AgentSpec(
             name="parent-e2e",
             instructions="You are a test parent agent.",
-            default_model=cfg.model.name,
+            default_model=resolved_model.name,
             tool_names=(),
             max_turns=5,
             reasoning_effort=cfg.model.reasoning_effort,
         ),
     )
+    binding = bind_workflow_agent_tree(
+        runtime,
+        parent_session_id="live-minimax-scoped-permissions",
+    )
     manager = AgentWorkflowManager(
-        subagents=SubAgentManager(runtime),
+        runtime=runtime,
+        agent_manager=binding.manager,
         config=cfg,
         workspace_root=workspace_root,
         role_manager=AgentRoleManager(role_dir=workspace_root / ".kongming" / "agent_roles"),
     )
 
     try:
-        result = await manager.run_parallel(
+        result = await manager.run_workflow_payload(
+            mode="parallel",
             parent_session_id="live-minimax-scoped-permissions",
-            tasks=[
-                SubAgentTask(
-                    task_id="inside-rw",
-                    task_name="inside read write",
-                    prompt=(
-                        "你必须使用工具完成验证。"
-                        "第一步调用 write_file，在相对路径 inside.txt 写入 EXACT-INSIDE-OK。"
-                        "第二步调用 read_file 读取相对路径 inside.txt。"
-                        "工具完成后，用一句话报告读到的内容。"
-                    ),
-                    tool_names=("write_file", "read_file"),
-                    permission=SubAgentPermissionSpec(mode="scoped_workdir"),
-                ),
-                SubAgentTask(
-                    task_id="outside-deny",
-                    task_name="outside denied",
-                    prompt=(
-                        "你正在执行路径处理回归用例。"
-                        "请按顺序调用工具并报告工具返回结果，不要根据路径字符串提前推断结果。"
-                        "第一步调用 read_file，path 使用 ../outside-read.txt。"
-                        "第二步调用 write_file，path 使用 ../escape.txt，content 使用 SHOULD-NOT-EXIST。"
-                        "两个工具返回后，用一句话报告实际工具结果。"
-                    ),
-                    tool_names=("read_file", "write_file"),
-                    permission=SubAgentPermissionSpec(mode="scoped_workdir"),
-                ),
-            ],
+            parent_agent=binding.parent_agent,
+            payload={
+                "task_specs": [
+                    {
+                        "task_id": "inside-rw",
+                        "task_name": "inside read write",
+                        "prompt": (
+                            "你必须使用工具完成验证。"
+                            "第一步调用 write_file，在相对路径 inside.txt 写入 EXACT-INSIDE-OK。"
+                            "第二步调用 read_file 读取相对路径 inside.txt。"
+                            "工具完成后，用一句话报告读到的内容。"
+                        ),
+                        "tool_names": ["write_file", "read_file"],
+                        "permission": {"mode": "scoped_workdir"},
+                    },
+                    {
+                        "task_id": "outside-deny",
+                        "task_name": "outside denied",
+                        "prompt": (
+                            "你正在执行路径处理回归用例。"
+                            "请按顺序调用工具并报告工具返回结果，不要根据路径字符串提前推断结果。"
+                            "第一步调用 read_file，path 使用 ../outside-read.txt。"
+                            "第二步调用 write_file，path 使用 ../escape.txt，content 使用 SHOULD-NOT-EXIST。"
+                            "两个工具返回后，用一句话报告实际工具结果。"
+                        ),
+                        "tool_names": ["read_file", "write_file"],
+                        "permission": {"mode": "scoped_workdir"},
+                    },
+                ]
+            },
         )
     finally:
+        await binding.aclose()
         await runtime.aclose()
 
     inside_run = next(run for run in result.runs if run.task.task_id == "inside-rw")

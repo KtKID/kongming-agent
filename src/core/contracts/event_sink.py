@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
+
+from core.clock import now_epoch_ms
 
 # EventSink / Event
 # ---------------------------------------------------------------------------
@@ -14,7 +15,7 @@ EventKind = Literal[
     "run.start",
     "run.end",
     # interrupt-run-v0.1：runner 顶层捕获到 ``asyncio.CancelledError``（典型 =
-    # 用户在 web 端发 ``InterruptFrame`` → ``cell.current_run_task.cancel()``）后
+    # 用户在 web 端发 ``InterruptFrame`` → ``HostDispatcher.interrupt()``）后
     # emit；紧接着会 emit ``run.end``（status="cancelled"）。WSEventSink 会把
     # 这条转成 S2C ``RunInterruptedFrame`` 推给所有 attach 的 ws，多 tab 自动
     # 同步。payload={"cancelled_at_turn": int, "cancelled_tool_call_id": str | None,
@@ -43,6 +44,9 @@ EventKind = Literal[
     "reasoning.delta",
     "llm.chunk.first",
     "llm.stream.end",
+    # 显式 LLM 工具调用合同拒绝了一整条 assistant 响应。payload 只含协议坐标，
+    # 不含 arguments 或 transcript 正文。
+    "llm.tool_call.contract_violation",
     # Memory 模块事件（self-evolution-memory v0.1.3+）：
     # - memory.write.success：safety_write.execute_write 成功落盘 (status="written")
     # - memory.write.rejected：内容扫描拦截（prompt injection / secret / 不可见 Unicode 等）
@@ -60,12 +64,17 @@ EventKind = Literal[
     #   / tool_name / path_or_command / request_id / outcome
     # - tool.approval_required：ConsentResolver 进入 standard / elevated ask 时
     #   触发，发起 InteractiveApproval 之前 emit 一次（先于 decision）
-    # - tool.silently_allowed：TrustResolver 命中 intrinsic / session / config
+    # - tool.silently_allowed：full_trust 或 thread permissions allow 命中
     #   或 ConsentResolver 用户允许时触发。read 类工具的 silently_allowed
     #   默认不写盘（受 config.safety.log_silent_reads 控制，避免 jsonl 膨胀）
     "tool.denied",
     "tool.approval_required",
     "tool.silently_allowed",
+    "safety.auto_mode_fallback",
+    # thread permissions v1 首次读取完成安全迁移后 emit 一次。
+    # payload={"thread_id", "from_schema_version", "to_schema_version",
+    #          "invalidated_shell_allow_count", "backup_path"}
+    "permissions.migrated.v2",
     # Skill loader 装配期事件（skill-loader-v0.1.6）：
     # - skill.discovered：每成功解析一个 SkillSpec
     # - skill.shadowed：workspace 覆盖 home 时
@@ -103,13 +112,27 @@ class Event:
     runner 在关键节点构造 Event，fan-out 到所有注册的 :class:`EventSink`。
     v1-mini 只有一个 sink：``infrastructure.tracing/trace_sink.py`` 的 ``JsonlTraceSink``。
     v0.2+ 追加 usage / audit sink 时仍然走同一个协议，不新增事件协议。
+
+    三坐标字段（agent-tree-v0.1 模块 G）用于多 agent 场景的事件归属：
+
+    - ``agent_id``：产生该 event 的 agent（单 agent 场景默认 ``""``，由
+      runner 填充真实值）；agent_loop 分发、cancel_subtree 编排、前端归属
+      展示均依赖此字段。
+    - ``task_id``：关联 :class:`TaskRecord`（单 agent 为空，留待 task-3/4 填充）。
+    - ``conversation_id``：= tree_id / thread_id，标识所属会话树。
+
+    三字段默认值均为 ``""``，保证现有构造点（如 ``Event(kind="run.start",
+    run_id=...)``）不报错。
     """
 
     kind: str
     run_id: str
     turn: int | None = None
     payload: dict[str, Any] = field(default_factory=dict)
-    timestamp_ms: int = field(default_factory=lambda: int(time.time() * 1000))
+    timestamp_ms: int = field(default_factory=now_epoch_ms)
+    agent_id: str = ""
+    task_id: str = ""
+    conversation_id: str = ""
 
 
 @runtime_checkable

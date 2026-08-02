@@ -3,9 +3,9 @@
 本脚本验证 Multi-Agent Roundtable Review 策略注册、fake reviewer/arbiter 运行、
 ReviewBoard 产物和 run_agent_workflow tool 分流。
 作用是用可重复 pytest 覆盖圆桌评审第一版 runtime 集成边界，避免依赖真实模型。
-关键执行流程：创建临时源码，构造 roundtable_review payload，用 fake SubAgentManager
+关键执行流程：创建临时源码，构造 roundtable_review payload，用确定性 task executor
 返回 claims/comments/report，断言 claims.jsonl、rebuttals.jsonl、final_report.md 和 tool data。
-关键函数：_payload 构造 workflow 输入，_FakeRoundtableSubAgentManager 模拟子 agent 输出。
+关键函数：_payload 构造 workflow 输入，_FakeRoundtableTaskExecutor 模拟 child 输出。
 """
 
 from __future__ import annotations
@@ -15,17 +15,20 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from typing_extensions import override
 
 from application.agent_roles import AgentRoleManager
-from application.agent_workflows.manager import AgentWorkflowManager
+from application.agent_workflows.context import WorkflowExecutionContext
 from application.agent_workflows.strategies.roundtable_review.presets import (
     code_review_role_presets,
 )
-from application.subagents.manager import SubAgentRun
+from application.agent_workflows.task_models import SubAgentRun, SubAgentTask
 from core import AgentSpec, InMemorySession, Runner, ToolCall
 from core.contracts import LLMRequest, LLMResponse, ToolContext
 from core.message import Message
-from infrastructure.config.models import Config, ModelConfig
+from infrastructure.config.models import Config, ModelSelectionConfig, RunnerConfig
+from tests.support.tool_calls import execute_prepared_tool
+from tests.support.workflow_strategy_manager import WorkflowStrategyTestManager
 from tools import AutoAllowApproval, ToolRegistry, register_agent_role_tool
 from tools.agent_workflow_tool import (
     AgentWorkflowHandle,
@@ -33,14 +36,34 @@ from tools.agent_workflow_tool import (
 )
 
 
-class _FakeRoundtableSubAgentManager:
-    """测试用子 agent manager，按 roundtable_stage 返回结构化输出。"""
+class _RecordingWorkflowStrategyTestManager(WorkflowStrategyTestManager):
+    """记录 runtime progress 初始化次数，同时执行生产初始化链路。"""
+
+    def __init__(self, **kwargs: Any) -> None:
+        """初始化测试 Manager，输入为生产构造参数，输出为带计数实例。"""
+        super().__init__(**kwargs)
+        self.runtime_progress_open_count = 0
+
+    @override
+    def _open_runtime_task_progress(
+        self,
+        *,
+        context: WorkflowExecutionContext,
+        tasks: list[SubAgentTask],
+    ) -> None:
+        """记录同一 workflow 的初始化次数，输入为上下文和任务，输出为真实初始化结果。"""
+        self.runtime_progress_open_count += 1
+        super()._open_runtime_task_progress(context=context, tasks=tasks)
+
+
+class _FakeRoundtableTaskExecutor:
+    """测试用 roundtable task executor，按 roundtable_stage 返回结构化输出。"""
 
     def __init__(self) -> None:
         """初始化 fake manager，输入为空，输出为记录任务的实例。"""
         self.tasks: list[Any] = []
 
-    async def run_task(
+    async def execute_task(
         self,
         *,
         workflow_id: str,
@@ -201,15 +224,68 @@ class _RoleWorkflowLLM:
         )
 
 
+class _SparseRoundtableRole:
+    """测试用 role，模拟 runtime 字段缺省。"""
+
+    role_id = "sparse_reviewer"
+    nickname = "缺省字段 Reviewer"
+    title = "缺省字段 Reviewer"
+    role = "验证 role runtime fallback"
+    role_desc = "验证 role runtime fallback"
+    model = ""
+    reasoning_effort = None
+    max_turns = None
+
+    def summary(self) -> dict[str, object]:
+        """返回角色摘要，输入为空，输出 workflow 快照数据。"""
+        return {
+            "id": self.role_id,
+            "nickname": self.title,
+            "model": self.model,
+            "role_desc": self.role,
+            "reasoning_effort": self.reasoning_effort,
+            "max_turns": self.max_turns,
+        }
+
+
+class _SparseRoundtableRoleManager:
+    """测试用 role manager，返回 runtime 字段缺省的 role。"""
+
+    def __init__(self) -> None:
+        """初始化 manager，输入为空，输出绑定 sparse role 的实例。"""
+        self._role = _SparseRoundtableRole()
+
+    def resolve_participants(self, role_ids: list[object] | tuple[object, ...]) -> tuple[Any, ...]:
+        """解析 participant，输入为 role ids，输出 sparse role。"""
+        assert tuple(role_ids) == ("sparse_reviewer",)
+        return (self._role,)
+
+    def get_role(self, role_id: str) -> Any | None:
+        """按 role id 返回 role，输入为字符串 ID，输出 sparse role 或 None。"""
+        if role_id == self._role.role_id:
+            return self._role
+        return None
+
+    def write_workflow_snapshot(self, workflow_dir: Path, roles: tuple[Any, ...]) -> Path:
+        """写入角色快照，输入为 workflow 目录和 roles，输出快照路径。"""
+        path = workflow_dir / "roles.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "source": "sparse_role_manager",
+                    "roles": [role.summary() for role in roles],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+
 def _config(tmp_path: Path) -> Config:
     """构造测试配置，输入为临时目录，输出为 file session 配置。"""
-    cfg = Config(
-        model=ModelConfig(
-            name="fake-model",
-            base_url="http://127.0.0.1:1234/v1",
-            api_key="",
-        )
-    )
+    cfg = Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
     cfg.session.file_store_path = str(tmp_path / "sessions")
     return cfg
 
@@ -295,9 +371,9 @@ def _role_manager(tmp_path: Path) -> AgentRoleManager:
 async def test_roundtable_review_strategy_writes_review_board(tmp_path: Path) -> None:
     """验证 roundtable_review 产物，输入为 fake 子 agent，输出为白板断言。"""
     _write_sample_source(tmp_path)
-    fake = _FakeRoundtableSubAgentManager()
-    manager = AgentWorkflowManager(
-        subagents=fake,  # type: ignore[arg-type]
+    fake = _FakeRoundtableTaskExecutor()
+    manager = _RecordingWorkflowStrategyTestManager(
+        task_executor=fake,
         config=_config(tmp_path),
         workspace_root=tmp_path,
         role_manager=_role_manager(tmp_path),
@@ -315,7 +391,14 @@ async def test_roundtable_review_strategy_writes_review_board(tmp_path: Path) ->
         len([task for task in fake.tasks if task.metadata["roundtable_stage"] == "independent"])
         == 5
     )
-    assert all(task.metadata["max_turns"] == 8 for task in fake.tasks)
+    reviewer_tasks = [
+        task
+        for task in fake.tasks
+        if task.metadata["roundtable_stage"] in {"independent", "rebuttal"}
+    ]
+    arbiter_tasks = [task for task in fake.tasks if task.metadata["roundtable_stage"] == "arbiter"]
+    assert all(task.metadata["max_turns"] == 3 for task in reviewer_tasks)
+    assert all(task.metadata["max_turns"] == 8 for task in arbiter_tasks)
     board = result.workflow_dir / "review_board"
     claims = (board / "claims.jsonl").read_text(encoding="utf-8").strip().splitlines()
     rebuttals = (board / "rebuttals.jsonl").read_text(encoding="utf-8").strip().splitlines()
@@ -326,6 +409,15 @@ async def test_roundtable_review_strategy_writes_review_board(tmp_path: Path) ->
     assert (board / "context.md").exists()
     assert (board / "sources.md").exists()
     assert (board / "consensus.md").exists()
+    task_progress = json.loads(
+        (tmp_path / "sessions" / "parent-session" / "task_progress.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert task_progress["workflow_id"] == result.workflow_id
+    assert task_progress["counts"]["completed"] == task_progress["counts"]["total"]
+    assert {task["status"] for task in task_progress["tasks"]} == {"completed"}
+    assert manager.runtime_progress_open_count == 1
     roles = json.loads((result.workflow_dir / "roles.json").read_text(encoding="utf-8"))
     assert roles["source"] == "agent_role_manager"
     assert [role["id"] for role in roles["roles"]] == _payload()["participants"]["select"]
@@ -356,10 +448,121 @@ async def test_roundtable_review_strategy_writes_review_board(tmp_path: Path) ->
     )
 
 
+@pytest.mark.asyncio
+async def test_roundtable_review_role_runtime_overrides_subagent_task_runtime(
+    tmp_path: Path,
+) -> None:
+    """验证 role runtime 强覆盖，输入为 agent.toml 角色，输出子 agent runtime 断言。"""
+    _write_sample_source(tmp_path)
+    agent_config = tmp_path / "agent.toml"
+    agent_config.write_text(
+        """
+[[agents]]
+id = 1
+nickname = "explorer"
+model = "minimax-m3"
+role_desc = "Explore current behavior."
+reasoning_effort = "high"
+max_turns = 4
+
+[[agents]]
+id = 2
+nickname = "skeptic"
+model = "bigmodel-glm5"
+role_desc = "Challenge hidden assumptions."
+reasoning_effort = "low"
+max_turns = 5
+""".strip(),
+        encoding="utf-8",
+    )
+    fake = _FakeRoundtableTaskExecutor()
+    manager = WorkflowStrategyTestManager(
+        task_executor=fake,
+        config=_config(tmp_path),
+        workspace_root=tmp_path,
+        role_manager=AgentRoleManager(role_dir=tmp_path / "roles", config_path=agent_config),
+    )
+    payload = _payload()
+    payload["participants"] = {"select": [1, 2]}
+    payload["limits"]["discussion_rounds"] = 1
+
+    await manager.run_workflow_payload(
+        mode="roundtable_review",
+        parent_session_id="parent-session",
+        payload=payload,
+    )
+
+    independent_tasks = {
+        str(task.metadata["roundtable_agent"]): task
+        for task in fake.tasks
+        if task.metadata["roundtable_stage"] == "independent"
+    }
+    assert independent_tasks["1"].runtime is not None
+    assert independent_tasks["2"].runtime is not None
+    assert independent_tasks["1"].runtime.model == "MiniMax-M3"
+    assert independent_tasks["1"].runtime.reasoning_effort == "high"
+    assert independent_tasks["1"].metadata["max_turns"] == 4
+    assert independent_tasks["1"].runtime.max_turns == 4
+    assert independent_tasks["1"].runtime.field_sources["model"] == "catalog:minimax-m3"
+    assert (
+        independent_tasks["1"].runtime.field_sources["reasoning_effort"]
+        == "agent.toml:1.reasoning_effort"
+    )
+    assert independent_tasks["2"].runtime.model == "glm-5.1"
+    assert independent_tasks["2"].runtime.reasoning_effort == "low"
+    assert independent_tasks["2"].metadata["max_turns"] == 5
+    assert independent_tasks["2"].runtime.max_turns == 5
+    assert independent_tasks["2"].runtime.field_sources["model"] == "catalog:bigmodel-glm5"
+    assert (
+        independent_tasks["2"].runtime.field_sources["reasoning_effort"]
+        == "agent.toml:2.reasoning_effort"
+    )
+
+
+@pytest.mark.asyncio
+async def test_roundtable_review_role_runtime_falls_back_to_parent_config(
+    tmp_path: Path,
+) -> None:
+    """验证 role runtime 缺省 fallback，输入为 sparse role，输出主配置字段断言。"""
+    _write_sample_source(tmp_path)
+    fake = _FakeRoundtableTaskExecutor()
+    cfg = Config(
+        model=ModelSelectionConfig(
+            preset_id="bigmodel-glm5-1m",
+            reasoning_effort="high",
+        ),
+        runner=RunnerConfig(max_turns=12),
+    )
+    cfg.session.file_store_path = str(tmp_path / "sessions")
+    manager = WorkflowStrategyTestManager(
+        task_executor=fake,
+        config=cfg,
+        workspace_root=tmp_path,
+        role_manager=_SparseRoundtableRoleManager(),  # type: ignore[arg-type]
+    )
+    payload = _payload()
+    payload["participants"] = {"select": ["sparse_reviewer"]}
+    payload["limits"]["discussion_rounds"] = 1
+
+    await manager.run_workflow_payload(
+        mode="roundtable_review",
+        parent_session_id="parent-session",
+        payload=payload,
+    )
+
+    task = next(task for task in fake.tasks if task.metadata["roundtable_stage"] == "independent")
+    assert task.runtime is not None
+    assert task.runtime.model == "glm-5.2"
+    assert task.runtime.reasoning_effort == "high"
+    assert task.runtime.max_turns == 12
+    assert task.runtime.field_sources["model"] == "catalog:bigmodel-glm5-1m"
+    assert task.runtime.field_sources["reasoning_effort"] == "config.model.reasoning_effort"
+    assert task.runtime.field_sources["max_turns"] == "config.runner.max_turns"
+
+
 def test_agent_workflow_manager_registers_roundtable_review(tmp_path: Path) -> None:
     """验证默认策略目录包含 roundtable_review，输入为 manager，输出为 catalog 断言。"""
-    manager = AgentWorkflowManager(
-        subagents=object(),  # type: ignore[arg-type]
+    manager = WorkflowStrategyTestManager(
         config=_config(tmp_path),
         workspace_root=tmp_path,
         role_manager=_role_manager(tmp_path),
@@ -376,14 +579,15 @@ def test_agent_workflow_manager_registers_roundtable_review(tmp_path: Path) -> N
     description = manager.describe_workflow_strategy("roundtable_review")
     assert description.runnable is True
     assert description.inputs[0].name == "topic"
+    assert "subagent_runtime" not in {field.name for field in description.inputs}
 
 
 @pytest.mark.asyncio
 async def test_run_agent_workflow_tool_dispatches_roundtable_review(tmp_path: Path) -> None:
     """验证 tool 入口分流 roundtable_review，输入为 payload，输出为 data 路径断言。"""
     _write_sample_source(tmp_path)
-    manager = AgentWorkflowManager(
-        subagents=_FakeRoundtableSubAgentManager(),  # type: ignore[arg-type]
+    manager = WorkflowStrategyTestManager(
+        task_executor=_FakeRoundtableTaskExecutor(),
         config=_config(tmp_path),
         workspace_root=tmp_path,
         role_manager=_role_manager(tmp_path),
@@ -392,7 +596,8 @@ async def test_run_agent_workflow_tool_dispatches_roundtable_review(tmp_path: Pa
     handle.bind(manager)
     tool = build_run_agent_workflow_tool(handle)
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {"mode": "roundtable_review", "payload": _payload()},
         ToolContext(run_id="r", session_id="parent-session", turn=1, call_id="c"),
     )
@@ -410,8 +615,8 @@ async def test_runner_fake_llm_creates_role_then_runs_roundtable(tmp_path: Path)
     """验证 Runner 工具链路，输入为 fake LLM tool calls，输出动态角色 workflow。"""
     _write_sample_source(tmp_path)
     role_manager = AgentRoleManager(role_dir=tmp_path / "roles")
-    manager = AgentWorkflowManager(
-        subagents=_FakeRoundtableSubAgentManager(),  # type: ignore[arg-type]
+    manager = WorkflowStrategyTestManager(
+        task_executor=_FakeRoundtableTaskExecutor(),
         config=_config(tmp_path),
         workspace_root=tmp_path,
         role_manager=role_manager,
@@ -456,13 +661,16 @@ async def test_runner_fake_llm_creates_role_then_runs_roundtable(tmp_path: Path)
     workflow_data = tool_messages[2].metadata["data"]
     workflow_dir = Path(workflow_data["workflow_dir"])
     roles = json.loads((workflow_dir / "roles.json").read_text(encoding="utf-8"))
-    assert roles["roles"] == [
-        {
-            "id": "risk_skeptic",
-            "title": "风险质询者",
-            "role": "专门寻找方案失败路径和隐藏风险",
-        }
-    ]
+    assert len(roles["roles"]) == 1
+    role = roles["roles"][0]
+    assert role["id"] == "risk_skeptic"
+    assert role["nickname"] == created["role"]["nickname"]
+    assert role["model"] == ""
+    assert role["role_desc"] == created["role"]["role_desc"]
+    assert role["reasoning_effort"] is None
+    assert role["max_turns"] == 3
+    assert role["source"] == "runtime"
+    assert role["editable"] is True
 
 
 @pytest.mark.asyncio
@@ -489,8 +697,8 @@ async def test_roundtable_review_rejects_invalid_participants(
     _write_sample_source(tmp_path)
     payload = _payload()
     payload.update(payload_patch)
-    manager = AgentWorkflowManager(
-        subagents=_FakeRoundtableSubAgentManager(),  # type: ignore[arg-type]
+    manager = WorkflowStrategyTestManager(
+        task_executor=_FakeRoundtableTaskExecutor(),
         config=_config(tmp_path),
         workspace_root=tmp_path,
         role_manager=_role_manager(tmp_path),

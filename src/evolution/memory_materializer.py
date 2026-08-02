@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import re
-import time
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from core.clock import now_epoch_ms
 from core.contracts import EventSink
 from evolution.models import EvolutionNutrient
 from memory import ENTRY_DELIMITER, MemoryStore, MemoryWriteAction, execute_write
@@ -73,7 +73,7 @@ class MemoryMaterializer:
             new_entries.append(entry)
             existing_normalized.add(normalized)
 
-        applied_at_ms = int(time.time() * 1000)
+        applied_at_ms = now_epoch_ms()
         memory_path = str(self._store.memory_file_path)
         if not new_entries:
             return MemoryMaterializationOutcome(

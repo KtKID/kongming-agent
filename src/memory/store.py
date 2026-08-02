@@ -19,11 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from core.clock import now_epoch_ms
 from infrastructure.config.paths import get_kongming_home, resolve_kongming_path
 
 # ---------------------------------------------------------------------------
@@ -330,7 +330,7 @@ class MemoryStore:
         self._snapshot = MemorySnapshot(
             memory_text=memory_text,
             user_text=user_text,
-            captured_at_ms=int(time.time() * 1000),
+            captured_at_ms=now_epoch_ms(),
             source_paths=tuple(source_paths),
             checksum=_compute_checksum(memory_text, user_text),
         )

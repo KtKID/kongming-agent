@@ -15,6 +15,7 @@ import pytest
 
 from application.agent_workflows.manager import AgentWorkflowResult
 from core.contracts import ToolContext
+from tests.support.tool_calls import execute_prepared_tool
 from tools.agent_workflow_tool import (
     AgentWorkflowHandle,
     _normalize_workflow_payload,
@@ -34,6 +35,8 @@ def test_run_agent_workflow_schema_exposes_task_flow_payload_fields() -> None:
     assert "enum" not in mode_schema
     assert {"objective", "planning", "plan", "execution"}.issubset(payload_properties)
     assert payload_properties["plan"]["properties"]["nodes"]["items"]["required"] == ["title"]
+    assert "status" not in payload_properties["plan"]["properties"]["nodes"]["items"]["properties"]
+    assert "progress_tool" not in payload_properties["execution"]["properties"]
 
 
 def test_normalize_task_flow_payload_fills_defaults_and_steps_alias() -> None:
@@ -56,10 +59,7 @@ def test_normalize_task_flow_payload_fills_defaults_and_steps_alias() -> None:
         "interaction_mode": "llm_decide",
         "choice_policy": "ask_when_multiple_viable_paths",
     }
-    assert normalized["execution"] == {
-        "on_unexpected_severe_issue": "ask_user",
-        "progress_tool": "update_task_progress",
-    }
+    assert normalized["execution"] == {"on_unexpected_severe_issue": "ask_user"}
     assert normalized["plan"]["nodes"] == [{"title": "建立计划"}]
 
 
@@ -71,7 +71,8 @@ async def test_run_agent_workflow_tool_passes_normalized_task_flow_payload() -> 
     handle.bind(manager)
     tool = build_run_agent_workflow_tool(handle)
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {
             "mode": "task_flow",
             "payload": _minimal_payload(),
@@ -83,7 +84,7 @@ async def test_run_agent_workflow_tool_passes_normalized_task_flow_payload() -> 
     assert manager.mode == "task_flow"
     assert manager.parent_session_id == "parent-session"
     assert manager.payload["planning"]["interaction_mode"] == "llm_decide"
-    assert manager.payload["execution"]["progress_tool"] == "update_task_progress"
+    assert "progress_tool" not in manager.payload["execution"]
     assert result.content is not None
     assert "task_flow_plan" in result.content
     assert result.data is not None
@@ -97,7 +98,8 @@ async def test_run_agent_workflow_tool_formats_task_flow_payload_errors() -> Non
     handle.bind(_CapturingManager())
     tool = build_run_agent_workflow_tool(handle)
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {
             "mode": "task_flow",
             "payload": "bad-payload",
@@ -141,8 +143,10 @@ class _CapturingManager:
         mode: str,
         parent_session_id: str,
         payload: dict[str, Any],
+        parent_agent: dict[str, object] | None = None,
     ) -> AgentWorkflowResult:
         """记录 workflow payload 调用，输入为 mode/session/payload，输出为 fake 结果。"""
+        del parent_agent
         self.mode = mode
         self.parent_session_id = parent_session_id
         self.payload = payload

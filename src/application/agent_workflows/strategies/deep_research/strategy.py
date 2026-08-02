@@ -83,7 +83,7 @@ class DeepResearchStrategy:
             ),
             warnings=(
                 "v0.1 skeleton 使用确定性事实抽取和 fallback jury",
-                "真实 WebSearch/WebFetch provider 后续通过 ResearchSourceProvider 接入",
+                "网页搜索统一调用 web_search 工具；底层 MCP 缺失时 web_search 返回工具缺失",
                 "报告质量取决于 provider 返回的正文质量和来源覆盖面",
             ),
             inputs=(
@@ -119,9 +119,8 @@ class DeepResearchStrategy:
                     name="source_policy",
                     required=False,
                     type_label="object",
-                    description="来源 provider 和检索偏好，v0.1 支持 fake/internal。",
+                    description="检索偏好。网页搜索统一调用 web_search 工具。",
                     example={
-                        "provider": "internal",
                         "language": "zh-CN",
                         "allowed_domains": [],
                         "blocked_domains": [],
@@ -165,7 +164,11 @@ class DeepResearchStrategy:
                             "jury_size": 3,
                             "reject_quorum": 2,
                         },
-                        "source_policy": {"provider": "internal"},
+                        "source_policy": {
+                            "language": "zh-CN",
+                            "allowed_domains": [],
+                            "blocked_domains": [],
+                        },
                     },
                 },
             ),
@@ -355,6 +358,7 @@ class DeepResearchStrategy:
                 "topic": spec.topic,
                 "objective": spec.objective,
                 "source_provider": provider.name,
+                "resolved_runtime": context.audit_writer.resolved_runtime_payload,
                 "artifact_paths": artifact_paths,
                 "stats": stats,
                 "report_path": str(report_path),
@@ -391,7 +395,7 @@ class DeepResearchStrategy:
             }
         )
 
-        from application.agent_workflows.manager import AgentWorkflowResult
+        from application.agent_workflows.models import AgentWorkflowResult
 
         return AgentWorkflowResult(
             workflow_id=context.workflow_id,
@@ -409,7 +413,7 @@ class DeepResearchStrategy:
         )
 
     def _resolve_source_provider(self, spec: DeepResearchSpec) -> ResearchSourceProvider:
-        """解析来源 provider，输入为运行规格，输出为 fake、注入 provider 或确定性 provider。"""
+        """解析来源 provider，输入为运行规格，输出为注入 provider、fixture 或确定性 provider。"""
         manager_provider = getattr(self._manager, "deep_research_source_provider", None)
         if manager_provider is not None:
             return cast(ResearchSourceProvider, manager_provider)

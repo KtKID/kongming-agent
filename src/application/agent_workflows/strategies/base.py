@@ -33,6 +33,8 @@ class WorkflowRunRequest:
     source: str
     # LLM 填写的一句 workflow 短描述，用于运行产物和 Viewer 展示。
     desc: str | None = None
+    # 父 agent 当前 run 快照，由 tool context 注入，供子 agent runtime fallback 使用。
+    parent_agent: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)

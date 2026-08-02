@@ -17,6 +17,9 @@ from __future__ import annotations
 import pytest
 
 from core.contracts import Event
+from core.errors import ProviderError
+from core.message import Message
+from core.result import Result
 from hosts.cli.adapter import (
     CLIAdapter,
     CLIEventSink,
@@ -313,3 +316,114 @@ async def test_pre_prompt_hook_none_skips_call(monkeypatch):
 
     assert text == "ok"
     assert call_log == ["kongming > "]
+
+
+# ---------------------------------------------------------------------------
+# CLIAdapter.render_result（cli-bridge-render-result-debt #6）
+#
+# render_result 三段渲染:content（受 streaming 门控）/ error（永远打）/ token
+# （永远打）。决策点全在 adapter 内部。下面 6 个用例覆盖
+# streaming × {有/无 content} × {有/无 error} × {有/无 usage} 的
+# 关键组合，保留 token/error 渲染语义。
+# ---------------------------------------------------------------------------
+
+
+def _usage_result(content: str | None = "hello", *, error: ProviderError | None = None) -> Result:
+    """带 usage + content 的 Result 工厂（streaming 用例的通用底料）。"""
+    from core.contracts import ProviderUsageFamily, ProviderUsageScope
+    from infrastructure.llm_providers.usage import ProviderUsageManager
+
+    usage = ProviderUsageManager().normalize(
+        family=ProviderUsageFamily.OPENAI_CHAT_COMPLETIONS,
+        raw_usage={"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+        scope=ProviderUsageScope.RUN,
+    )
+    return Result(
+        run_id="r-1",
+        session_id="sid-1",
+        status="failed" if error is not None else "completed",
+        final_message=Message.assistant(content=content) if content is not None else None,
+        turn_count=1,
+        error=error,
+        metadata={"usage": usage.to_payload()},
+    )
+
+
+@pytest.mark.asyncio
+async def test_render_result_non_streaming_prints_content_and_tokens(capsys):
+    """streaming=False + 完整 Result：打 content + token，无 error 行。"""
+    adapter = CLIAdapter(streaming=False)  # 显式非流式(CLIAdapter 默认 streaming=True)
+    await adapter.render_result(_usage_result("hello"))
+
+    out = capsys.readouterr().out
+    assert "hello" in out  # content
+    assert "[tokens ↑10 ↓20 =30]" in out  # token 汇总
+    assert "[error]" not in out  # 无 error → 不打 error 行
+
+
+@pytest.mark.asyncio
+async def test_render_result_non_streaming_with_error_prints_error_line(capsys):
+    """streaming=False + 含 error：打 content + [error] 行。"""
+    adapter = CLIAdapter(streaming=False)  # 显式非流式
+    await adapter.render_result(_usage_result("oops", error=ProviderError("boom")))
+
+    out = capsys.readouterr().out
+    assert "oops" in out  # content 仍打
+    assert "[error] ProviderError: boom" in out
+
+
+@pytest.mark.asyncio
+async def test_render_result_streaming_skips_content_keeps_tokens(capsys):
+    """streaming=True + 完整 Result：跳过 content（CLIStreamSink 已打），只打 token。"""
+    adapter = CLIAdapter(streaming=True)
+    await adapter.render_result(_usage_result("hello"))
+
+    out = capsys.readouterr().out
+    assert "hello" not in out  # streaming → 不二次打印 content
+    assert "[tokens ↑10 ↓20 =30]" in out  # token 仍打
+
+
+@pytest.mark.asyncio
+async def test_render_result_streaming_with_error_prints_error_and_tokens(capsys):
+    """streaming=True + 含 error：打 [error] 行 + token（error 不走流式通道）。"""
+    adapter = CLIAdapter(streaming=True)
+    await adapter.render_result(_usage_result("ignored", error=ProviderError("boom")))
+
+    out = capsys.readouterr().out
+    assert "ignored" not in out  # streaming → 跳过 content
+    assert "[error] ProviderError: boom" in out
+    assert "[tokens ↑10 ↓20 =30]" in out
+
+
+@pytest.mark.asyncio
+async def test_render_result_handles_none_final_message(capsys):
+    """final_message=None（status=failed 典型）不崩，只打 token（若有 usage）。"""
+    adapter = CLIAdapter(
+        streaming=False
+    )  # 显式非流式(content=None 时 streaming 与否都跳过,显式传保持用例意图清晰)
+    await adapter.render_result(_usage_result(content=None))
+
+    out = capsys.readouterr().out
+    # 无 content 无 error → 只有 token 行
+    assert "[tokens ↑10 ↓20 =30]" in out
+    assert "[error]" not in out
+
+
+@pytest.mark.asyncio
+async def test_render_result_skips_token_line_when_no_usage(capsys):
+    """metadata 无 usage → 不打 token 行（content 仍按 streaming 门控）。"""
+    adapter = CLIAdapter(
+        streaming=False
+    )  # 显式非流式:本用例断言 content "hello" 被打印,需 streaming=False
+    result = Result(
+        run_id="r-1",
+        session_id="sid-1",
+        status="completed",
+        final_message=Message.assistant(content="hello"),
+        turn_count=1,
+    )  # metadata 默认 {} → 无 usage
+    await adapter.render_result(result)
+
+    out = capsys.readouterr().out
+    assert "hello" in out
+    assert "[tokens" not in out  # 无 usage → 不打 token 行
