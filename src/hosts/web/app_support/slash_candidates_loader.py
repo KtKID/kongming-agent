@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 
 async def load_slash_candidates() -> list[dict[str, str]]:
     from commands.registry import build_builtin_registry
@@ -11,7 +9,7 @@ async def load_slash_candidates() -> list[dict[str, str]]:
     from prompting.skills.skill_loader import load_skill_specs
 
     home = get_kongming_home()
-    skill_specs_list = await load_skill_specs(home, workspace=Path.cwd(), event_sinks=[])
+    skill_specs_list = await load_skill_specs(home, workspace=home, event_sinks=[])
     builtin_commands = build_builtin_registry().list_commands("web")
 
     seen: set[str] = set()

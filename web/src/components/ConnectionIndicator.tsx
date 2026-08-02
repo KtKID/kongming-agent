@@ -1,9 +1,3 @@
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { SocketState } from "@/network/manager";
 
@@ -29,27 +23,19 @@ export function ConnectionIndicator({
   const { dotClass, text } = stateDisplay(state, latencyMs);
 
   return (
-    <TooltipProvider delayDuration={300}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span
-            className="inline-flex items-center gap-1 text-[11px] tabular-nums text-muted-foreground select-none"
-            data-testid="connection-indicator"
-          >
-            <span
-              className={cn(
-                "inline-block h-2 w-2 rounded-full shrink-0",
-                dotClass,
-              )}
-            />
-            <span>{text}</span>
-          </span>
-        </TooltipTrigger>
-        <TooltipContent side="bottom">
-          <span>{label}</span>
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
+    <span
+      className="inline-flex items-center gap-1 text-[11px] tabular-nums text-muted-foreground select-none"
+      data-testid="connection-indicator"
+      title={label}
+    >
+      <span
+        className={cn(
+          "inline-block h-2 w-2 rounded-full shrink-0",
+          dotClass,
+        )}
+      />
+      <span>{text}</span>
+    </span>
   );
 }
 

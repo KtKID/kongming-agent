@@ -1,4 +1,4 @@
-import { Fragment, Suspense, lazy, type ReactNode } from "react";
+import { Fragment, Suspense, lazy, memo, useMemo, type ReactNode } from "react";
 
 // mermaid 走独立 chunk（vite.config manualChunks），按需异步加载
 const MermaidBlock = lazy(() => import("@/components/MermaidBlock"));
@@ -114,8 +114,9 @@ interface BlockToken {
   lines: string[];
 }
 
-/** 块级解析：把整段文本切成 BlockToken[] */
-function parseBlocks(src: string): BlockToken[] {
+/** 块级解析：把整段文本切成 BlockToken[]。导出供渲染性能测试 spy。 */
+// eslint-disable-next-line react-refresh/only-export-components -- parser test seam
+export function parseBlocks(src: string): BlockToken[] {
   const lines = src.split(/\r?\n/);
   const tokens: BlockToken[] = [];
   let i = 0;
@@ -220,8 +221,16 @@ interface MarkdownProps {
   className?: string;
 }
 
-export function Markdown({ text, className }: MarkdownProps) {
-  const tokens = parseBlocks(text);
+let markdownParser: typeof parseBlocks = parseBlocks;
+
+/** 测试可替换 parser，以验证流式纯文本路径和按 text 的 memoized 解析次数。 */
+// eslint-disable-next-line react-refresh/only-export-components -- parser test seam
+export function __setMarkdownParserForTest(parser: typeof parseBlocks | null): void {
+  markdownParser = parser ?? parseBlocks;
+}
+
+export const Markdown = memo(function Markdown({ text, className }: MarkdownProps) {
+  const tokens = useMemo(() => markdownParser(text), [text]);
   let key = 0;
   return (
     <div className={className}>
@@ -328,4 +337,4 @@ export function Markdown({ text, className }: MarkdownProps) {
       })}
     </div>
   );
-}
+});

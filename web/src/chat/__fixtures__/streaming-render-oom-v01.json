@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "脱敏的流式渲染压力回放。内容只保留 Markdown 特殊字符与相对间隔，运行时展开后恰为 1557 个 delta。",
+  "source": "sanitized-renderer-oom-shape",
+  "thread_id": "replay-thread",
+  "run_id": "replay-run",
+  "turn": 1,
+  "chunks": [
+    {
+      "channel": "content",
+      "delta": "段落 **markdown** [link](https://example.test) `code`\n",
+      "interval_ms": 16,
+      "repeat": 1400
+    },
+    {
+      "channel": "reasoning",
+      "delta": "推理片段\n",
+      "interval_ms": 16,
+      "repeat": 157
+    }
+  ],
+  "terminal": {
+    "kind": "turn.end",
+    "relative_delay_ms": 16
+  }
+}

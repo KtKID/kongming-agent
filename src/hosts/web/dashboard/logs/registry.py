@@ -25,6 +25,7 @@ Constraints
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,9 +34,18 @@ from typing import Literal
 from infrastructure.config.models import Config
 from infrastructure.config.paths import resolve_kongming_path
 
+_THREAD_ID_RE: re.Pattern[str] = re.compile(r"^thread-[a-f0-9]{12}$")
+
 # ---------------------------------------------------------------------------
 # DTOs
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LogSourceContext:
+    """Dynamic context used by thread-scoped log sources."""
+
+    thread_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -46,7 +56,8 @@ class LogSourceSpec:
     label: str
     format: Literal["jsonl", "plain", "mixed"]
     description: str
-    resolve_path: Callable[[Config, Path], Path]
+    resolve_path: Callable[[Config, Path, LogSourceContext], Path]
+    requires_thread_context: bool = False
 
 
 @dataclass(frozen=True)
@@ -92,41 +103,56 @@ def _ensure_under_allowed_root(resolved: Path, allowed_roots: list[Path]) -> Pat
     )
 
 
+def _validate_thread_id(thread_id: str) -> str:
+    """Validate a Web thread id before it is used in a filesystem path."""
+    if not _THREAD_ID_RE.match(thread_id):
+        raise ValueError(f"Invalid thread_id: {thread_id!r}")
+    return thread_id
+
+
 # ---------------------------------------------------------------------------
 # Resolve helpers per log type
 # ---------------------------------------------------------------------------
 
 
-def _resolve_web_server(_cfg: Config, home: Path) -> Path:
+def _resolve_web_server(_cfg: Config, home: Path, _context: LogSourceContext) -> Path:
     return (home / "web" / "server.log").resolve()
 
 
-def _resolve_full_log(cfg: Config, _home: Path) -> Path:
+def _resolve_full_log(cfg: Config, _home: Path, _context: LogSourceContext) -> Path:
     return _resolve_relative(cfg.web.full_log.path, _home)
 
 
-def _resolve_trace(cfg: Config, _home: Path) -> Path:
+def _resolve_trace(cfg: Config, _home: Path, _context: LogSourceContext) -> Path:
     return _resolve_relative(cfg.trace.output_path, _home)
 
 
-def _resolve_heartbeat(_cfg: Config, home: Path) -> Path:
+def _resolve_heartbeat(_cfg: Config, home: Path, _context: LogSourceContext) -> Path:
     return (home / "logs" / "heartbeat" / "heartbeat.log").resolve()
 
 
-def _resolve_generic_channel(_cfg: Config, home: Path) -> Path:
+def _resolve_generic_channel(_cfg: Config, home: Path, _context: LogSourceContext) -> Path:
     return (home / "logs" / "generic-channel" / "generic-channel.jsonl").resolve()
 
 
-def _resolve_evolution(_cfg: Config, home: Path) -> Path:
+def _resolve_evolution(_cfg: Config, home: Path, _context: LogSourceContext) -> Path:
     return (home / "logs" / "evolution.log").resolve()
 
 
-def _resolve_cron_audit(_cfg: Config, home: Path) -> Path:
+def _resolve_cron_audit(_cfg: Config, home: Path, _context: LogSourceContext) -> Path:
     return (home / "cron" / "audits.jsonl").resolve()
 
 
-def _resolve_auto_approval_audit(_cfg: Config, home: Path) -> Path:
+def _resolve_auto_approval_audit(_cfg: Config, home: Path, _context: LogSourceContext) -> Path:
     return (home / "web" / "auto_approval" / "audit.jsonl").resolve()
+
+
+def _resolve_session_conversation(cfg: Config, home: Path, context: LogSourceContext) -> Path:
+    if context.thread_id is None:
+        raise ValueError("thread_id is required for session_conversation log source")
+    thread_id = _validate_thread_id(context.thread_id)
+    session_root = _resolve_relative(cfg.session.file_store_path, home)
+    return (session_root / thread_id / f"{thread_id}.jsonl").resolve()
 
 
 # ---------------------------------------------------------------------------
@@ -146,11 +172,16 @@ class LogSourceRegistry:
 
     # -- public API ---------------------------------------------------------
 
-    def list_sources(self) -> list[ResolvedLogSource]:
+    def list_sources(self, *, thread_id: str | None = None) -> list[ResolvedLogSource]:
         """Return every registered log source with live file-system metadata."""
-        return [self._resolve_one(spec) for spec in self._sources]
+        context = self._build_context(thread_id)
+        return [
+            self._resolve_one(spec, context)
+            for spec in self._sources
+            if not spec.requires_thread_context or context.thread_id is not None
+        ]
 
-    def get_source(self, type: str) -> ResolvedLogSource:
+    def get_source(self, type: str, *, thread_id: str | None = None) -> ResolvedLogSource:
         """Return a single resolved log source by *type*.
 
         Raises:
@@ -162,9 +193,12 @@ class LogSourceRegistry:
                 f"Unknown log source type: {type!r}. "
                 f"Available types: {sorted(self._source_by_type)}"
             )
-        return self._resolve_one(spec)
+        context = self._build_context(thread_id)
+        if spec.requires_thread_context and context.thread_id is None:
+            raise ValueError(f"thread_id is required for log source type: {type!r}")
+        return self._resolve_one(spec, context)
 
-    def resolve_source_path(self, type: str) -> Path:
+    def resolve_source_path(self, type: str, *, thread_id: str | None = None) -> Path:
         """Resolve the absolute path for *type* after whitelist validation.
 
         Raises:
@@ -177,10 +211,19 @@ class LogSourceRegistry:
                 f"Unknown log source type: {type!r}. "
                 f"Available types: {sorted(self._source_by_type)}"
             )
-        resolved = spec.resolve_path(self._config, self._kongming_home)
+        context = self._build_context(thread_id)
+        if spec.requires_thread_context and context.thread_id is None:
+            raise ValueError(f"thread_id is required for log source type: {type!r}")
+        resolved = spec.resolve_path(self._config, self._kongming_home, context)
         return _ensure_under_allowed_root(resolved, self._allowed_roots)
 
     # -- internal -----------------------------------------------------------
+
+    @staticmethod
+    def _build_context(thread_id: str | None) -> LogSourceContext:
+        if thread_id is None:
+            return LogSourceContext()
+        return LogSourceContext(thread_id=_validate_thread_id(thread_id))
 
     def _build_sources(self) -> list[LogSourceSpec]:
         return [
@@ -220,6 +263,14 @@ class LogSourceRegistry:
                 resolve_path=_resolve_generic_channel,
             ),
             LogSourceSpec(
+                type="session_conversation",
+                label="Session Conversation",
+                format="jsonl",
+                description="当前 thread 的 FileSession 完整对话记录",
+                resolve_path=_resolve_session_conversation,
+                requires_thread_context=True,
+            ),
+            LogSourceSpec(
                 type="evolution",
                 label="Evolution Log",
                 format="plain",
@@ -242,9 +293,9 @@ class LogSourceRegistry:
             ),
         ]
 
-    def _resolve_one(self, spec: LogSourceSpec) -> ResolvedLogSource:
+    def _resolve_one(self, spec: LogSourceSpec, context: LogSourceContext) -> ResolvedLogSource:
         """Resolve a single spec into a :class:`ResolvedLogSource`."""
-        resolved = spec.resolve_path(self._config, self._kongming_home)
+        resolved = spec.resolve_path(self._config, self._kongming_home, context)
         try:
             validated = _ensure_under_allowed_root(resolved, self._allowed_roots)
         except ValueError:

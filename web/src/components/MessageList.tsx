@@ -1,13 +1,16 @@
 import {
+  Fragment,
   createContext,
   useCallback,
   useContext,
   useEffect,
+  memo,
   useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
+import { Link } from "react-router-dom";
 import {
   AlertTriangle,
   ArrowDown,
@@ -17,7 +20,9 @@ import {
   ChevronRight,
   Copy,
   FileText,
+  GitFork,
   LoaderCircle,
+  Sparkles,
   Sigma,
   XCircle,
 } from "lucide-react";
@@ -28,12 +33,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ChatAvatar } from "@/components/ChatAvatar";
 import { useChatStore, type ChatItem } from "@/stores/chat";
-import type { UserInputAttachment } from "@/protocol";
+import type { ConversationReferenceDTO, UserInputAttachment } from "@/protocol";
 import { isDebugMode } from "@/lib/debug";
 import { cn } from "@/lib/utils";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { ModifiedFilesSummary } from "@/components/ModifiedFilesSummary";
 import { useItemsWithFileSummary } from "@/hooks/useItemsWithFileSummary";
+import { ConversationReferenceManager } from "@/modules/conversation-references/ConversationReferenceManager";
 
 /**
  * 消息列表：按 ChatItem.kind 分类渲染。
@@ -42,7 +48,6 @@ import { useItemsWithFileSummary } from "@/hooks/useItemsWithFileSummary";
  * - assistant：左对齐气泡 + reasoning 折叠 + Markdown
  * - tool：折叠卡片 + status badge
  * - system：时间线系统提示卡片
- * - approval：内联 banner（modal 由 ApprovalDialog 单独负责）
  * - error：醒目横幅
  *
  * Smart auto-scroll：
@@ -53,6 +58,34 @@ import { useItemsWithFileSummary } from "@/hooks/useItemsWithFileSummary";
  */
 const EMPTY_ITEMS: ChatItem[] = [];
 const NEAR_BOTTOM_PX = 80;
+
+type ForkLineage = {
+  parentThreadId: string;
+  historyIndex: number;
+};
+
+function ForkLineageNavigation({
+  parentThreadId,
+  historyIndex,
+}: ForkLineage) {
+  return (
+    <div
+      className="flex items-center gap-4 py-3"
+      data-history-index={historyIndex}
+      data-testid="fork-lineage-navigation"
+    >
+      <div aria-hidden="true" className="h-px flex-1 bg-border/70" />
+      <Link
+        to={`/chat/${parentThreadId}`}
+        className="inline-flex items-center gap-2 text-sm font-medium text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+      >
+        <GitFork aria-hidden="true" className="h-4 w-4" />
+        续接自任务
+      </Link>
+      <div aria-hidden="true" className="h-px flex-1 bg-border/70" />
+    </div>
+  );
+}
 
 /**
  * Lightbox 打开回调上下文。
@@ -147,7 +180,7 @@ export function MessageViewport<T>({
         onScroll={checkNearBottom}
         className="h-full overflow-y-auto scrollbar-overlay"
       >
-        <div className="w-full p-7">
+        <div data-testid="message-viewport-content" className="w-full p-4">
           <div className="flex flex-col gap-4">
             {items.map((item, index) => renderItem(item, index))}
           </div>
@@ -172,6 +205,9 @@ export function MessageList({
   threadId,
   items: injectedItems,
   timezone,
+  onForkAssistant,
+  forkingHistoryIndex,
+  forkLineage = null,
 }: {
   threadId: string | undefined;
   /**
@@ -184,6 +220,9 @@ export function MessageList({
    */
   items?: ChatItem[];
   timezone?: string;
+  onForkAssistant?: (historyIndex: number) => void;
+  forkingHistoryIndex?: number | null;
+  forkLineage?: ForkLineage | null;
 }) {
   const storeItems = useChatStore((s) =>
     threadId ? (s.itemsByThread[threadId] ?? EMPTY_ITEMS) : EMPTY_ITEMS,
@@ -219,17 +258,28 @@ export function MessageList({
         getUserMessageCount={(list) =>
           list.filter((it) => it.kind === "user").length
         }
-        renderItem={(item) =>
-          item.kind === "files-summary" ? (
-            <ModifiedFilesSummary
-              key={item.id}
-              files={item.files}
-              threadId={item.threadId}
-            />
-          ) : (
-            <ChatMessageItem key={item.id} item={item} timezone={timezone} />
-          )
-        }
+        renderItem={(item) => (
+          <Fragment key={item.id}>
+            {item.kind === "files-summary" ? (
+              <ModifiedFilesSummary
+                files={item.files}
+                threadId={item.threadId}
+              />
+            ) : (
+              <ChatMessageItem
+                item={item}
+                timezone={timezone}
+                onForkAssistant={onForkAssistant}
+                forkingHistoryIndex={forkingHistoryIndex}
+              />
+            )}
+            {forkLineage !== null &&
+            item.kind === "assistant" &&
+            item.forkHistoryIndex === forkLineage.historyIndex ? (
+              <ForkLineageNavigation {...forkLineage} />
+            ) : null}
+          </Fragment>
+        )}
       />
       <ImageLightbox
         src={lightbox?.src ?? null}
@@ -250,14 +300,25 @@ export function MessageList({
 export function ChatMessageItem({
   item,
   timezone,
+  onForkAssistant,
+  forkingHistoryIndex,
 }: {
   item: ChatItem;
   timezone?: string;
+  onForkAssistant?: (historyIndex: number) => void;
+  forkingHistoryIndex?: number | null;
 }) {
   // 同步读一次 debug 开关；不响应式，避免不必要的 re-render
   const debug = useMemo(() => isDebugMode(), []);
   if (!debug) {
-    return <MessageContent item={item} timezone={timezone} />;
+    return (
+      <MessageContent
+        item={item}
+        timezone={timezone}
+        onForkAssistant={onForkAssistant}
+        forkingHistoryIndex={forkingHistoryIndex}
+      />
+    );
   }
 
   const turn =
@@ -268,7 +329,12 @@ export function ChatMessageItem({
 
   return (
     <div className="relative" data-testid="debug-badge-wrap">
-      <MessageContent item={item} timezone={timezone} />
+      <MessageContent
+        item={item}
+        timezone={timezone}
+        onForkAssistant={onForkAssistant}
+        forkingHistoryIndex={forkingHistoryIndex}
+      />
       <div
         data-testid="debug-badge"
         className="pointer-events-none absolute right-0 top-0 z-10 rounded-bl-md rounded-tr-md border border-border bg-background/90 px-1.5 py-0.5 font-mono text-[10px] leading-tight text-muted-foreground shadow-sm backdrop-blur-sm"
@@ -282,9 +348,13 @@ export function ChatMessageItem({
 function MessageContent({
   item,
   timezone,
+  onForkAssistant,
+  forkingHistoryIndex,
 }: {
   item: ChatItem;
   timezone?: string;
+  onForkAssistant?: (historyIndex: number) => void;
+  forkingHistoryIndex?: number | null;
 }) {
   switch (item.kind) {
     case "user":
@@ -295,13 +365,25 @@ function MessageContent({
             timestampMs={item.timestampMs}
             timezone={timezone}
             align="right"
-            bubbleClassName="max-w-[80%] rounded-[1.4rem] rounded-br-md border border-primary/20 bg-primary px-4 py-3 text-sm text-primary-foreground shadow-sm"
+            bubbleClassName="rounded-[1.4rem] rounded-br-md border border-primary/20 bg-primary px-4 py-3 text-sm text-primary-foreground shadow-sm"
           >
             {item.attachments && item.attachments.length > 0 ? (
               <UserAttachmentThumbnails attachments={item.attachments} />
             ) : null}
+            {item.references && item.references.length > 0 ? (
+              <UserReferenceChips references={item.references} />
+            ) : null}
             {item.content ? (
               <Markdown text={item.content} className="leading-relaxed" />
+            ) : null}
+            {item.deliveryStatus === "steered" ? (
+              <div
+                data-testid="user-message-delivery-status"
+                className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-medium text-primary-foreground/75"
+              >
+                <CheckCircle2 className="h-3 w-3" />
+                <span>已插队</span>
+              </div>
             ) : null}
           </MessageBubbleFrame>
           <ChatAvatar role="user" />
@@ -309,12 +391,17 @@ function MessageContent({
       );
     case "assistant": {
       // 空 assistant 帧（只发 tool_calls 无文本）不渲染头像+气泡
-      if (!item.content && !item.streaming && !item.reasoning) return null;
+      if (!item.content && !item.reasoning && !item.usage) return null;
       return (
         <div className="flex items-start gap-2">
           <ChatAvatar role="assistant" />
           <div className="min-w-0 flex-1">
-            <AssistantMessage item={item} timezone={timezone} />
+            <AssistantMessage
+              item={item}
+              timezone={timezone}
+              onForkAssistant={onForkAssistant}
+              forkingHistoryIndex={forkingHistoryIndex}
+            />
           </div>
         </div>
       );
@@ -323,15 +410,6 @@ function MessageContent({
       return <ToolCard item={item} />;
     case "system":
       return <SystemNoticeCard item={item} />;
-    case "approval":
-      return (
-        <div className="rounded-md border border-warning bg-warning/10 px-4 py-2 text-xs text-foreground">
-          <div className="font-semibold">需要审批：{item.toolName}</div>
-          {item.reason ? (
-            <div className="text-muted-foreground">{item.reason}</div>
-          ) : null}
-        </div>
-      );
     case "error":
       return (
         <div
@@ -357,6 +435,7 @@ function MessageBubbleFrame({
   timezone,
   align,
   bubbleClassName,
+  footerAction,
 }: {
   children: ReactNode;
   content: string;
@@ -364,6 +443,7 @@ function MessageBubbleFrame({
   timezone?: string;
   align: "left" | "right";
   bubbleClassName: string;
+  footerAction?: ReactNode;
 }) {
   const formattedTime = useMemo(
     () => formatMessageTime(timestampMs, timezone),
@@ -377,12 +457,18 @@ function MessageBubbleFrame({
 
   return (
     <div
+      data-testid="message-bubble-frame"
       className={cn(
-        "group flex min-w-0 flex-col gap-1",
+        "group flex w-full min-w-0 flex-col gap-1",
         isRight ? "items-end" : "items-start",
       )}
     >
-      <div className={bubbleClassName}>{children}</div>
+      <div
+        data-testid="message-bubble"
+        className={cn("w-fit max-w-full", bubbleClassName)}
+      >
+        {children}
+      </div>
       <div
         data-testid="message-hover-meta"
         className={cn(
@@ -401,6 +487,7 @@ function MessageBubbleFrame({
             <Copy className="h-3.5 w-3.5" />
           </button>
         ) : null}
+        {footerAction}
         <span>{formattedTime}</span>
       </div>
     </div>
@@ -424,6 +511,49 @@ function formatMessageTime(timestampMs: number, timezone: string | undefined): s
     hour12: false,
     timeZone: normalizeMessageTimezone(timezone),
   }).format(new Date(timestampMs));
+}
+
+function UserReferenceChips({
+  references,
+}: {
+  references: ConversationReferenceDTO[];
+}) {
+  if (references.length === 0) return null;
+  return (
+    <div
+      data-testid="message-reference-strip"
+      className="mb-2 flex flex-wrap gap-1.5"
+    >
+      {references.map((reference) => (
+        <span
+          key={reference.id}
+          data-testid="message-reference-chip"
+          className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-primary-foreground/25 bg-primary-foreground/10 px-2 py-1 text-xs font-medium text-primary-foreground"
+          title={`${reference.label} - ${reference.ref}`}
+        >
+          <Sparkles className="h-3.5 w-3.5 shrink-0" />
+          <span className="max-w-[12rem] truncate">{reference.label}</span>
+          <button
+            type="button"
+            className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-primary-foreground/75 hover:bg-primary-foreground/15 hover:text-primary-foreground"
+            onClick={() => copyReference(reference)}
+            aria-label={`复制引用 ${reference.label}`}
+            title="复制引用"
+          >
+            <Copy className="h-3 w-3" />
+          </button>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function copyReference(reference: ConversationReferenceDTO): void {
+  const clipboard = navigator.clipboard;
+  if (!clipboard) return;
+  void clipboard
+    .writeText(ConversationReferenceManager.toClipboardText(reference))
+    .catch(() => undefined);
 }
 
 /**
@@ -477,22 +607,24 @@ function UserAttachmentThumbnails({
   );
 }
 
-function AssistantMessage({
+const AssistantMessage = memo(function AssistantMessage({
   item,
   timezone,
+  onForkAssistant,
+  forkingHistoryIndex,
 }: {
   item: Extract<ChatItem, { kind: "assistant" }>;
   timezone?: string;
+  onForkAssistant?: (historyIndex: number) => void;
+  forkingHistoryIndex?: number | null;
 }) {
   const [reasoningOpen, setReasoningOpen] = useState(false);
   // v0.1.6：assistant 只发 tool_calls 时 content 为空字符串（语义"无文本输出"）。
-  // 既无 content、又不在流式中、也没 reasoning 时整个气泡不渲染——避免在用户消息
-  // 后跟一个空白框（以前更糟：后端 str(None) → "None" 字面，已在 ws.py 修；
-  // 这里再加一道防御兜底）。
+  // 既无 content、又没 reasoning/usage 时整个气泡不渲染，避免正文到来前出现空白框。
   const hasContent = Boolean(item.content);
   const hasReasoning = Boolean(item.reasoning);
   const hasUsage = Boolean(item.usage);
-  if (!hasContent && !item.streaming && !hasReasoning) return null;
+  if (!hasContent && !hasReasoning && !hasUsage) return null;
   return (
     <div className="flex flex-col gap-2">
       {hasReasoning ? (
@@ -514,7 +646,7 @@ function AssistantMessage({
           {item.reasoning}
         </pre>
       ) : null}
-      {hasContent || item.streaming ? (
+      {hasContent ? (
         <div className="w-full">
           <MessageBubbleFrame
             content={item.content}
@@ -522,37 +654,93 @@ function AssistantMessage({
             timezone={timezone}
             align="left"
             bubbleClassName="obsidian-panel-soft rounded-[1.45rem] rounded-bl-md px-4 py-3 text-sm"
+            footerAction={
+              typeof item.forkHistoryIndex === "number" &&
+              !item.streaming &&
+              onForkAssistant ? (
+                <button
+                  type="button"
+                  onClick={() => onForkAssistant(item.forkHistoryIndex!)}
+                  disabled={forkingHistoryIndex != null}
+                  className="inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-50"
+                  aria-label="从此回复分叉"
+                  title="从此回复分叉"
+                >
+                  {forkingHistoryIndex === item.forkHistoryIndex ? (
+                    <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <GitFork className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              ) : null
+            }
           >
-            <Markdown text={item.content} />
             {item.streaming ? (
-              <span
-                aria-label="streaming"
-                className="ml-1 inline-block h-4 w-1 animate-pulse bg-accent align-middle"
-              />
-            ) : null}
+              <div data-testid="streaming-assistant-text" className="whitespace-pre-wrap leading-relaxed">
+                {item.content}
+                <span
+                  aria-label="streaming"
+                  className="ml-1 inline-block h-4 w-1 animate-pulse bg-accent align-middle"
+                />
+              </div>
+            ) : (
+              <Markdown text={item.content} />
+            )}
           </MessageBubbleFrame>
-          {hasUsage ? (
-            <div
-              className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 pl-2 text-[11px] text-muted-foreground"
-              data-testid="assistant-usage-footer"
-            >
-              <span className="inline-flex items-center gap-1">
-                <ArrowUp className="h-3 w-3" />
-                {fmtCompact(item.usage!.prompt)}
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <ArrowDown className="h-3 w-3" />
-                {fmtCompact(item.usage!.completion)}
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <Sigma className="h-3 w-3" />
-                {fmtCompact(item.usage!.total)}
-              </span>
-            </div>
-          ) : null}
+        </div>
+      ) : null}
+      {hasUsage ? (
+        <div
+          className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 pl-2 text-[11px] text-muted-foreground"
+          data-testid="assistant-usage-footer"
+        >
+          <span className="inline-flex items-center gap-1">
+            <ArrowUp className="h-3 w-3" />
+            {fmtCompact(item.usage!.prompt)}
+          </span>
+          <span className="inline-flex items-center gap-1">
+            <ArrowDown className="h-3 w-3" />
+            {fmtCompact(item.usage!.completion)}
+          </span>
+          <span className="inline-flex items-center gap-1">
+            <Sigma className="h-3 w-3" />
+            {fmtCompact(item.usage!.total)}
+          </span>
         </div>
       ) : null}
     </div>
+  );
+}, assistantMessageEqual);
+
+function assistantMessageEqual(
+  previous: {
+    item: Extract<ChatItem, { kind: "assistant" }>;
+    timezone?: string;
+    onForkAssistant?: (historyIndex: number) => void;
+    forkingHistoryIndex?: number | null;
+  },
+  next: {
+    item: Extract<ChatItem, { kind: "assistant" }>;
+    timezone?: string;
+    onForkAssistant?: (historyIndex: number) => void;
+    forkingHistoryIndex?: number | null;
+  },
+): boolean {
+  const previousItem = previous.item;
+  const nextItem = next.item;
+  return (
+    previous.timezone === next.timezone &&
+    previous.onForkAssistant === next.onForkAssistant &&
+    previous.forkingHistoryIndex === next.forkingHistoryIndex &&
+    previousItem.id === nextItem.id &&
+    previousItem.content === nextItem.content &&
+    previousItem.reasoning === nextItem.reasoning &&
+    previousItem.streaming === nextItem.streaming &&
+    previousItem.forkHistoryIndex === nextItem.forkHistoryIndex &&
+    previousItem.timestampMs === nextItem.timestampMs &&
+    previousItem.usage?.prompt === nextItem.usage?.prompt &&
+    previousItem.usage?.completion === nextItem.usage?.completion &&
+    previousItem.usage?.total === nextItem.usage?.total
   );
 }
 

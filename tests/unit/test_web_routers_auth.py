@@ -42,7 +42,6 @@ def _make_cfg() -> Config:
                 "dev_mode": True,
                 "idle_timeout_seconds": 1800,
                 "idle_check_interval_seconds": 60,
-                "pending_approval_timeout_seconds": 60,
             },
         }
     )

@@ -35,9 +35,7 @@ from hosts.web.protocol.rest_models import (
     ThreadMetadataDTO,
 )
 from hosts.web.protocol.ws_frames import (
-    ApprovalAckFrame,
     ApprovalDecisionFrame,
-    ApprovalRequestFrame,
     AssistantFinalFrame,
     CellEvictedFrame,
     ContentDeltaFrame,
@@ -52,6 +50,7 @@ from hosts.web.protocol.ws_frames import (
     TurnEndFrame,
     TurnStartFrame,
     UsageFrame,
+    UsageSummaryUpdatedFrame,
     UserInputFrame,
     WSFrameC2SAdapter,
     WSFrameS2CAdapter,
@@ -78,8 +77,8 @@ def test_history_message_dto_is_not_exported() -> None:
     [
         # UserInputFrame：缺 request_id
         (UserInputFrame, {"text": "hello"}),
-        # ApprovalAckFrame：缺 approved
-        (ApprovalAckFrame, {"call_id": "call-1"}),
+        # UsageSummaryUpdatedFrame：缺 usage
+        (UsageSummaryUpdatedFrame, {"threadId": "thread-aabbccddeeff"}),
         # ContentDeltaFrame：缺 seq + timestamp_ms
         (ContentDeltaFrame, {"delta": "x", "turn": 1}),
         # CreateThreadRequest：name + preset_id 都已改为可选，无必填字段可测
@@ -88,7 +87,7 @@ def test_history_message_dto_is_not_exported() -> None:
     ],
     ids=[
         "user_input_missing_request_id",
-        "approval_ack_missing_approved",
+        "usage_summary_updated_missing_usage",
         "content_delta_missing_seq_timestamp",
         "login_request_empty",
     ],
@@ -112,8 +111,6 @@ def test_reject_missing_required_fields(model: Any, kwargs: dict[str, Any]) -> N
             ContentDeltaFrame,
             {"delta": "x", "turn": "not_int", "seq": 0, "timestamp_ms": 1},
         ),
-        # ApprovalAckFrame.approved 应为 bool（"yes" 不是 bool）
-        (ApprovalAckFrame, {"call_id": "x", "approved": "yes_string_not_bool"}),
         # UsageFrame.prompt_tokens 应为 int
         (
             UsageFrame,
@@ -138,6 +135,11 @@ def test_reject_missing_required_fields(model: Any, kwargs: dict[str, Any]) -> N
         ),
         # ThreadHistoryFrame.messages 应为 list[NormalizedMessage]
         (ThreadHistoryFrame, {"messages": "not_a_list", "timestamp_ms": 1}),
+        # UsageSummaryUpdatedFrame.usage 应为 dict
+        (
+            UsageSummaryUpdatedFrame,
+            {"threadId": "thread-aabbccddeeff", "usage": "not_a_dict"},
+        ),
         # ThreadMetadataDTO.created_at 应为 float / number
         (
             ThreadMetadataDTO,
@@ -153,10 +155,10 @@ def test_reject_missing_required_fields(model: Any, kwargs: dict[str, Any]) -> N
     ],
     ids=[
         "content_delta_turn_str",
-        "approval_ack_approved_str",
         "usage_prompt_tokens_str",
         "tool_call_start_arguments_str",
         "thread_history_messages_str",
+        "usage_summary_updated_usage_str",
         "thread_metadata_created_at_str",
     ],
 )
@@ -189,6 +191,15 @@ def test_reject_wrong_field_type(model: Any, kwargs: dict[str, Any]) -> None:
         ),
         # TurnStartFrame：额外字段
         (TurnStartFrame, {"turn": 1, "timestamp_ms": 1, "boom": "boom"}),
+        # UsageSummaryUpdatedFrame：额外字段
+        (
+            UsageSummaryUpdatedFrame,
+            {
+                "threadId": "thread-aabbccddeeff",
+                "usage": {"provider": "openai"},
+                "type": "usage_summary_updated",
+            },
+        ),
     ],
     ids=[
         "ping_extra_field",
@@ -197,6 +208,7 @@ def test_reject_wrong_field_type(model: Any, kwargs: dict[str, Any]) -> None:
         "create_thread_extra_field",
         "create_generic_thread_from_first_message_extra_field",
         "turn_start_extra_field",
+        "usage_summary_updated_extra_type",
     ],
 )
 def test_reject_extra_forbidden_fields(model: Any, kwargs: dict[str, Any]) -> None:
@@ -492,10 +504,6 @@ def test_reject_thread_name_exceeds_max_length(model: Any) -> None:
         (PongFrame, {}),
         (TurnEndFrame, {"turn": 1}),
         (ToolCallEndFrame, {"call_id": "c", "turn": 1, "ok": True}),
-        (
-            ApprovalRequestFrame,
-            {"call_id": "c", "tool_name": "t", "arguments": {}, "turn": 1},
-        ),
         (ReasoningDeltaFrame, {"delta": "x", "turn": 1, "seq": 0}),
         (
             SystemNoticeFrame,
@@ -514,7 +522,6 @@ def test_reject_thread_name_exceeds_max_length(model: Any) -> None:
         "pong",
         "turn_end",
         "tool_call_end",
-        "approval_request",
         "reasoning_delta",
         "system_notice",
     ],

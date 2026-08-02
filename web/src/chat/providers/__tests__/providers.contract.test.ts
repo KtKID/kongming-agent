@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { getChatProvider } from "../index";
+import { makeCronTimelineKey } from "@/chat/runtimeWiring";
 import type { NetworkHandle, RawFrameEnvelope, SendRequest } from "@/chat/types";
 
 function fakeHandle(): { handle: NetworkHandle; sent: any[] } {
@@ -17,10 +18,22 @@ function fakeHandle(): { handle: NetworkHandle; sent: any[] } {
 describe("GenericChatProvider", () => {
   const p = getChatProvider("generic");
 
-  it("send → user.input 帧（带 reasoning_effort）", async () => {
+  it("send → user.input 帧（带 reasoning_effort / references）", async () => {
     const { handle, sent } = fakeHandle();
     const req: SendRequest = {
-      common: { text: "hi", reasoningEffort: "high" },
+      common: {
+        text: "hi",
+        reasoningEffort: "high",
+        references: [
+          {
+            id: "ref-1",
+            kind: "skill",
+            ref: "skill:skill-creator",
+            label: "Skill Creator",
+            activation: "inject_context",
+          },
+        ],
+      },
       provider: { provider: "generic", threadId: "t1" },
     };
     await p.send(handle, req);
@@ -28,6 +41,15 @@ describe("GenericChatProvider", () => {
       frame_type: "user.input",
       text: "hi",
       reasoning_effort: "high",
+      references: [
+        {
+          id: "ref-1",
+          kind: "skill",
+          ref: "skill:skill-creator",
+          label: "Skill Creator",
+          activation: "inject_context",
+        },
+      ],
     });
   });
 
@@ -43,6 +65,37 @@ describe("GenericChatProvider", () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ kind: "assistant_message_delta", provider: "generic" });
     expect(events[0].payload.delta).toBe("x");
+  });
+
+  it("mapInboundFrame：cron.message.appended → assistant_message_completed", () => {
+    const env: RawFrameEnvelope = {
+      connectionId: "t1",
+      channel: "generic",
+      threadId: "t1",
+      frame: {
+        frame_type: "cron.message.appended",
+        timestamp_ms: 6,
+        thread_id: "t1",
+        content: "done",
+        message_id: "cron-msg-1",
+        run_id: "run-1",
+        session_id: "session-run-1",
+        task_id: "task-1",
+        task_name: "daily",
+      },
+      receivedAt: 6,
+    };
+    const events = p.mapInboundFrame(env);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      kind: "assistant_message_completed",
+      provider: "generic",
+      threadId: makeCronTimelineKey("t1", "run-1"),
+      messageId: "cron-msg-1",
+      turnId: "run-1:turn-unknown",
+    });
+    expect(events[0].payload.content).toBe("done");
+    expect(events[0].payload.source).toBe("cron");
   });
 
   it("interrupt → interrupt 帧", async () => {

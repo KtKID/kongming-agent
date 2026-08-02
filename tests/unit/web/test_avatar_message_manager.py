@@ -40,6 +40,7 @@ class _FakeBridge:
         *,
         reasoning_effort: str | None = None,
         attachments: list[dict[str, object]] | None = None,
+        references: list[dict[str, object]] | None = None,
     ) -> None:
         """记录 run_once 入参。
 
@@ -82,6 +83,7 @@ class _FakeThreadManager:
         self.threads: dict[str, ThreadMetadata] = {}
         self.cells: dict[str, _FakeCell] = {}
         self.refresh_calls: list[str] = []
+        self.submit_calls: list[dict[str, object]] = []
 
     async def create_thread(
         self,
@@ -132,6 +134,30 @@ class _FakeThreadManager:
         """记录 runtime refresh 调用并返回成功。"""
         self.refresh_calls.append(thread_id)
         return True
+
+    async def submit_avatar_input(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        request_id: str | None = None,
+        reasoning_effort: str | None = None,
+        attachments: list[dict[str, object]] | None = None,
+        avatar_run_id: str | None = None,
+    ) -> object:
+        """记录 Avatar 输入提交到 ThreadManager 统一入口。"""
+        await self.boot_or_attach(thread_id)
+        self.submit_calls.append(
+            {
+                "thread_id": thread_id,
+                "text": text,
+                "request_id": request_id,
+                "reasoning_effort": reasoning_effort,
+                "attachments": attachments,
+                "avatar_run_id": avatar_run_id,
+            }
+        )
+        return object()
 
 
 def _manager(tmp_path: Path, thread_manager: _FakeThreadManager | None = None) -> AvatarManager:
@@ -216,13 +242,15 @@ async def test_avatar_chat_creates_generic_thread_and_starts_run(tmp_path: Path)
     assert accepted.websocket_url == f"/ws/avatar/v1/threads/{accepted.thread_id}"
     assert accepted.transport == "websocket"
 
-    await fake_tm.cells[accepted.thread_id].current_run_task
     assert fake_tm.refresh_calls == [accepted.thread_id]
-    assert fake_tm.cells[accepted.thread_id].bridge.calls == [
+    assert fake_tm.submit_calls == [
         {
+            "thread_id": accepted.thread_id,
             "text": "hello from avatar",
+            "request_id": None,
             "reasoning_effort": "medium",
             "attachments": None,
+            "avatar_run_id": accepted.run_id,
         }
     ]
 

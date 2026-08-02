@@ -3,30 +3,31 @@
  *
  * ## 这份文件是什么
  *
- * 本文件是 Python 侧 `src/web/protocol/` 三个模块的 TS 1:1 复刻：
+ * 本入口是 Python 侧 `src/hosts/web/protocol/` 的 TS 公共入口：
  *
- * - Python `src/web/protocol/_base.py`        → 本文件「公共枚举」段
- * - Python `src/web/protocol/rest_models.py`  → 本文件「REST DTO」段
- * - Python `src/web/protocol/ws_frames.py`    → 本文件「C2S 帧」+「S2C 帧」+「Unions」三段（18 帧 + 2 union）
+ * - Python `src/hosts/web/protocol/_base.py`        → 本文件「公共枚举」段
+ * - Python `src/hosts/web/protocol/rest_models.py`  → 本文件「REST DTO」段
+ * - Python `src/hosts/web/protocol/ws_frames.py`    → 本文件「generic_chat WS」段
+ * - Python `src/hosts/web/protocol/ws_frames.py`    → `web/src/protocol/*.ts` 通道 WS 段
  *
  * 字段名 / 类型 / 必选与 Python 侧严格对应；可选字段（Python `X | None = None`）
  * 用 TS 的 `field?: X` 表达；Pydantic `Literal["x"]` 单值用 TS 字面量类型。
  *
  * ## 维护方式
  *
- * 本文件**由人手维护**——v0.1.5 暂不引入 OpenAPI / msgspec / datamodel-codegen
- * 这类自动生成工具，理由：
- * - 18 帧 + 8 DTO 体量小，手写一次即可，引入 codegen 工具会带来构建链复杂度
- * - 漂移由两道护栏兜底：
- *   1. Python 侧 110 个 round-trip + 拒绝场景单测（保证 Python 模型与 wire 一致）
- *   2. PR 审查时必须同时改 Python + TS，review checklist 强制对照
+ * - `protocol/generated/` 中的类型由 Python Pydantic 自动生成，禁止手工修改。
+ * - `ThreadStatusFrame` 已迁移到生成链，运行
+ *   `make web-protocol-generate` 更新，`make web-protocol-check` 检查漂移。
+ * - 其余尚未迁移的 DTO / frame 继续与 Python 侧人工 1:1 同步。
  *
  * ## 修改约定
  *
- * - 增删字段：必须**同步**改 Python `src/web/protocol/` 与本文件，缺一即视为协议漂移
+ * - 已生成类型增删字段：只改 Python 真源并重新生成、提交产物
+ * - 暂时手写类型增删字段：同步改 Python 与本入口或 `web/src/protocol/*.ts`
  * - 字段顺序与 Python 保持一致，便于双侧 diff 对照 review
  * - 公共枚举新增枚举值视为破坏性变更，需 bump 协议小版本（v0.1.6+）
- * - 不要在本文件加 React / 浏览器 / WS 客户端逻辑——这里只放纯类型定义
+ * - 业务模块只能从 `@/protocol` 导入 wire 类型，避免 feature 目录形成第二份协议
+ * - 不要在协议文件加 React / 浏览器 / WS 客户端逻辑——这里只放纯类型定义
  *
  * ## TypeScript 设施使用约定
  *
@@ -40,17 +41,23 @@
  * - Python `int` / `float` → TS `number`（TS 没有 int 区分）
  */
 
+import type {
+  AutoApprovalQueryFrame,
+  AutoApprovalStateFrame,
+  AutoApprovalSetModeFrame,
+} from "./protocol/ws-shared";
+
 // ============================================================================
 // ===== 公共枚举（对应 Python src/web/protocol/_base.py）=====
 // ============================================================================
 
 /**
- * `error` 帧的错误分类（5 枚举，与 Python `ErrorCode` 一致）。
+ * `error` 帧的错误分类（与 Python `ErrorCode` 一致）。
  *
  * - `network`：连接 LLM endpoint / 工具远端失败（DNS / TCP / TLS 层）
  * - `llm_error`：LLM 端返回 4xx / 5xx 或解析模型响应失败
  * - `tool_error`：工具执行抛异常（不含 ok=false 的业务失败，那个走 tool.call.end）
- * - `approval_timeout`：浏览器在 pending_approval_timeout_seconds 内没回 ack
+ * - `approval_timeout`：ApprovalManager 等待人工审批超时
  * - `internal`：runtime 内部 panic / 不在以上四类的兜底
  */
 export type ErrorCode =
@@ -58,7 +65,11 @@ export type ErrorCode =
   | "llm_error"
   | "tool_error"
   | "approval_timeout"
-  | "internal";
+  | "internal"
+  | "feature_disabled"
+  | "preset_unknown"
+  | "credential_missing"
+  | "reasoning_unsupported";
 
 /**
  * `cell.evicted` 帧的回收原因（4 枚举，与 Python `EvictReason` 一致）。
@@ -139,6 +150,33 @@ export interface UserInputAttachment {
   status: "ready" | "processing" | "failed";
 }
 
+export type ConversationReferenceKind =
+  | "skill"
+  | "command"
+  | "workflow_strategy"
+  | "workflow_run";
+
+export type ConversationReferenceActivation =
+  | "inject_context"
+  | "execute_command"
+  | "start_workflow"
+  | "guide_payload"
+  | "open_viewer";
+
+export interface ConversationReferenceTemplate {
+  kind: ConversationReferenceKind;
+  ref: string;
+  label: string;
+  activation: ConversationReferenceActivation;
+  source_ref?: string | null;
+  args?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ConversationReferenceDTO extends ConversationReferenceTemplate {
+  id: string;
+}
+
 /**
  * 管理页单个 cell 的快照（`GET /api/manage/cells` 返回元素）。
  *
@@ -155,6 +193,27 @@ export interface CellSummaryDTO {
   current_turn?: number;
   pending_approval_count: number;
   status: "idle" | "running" | "awaiting_approval";
+}
+
+export interface PluginToolDTO {
+  id: string;
+  name: string;
+  display_name: string;
+  source: "mcp";
+  enabled: boolean;
+  server_id: string;
+  mcp_tool_name: string;
+  description: string;
+  canonical_name: string;
+  is_alias: boolean;
+}
+
+export interface PluginToolsResponseDTO {
+  plugins: PluginToolDTO[];
+}
+
+export interface UpdatePluginToolRequest {
+  enabled: boolean;
 }
 
 export interface RuntimeStatusPollingDTO {
@@ -225,11 +284,15 @@ export interface CreateThreadRequest {
   cwd?: string;
 }
 
+export interface ForkThreadRequest {
+  history_index: number;
+}
+
 export interface CreateGenericThreadFromFirstMessageRequest {
   text: string;
   preset_id: string;
   cwd?: string;
-  reasoning_effort?: "low" | "medium" | "high" | null;
+  reasoning_effort?: "none" | "low" | "medium" | "high" | "max" | null;
 }
 
 export interface CreateGenericThreadFromFirstMessageResponse {
@@ -268,6 +331,52 @@ export interface LLMPresetDTO {
   requires_api_key: boolean;
 }
 
+export type ProviderConnectionStatus = "connected" | "disconnected" | "error";
+
+export interface ProviderCatalogItemDTO {
+  providerId: string;
+  displayName: string;
+  regionLabel: string;
+  description: string;
+  logoText: string;
+}
+
+export interface ProviderConnectionDTO {
+  providerId: string;
+  status: ProviderConnectionStatus;
+  model: string | null;
+  authLabel: string | null;
+}
+
+export interface ConnectedModelFamilyDTO {
+  providerId: string;
+  providerLabel: string;
+  familyId: string;
+  displayName: string;
+  presetId: string;
+  model: string;
+  connected: boolean;
+  supportedReasoningEfforts: Array<"none" | "low" | "medium" | "high" | "max">;
+  defaultReasoningEffort: "none" | "low" | "medium" | "high" | "max" | null;
+  reasoningAdapter: string | null;
+  contextWindowTokens: number | null;
+}
+
+export interface ProviderActionResponseDTO {
+  providerId: string;
+  ok: boolean;
+  message: string;
+  connection?: ProviderConnectionDTO | null;
+}
+
+export interface TestProviderRequestDTO {
+  apiKey?: string | null;
+}
+
+export interface ConnectProviderRequestDTO {
+  apiKey?: string | null;
+}
+
 /**
  * 登录请求体（`POST /api/auth/login`）。
  *
@@ -301,36 +410,37 @@ export interface RenameThreadRequest {
 export type ThreadTaskProgressStatus =
   | "pending"
   | "in_progress"
-  | "completed";
-
-export type ThreadTaskProgressSource = "llm" | "workflow" | "api";
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface ThreadTaskProgressCounts {
   pending: number;
   in_progress: number;
   completed: number;
+  failed: number;
+  cancelled: number;
   total: number;
 }
 
 export interface ThreadTaskProgressItem {
-  id: string;
-  orchestration_task_id: string;
-  workflow_id?: string | null;
   task_id: string;
   task_run_id: string;
   desc: string;
+  depends_on: string[];
   status: ThreadTaskProgressStatus;
-  source_status?: string | null;
-  error_message?: string | null;
+  error_message: string | null;
   display_order: number;
-  updated_at_ms?: number | null;
+  updated_at_ms: number;
 }
 
 export interface ThreadTaskProgressSnapshot {
-  schema_version: 1;
+  schema_version: 2;
   session_id: string;
+  workflow_id: string | null;
+  title: string | null;
+  control_mode: "llm_steps" | "runtime_lifecycle" | null;
   updated_at_ms: number;
-  source: ThreadTaskProgressSource;
   tasks: ThreadTaskProgressItem[];
   counts: ThreadTaskProgressCounts;
 }
@@ -338,15 +448,15 @@ export interface ThreadTaskProgressSnapshot {
 export type ThreadTaskProgressIconVariant =
   | "check_circle"
   | "ring"
-  | "active_ring";
+  | "active_ring"
+  | "error_circle";
 
 export interface ThreadTaskProgressDisplayItem {
   key: string;
-  orchestration_task_id: string;
   task_id: string;
   desc: string;
   status: ThreadTaskProgressStatus;
-  status_label: "未完成" | "进行中" | "已完成";
+  status_label: "未完成" | "进行中" | "已完成" | "失败" | "已取消";
   icon_variant: ThreadTaskProgressIconVariant;
   order: number;
   aria_label: string;
@@ -360,6 +470,7 @@ export interface ThreadTaskProgressViewModel {
 }
 
 export type ThreadSubAgentStatus =
+  | "pending"
   | "running"
   | "completed"
   | "failed"
@@ -367,13 +478,23 @@ export type ThreadSubAgentStatus =
 
 export interface ThreadSubAgentDTO {
   id: string;
-  task_name?: string | null;
-  name?: string | null;
+  agent_id: string;
+  thread_id: string;
+  source: string;
+  workflow_id: string | null;
+  workflow_task_id: string | null;
+  task_id: string;
+  task_run_id: string;
+  task_name: string;
+  session_id: string;
   status: ThreadSubAgentStatus;
-  source?: string | null;
-  workflow_id?: string | null;
-  started_at_ms?: number | null;
-  updated_at_ms?: number | null;
+  started_at: string;
+  updated_at: string;
+  finished_at: string | null;
+  started_at_ms: number;
+  updated_at_ms: number;
+  finished_at_ms: number | null;
+  error_message: string | null;
 }
 
 export interface ThreadSubAgentListDTO {
@@ -382,7 +503,91 @@ export interface ThreadSubAgentListDTO {
   subagents: ThreadSubAgentDTO[];
 }
 
-export type ThreadSubAgentListResponse = ThreadSubAgentListDTO;
+export type CronTaskLifecycle =
+  | "scheduled"
+  | "paused"
+  | "disabled"
+  | "exhausted"
+  | "deleted";
+
+export type CronRunStatus =
+  | "running"
+  | "completed"
+  | "silent"
+  | "failed"
+  | "inactivity_timeout"
+  | "abandoned"
+  | "cancelled";
+
+export interface CronTaskDTO {
+  task_id: string;
+  name: string;
+  lifecycle: CronTaskLifecycle;
+  latest_run_status: CronRunStatus | null;
+  live_runtime_status: "idle" | "running";
+  trigger_type: "once" | "interval" | "cron" | "seconds";
+  trigger_expr: string;
+  timezone: string;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  thread_id: string;
+  preset_id: string;
+  created_by: string;
+  input_text: string;
+  agent_name: string;
+}
+
+export interface CronRunDTO {
+  run_id: string;
+  task_id: string;
+  task_name: string;
+  session_id: string;
+  thread_id: string;
+  scheduled_for: string;
+  started_at: string | null;
+  finished_at: string | null;
+  status: CronRunStatus;
+  failure_reason: string | null;
+  final_message_excerpt: string | null;
+  delivery_status: "pending" | "delivered" | "failed" | "skipped";
+  delivery_error: string | null;
+}
+
+export interface CronRunMessagesResponse {
+  messages: NormalizedMessage[];
+}
+
+export interface CronRunsPage {
+  runs: CronRunDTO[];
+  next_cursor: string | null;
+}
+
+export interface RunNowResponse {
+  run_id: string;
+  status: "PENDING";
+}
+
+export interface CreateCronTaskRequest {
+  name: string;
+  agent_name: string;
+  input_text: string;
+  schedule_type: "once" | "cron";
+  once_at?: string | null;
+  cron_expr?: string | null;
+  timezone?: string;
+  concurrency_policy?: "forbid" | "allow" | "replace";
+  preset_id?: string | null;
+}
+
+export interface UpdateCronTaskRequest {
+  name?: string | null;
+  schedule?: string | null;
+  agent?: string | null;
+  input_text?: string | null;
+  preset_id?: string | null;
+  lifecycle?: "scheduled" | "paused" | "disabled" | null;
+  concurrency_policy?: "forbid" | "allow" | "replace" | null;
+}
 
 export type ThreadSubAgentIconVariant =
   | "running"
@@ -409,7 +614,7 @@ export interface ThreadSubAgentDisplayItem {
  * `id` 形如 `thread-<12 位 hex>`；
  * `name.length <= 200`；
  * `message_count >= 0`；
- * `schema_version`：当前 v11；老文件由后端读盘时懒升级。
+ * `schema_version`：当前 v12；老文件由后端读盘时懒升级。
  *
  * v0.1.6 新增 `backend_kind`；老 v1 文件读入默认 `generic_chat`。
  * v0.2 新增 `claude_thread_id` + `cwd`（claude_code thread 与 SDK session 持久化绑定）；
@@ -420,6 +625,8 @@ export interface ThreadSubAgentDisplayItem {
  * v0.2.x（schema v10）新增 `is_archived`，作为归档真源（替代旧 jsonl ``archived``
  * 事件方案）；老 v9 文件懒升级补 `is_archived=false`。
  * scheduled-task-thread（schema v11）新增 `thread_kind/source_kind/source_id`。
+ * 完整对话 fork（schema v12）新增 `forked_from_id`。
+ * fork 时间线定位（schema v13）新增 `forked_from_history_index`。
  * `preset_id` 在 `backend_kind="claude_code"` 时允许空字符串占位。
  */
 export interface ThreadMetadataDTO {
@@ -453,14 +660,51 @@ export interface ThreadMetadataDTO {
   is_pinned: boolean;
   /** 是否归档；归档的 thread 不在历史列表中显示（claude_code 真源由本字段决定，不再读 jsonl ``archived`` 事件） */
   is_archived: boolean;
+  /** 完整对话 fork 的直接父 thread ID；普通 thread 为 null。 */
+  forked_from_id?: string | null;
+  /** fork 快照中最后一条复制的终态 assistant 在当前 history 中的零基位置；旧 metadata 为 null。 */
+  forked_from_history_index?: number | null;
   /** 业务类型；缺失时按普通聊天处理。 */
   thread_kind?: ThreadKind;
   /** 业务来源类型；定时任务 thread 使用 scheduled_task。 */
   source_kind?: string;
   /** 业务来源 ID；定时任务 thread 使用 task_id。 */
   source_id?: string;
-  /** 元数据 schema 版本号，当前 11（新增 scheduled_task thread 来源字段） */
-  schema_version?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11;
+  /** 元数据 schema 版本号，当前 13（新增 fork 时间线边界） */
+  schema_version?: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13;
+}
+
+/** thread permissions 的结构化规则。 */
+export interface PermissionRuleDTO {
+  expression: string;
+  scope_cwd: string | null;
+}
+
+/** v1→v2 首次读取迁移的可见结果。 */
+export interface PermissionsMigrationSummaryDTO {
+  from_schema_version: 1;
+  to_schema_version: 2;
+  invalidated_shell_allow_count: number;
+  backup_path: string;
+}
+
+/** 单个 thread 的 permissions 本子 REST 快照。 */
+export interface ThreadPermissionsDTO {
+  schema_version: 2;
+  thread_id: string;
+  revision: number;
+  allow: PermissionRuleDTO[];
+  deny: PermissionRuleDTO[];
+  updated_at: string | null;
+  migration_summary: PermissionsMigrationSummaryDTO | null;
+}
+
+/** `PUT /api/threads/{thread_id}/permissions` 的 revision CAS 请求。 */
+export interface UpdateThreadPermissionsRequest {
+  thread_id: string;
+  revision: number;
+  allow: PermissionRuleDTO[];
+  deny: PermissionRuleDTO[];
 }
 
 // usage-token-v2-bigbang: token 数据通过独立端点 GET /threads/<tid>/usage 拿，
@@ -494,6 +738,25 @@ export interface ClaudeUsage {
   context_window: number;
 }
 
+/** generic_chat Anthropic cache TTL 细分；null 表示 provider 未报告。 */
+export interface GenericChatCacheCreation {
+  ephemeral_1h_input_tokens: number | null;
+  ephemeral_5m_input_tokens: number | null;
+}
+
+/** generic_chat Anthropic 用量；canonical unknown 映射为 null。 */
+export interface GenericChatAnthropicUsage {
+  provider: "claude";
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_input_tokens: number | null;
+  cache_creation_input_tokens: number | null;
+  cache_creation: GenericChatCacheCreation;
+  context_usage: number | null;
+  model: string;
+  context_window: number;
+}
+
 /** Codex token 用量 5 字段细分（OpenAI 语义）。 */
 export interface CodexTokenBreakdown {
   input_tokens: number;
@@ -501,6 +764,15 @@ export interface CodexTokenBreakdown {
   output_tokens: number;
   reasoning_output_tokens: number;
   total_tokens: number;
+}
+
+/** generic_chat OpenAI 用量细分；null 表示 provider 未报告。 */
+export interface GenericChatTokenBreakdown {
+  input_tokens: number | null;
+  cached_input_tokens: number | null;
+  output_tokens: number | null;
+  reasoning_output_tokens: number | null;
+  total_tokens: number | null;
 }
 
 /** Codex 速率限制单窗口（5h 或 7d）。 */
@@ -537,7 +809,7 @@ export interface CodexUsage {
  */
 export interface GenericChatOpenAIUsage {
   provider: "openai";
-  last: CodexTokenBreakdown;
+  last: GenericChatTokenBreakdown;
   model: string;
   context_window: number;
 }
@@ -550,7 +822,11 @@ export interface GenericChatOpenAIUsage {
  * discriminator 同为 "openai" 但形态不同，前端需要按是否有 `total`/`rate_limits`
  * 区分（或在 v3 加额外 discriminator 字段）。
  */
-export type ThreadUsage = ClaudeUsage | CodexUsage | GenericChatOpenAIUsage;
+export type ThreadUsage =
+  | ClaudeUsage
+  | CodexUsage
+  | GenericChatAnthropicUsage
+  | GenericChatOpenAIUsage;
 
 /**
  * 当前 thread 的共享 workspace 上下文。
@@ -952,28 +1228,6 @@ export interface ImportClaudeSessionResponse {
 // ============================================================================
 
 /**
- * 浏览器对 `approval.request` 的应答（v0.1.6 三态）。
- *
- * `action` 字面值与 `core.contracts.ApprovalAction` 对齐，零翻译层：
- * - `accept_once`：仅本次放行
- * - `accept_for_session`：本次放行 + 写入 session GrantStore，本 thread
- *   后续同 capability 静默放行
- * - `reject`：拒绝；超时 / ESC 也走这条
- *
- * v0.1.5 的 `approved: bool` 字段废弃，开发期不留兼容 shim。
- */
-export type ApprovalAckAction =
-  | "accept_once"
-  | "accept_for_session"
-  | "reject";
-
-export interface ApprovalAckFrame {
-  frame_type: "approval.ack";
-  call_id: string;
-  action: ApprovalAckAction;
-}
-
-/**
  * 浏览器侧 keep-alive 心跳；后端以 `pong` 回应。
  */
 export interface PingFrame {
@@ -991,8 +1245,9 @@ export interface UserInputFrame {
   frame_type: "user.input";
   text: string;
   request_id: string;
-  reasoning_effort?: "low" | "medium" | "high" | null;
+  reasoning_effort?: "none" | "low" | "medium" | "high" | "max" | null;
   attachments?: UserInputAttachment[];
+  references?: ConversationReferenceDTO[];
 }
 
 /**
@@ -1025,12 +1280,41 @@ export interface ChoiceSubmitFrame {
   answers: ChoiceAnswerDTO[];
 }
 
+export interface PendingInputUpdateFrame {
+  frame_type: "pending-input.update";
+  pending_input_id: string;
+  content: string;
+}
+
+export interface PendingInputCancelFrame {
+  frame_type: "pending-input.cancel";
+  pending_input_id: string;
+}
+
+export interface PendingInputReorderFrame {
+  frame_type: "pending-input.reorder";
+  ordered_ids: string[];
+}
+
+export interface PendingInputSendNowFrame {
+  frame_type: "pending-input.send-now";
+  pending_input_id: string;
+  request_id?: string | null;
+}
+
 // ============================================================================
 // ===== S2C 帧（后端 → 浏览器，15 个；对应 Python ws_frames.py）=====
 //
 // 所有 S2C 帧必带 `timestamp_ms` 服务端时间戳，让前端按时序重排。
 // 流式增量类（content.delta / reasoning.delta）额外带 `turn` 和 `seq`。
 // 控制类（pong / cell.evicted / thread.history）不带 turn / seq。
+//
+// agent-tree-v0.1 模块 G：所有 S2C 帧可选带 `agent_id`（产生该帧的 agent
+// 归属）。runtime Event 翻译来的帧（turn.* / tool.* / content/reasoning.delta
+// / usage / run.interrupted / system.notice 等）由 WSEventSink 透传
+// `event.agent_id`；非 Event 源帧（pong / thread.history / cell.evicted /
+// approval.inbox.* 等）不携带，前端按 undefined 处理。与 Python
+// `_S2CFrameBase.agent_id: str = ""` 双侧真源同步（约束 17）。
 // ============================================================================
 
 /**
@@ -1039,6 +1323,7 @@ export interface ChoiceSubmitFrame {
 export interface AssistantFinalFrame {
   frame_type: "assistant.final";
   timestamp_ms: number;
+  agent_id?: string;
   content: string;
   turn: number;
   /** session 内自增 run 编号，形如 `run-{session_id}-{n}`；空串表示未携带（兼容旧后端）。 */
@@ -1051,26 +1336,10 @@ export interface AssistantFinalFrame {
 export interface ApprovalDecisionFrame {
   frame_type: "approval.decision";
   timestamp_ms: number;
+  agent_id?: string;
   call_id: string;
   outcome: ApprovalOutcome;
   turn: number;
-}
-
-/**
- * 工具执行前向用户请求审批，浏览器需回 `approval.ack`。
- */
-export interface ApprovalRequestFrame {
-  frame_type: "approval.request";
-  timestamp_ms: number;
-  call_id: string;
-  tool_name: string;
-  arguments: Record<string, unknown>;
-  reason?: string;
-  turn: number;
-  /** elevated 审批时为 "elevated"，标准审批时为 "standard" 或 undefined */
-  policy_hint?: string;
-  /** elevated 审批时的确认令牌（8 hex），用户需输入后才能点同意 */
-  confirm_token?: string;
 }
 
 export interface ChoiceOptionDTO {
@@ -1090,6 +1359,7 @@ export interface ChoiceQuestionDTO {
 export interface ChoiceRequestFrame {
   frame_type: "choice.request";
   timestamp_ms: number;
+  agent_id?: string;
   request_id: string;
   title: string;
   description: string;
@@ -1104,6 +1374,7 @@ export interface ChoiceRequestFrame {
 export interface CellEvictedFrame {
   frame_type: "cell.evicted";
   timestamp_ms: number;
+  agent_id?: string;
   thread_id: string;
   reason: EvictReason;
   message?: string;
@@ -1125,6 +1396,7 @@ export interface CellEvictedFrame {
 export interface RunInterruptedFrame {
   frame_type: "run.interrupted";
   timestamp_ms: number;
+  agent_id?: string;
   run_id: string;
   cancelled_at_turn: number;
   cancelled_tool_call_id?: string | null;
@@ -1140,6 +1412,7 @@ export interface RunInterruptedFrame {
 export interface SystemNoticeFrame {
   frame_type: "system.notice";
   timestamp_ms: number;
+  agent_id?: string;
   notice_key: string;
   source: string;
   status: SystemNoticeStatus;
@@ -1156,6 +1429,7 @@ export interface SystemNoticeFrame {
 export interface ContentDeltaFrame {
   frame_type: "content.delta";
   timestamp_ms: number;
+  agent_id?: string;
   delta: string;
   turn: number;
   seq: number;
@@ -1169,9 +1443,11 @@ export interface ContentDeltaFrame {
 export interface ErrorFrame {
   frame_type: "error";
   timestamp_ms: number;
+  agent_id?: string;
   error_code: ErrorCode;
   message: string;
   turn?: number;
+  reason?: string | null;
 }
 
 /**
@@ -1180,6 +1456,7 @@ export interface ErrorFrame {
 export interface PongFrame {
   frame_type: "pong";
   timestamp_ms: number;
+  agent_id?: string;
   ts?: number;  // 原样回传客户端的 ts，用于 RTT 计算
 }
 
@@ -1189,6 +1466,7 @@ export interface PongFrame {
 export interface ReasoningDeltaFrame {
   frame_type: "reasoning.delta";
   timestamp_ms: number;
+  agent_id?: string;
   delta: string;
   turn: number;
   seq: number;
@@ -1201,6 +1479,7 @@ export interface ReasoningDeltaFrame {
 export interface ThreadHistoryFrame {
   frame_type: "thread.history";
   timestamp_ms: number;
+  agent_id?: string;
   messages: NormalizedMessage[];
 }
 
@@ -1213,6 +1492,7 @@ export interface ThreadHistoryFrame {
 export interface ToolCallEndFrame {
   frame_type: "tool.call.end";
   timestamp_ms: number;
+  agent_id?: string;
   call_id: string;
   turn: number;
   ok: boolean;
@@ -1230,6 +1510,7 @@ export interface ToolCallEndFrame {
 export interface ToolCallStartFrame {
   frame_type: "tool.call.start";
   timestamp_ms: number;
+  agent_id?: string;
   tool_name: string;
   call_id: string;
   turn: number;
@@ -1243,8 +1524,11 @@ export interface ToolCallStartFrame {
 export interface TurnEndFrame {
   frame_type: "turn.end";
   timestamp_ms: number;
+  agent_id?: string;
   turn: number;
   run_id?: string;
+  history_index?: number | null;
+  has_tool_calls?: boolean;
 }
 
 /**
@@ -1253,8 +1537,76 @@ export interface TurnEndFrame {
 export interface TurnStartFrame {
   frame_type: "turn.start";
   timestamp_ms: number;
+  agent_id?: string;
   turn: number;
   run_id?: string;
+}
+
+/** cron 结果已追加到绑定 thread 的聊天时间线。 */
+export interface CronMessageAppendedFrame {
+  frame_type: "cron.message.appended";
+  timestamp_ms: number;
+  agent_id?: string;
+  thread_id: string;
+  task_id: string;
+  run_id: string;
+  session_id: string;
+  task_name: string;
+  content: string;
+  message_id: string;
+}
+
+/** 定时任务 run 已持久化 RUNNING。 */
+export interface CronRunStartedFrame {
+  frame_type: "cron.run.started";
+  timestamp_ms: number;
+  agent_id?: string;
+  task_id: string;
+  task_name: string;
+  run_id: string;
+  thread_id: string;
+  session_id: string | null;
+  scheduled_for: string;
+  started_at: string | null;
+  status: "running";
+}
+
+/** 定时任务 run 已持久化 terminal。 */
+export interface CronRunFinishedFrame {
+  frame_type: "cron.run.finished";
+  timestamp_ms: number;
+  agent_id?: string;
+  task_id: string;
+  task_name: string;
+  run_id: string;
+  thread_id: string;
+  session_id: string | null;
+  scheduled_for: string;
+  started_at: string | null;
+  finished_at: string | null;
+  status: Exclude<CronRunStatus, "running">;
+  final_message: string | null;
+  error_message: string | null;
+  delivery_error: string | null;
+  next_run_at: string | null;
+}
+
+/** 定时任务 terminal 已交给 Web delivery broker。 */
+export interface CronRunCompletedFrame {
+  frame_type: "cron.run.completed";
+  timestamp_ms: number;
+  agent_id?: string;
+  task_id: string;
+  task_name: string;
+  run_id: string;
+  thread_id: string;
+  session_id: string | null;
+  final_message: string;
+  delivered_at_iso: string | null;
+  scheduled_for: string;
+  delivery_target: string | null;
+  next_run_at: string | null;
+  status: Exclude<CronRunStatus, "running">;
 }
 
 /**
@@ -1271,9 +1623,118 @@ export interface TurnStartFrame {
 export interface UsageFrame {
   frame_type: "usage";
   timestamp_ms: number;
+  agent_id?: string;
   turn: number;
   run_id?: string;
   usage: ThreadUsage;
+}
+
+/**
+ * thread-status 全局 WS 通道上的 usage summary 刷新帧。
+ *
+ * 后端真源：`web.protocol.ws_frames.UsageSummaryUpdatedFrame`。
+ * Claude/Codex service 在 manager.get_thread_usage 后广播本帧，前端
+ * `useThreadStatusWS` 用它刷新 `usageByThread`。
+ */
+export interface UsageSummaryUpdatedFrame {
+  frame_type: "usage_summary_updated";
+  threadId: string;
+  usage: ThreadUsage;
+}
+
+/**
+ * 后端 pending input 队列项投影。
+ *
+ * content 是后续 run 的执行真源；preview 仅用于列表展示；sequence 只在同优先级排序中生效。
+ */
+export interface PendingInputDTO {
+  /** pin-* 稳定 ID，用于编辑、删除、排序和 started 事件关联。 */
+  id: string;
+  /** 队列归属 thread；前端 reducer 用它过滤旧连接或其他 tab 的乱入帧。 */
+  thread_id: string;
+  /** 输入来源：普通 composer、ChoicePanel 或 Avatar。 */
+  source: "user_input" | "choice_submit" | "avatar";
+  /** drain 优先级；choice_response 排在普通 user_message 前面。 */
+  priority: "choice_response" | "user_message";
+  /** 完整输入内容，后端启动 run 时交给 root agent mailbox。 */
+  content: string;
+  /** UI 列表展示用短文本。 */
+  preview: string;
+  /** queued 表示仍在队列中；starting 表示刚出队并交给 active run。 */
+  status: "queued" | "starting";
+  created_at_ms: number;
+  updated_at_ms: number;
+  /** cell 内单调递增序号，用于同优先级 FIFO 和手动排序。 */
+  sequence: number;
+  /** request_id、reasoning_effort、attachments、references 等运行透传参数。 */
+  metadata: Record<string, unknown>;
+}
+
+/** WS 建连后的队列全量快照；前端以 thread_id + version 合并状态。 */
+export interface PendingInputSnapshotFrame {
+  frame_type: "pending-input.snapshot";
+  timestamp_ms: number;
+  agent_id?: string;
+  thread_id: string;
+  items: PendingInputDTO[];
+  max_items: number;
+  active_run_id?: string | null;
+  version: number;
+}
+
+/** 队列 add/update/remove/reorder/drain 后的完整快照。 */
+export interface PendingInputChangedFrame {
+  frame_type: "pending-input.changed";
+  timestamp_ms: number;
+  agent_id?: string;
+  thread_id: string;
+  items: PendingInputDTO[];
+  max_items: number;
+  reason:
+    | "added"
+    | "updated"
+    | "removed"
+    | "reordered"
+    | "drained"
+    | "cleared"
+    | "sent_now"
+    | "steer_undelivered";
+  active_run_id?: string | null;
+  version: number;
+}
+
+/**
+ * 某个队列项已经被后端写入当前活跃 run 的 steer buffer。
+ *
+ * pending_input 携带被认领队列项的最终内容，聊天 timeline 可用它立即生成用户气泡。
+ */
+export interface PendingInputSteeredFrame {
+  frame_type: "pending-input.steered";
+  timestamp_ms: number;
+  agent_id?: string;
+  thread_id: string;
+  pending_input_id: string;
+  pending_input: PendingInputDTO;
+  active_run_id?: string | null;
+  run_id?: string;
+  turn?: number | null;
+  version: number;
+}
+
+/**
+ * 某个队列项已经被后端启动为下一轮 run。
+ *
+ * pending_input 携带后端确认启动时的最终内容，聊天 timeline 只从这里生成用户气泡。
+ */
+export interface PendingInputStartedFrame {
+  frame_type: "pending-input.started";
+  timestamp_ms: number;
+  agent_id?: string;
+  thread_id: string;
+  pending_input_id: string;
+  pending_input: PendingInputDTO;
+  run_id?: string;
+  version: number;
 }
 
 // ============================================================================
@@ -1286,10 +1747,15 @@ export interface UsageFrame {
 /** C2S 帧 union（浏览器 → 后端）。 */
 export type WSFrameC2S =
   | UserInputFrame
-  | ApprovalAckFrame
   | PingFrame
   | InterruptFrame
-  | ChoiceSubmitFrame;
+  | ChoiceSubmitFrame
+  | PendingInputUpdateFrame
+  | PendingInputCancelFrame
+  | PendingInputReorderFrame
+  | PendingInputSendNowFrame
+  | AutoApprovalSetModeFrame
+  | AutoApprovalQueryFrame;
 
 /** S2C 帧 union（后端 → 浏览器）。 */
 export type WSFrameS2C =
@@ -1300,16 +1766,25 @@ export type WSFrameS2C =
   | SystemNoticeFrame
   | ToolCallStartFrame
   | ToolCallEndFrame
-  | ApprovalRequestFrame
   | ApprovalDecisionFrame
   | UsageFrame
+  | UsageSummaryUpdatedFrame
   | ErrorFrame
   | TurnStartFrame
   | TurnEndFrame
+  | CronMessageAppendedFrame
+  | CronRunStartedFrame
+  | CronRunFinishedFrame
+  | CronRunCompletedFrame
   | PongFrame
   | CellEvictedFrame
   | RunInterruptedFrame
-  | ChoiceRequestFrame;
+  | ChoiceRequestFrame
+  | PendingInputSnapshotFrame
+  | PendingInputChangedFrame
+  | PendingInputSteeredFrame
+  | PendingInputStartedFrame
+  | AutoApprovalStateFrame;
 
 // ============================================================================
 // ===== 类型守卫示例（Type Guards）=====
@@ -1350,10 +1825,6 @@ export function isAssistantFinal(f: WSFrameS2C): f is AssistantFinalFrame {
   return f.frame_type === "assistant.final";
 }
 
-export function isApprovalRequest(f: WSFrameS2C): f is ApprovalRequestFrame {
-  return f.frame_type === "approval.request";
-}
-
 export function isApprovalDecision(f: WSFrameS2C): f is ApprovalDecisionFrame {
   return f.frame_type === "approval.decision";
 }
@@ -1372,6 +1843,12 @@ export function isToolCallEnd(f: WSFrameS2C): f is ToolCallEndFrame {
 
 export function isUsage(f: WSFrameS2C): f is UsageFrame {
   return f.frame_type === "usage";
+}
+
+export function isUsageSummaryUpdated(
+  f: WSFrameS2C,
+): f is UsageSummaryUpdatedFrame {
+  return f.frame_type === "usage_summary_updated";
 }
 
 export function isError(f: WSFrameS2C): f is ErrorFrame {
@@ -1400,10 +1877,6 @@ export function isThreadHistory(f: WSFrameS2C): f is ThreadHistoryFrame {
 
 export function isUserInput(f: WSFrameC2S): f is UserInputFrame {
   return f.frame_type === "user.input";
-}
-
-export function isApprovalAck(f: WSFrameC2S): f is ApprovalAckFrame {
-  return f.frame_type === "approval.ack";
 }
 
 export function isPing(f: WSFrameC2S): f is PingFrame {
@@ -1482,6 +1955,8 @@ export interface NormalizedMessage {
   role?: "user" | "assistant";
   /** kind="text" / "thinking" / "tool_result" 的内容；类型不固定（SDK 透传） */
   content?: unknown;
+  /** generic_chat Session.history() 中的零基位置；只赋给可分叉 assistant 回复。 */
+  historyIndex?: number;
   /** kind="tool_use" 的工具名 */
   toolName?: string;
   /** kind="tool_use" 的工具入参；与 `input` 同义（normalizer 出 toolInput） */
@@ -1502,8 +1977,14 @@ export interface NormalizedMessage {
   aborted?: boolean;
   /** kind="complete" 的 token 用量摘要（camelCase） */
   tokenBudget?: Record<string, unknown>;
+  /** kind="complete" 的执行时长（毫秒）。 */
+  durationMs?: number;
   /** kind="error" 的错误描述 */
   error?: string;
+  /** permission_cancelled / error 的结构化原因。 */
+  reason?: string;
+  /** 后端历史消息 metadata；generic_chat 用于携带 attachments / conversation_references。 */
+  metadata?: Record<string, unknown>;
   /** kind="stream_status"：当前阶段（responding=生成 / thinking=思考 / tool_calling=调用工具） */
   phase?: "responding" | "thinking" | "tool_calling";
   /** kind="stream_status"：SDK content_block 的 index（同一 turn 内自增） */
@@ -1512,95 +1993,54 @@ export interface NormalizedMessage {
   deltaType?: "text" | "thinking" | "input_json";
   /** kind="stream_status"：message_start 携带的 model 名 */
   model?: string;
+  /** permission_request：安全路径自动通过时间戳（毫秒）。 */
+  autoApproveAtMs?: number | null;
+  /** permission_request：危险路径自动拒绝时间戳（毫秒）。 */
+  autoRejectAtMs?: number | null;
+  /** permission_request：命中的危险规则 id；空值表示普通审批。 */
+  blockedByRule?: string | null;
+  /** permission_request / auto approval：通道标识。 */
+  channel?: string;
 }
 
-// ---------------------------------------------------------------------------
-// Thread Status（全局 WS 广播 /ws/thread-status）
-// ---------------------------------------------------------------------------
+export type {
+  AbortSessionFrame,
+  AutoApprovalQueryFrame,
+  AutoApprovalStateFrame,
+  AutoApprovalStateWireFrame,
+  AutoApprovalSetModeFrame,
+  CheckSessionStatusFrame,
+  CodexPermissionMode,
+  ReasoningEffort,
+  SessionStatusFrame,
+} from "./protocol/ws-shared";
 
-export type ThreadStatusPhase =
-  | "idle"
-  | "responding"
-  | "thinking"
-  | "tool_calling"
-  | "waiting_approval"
-  | "complete"
-  | "error";
+export type {
+  ApprovalInboxAddFrame,
+  ApprovalInboxItem,
+  RememberRule,
+  ApprovalInboxRemoveFrame,
+  ApprovalInboxRemoveReason,
+  ApprovalInboxResolveFrame,
+  ApprovalInboxResolveResultFrame,
+  ApprovalInboxSnapshotFrame,
+  ThreadStatusC2SFrame,
+  ThreadStatusFrame,
+  ThreadStatusPhase,
+  ThreadStatusSnapshotFrame,
+  ThreadStatusS2CFrame,
+} from "./protocol/ws-thread-status";
 
-export interface ThreadStatusFrame {
-  frame_type: "thread-status";
-  threadId: string;
-  phase: ThreadStatusPhase;
-  toolName?: string | null;
-}
+export { RUN_END_REASON } from "./protocol/ws-thread-status";
 
-// ---------------------------------------------------------------------------
-// Claude Code WebSocket 协议（v0.1.6；原 `web/src/lib/claude-ws.ts` 内业务类型，
-// network-layer v0.1 重构时迁入 protocol 真源以便随 Python 端协议同步维护。
-// ---------------------------------------------------------------------------
+export type {
+  ClaudeCodeC2SFrame,
+  ClaudeCodeS2CFrame,
+} from "./protocol/ws-claude";
 
-/**
- * Claude Code endpoint 客户端帧（v0.1.6）。
- *
- * 这是 `/ws/claude-code` 接受的 6 类入站帧，对应 `src/web/claude_code/route.py::_dispatch`。
- *
- * 跟 generic_chat 的 WSFrameC2S **完全独立** —— 字段命名走 SDK / ccui 风格
- * （camelCase + `frame_type` 判别字段，v0.2 统一）。
- *
- * 网络层 v0.1 之后，心跳帧 `{ frame_type: "ping", ts }` 走 NetworkManager 透明拦截，
- * 不进入本 union。
- */
-export type ClaudeCodeC2SFrame =
-  | {
-      frame_type: "claude-command";
-      command: string;
-      options?: Record<string, unknown>;
-      /**
-       * 图片附件（claude-code-channel-image-paste）。
-       *
-       * 后端 `_dispatch` 解析后传给 `service.query(attachments=...)`，
-       * 由 `AttachmentPrefixBuilder` 拼成 `@<abs_path>` 注入 prompt 头部。
-       * 缺省 / 空数组 → 走纯文本 prompt 路径，向后兼容。
-       */
-      attachments?: UserInputAttachment[];
-    }
-  | {
-      frame_type: "claude-permission-response";
-      requestId: string;
-      allow: boolean;
-      message?: string;
-      rememberEntry?: string;
-    }
-  | { frame_type: "abort-session"; sessionId: string }
-  | { frame_type: "check-session-status"; sessionId: string }
-  /* smart-approval-v1 */
-  | { frame_type: "auto-approval-toggle"; cwd: string; enabled: boolean }
-  | { frame_type: "auto-approval-query"; cwd: string };
-
-/**
- * 后端到前端的两类帧：NormalizedMessage（主流）+ session-status（特殊）+
- * auto_approval_state（smart-approval-v1）。
- *
- * `session-status` 是 `check-session-status` 的应答；v0.2 起所有 wire 帧
- * 都用 `frame_type` 判别字段，单独建模便于不同字段集独立演化。
- */
-export interface SessionStatusFrame {
-  frame_type: "session-status";
-  sessionId: string;
-  isProcessing: boolean;
-}
-
-/** smart-approval-v1 状态帧（per-cwd toggle 配置） */
-export interface AutoApprovalStateWireFrame {
-  frame_type: "auto_approval_state";
-  channel: "claude_code" | "generic_chat";
-  cwd: string;
-  enabled: boolean;
-  timeoutMs: number;
-  ruleOverrides: Record<string, boolean>;
-}
-
-export type ClaudeCodeS2CFrame =
-  | NormalizedMessage
-  | SessionStatusFrame
-  | AutoApprovalStateWireFrame;
+export type {
+  CodexC2SFrame,
+  CodexCommandFrame,
+  CodexCommandOptions,
+  CodexS2CFrame,
+} from "./protocol/ws-codex";

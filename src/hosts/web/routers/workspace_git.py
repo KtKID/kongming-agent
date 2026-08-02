@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Request
@@ -57,12 +58,25 @@ def _require_thread_meta(request: Request, thread_id: str) -> ThreadMetadata:
     return meta
 
 
+def _workspace_fallback_root(request: Request) -> Path:
+    state = getattr(request.app, "state", None)
+    raw_root = getattr(state, "workspace_root", None)
+    if raw_root:
+        return Path(raw_root).expanduser().resolve(strict=False)
+    raw_home = getattr(state, "kongming_home", None)
+    if raw_home:
+        return Path(raw_home).expanduser().resolve(strict=False)
+    from infrastructure.config.paths import get_kongming_home
+
+    return get_kongming_home()
+
+
 @router.get("/{thread_id}/workspace-git/status")
 async def get_workspace_git_status(thread_id: str, request: Request) -> WorkspaceGitStatusDTO:
     _validate_thread_id(thread_id)
     try:
         meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
-        root = require_workspace_root(meta)
+        root = require_workspace_root(meta, fallback_to=_workspace_fallback_root(request))
         payload = await asyncio.to_thread(read_git_status, root)
     except ThreadNotFoundError:
         raise
@@ -79,7 +93,7 @@ async def get_workspace_git_branches(
     _validate_thread_id(thread_id)
     try:
         meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
-        root = require_workspace_root(meta)
+        root = require_workspace_root(meta, fallback_to=_workspace_fallback_root(request))
         payload = await asyncio.to_thread(read_git_branches, root)
     except ThreadNotFoundError:
         raise
@@ -96,7 +110,7 @@ async def get_workspace_git_commits(
     _validate_thread_id(thread_id)
     try:
         meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
-        root = require_workspace_root(meta)
+        root = require_workspace_root(meta, fallback_to=_workspace_fallback_root(request))
         payload = await asyncio.to_thread(read_git_commits, root)
     except ThreadNotFoundError:
         raise
@@ -114,7 +128,7 @@ async def get_workspace_git_file_diff(
     _validate_thread_id(thread_id)
     try:
         meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
-        root = require_workspace_root(meta)
+        root = require_workspace_root(meta, fallback_to=_workspace_fallback_root(request))
         payload = await asyncio.to_thread(read_git_file_diff, root, path)
     except ThreadNotFoundError:
         raise
@@ -132,7 +146,7 @@ async def post_workspace_git_stage(
     _validate_thread_id(thread_id)
     try:
         meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
-        root = require_workspace_root(meta)
+        root = require_workspace_root(meta, fallback_to=_workspace_fallback_root(request))
         payload = await asyncio.to_thread(stage_git_paths, root, body.paths)
     except ThreadNotFoundError:
         raise
@@ -150,7 +164,7 @@ async def post_workspace_git_unstage(
     _validate_thread_id(thread_id)
     try:
         meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
-        root = require_workspace_root(meta)
+        root = require_workspace_root(meta, fallback_to=_workspace_fallback_root(request))
         payload = await asyncio.to_thread(unstage_git_paths, root, body.paths)
     except ThreadNotFoundError:
         raise
@@ -168,7 +182,7 @@ async def post_workspace_git_checkout(
     _validate_thread_id(thread_id)
     try:
         meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
-        root = require_workspace_root(meta)
+        root = require_workspace_root(meta, fallback_to=_workspace_fallback_root(request))
         payload = await asyncio.to_thread(checkout_git_branch, root, body.branch)
     except ThreadNotFoundError:
         raise
@@ -186,7 +200,7 @@ async def post_workspace_git_create_branch(
     _validate_thread_id(thread_id)
     try:
         meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
-        root = require_workspace_root(meta)
+        root = require_workspace_root(meta, fallback_to=_workspace_fallback_root(request))
         payload = await asyncio.to_thread(
             create_git_branch, root, body.branch, checkout=body.checkout
         )
@@ -206,7 +220,7 @@ async def post_workspace_git_commit(
     _validate_thread_id(thread_id)
     try:
         meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
-        root = require_workspace_root(meta)
+        root = require_workspace_root(meta, fallback_to=_workspace_fallback_root(request))
         payload = await asyncio.to_thread(commit_git, root, body.message)
     except ThreadNotFoundError:
         raise

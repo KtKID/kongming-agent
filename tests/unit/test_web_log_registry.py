@@ -13,10 +13,12 @@ from hosts.web.dashboard.logs.registry import LogSourceRegistry
 def _make_config(
     full_log_path: str = ".kongming/logs/full_log.jsonl",
     trace_output_path: str = ".kongming/trace.jsonl",
+    session_file_store_path: str = ".kongming/sessions",
 ) -> MagicMock:
     cfg = MagicMock()
     cfg.web.full_log.path = full_log_path
     cfg.trace.output_path = trace_output_path
+    cfg.session.file_store_path = session_file_store_path
     return cfg
 
 
@@ -46,6 +48,18 @@ class TestListSources:
             "auto_approval_audit",
         }
         assert types == expected
+
+    def test_thread_context_adds_session_conversation_source(self, tmp_path: Path) -> None:
+        cfg = _make_config()
+        home = tmp_path / ".kongming"
+        home.mkdir()
+        reg = LogSourceRegistry(cfg, home)
+
+        sources = reg.list_sources(thread_id="thread-abcdef123456")
+        types = {s.type for s in sources}
+
+        assert len(sources) == 9
+        assert "session_conversation" in types
 
     def test_missing_files_have_exists_false(self, tmp_path: Path) -> None:
         home = tmp_path / ".kongming"
@@ -85,6 +99,32 @@ class TestGetSource:
             "generic-channel.jsonl",
         )
 
+    def test_session_conversation_source(self, tmp_path: Path) -> None:
+        cfg = _make_config()
+        home = tmp_path / ".kongming"
+        home.mkdir()
+        reg = LogSourceRegistry(cfg, home)
+
+        src = reg.get_source("session_conversation", thread_id="thread-abcdef123456")
+
+        assert src.type == "session_conversation"
+        assert src.label == "Session Conversation"
+        assert src.format == "jsonl"
+        assert (
+            Path(src.path)
+            == (home / "sessions" / "thread-abcdef123456" / "thread-abcdef123456.jsonl").resolve()
+        )
+        assert src.exists is False
+
+    def test_session_conversation_requires_thread_id(self, tmp_path: Path) -> None:
+        cfg = _make_config()
+        home = tmp_path / ".kongming"
+        home.mkdir()
+        reg = LogSourceRegistry(cfg, home)
+
+        with pytest.raises(ValueError, match="thread_id is required"):
+            reg.get_source("session_conversation")
+
     def test_unknown_type_raises(self, tmp_path: Path) -> None:
         cfg = _make_config()
         home = tmp_path / ".kongming"
@@ -122,6 +162,27 @@ class TestResolveSourcePath:
         reg = LogSourceRegistry(cfg, home)
         with pytest.raises(ValueError, match="Unknown log source type"):
             reg.resolve_source_path("nonexistent")
+
+    def test_session_conversation_path_uses_thread_context(self, tmp_path: Path) -> None:
+        cfg = _make_config()
+        home = tmp_path / ".kongming"
+        home.mkdir()
+        reg = LogSourceRegistry(cfg, home)
+
+        p = reg.resolve_source_path("session_conversation", thread_id="thread-abcdef123456")
+
+        assert (
+            p == (home / "sessions" / "thread-abcdef123456" / "thread-abcdef123456.jsonl").resolve()
+        )
+
+    def test_invalid_thread_id_raises(self, tmp_path: Path) -> None:
+        cfg = _make_config()
+        home = tmp_path / ".kongming"
+        home.mkdir()
+        reg = LogSourceRegistry(cfg, home)
+
+        with pytest.raises(ValueError, match="Invalid thread_id"):
+            reg.list_sources(thread_id="../escape")
 
 
 class TestExistingFile:

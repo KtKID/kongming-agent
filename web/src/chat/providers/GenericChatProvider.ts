@@ -5,7 +5,7 @@
  * 翻译成统一 `ChatEvent`。传输走 `NetworkManager` 提供的 `NetworkHandle`。
  *
  * generic 链路特点（与 claude / codex 不同）：
- * - 发送帧 = `user.input`（带 request_id / reasoning_effort / attachments）
+ * - 发送帧 = `user.input`（带 request_id / reasoning_effort / attachments / references）
  * - 历史 = 连接后后端**被动推送** `thread.history` 帧，不是主动 REST 拉取
  * - 无 provider session 概念 → `checkSessionStatus` 固定返回 `{ active: false }`
  *
@@ -14,7 +14,9 @@
 import type {
   WSFrameS2C,
   NormalizedMessage,
+  SystemNoticeStatus,
 } from "@/protocol";
+import { makeCronTimelineKey } from "@/chat/runtimeWiring";
 import type {
   ChatProvider,
   SendRequest,
@@ -34,10 +36,61 @@ function makeRequestId(): string {
   return `req-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
 }
 
-/** generic 的 turn 归并键：优先 run_id，回退到 `${threadId}-turn-${turn}`。 */
-function genericTurnId(threadId: string, runId?: string, turn?: number): string {
-  if (runId) return runId;
-  return `${threadId}-turn-${turn ?? 0}`;
+interface TurnIdentity {
+  turnId: string;
+  runId: string;
+  turn: number | null;
+}
+
+/** generic 的 turn 坐标：turnId 只做内部 key，runId/turn 作为结构化字段进入状态机。 */
+function genericTurnIdentity(
+  threadId: string,
+  runId?: string | null,
+  turn?: number | null,
+): TurnIdentity {
+  const normalizedRunId = runId ?? "";
+  const normalizedTurn = typeof turn === "number" ? turn : null;
+  if (normalizedRunId) {
+    return {
+      turnId: `${normalizedRunId}:turn-${normalizedTurn ?? "unknown"}`,
+      runId: normalizedRunId,
+      turn: normalizedTurn,
+    };
+  }
+  return {
+    turnId: `${threadId}-turn-${normalizedTurn ?? "unknown"}`,
+    runId: "",
+    turn: normalizedTurn,
+  };
+}
+
+/** 从 pending_input.metadata 里读取数组字段，避免把非数组元数据写进 timeline。 */
+function metadataArray(
+  metadata: Record<string, unknown>,
+  key: string,
+): unknown[] | undefined {
+  const value = metadata[key];
+  return Array.isArray(value) ? value : undefined;
+}
+
+/** 把 wire notice 状态归一为聊天时间线使用的展示状态。 */
+function normalizeSystemNoticeStatus(
+  status: SystemNoticeStatus,
+): "running" | "success" | "error" | "warning" {
+  switch (status) {
+    case "started":
+      return "running";
+    case "completed":
+      return "success";
+    case "failed":
+      return "error";
+    case "drain_timeout":
+      return "warning";
+    default: {
+      const _exhaustive: never = status;
+      return _exhaustive;
+    }
+  }
 }
 
 export class GenericChatProvider implements ChatProvider {
@@ -49,13 +102,14 @@ export class GenericChatProvider implements ChatProvider {
         `[GenericChatProvider] 收到非 generic 的 SendRequest: ${request.provider.provider}`,
       );
     }
-    const { text, reasoningEffort, attachments } = request.common;
+    const { text, reasoningEffort, attachments, references } = request.common;
     handle.send({
       frame_type: "user.input",
       text,
       request_id: makeRequestId(),
       reasoning_effort: reasoningEffort ?? null,
       attachments,
+      references,
     });
   }
 
@@ -87,66 +141,167 @@ export class GenericChatProvider implements ChatProvider {
     switch (frame.frame_type) {
       case "turn.start":
         return [
-          this.ev("assistant_message_started", tid, genericTurnId(tid, frame.run_id, frame.turn), at, {
-            turn: frame.turn,
-          }),
+          this.ev(
+            "assistant_message_started",
+            tid,
+            genericTurnIdentity(tid, frame.run_id, frame.turn),
+            at,
+            { turn: frame.turn },
+          ),
         ];
       case "content.delta":
         return [
-          this.ev("assistant_message_delta", tid, genericTurnId(tid, frame.run_id, frame.turn), at, {
-            delta: frame.delta,
-            seq: frame.seq,
-          }),
+          this.ev(
+            "assistant_message_delta",
+            tid,
+            genericTurnIdentity(tid, frame.run_id, frame.turn),
+            at,
+            { delta: frame.delta, seq: frame.seq },
+          ),
         ];
       case "reasoning.delta":
         return [
-          this.ev("assistant_message_delta", tid, genericTurnId(tid, frame.run_id, frame.turn), at, {
-            reasoningDelta: frame.delta,
-            seq: frame.seq,
-          }),
+          this.ev(
+            "assistant_message_delta",
+            tid,
+            genericTurnIdentity(tid, frame.run_id, frame.turn),
+            at,
+            { reasoningDelta: frame.delta, seq: frame.seq },
+          ),
         ];
       case "assistant.final":
         return [
-          this.ev("assistant_message_completed", tid, genericTurnId(tid, frame.run_id, frame.turn), at, {
-            content: frame.content,
-          }),
+          this.ev(
+            "assistant_message_completed",
+            tid,
+            genericTurnIdentity(tid, frame.run_id, frame.turn),
+            at,
+            { content: frame.content },
+          ),
         ];
       case "tool.call.start":
         return [
-          this.evTool("tool_call_started", tid, genericTurnId(tid, frame.run_id, frame.turn), at, frame.call_id, {
-            toolName: frame.tool_name,
-            arguments: frame.arguments,
-          }),
+          this.evTool(
+            "tool_call_started",
+            tid,
+            genericTurnIdentity(tid, frame.run_id, frame.turn),
+            at,
+            frame.call_id,
+            { toolName: frame.tool_name, arguments: frame.arguments },
+          ),
         ];
       case "tool.call.end":
         return [
-          this.evTool("tool_call_completed", tid, genericTurnId(tid, frame.run_id, frame.turn), at, frame.call_id, {
-            ok: frame.ok,
-            content: frame.content,
-            data: frame.data,
-            errorMessage: frame.error_message,
-          }),
+          this.evTool(
+            "tool_call_completed",
+            tid,
+            genericTurnIdentity(tid, frame.run_id, frame.turn),
+            at,
+            frame.call_id,
+            {
+              ok: frame.ok,
+              content: frame.content,
+              data: frame.data,
+              errorMessage: frame.error_message,
+            },
+          ),
         ];
       case "turn.end":
         return [
-          this.ev("turn_completed", tid, genericTurnId(tid, frame.run_id, frame.turn), at, { turn: frame.turn }),
+          this.ev(
+            "turn_completed",
+            tid,
+            genericTurnIdentity(tid, frame.run_id, frame.turn),
+            at,
+            {
+              turn: frame.turn,
+              historyIndex: frame.history_index,
+              hasToolCalls: frame.has_tool_calls ?? false,
+            },
+          ),
         ];
       case "thread.history":
         return [this.historyEvent(tid, at, frame.messages)];
+      case "pending-input.steered": {
+        const pending = frame.pending_input;
+        const runId = frame.run_id || frame.active_run_id || "";
+        return [
+          this.ev(
+            "user_message",
+            tid,
+            genericTurnIdentity(tid, runId, frame.turn ?? null),
+            at,
+            {
+              text: pending.content,
+              attachments: metadataArray(pending.metadata, "attachments"),
+              references: metadataArray(pending.metadata, "references"),
+              pendingInputId: pending.id,
+              source: pending.source,
+              deliveryStatus: "steered",
+            },
+            pending.id,
+          ),
+        ];
+      }
+      case "pending-input.started": {
+        const pending = frame.pending_input;
+        return [
+          this.ev(
+            "user_message",
+            tid,
+            genericTurnIdentity(tid, frame.run_id, null),
+            at,
+            {
+              text: pending.content,
+              attachments: metadataArray(pending.metadata, "attachments"),
+              references: metadataArray(pending.metadata, "references"),
+              pendingInputId: pending.id,
+              source: pending.source,
+            },
+            pending.id,
+          ),
+        ];
+      }
+      case "cron.message.appended": {
+        const parentThreadId = frame.thread_id || tid;
+        const threadId = frame.run_id
+          ? makeCronTimelineKey(parentThreadId, frame.run_id)
+          : parentThreadId;
+        return [
+          this.ev(
+            "assistant_message_completed",
+            threadId,
+            genericTurnIdentity(threadId, frame.run_id || frame.message_id, null),
+            at,
+            {
+              content: frame.content,
+              source: "cron",
+              taskId: frame.task_id,
+              taskName: frame.task_name,
+              parentThreadId,
+              sessionId: frame.session_id,
+            },
+            frame.message_id,
+          ),
+        ];
+      }
       case "error":
         return [
-          this.ev("error", tid, genericTurnId(tid, undefined, frame.turn), at, {
+          this.ev("error", tid, genericTurnIdentity(tid, "", frame.turn), at, {
             errorCode: frame.error_code,
             message: frame.message,
           }),
         ];
       case "system.notice":
         return [
-          this.ev("status", tid, genericTurnId(tid, frame.run_id), at, {
+          this.ev("status", tid, genericTurnIdentity(tid, frame.run_id, null), at, {
             noticeKey: frame.notice_key,
-            status: frame.status,
+            source: frame.source,
+            status: normalizeSystemNoticeStatus(frame.status),
             title: frame.title,
             message: frame.message,
+            details: frame.details,
+            icon: frame.icon,
           }),
         ];
       case "usage":
@@ -158,28 +313,11 @@ export class GenericChatProvider implements ChatProvider {
         // 既让时间线持有 record（useStreamingRender 退役不回归），又把原始 ThreadUsage
         // 透传给视图层 StatusLine 渲染。
         return [
-          this.ev("status", tid, genericTurnId(tid, frame.run_id, frame.turn), at, {
+          this.ev("status", tid, genericTurnIdentity(tid, frame.run_id, frame.turn), at, {
             noticeKey: `usage:${frame.turn}`,
             source: "usage",
             status: "success",
             usage: frame.usage,
-          }),
-        ];
-      case "approval.request":
-        // approval.request → status notice record（noticeKey `approval:{call_id}`），
-        // 让内联审批横幅能在时间线渲染。审批 dialog 队列（pushApproval）是视图层
-        // 职责（#5），provider 只负责翻成可落 record 的 ChatEvent。
-        return [
-          this.ev("status", tid, genericTurnId(tid, undefined, frame.turn), at, {
-            noticeKey: `approval:${frame.call_id}`,
-            source: "approval",
-            status: "running",
-            callId: frame.call_id,
-            toolName: frame.tool_name,
-            arguments: frame.arguments,
-            reason: frame.reason,
-            policyHint: frame.policy_hint,
-            confirmToken: frame.confirm_token,
           }),
         ];
       case "run.interrupted":
@@ -187,12 +325,18 @@ export class GenericChatProvider implements ChatProvider {
         // 让状态机把该 turn 标 completed 并复位 activeStreamingTurnId（streaming=false），
         // Stop 按钮立刻隐藏。turnId 走 run_id（与实时 turn 同源）。
         return [
-          this.ev("turn_completed", tid, genericTurnId(tid, frame.run_id, frame.cancelled_at_turn), at, {
-            turn: frame.cancelled_at_turn,
-            cancelled: true,
-            cancelReason: frame.cancel_reason,
-            cancelledToolCallId: frame.cancelled_tool_call_id ?? null,
-          }),
+          this.ev(
+            "turn_completed",
+            tid,
+            genericTurnIdentity(tid, frame.run_id, frame.cancelled_at_turn),
+            at,
+            {
+              turn: frame.cancelled_at_turn,
+              cancelled: true,
+              cancelReason: frame.cancel_reason,
+              cancelledToolCallId: frame.cancelled_tool_call_id ?? null,
+            },
+          ),
         ];
       // cell.evicted / pong：toast-only 副作用与心跳，不进时间线。
       // - cell.evicted：thread 生命周期事件（视图层 toast.warning + 清 buffer，归 #5）。
@@ -224,22 +368,43 @@ export class GenericChatProvider implements ChatProvider {
   private ev(
     kind: ChatEvent["kind"],
     threadId: string,
-    turnId: string,
+    turn: TurnIdentity,
     createdAt: number,
     payload: Record<string, unknown>,
+    messageId?: string,
   ): ChatEvent {
-    return { kind, provider: "generic", threadId, turnId, createdAt, payload };
+    return {
+      kind,
+      provider: "generic",
+      threadId,
+      turnId: turn.turnId,
+      runId: turn.runId,
+      turn: turn.turn,
+      createdAt,
+      payload,
+      messageId,
+    };
   }
 
   private evTool(
     kind: ChatEvent["kind"],
     threadId: string,
-    turnId: string,
+    turn: TurnIdentity,
     createdAt: number,
     toolCallId: string,
     payload: Record<string, unknown>,
   ): ChatEvent {
-    return { kind, provider: "generic", threadId, turnId, toolCallId, createdAt, payload };
+    return {
+      kind,
+      provider: "generic",
+      threadId,
+      turnId: turn.turnId,
+      runId: turn.runId,
+      turn: turn.turn,
+      toolCallId,
+      createdAt,
+      payload,
+    };
   }
 
   private historyEvent(
@@ -252,6 +417,8 @@ export class GenericChatProvider implements ChatProvider {
       provider: "generic",
       threadId,
       turnId: `${threadId}-history`,
+      runId: "",
+      turn: null,
       createdAt,
       payload: { messages },
     };

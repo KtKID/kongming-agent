@@ -12,29 +12,57 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from core.contracts import ApprovalAction, ApprovalRequest
+from hosts.web.threads.cell import ThreadCellStatus
 from hosts.web.threads.manager import ThreadManager
 from hosts.web.threads.metadata import ThreadMetadata, write_thread_metadata
 from infrastructure.config.models import Config
+from safety.approval.manager import ApprovalManager
+from safety.approval.permissions_manager import PermissionsManager
 
 
-def _make_cfg(idle_timeout: int = 60, idle_check: int = 10) -> Config:
+def _write_model_catalog(tmp_path: Path) -> None:
+    """写入 eviction 测试使用的当前模型目录真源。"""
+    (tmp_path / "model-providers.yaml").write_text(
+        """\
+version: 2
+providers:
+  - provider_id: eviction-test
+    default_preset_id: p1
+    display_name: Eviction Test
+    region_label: Local
+    description: eviction fixture
+    logo_text: E
+    protocol: openai
+    default_base_url: http://127.0.0.1:1234/v1
+    request_defaults: {}
+    models:
+      - preset_id: p1
+        display_name: P1
+        model: fake
+""",
+        encoding="utf-8",
+    )
+
+
+def _make_cfg(
+    tmp_path: Path,
+    idle_timeout: int = 60,
+    idle_check: int = 10,
+) -> Config:
+    """返回使用 preset_id 配置入口的 eviction 测试配置。"""
+    _write_model_catalog(tmp_path)
     return Config.model_validate(
         {
-            "model": {
-                "name": "fake",
-                "base_url": "http://127.0.0.1:1234/v1",
-                "api_key": "",
-            },
+            "model": {"preset_id": "p1"},
             "web": {
                 "enabled": True,
                 "idle_timeout_seconds": idle_timeout,
                 "idle_check_interval_seconds": idle_check,
-                "pending_approval_timeout_seconds": 60,
             },
         }
     )
@@ -55,6 +83,7 @@ def _make_meta(thread_id: str = "thread-aaaaaaaaaaaa", **overrides: Any) -> Thre
 
 def _make_factory() -> Any:
     runtime_close: list[bool] = []
+    dispatcher_close: list[bool] = []
 
     async def factory(
         thread_id: str,
@@ -68,10 +97,17 @@ def _make_factory() -> Any:
             runtime_close.append(True)
 
         runtime.aclose = _aclose
-        bridge = MagicMock()
-        return runtime, bridge
+        dispatcher = MagicMock()
+        dispatcher.reset_for_reuse = AsyncMock()
+
+        async def _dispatcher_aclose(*, drain: bool = False) -> None:
+            dispatcher_close.append(drain)
+
+        dispatcher.aclose = _dispatcher_aclose
+        return runtime, dispatcher
 
     factory.runtime_close_log = runtime_close  # type: ignore[attr-defined]
+    factory.dispatcher_close_log = dispatcher_close  # type: ignore[attr-defined]
     return factory
 
 
@@ -81,7 +117,7 @@ def _make_factory() -> Any:
 
 
 async def test_evict_cell_manual_pushes_evicted_frame_and_closes(tmp_path: Path) -> None:
-    cfg = _make_cfg()
+    cfg = _make_cfg(tmp_path)
     meta = _make_meta()
     write_thread_metadata(tmp_path, meta)
     factory = _make_factory()
@@ -107,10 +143,11 @@ async def test_evict_cell_manual_pushes_evicted_frame_and_closes(tmp_path: Path)
     assert cell.adapter.closed is True
     # runtime.aclose 已被调用
     assert factory.runtime_close_log == [True]
+    assert factory.dispatcher_close_log == [False]
 
 
 async def test_evict_cell_unknown_silently_returns(tmp_path: Path) -> None:
-    cfg = _make_cfg()
+    cfg = _make_cfg(tmp_path)
     factory = _make_factory()
     mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
     # 不存在的 thread_id
@@ -119,7 +156,7 @@ async def test_evict_cell_unknown_silently_returns(tmp_path: Path) -> None:
 
 
 async def test_evict_cell_idempotent(tmp_path: Path) -> None:
-    cfg = _make_cfg()
+    cfg = _make_cfg(tmp_path)
     meta = _make_meta()
     write_thread_metadata(tmp_path, meta)
     factory = _make_factory()
@@ -132,7 +169,7 @@ async def test_evict_cell_idempotent(tmp_path: Path) -> None:
 
 
 async def test_evict_cell_shutdown_does_not_push_ws(tmp_path: Path) -> None:
-    cfg = _make_cfg()
+    cfg = _make_cfg(tmp_path)
     meta = _make_meta()
     write_thread_metadata(tmp_path, meta)
     factory = _make_factory()
@@ -150,16 +187,22 @@ async def test_evict_cell_shutdown_does_not_push_ws(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# pending approval 在 evict 时 resolve(False)
+# pending approval 在 evict 时由 ApprovalManager 取消
 # ---------------------------------------------------------------------------
 
 
-async def test_evict_resolves_pending_approvals_to_false(tmp_path: Path) -> None:
-    cfg = _make_cfg()
+async def test_evict_cancels_approval_manager_pending(
+    tmp_path: Path,
+) -> None:
+    cfg = _make_cfg(tmp_path)
     meta = _make_meta()
     write_thread_metadata(tmp_path, meta)
     factory = _make_factory()
     mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
+    approval_manager = ApprovalManager(
+        permissions_manager=PermissionsManager(tmp_path), default_timeout_ms=10_000
+    )
+    mgr.set_approval_manager(approval_manager)
 
     cell = await mgr.boot_or_attach(meta.id)
     ws = AsyncMock()
@@ -167,24 +210,62 @@ async def test_evict_resolves_pending_approvals_to_false(tmp_path: Path) -> None
     ws.close = AsyncMock(return_value=None)
     cell.attach_ws(ws)
 
-    request = ApprovalRequest(
-        run_id="r",
-        session_id=meta.id,
-        turn=1,
-        call_id="c1",
-        tool_name="ReadFile",
-        arguments={},
+    approval_task = asyncio.create_task(
+        approval_manager.request(
+            channel="generic_chat",
+            thread_id=meta.id,
+            cwd="/",
+            tool_name="ReadFile",
+            tool_input={},
+        ),
     )
-
-    # 启一个 task 等审批
-    approval_task = asyncio.create_task(cell.adapter.prompt_approval(request))
-    await asyncio.sleep(0.02)  # 让 prompt_approval 进 wait_for
+    await asyncio.sleep(0.02)
+    assert approval_manager.pending_count_for_thread(meta.id, channel="generic_chat") == 1
 
     # evict
     await mgr.evict_cell(meta.id, reason="manual_stop")
     result = await approval_task
-    # v0.1.6 三态：cancel 路径返回 ApprovalAction.REJECT（语义不变，类型升级）
-    assert result is ApprovalAction.REJECT
+    assert result.outcome == "rejected"
+    assert result.metadata.get("reason") == "cell_evict"
+    assert approval_manager.pending_count_for_thread(meta.id, channel="generic_chat") == 0
+
+
+async def test_close_ephemeral_session_cell_cancels_approval_manager_pending(
+    tmp_path: Path,
+) -> None:
+    cfg = _make_cfg(tmp_path)
+    factory = _make_factory()
+    mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
+    approval_manager = ApprovalManager(
+        permissions_manager=PermissionsManager(tmp_path), default_timeout_ms=10_000
+    )
+    mgr.set_approval_manager(approval_manager)
+    session_id = "sched-task-1-run-1"
+
+    cell = await mgr.build_ephemeral_session_cell(
+        session_id=session_id,
+        preset_id="p1",
+    )
+    approval_task = asyncio.create_task(
+        approval_manager.request(
+            channel="generic_chat",
+            thread_id=session_id,
+            cwd="/",
+            tool_name="ReadFile",
+            tool_input={},
+        ),
+    )
+    await asyncio.sleep(0.02)
+    assert approval_manager.pending_count_for_thread(session_id, channel="generic_chat") == 1
+
+    await mgr.close_ephemeral_session_cell(cell, reason="session_close")
+    result = await approval_task
+    assert result.outcome == "rejected"
+    assert result.metadata.get("reason") == "session_close"
+    assert approval_manager.pending_count_for_thread(session_id, channel="generic_chat") == 0
+    assert cell.adapter.closed is True
+    assert factory.runtime_close_log == [True]
+    assert factory.dispatcher_close_log == [False]
 
 
 # ---------------------------------------------------------------------------
@@ -192,27 +273,9 @@ async def test_evict_resolves_pending_approvals_to_false(tmp_path: Path) -> None
 # ---------------------------------------------------------------------------
 
 
-async def test_idle_eviction_loop_evicts_stale_cells(tmp_path: Path) -> None:
-    """把 idle 阈值压到 0 + check 周期 1s，让 loop 立刻命中。"""
-    cfg = _make_cfg(idle_timeout=60, idle_check=10)
-    # 直接用 monkeypatch 替换 cfg.web 字段更省事；这里用 model_validate 重建一份
-    cfg = Config.model_validate(
-        {
-            "model": {
-                "name": "fake",
-                "base_url": "http://127.0.0.1:1234/v1",
-                "api_key": "",
-            },
-            "web": {
-                "enabled": True,
-                # 把阈值 / 周期都压到下限以加速测
-                "idle_timeout_seconds": 60,  # ge=60
-                "idle_check_interval_seconds": 10,  # ge=10
-                "pending_approval_timeout_seconds": 10,
-            },
-        }
-    )
-
+async def test_idle_eviction_evicts_stale_ownerless_cells(tmp_path: Path) -> None:
+    """过期且没有 owner work 的 cell 会走最终复核路径回收。"""
+    cfg = _make_cfg(tmp_path)
     meta = _make_meta()
     write_thread_metadata(tmp_path, meta)
     factory = _make_factory()
@@ -222,36 +285,43 @@ async def test_idle_eviction_loop_evicts_stale_cells(tmp_path: Path) -> None:
     # 强制 cell 看起来已 idle 很久
     cell.last_active_at = 0.0
 
-    # 直接调一次 _idle_eviction_loop 的内部逻辑（不等真 sleep）
-    # 取代后台 task 的实际等待，手动触发一次 idle 扫描
-    threshold = float(cfg.web.idle_timeout_seconds)
-    import time as _time
+    evicted = await mgr._evict_cell_if_idle(
+        meta.id,
+        now=10_000.0,
+        threshold=60.0,
+    )
 
-    now = _time.time()
-    candidates = [
-        c.thread_id
-        for c in mgr._cells.values()
-        if (now - c.last_active_at) > threshold and not c.has_pending_approvals
-    ]
-    assert candidates == [meta.id]
-    for tid in candidates:
-        await mgr.evict_cell(tid, reason="idle", notify_ws=True)
+    assert evicted is True
     assert mgr.get_cell(meta.id) is None
+    assert factory.runtime_close_log == [True]
+    assert factory.dispatcher_close_log == [False]
 
 
 async def test_idle_eviction_skips_cells_with_pending_approvals(tmp_path: Path) -> None:
-    cfg = _make_cfg()
+    cfg = _make_cfg(tmp_path)
     meta = _make_meta()
     write_thread_metadata(tmp_path, meta)
     factory = _make_factory()
     mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
+    approval_manager = ApprovalManager(
+        permissions_manager=PermissionsManager(tmp_path), default_timeout_ms=10_000
+    )
+    mgr.set_approval_manager(approval_manager)
 
     cell = await mgr.boot_or_attach(meta.id)
     cell.last_active_at = 0.0  # 看似 idle
-    # 注入一个 pending future（模拟有审批等待）
-    loop = asyncio.get_running_loop()
-    cell.adapter._pending_approvals["c1"] = loop.create_future()
-    assert cell.has_pending_approvals is True
+
+    approval_task = asyncio.create_task(
+        approval_manager.request(
+            channel="generic_chat",
+            thread_id=meta.id,
+            cwd="/",
+            tool_name="ReadFile",
+            tool_input={},
+        ),
+    )
+    await asyncio.sleep(0.02)
+    assert mgr._has_pending_approval(meta.id) is True
 
     # 跑一次 idle 扫描
     threshold = float(cfg.web.idle_timeout_seconds)
@@ -261,12 +331,230 @@ async def test_idle_eviction_skips_cells_with_pending_approvals(tmp_path: Path) 
     candidates = [
         c.thread_id
         for c in mgr._cells.values()
-        if (now - c.last_active_at) > threshold and not c.has_pending_approvals
+        if (now - c.last_active_at) > threshold and not mgr._has_pending_approval(c.thread_id)
     ]
     assert candidates == []  # 跳过
 
-    # 清理 pending future（不让 prompt_approval 永久挂着）
-    cell.adapter._pending_approvals["c1"].cancel()
+    approval_manager.cancel_by_thread(meta.id, reason="test_cleanup")
+    result = await approval_task
+    assert result.outcome == "rejected"
+
+
+async def test_idle_eviction_skips_cells_with_active_run(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    meta = _make_meta()
+    write_thread_metadata(tmp_path, meta)
+    factory = _make_factory()
+    mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
+
+    cell = await mgr.boot_or_attach(meta.id)
+    cell.last_active_at = 0.0
+    run_task = asyncio.create_task(asyncio.sleep(60))
+    cell.current_run_task = run_task
+
+    try:
+        evicted = await mgr._evict_cell_if_idle(
+            meta.id,
+            now=10_000.0,
+            threshold=60.0,
+        )
+
+        assert evicted is False
+        assert mgr.get_cell(meta.id) is cell
+    finally:
+        run_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await run_task
+
+
+async def test_effective_status_precedence(tmp_path: Path) -> None:
+    """现算唯一入口的优先级：evicting > awaiting_approval > running > idle。
+
+    running / awaiting_approval 都从事实真源（current_run_task / pending approval）
+    现算，不落字段；只有 evicting 是粘性写入字段，压过一切。
+    """
+    cfg = _make_cfg(tmp_path)
+    meta = _make_meta()
+    write_thread_metadata(tmp_path, meta)
+    factory = _make_factory()
+    mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
+    approval_manager = ApprovalManager(
+        permissions_manager=PermissionsManager(tmp_path), default_timeout_ms=10_000
+    )
+    mgr.set_approval_manager(approval_manager)
+
+    cell = await mgr.boot_or_attach(meta.id)
+
+    # 默认无任何工作 → idle
+    assert mgr._effective_status(cell) is ThreadCellStatus.IDLE
+
+    approval_task: asyncio.Task[Any] | None = None
+    run_task = asyncio.create_task(asyncio.sleep(60))
+    cell.current_run_task = run_task
+    try:
+        # 有 active run → running（现算自 current_run_task）
+        assert mgr._effective_status(cell) is ThreadCellStatus.RUNNING
+
+        # 有 pending approval → awaiting_approval，优先于 running
+        approval_task = asyncio.create_task(
+            approval_manager.request(
+                channel="generic_chat",
+                thread_id=meta.id,
+                cwd="/",
+                tool_name="ReadFile",
+                tool_input={},
+            ),
+        )
+        await asyncio.sleep(0.02)
+        assert mgr._has_pending_approval(meta.id) is True
+        assert mgr._effective_status(cell) is ThreadCellStatus.AWAITING_APPROVAL
+
+        # evicting 粘性，压过 running / awaiting_approval
+        mgr._set_cell_status(cell, ThreadCellStatus.EVICTING)
+        assert mgr._effective_status(cell) is ThreadCellStatus.EVICTING
+    finally:
+        approval_manager.cancel_by_thread(meta.id, reason="test_cleanup")
+        if approval_task is not None:
+            with suppress(asyncio.CancelledError):
+                await approval_task
+        run_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await run_task
+
+
+async def test_idle_eviction_skips_cells_with_pending_input_queue(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    meta = _make_meta()
+    write_thread_metadata(tmp_path, meta)
+    factory = _make_factory()
+    mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
+
+    cell = await mgr.boot_or_attach(meta.id)
+    cell.last_active_at = 0.0
+    cell.pending_inputs = [
+        mgr._create_pending_input(
+            cell,
+            "queued",
+            source="user_input",
+            priority="user_message",
+            metadata={},
+        )
+    ]
+
+    evicted = await mgr._evict_cell_if_idle(
+        meta.id,
+        now=10_000.0,
+        threshold=60.0,
+    )
+
+    assert evicted is False
+    assert mgr.get_cell(meta.id) is cell
+
+
+async def test_idle_eviction_skips_done_run_before_drain_clears_owner(
+    tmp_path: Path,
+) -> None:
+    cfg = _make_cfg(tmp_path)
+    meta = _make_meta()
+    write_thread_metadata(tmp_path, meta)
+    factory = _make_factory()
+    mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
+
+    cell = await mgr.boot_or_attach(meta.id)
+    cell.last_active_at = 0.0
+    completed_task = asyncio.create_task(asyncio.sleep(0))
+    await completed_task
+    cell.current_run_task = completed_task
+
+    evicted = await mgr._evict_cell_if_idle(
+        meta.id,
+        now=10_000.0,
+        threshold=60.0,
+    )
+
+    assert evicted is False
+    assert mgr.get_cell(meta.id) is cell
+
+
+async def test_pending_run_done_restores_idle_status(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    meta = _make_meta()
+    write_thread_metadata(tmp_path, meta)
+    factory = _make_factory()
+    mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
+
+    cell = await mgr.boot_or_attach(meta.id)
+    result = MagicMock()
+    result.status = "completed"
+
+    async def _completed_run() -> Any:
+        return result
+
+    run_task = asyncio.create_task(_completed_run())
+    await run_task
+    cell.current_run_task = run_task
+
+    await mgr._handle_pending_run_done(cell, run_task, run_task)
+
+    # drain 清空 current_run_task 后，现算入口自然回到 idle（不再依赖散写字段）。
+    assert cell.current_run_task is None
+    assert mgr._effective_status(cell) is ThreadCellStatus.IDLE
+
+
+async def test_idle_eviction_skips_cells_with_drain_block_reason(tmp_path: Path) -> None:
+    cfg = _make_cfg(tmp_path)
+    meta = _make_meta()
+    write_thread_metadata(tmp_path, meta)
+    factory = _make_factory()
+    mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
+
+    cell = await mgr.boot_or_attach(meta.id)
+    cell.last_active_at = 0.0
+    cell.pending_input_drain_block_reason = "runtime_refresh_failed"
+
+    evicted = await mgr._evict_cell_if_idle(
+        meta.id,
+        now=10_000.0,
+        threshold=60.0,
+    )
+
+    assert evicted is False
+    assert mgr.get_cell(meta.id) is cell
+
+
+async def test_idle_eviction_rechecks_owner_work_after_candidate_scan(
+    tmp_path: Path,
+) -> None:
+    cfg = _make_cfg(tmp_path)
+    meta = _make_meta()
+    write_thread_metadata(tmp_path, meta)
+    factory = _make_factory()
+    mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
+
+    cell = await mgr.boot_or_attach(meta.id)
+    cell.last_active_at = 0.0
+    candidates = [
+        stale_cell.thread_id
+        for stale_cell in mgr._cells.values()
+        if (10_000.0 - stale_cell.last_active_at) > 60.0
+    ]
+    assert candidates == [meta.id]
+
+    run_task = asyncio.create_task(asyncio.sleep(60))
+    cell.current_run_task = run_task
+    try:
+        evicted = await mgr._evict_cell_if_idle(
+            candidates[0],
+            now=10_000.0,
+            threshold=60.0,
+        )
+
+        assert evicted is False
+        assert mgr.get_cell(meta.id) is cell
+    finally:
+        run_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await run_task
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +563,7 @@ async def test_idle_eviction_skips_cells_with_pending_approvals(tmp_path: Path) 
 
 
 async def test_aclose_all_evicts_all_cells_without_ws_notify(tmp_path: Path) -> None:
-    cfg = _make_cfg()
+    cfg = _make_cfg(tmp_path)
     meta_a = _make_meta("thread-aaaaaaaaaaaa")
     meta_b = _make_meta("thread-bbbbbbbbbbbb")
     write_thread_metadata(tmp_path, meta_a)
@@ -300,10 +588,11 @@ async def test_aclose_all_evicts_all_cells_without_ws_notify(tmp_path: Path) -> 
     sent_b = [c.args[0] for c in ws_b.send_json.await_args_list]
     assert not any(f.get("frame_type") == "cell.evicted" for f in sent_a)
     assert not any(f.get("frame_type") == "cell.evicted" for f in sent_b)
+    assert factory.dispatcher_close_log == [False, False]
 
 
 async def test_aclose_all_idempotent(tmp_path: Path) -> None:
-    cfg = _make_cfg()
+    cfg = _make_cfg(tmp_path)
     factory = _make_factory()
     mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
     await mgr.aclose_all()
@@ -312,7 +601,7 @@ async def test_aclose_all_idempotent(tmp_path: Path) -> None:
 
 
 async def test_aclose_all_cancels_idle_loop(tmp_path: Path) -> None:
-    cfg = _make_cfg()
+    cfg = _make_cfg(tmp_path)
     factory = _make_factory()
     mgr = ThreadManager(cfg, kongming_home=tmp_path, runtime_factory=factory)
     await mgr.start()

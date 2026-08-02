@@ -1,11 +1,20 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ThreadList } from "@/components/ThreadList";
 import { useThreadsStore } from "@/stores/threads";
 
+const toastMocks = vi.hoisted(() => ({
+  success: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock("sonner", () => ({ toast: toastMocks }));
+
 beforeEach(() => {
+  toastMocks.success.mockReset();
+  toastMocks.error.mockReset();
   useThreadsStore.setState({
     threads: [],
     presets: [],
@@ -13,6 +22,7 @@ beforeEach(() => {
     fetchThreads: vi.fn().mockResolvedValue(undefined),
     fetchPresets: vi.fn().mockResolvedValue(undefined),
     createThread: vi.fn(),
+    forkThread: vi.fn(),
     renameThread: vi.fn(),
     deleteThread: vi.fn(),
     startPendingGenericThread: vi.fn(() => {
@@ -82,6 +92,33 @@ describe("ThreadList", () => {
     );
     expect(screen.getByText("alpha")).toBeInTheDocument();
     expect(screen.getByText("beta")).toBeInTheDocument();
+  });
+
+  it("旧缓存缺少 provider thread id 时仍可渲染，侧栏不提供分叉", () => {
+    const legacyThread = {
+      id: "thread-legacy-cache",
+      name: "legacy cached chat",
+      preset_id: "p1",
+      backend_kind: "generic_chat",
+      cwd: "",
+      created_at: 1,
+      updated_at: 100,
+      message_count: 0,
+      is_pinned: false,
+      is_archived: false,
+    } as ReturnType<typeof useThreadsStore.getState>["threads"][number];
+    useThreadsStore.setState({ threads: [legacyThread] });
+
+    render(
+      <MemoryRouter initialEntries={["/chat"]}>
+        <Routes>
+          <Route path="/chat" element={<ThreadList />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("legacy cached chat")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "完整分叉" })).toBeNull();
   });
 
   it("只渲染 backend_kind=generic_chat 的 thread，claude_code / codex 被过滤掉", () => {
@@ -177,6 +214,9 @@ describe("ThreadList", () => {
 
     const claudeBadge = screen.getByLabelText("Claude 会话");
     expect(claudeBadge.querySelector("img")).toHaveAttribute("src", "/brand/claude-app-icon.png");
+    expect(
+      screen.queryByRole("button", { name: "完整分叉" }),
+    ).not.toBeInTheDocument();
   });
 
   it("按 thread_kind 分成普通聊天和定时任务分组，并可打开定时任务历史", async () => {
@@ -237,9 +277,11 @@ describe("ThreadList", () => {
     expect(screen.getByRole("region", { name: "普通聊天" })).toHaveTextContent(
       "普通会话",
     );
-    expect(screen.getByRole("region", { name: "定时任务" })).toHaveTextContent(
-      "每天早报",
-    );
+    const scheduledSection = screen.getByRole("region", { name: "定时任务" });
+    expect(scheduledSection).toHaveTextContent("每天早报");
+    expect(
+      within(scheduledSection).queryByRole("button", { name: "完整分叉" }),
+    ).not.toBeInTheDocument();
     expect(screen.getByLabelText("定时任务 会话")).toBeInTheDocument();
 
     await user.click(screen.getByText("每天早报"));
@@ -264,4 +306,5 @@ describe("ThreadList", () => {
     expect(useThreadsStore.getState().pendingNewSession?.backendKind).toBe("generic_chat");
     expect(screen.getByTestId("chat-root")).toBeInTheDocument();
   });
+
 });

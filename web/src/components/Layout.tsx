@@ -1,41 +1,82 @@
+import { useMemo } from "react";
 import { Link, NavLink, Outlet, useLocation, useParams } from "react-router-dom";
-import { ArrowLeft, LogOut, Settings2, Workflow } from "lucide-react";
+import {
+  ArrowLeft,
+  Clock,
+  LogOut,
+  Monitor,
+  Moon,
+  PawPrint,
+  Plug,
+  ScrollText,
+  Settings2,
+  Sun,
+  Telescope,
+  Workflow,
+} from "lucide-react";
 import { ConnectionIndicator } from "@/components/ConnectionIndicator";
 import { MobileToolsMenu } from "@/components/MobileToolsMenu";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
+import {
+  WebShellRail,
+  WebShellRailManager,
+  WebShellRailProvider,
+  useWebShellRailRegisteredItems,
+  type WebShellRailContext,
+  type WebShellRailItem,
+} from "@/components/web-shell-rail";
 import { ApprovalToastQueue } from "@/features/approval-inbox";
 import { useChatLayout } from "@/hooks/useChatLayout";
-import { useHeartbeatConfig } from "@/hooks/useHeartbeatConfig";
+import { useClientConfig } from "@/hooks/useClientConfig";
 import { useThreadStatusWS } from "@/hooks/useThreadStatusWS";
 import { cn } from "@/lib/utils";
 import {
   SchedulerDrawerHost,
   SchedulerEntryButton,
+  useSchedulerStore,
 } from "@/modules/scheduler";
 import {
   LogViewerEntryButton,
   LogViewerOverlay,
+  useLogViewerStore,
 } from "@/modules/logs";
 import {
   SitianReportDialog,
   SitianReportEntryButton,
+  useSitian,
 } from "@/modules/sitian";
 import { useAuthStore } from "@/stores/auth";
 import { useConnectionStatusStore } from "@/stores/connectionStatus";
+import { useThemeStore } from "@/stores/theme";
 import { useThreadsStore } from "@/stores/threads";
 
 export function Layout() {
-  const heartbeatConfig = useHeartbeatConfig();
-  useThreadStatusWS(heartbeatConfig);
-  const { isCompactLayout } = useChatLayout();
+  return (
+    <WebShellRailProvider>
+      <LayoutContent />
+    </WebShellRailProvider>
+  );
+}
+
+function LayoutContent() {
+  const clientConfig = useClientConfig();
+  useThreadStatusWS(clientConfig?.heartbeat);
+  const { isCompactLayout, isMobileLayout } = useChatLayout();
   const useCompactHeader = isCompactLayout;
 
   const params = useParams<{ thread_id?: string }>();
   const location = useLocation();
   const threads = useThreadsStore((s) => s.threads);
   const logout = useAuthStore((s) => s.logout);
+  const authenticated = useAuthStore((s) => s.authenticated);
+  const openScheduler = useSchedulerStore((s) => s.openDrawer);
+  const openLogs = useLogViewerStore((s) => s.open);
+  const { open: openSitian, loading: sitianLoading } = useSitian();
+  const theme = useThemeStore((s) => s.theme);
+  const setTheme = useThemeStore((s) => s.setTheme);
+  const registeredRailItems = useWebShellRailRegisteredItems();
 
   const threadWsActive = useConnectionStatusStore((s) => s.threadWsActive);
   const threadWsState = useConnectionStatusStore((s) => s.threadWsState);
@@ -53,6 +94,140 @@ export function Layout() {
   const activeThreadTitle = current?.name ?? (activeThreadId ? "Current thread" : undefined);
   const onManagePage = location.pathname.startsWith("/manage");
   const title = onManagePage ? "运行管理" : activeThreadTitle ?? "kongming-agent";
+  const railDensity = isMobileLayout
+    ? "mobile"
+    : isCompactLayout
+      ? "compact"
+      : "desktop";
+  const railContext = useMemo<WebShellRailContext>(
+    () => ({
+      density: railDensity,
+      activeThreadId,
+      activeThreadTitle,
+      hasActiveThread: Boolean(activeThreadId),
+      isAuthenticated: authenticated,
+      hostEnvironment: clientConfig?.hostEnvironment ?? "browser",
+      capabilities: clientConfig?.capabilities ?? {
+        xspaceHost: false,
+        nativeFileDialog: false,
+      },
+    }),
+    [
+      activeThreadId,
+      activeThreadTitle,
+      authenticated,
+      clientConfig?.capabilities,
+      clientConfig?.hostEnvironment,
+      railDensity,
+    ],
+  );
+  const ThemeRailIcon =
+    theme === "dark" ? Moon : theme === "light" ? Sun : Monitor;
+  const globalRailItems = useMemo<WebShellRailItem[]>(
+    () => [
+      {
+        id: onManagePage ? "chat" : "manage",
+        scope: "global",
+        priority: "p0",
+        label: onManagePage ? "聊天" : "管理",
+        icon: onManagePage ? ArrowLeft : Settings2,
+        available: true,
+        to: onManagePage ? "/chat" : "/manage",
+      },
+      {
+        id: "thread-task-detail-route",
+        scope: "thread",
+        priority: "p0",
+        label: "任务详情",
+        icon: Workflow,
+        available: Boolean(activeThreadId),
+        to: activeThreadId ? `/chat/${activeThreadId}/task-detail` : undefined,
+      },
+      {
+        id: "pet",
+        scope: "global",
+        priority: "p0",
+        label: "宠物",
+        icon: PawPrint,
+        available: clientConfig?.hostEnvironment === "xspace",
+      },
+      {
+        id: "scheduler",
+        scope: "global",
+        priority: "p1",
+        label: "定时任务",
+        icon: Clock,
+        available: true,
+        onSelect: openScheduler,
+      },
+      {
+        id: "sitian",
+        scope: "global",
+        priority: "p1",
+        label: "司天报告",
+        icon: Telescope,
+        available: true,
+        disabledReason: sitianLoading ? "司天报告加载中" : undefined,
+        onSelect: () => {
+          if (!sitianLoading) void openSitian();
+        },
+      },
+      {
+        id: "logs",
+        scope: "global",
+        priority: "p1",
+        label: "日志",
+        icon: ScrollText,
+        available: true,
+        onSelect: openLogs,
+      },
+      {
+        id: "theme",
+        scope: "global",
+        priority: "p2",
+        label: "切换主题",
+        icon: ThemeRailIcon,
+        available: true,
+        onSelect: () => {
+          setTheme(theme === "system" ? "dark" : theme === "dark" ? "light" : "system");
+        },
+      },
+      {
+        id: "logout",
+        scope: "global",
+        priority: "p2",
+        label: "退出登录",
+        icon: LogOut,
+        available: authenticated,
+        onSelect: () => {
+          void logout();
+        },
+      },
+    ],
+    [
+      ThemeRailIcon,
+      activeThreadId,
+      authenticated,
+      clientConfig?.hostEnvironment,
+      logout,
+      onManagePage,
+      openLogs,
+      openScheduler,
+      openSitian,
+      setTheme,
+      sitianLoading,
+      theme,
+    ],
+  );
+  const railManager = useMemo(
+    () =>
+      new WebShellRailManager({
+        context: railContext,
+        items: [...globalRailItems, ...registeredRailItems],
+      }),
+    [globalRailItems, railContext, registeredRailItems],
+  );
+
   const manageButton = onManagePage ? (
     <Link
       to="/chat"
@@ -79,28 +254,28 @@ export function Layout() {
       </span>
     </NavLink>
   );
-
-  const workflowButton = activeThreadId ? (
+  const pluginButton = (
     <NavLink
-      to={`/chat/${activeThreadId}/task-detail`}
+      to="/manage/plugins"
       className={({ isActive }) =>
         cn(
           "inline-flex h-7 items-center rounded-md border px-2.5 py-1.5 text-xs font-medium shadow-sm transition-colors",
           isActive
-            ? "border-accent/25 bg-accent/12 text-foreground"
+            ? "border-primary/20 bg-primary/12 text-foreground"
             : "border-border/70 bg-card/70 text-muted-foreground hover:bg-secondary hover:text-foreground",
         )
       }
     >
       <span className="inline-flex items-center gap-1.5">
-        <Workflow className="h-3.5 w-3.5" />
-        任务详情
+        <Plug className="h-3.5 w-3.5" />
+        插件
       </span>
     </NavLink>
-  ) : null;
+  );
 
   return (
     <div className="flex h-full flex-col bg-transparent">
+      <WebShellRail manager={railManager} />
       <header
         className={cn(
           "obsidian-panel obsidian-hairline relative z-30 mx-2 mt-2 flex shrink-0 items-center rounded-xl",
@@ -145,12 +320,13 @@ export function Layout() {
         {useCompactHeader ? (
         <div className="flex shrink-0 items-center gap-2">
           {manageButton}
+          {pluginButton}
           <MobileToolsMenu threadId={activeThreadId} threadTitle={activeThreadTitle} />
         </div>
         ) : (
           <>
             {manageButton}
-            {workflowButton}
+            {pluginButton}
             <SchedulerEntryButton />
             <SitianReportEntryButton />
             <LogViewerEntryButton />
@@ -196,7 +372,7 @@ export function Layout() {
       <SchedulerDrawerHost />
       <SitianReportDialog />
       <ApprovalToastQueue />
-      <LogViewerOverlay />
+      <LogViewerOverlay activeThreadId={activeThreadId ?? null} />
     </div>
   );
 }

@@ -14,12 +14,10 @@
  *      不在时间线 state 里，由 #6 视图侧追加，本层只产出 GenericChatItem 部分）。
  *    - CodexRenderItem = GenericChatItem | CodexMetaItem（同上，#7）。
  *
- * ## turn / runId 还原
+ * ## turn / runId
  *
- * 时间线只存 `turnId` 字符串。generic provider 的 turnId 规则（见
- * providers/GenericChatProvider.ts::genericTurnId）：有 run_id 时 turnId=run_id；
- * 无 run_id 时 turnId=`${threadId}-turn-${turn}`。历史展开同样走后者。
- * 适配层据此反解出 GenericChatItem 需要的 `(turn, runId)` 复合 key。
+ * 时间线记录直接保存结构化 `runId` / `turn`。`turnId` 只作为内部归并 key，
+ * 适配层不再从字符串反解运行坐标。
  */
 import type {
   ChatTimelineState,
@@ -28,6 +26,7 @@ import type {
   ChatMessageRecord,
   ChatToolRecord,
   ChatPendingTool,
+  ConversationReferenceDTO,
   UserInputAttachment,
 } from "@/chat/types";
 import type { ChatItem as GenericChatItem } from "@/stores/chat";
@@ -48,14 +47,8 @@ export type CodexRenderItem = GenericChatItem | CodexMetaItem;
 // 核心层：state → ChatViewModel（纯函数）
 // ---------------------------------------------------------------------------
 
-/** 从 turnId 反解出 `(turn, runId)`：`${threadId}-turn-${N}` → turn=N/runId=""，否则 runId=turnId。 */
-function decodeTurn(turnId: string, threadId: string): { turn: number; runId: string } {
-  const prefix = `${threadId}-turn-`;
-  if (turnId.startsWith(prefix)) {
-    const n = Number(turnId.slice(prefix.length));
-    return { turn: Number.isFinite(n) ? n : 0, runId: "" };
-  }
-  return { turn: 0, runId: turnId };
+function viewTurn(turn: number | null): number {
+  return turn ?? 0;
 }
 
 /** 取消息正文文本（合并所有 text part）。 */
@@ -74,17 +67,22 @@ function attachmentsOf(record: ChatMessageRecord): UserInputAttachment[] | undef
   return atts.length > 0 ? atts : undefined;
 }
 
+function referencesOf(record: ChatMessageRecord): ConversationReferenceDTO[] | undefined {
+  return record.references && record.references.length > 0
+    ? record.references
+    : undefined;
+}
+
 /** tool 富记录（已 resolve）投影成 tool 视图项。 */
 function toolToViewItem(tool: ChatToolRecord, threadId: string): Extract<ChatViewItem, { kind: "tool" }> {
-  const { turn, runId } = decodeTurn(tool.turnId, threadId);
   const ok: boolean | null =
     tool.status === "completed" ? true : tool.status === "failed" ? false : null;
   return {
     kind: "tool",
     id: tool.id,
     threadId,
-    turn,
-    runId,
+    turn: viewTurn(tool.turn),
+    runId: tool.runId,
     toolName: tool.toolName,
     callId: tool.id,
     arguments: tool.arguments ?? {},
@@ -103,13 +101,12 @@ function pendingToolToViewItem(
   pending: ChatPendingTool,
   threadId: string,
 ): Extract<ChatViewItem, { kind: "tool" }> {
-  const { turn, runId } = decodeTurn(pending.turnId, threadId);
   return {
     kind: "tool",
     id: pending.id,
     threadId,
-    turn,
-    runId,
+    turn: viewTurn(pending.turn),
+    runId: pending.runId,
     toolName: "",
     callId: pending.id,
     arguments: {},
@@ -138,19 +135,25 @@ export function toViewModel(state: ChatTimelineState): ChatViewModel {
     switch (record.role) {
       case "user":
       case "assistant": {
-        const { turn, runId } = decodeTurn(record.turnId, state.threadId);
+        const content = textOf(record);
         items.push({
           kind: "message",
           id: record.id,
           role: record.role,
           threadId: record.threadId,
-          turn,
-          runId,
-          content: textOf(record),
+          turn: viewTurn(record.turn),
+          runId: record.runId,
+          content,
           reasoning: record.reasoning,
           usage: record.usage,
+          forkHistoryIndex: record.forkHistoryIndex,
           attachments: attachmentsOf(record),
-          streaming: record.status === "streaming",
+          references: record.role === "user" ? referencesOf(record) : undefined,
+          deliveryStatus: record.role === "user" ? record.deliveryStatus : undefined,
+          streaming:
+            record.role === "assistant" &&
+            content.length > 0 &&
+            record.status === "streaming",
           timestampMs: record.createdAt,
         });
         break;
@@ -171,12 +174,11 @@ export function toViewModel(state: ChatTimelineState): ChatViewModel {
         if (!notice) break;
         // usage 留 store 供 StatusLine 消费，不渲染为系统通知卡片。
         if (notice.source === "usage") break;
-        const { runId } = decodeTurn(record.turnId, state.threadId);
         items.push({
           kind: "notice",
           id: record.id,
           threadId: record.threadId,
-          runId,
+          runId: record.runId,
           noticeKey: notice.noticeKey,
           source: notice.source,
           title: notice.title,
@@ -239,6 +241,8 @@ function viewItemToGeneric(item: ChatViewItem): GenericChatItem {
           content: item.content,
           timestampMs: item.timestampMs,
           attachments: item.attachments,
+          references: item.references,
+          deliveryStatus: item.deliveryStatus,
         };
       }
       return {
@@ -250,6 +254,7 @@ function viewItemToGeneric(item: ChatViewItem): GenericChatItem {
         content: item.content,
         reasoning: item.reasoning ?? "",
         usage: item.usage,
+        forkHistoryIndex: item.forkHistoryIndex,
         timestampMs: item.timestampMs,
         streaming: item.streaming,
       };

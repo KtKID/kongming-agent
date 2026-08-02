@@ -301,7 +301,10 @@ function ClaudeSessionRow({
       leading={
         <>
           <ThreadSourceIcon backendKind="claude_code" active={selected} />
-          <PhaseIndicator phase={phase?.phase} toolName={phase?.toolName} />
+          <PhaseIndicator
+            phase={phase?.phase}
+            toolName={phase?.toolName ?? undefined}
+          />
         </>
       }
       title={session.title}

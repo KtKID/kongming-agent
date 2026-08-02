@@ -6,7 +6,7 @@
 2. thread_id 非法 → close 1008
 3. thread_id 不存在（boot 抛 KeyError）→ close 1008
 4. user.input 帧 → 触发 cell.bridge.run_once（后台 task）
-5. approval.ack 帧 → 调 tm.resolve_approval
+5. approval.ack 帧 → 退役保护，不再调 tm.resolve_approval
 6. ping → 收到 pong
 7. 1MB 限制：超大帧 → 推 error 帧
 8. 非法 JSON → 推 error 帧
@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from hosts.web.app import create_app
@@ -25,6 +27,21 @@ from hosts.web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
 from hosts.web.threads.metadata import ThreadMetadata
 from infrastructure.config.models import Config
 from network.manager import reset_network_manager_for_test
+from scheduler.domain import (
+    ConcurrencyPolicy,
+    DeliveryChannel,
+    RunStatus,
+    ScheduleDelivery,
+    ScheduledRun,
+    ScheduledTask,
+    ScheduleTrigger,
+    TaskExecutionPolicy,
+    TaskLifecycleState,
+    TaskOrigin,
+    TaskTarget,
+    TriggerType,
+)
+from scheduler.store import Store
 from tests.unit.test_web_app_lifespan import _seed_password
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
@@ -47,6 +64,7 @@ class FakeBridge:
         *,
         reasoning_effort: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        references: list[dict[str, Any]] | None = None,
     ) -> None:
         self.run_once_calls.append((text, reasoning_effort))
         self.last_attachments = attachments
@@ -58,6 +76,38 @@ class FakeBridge:
             except asyncio.CancelledError:
                 self.hang_cancelled = True
                 raise
+
+
+class FakeHostDispatcher:
+    def __init__(self, bridge: FakeBridge) -> None:
+        self.bridge = bridge
+        self.submit_calls: list[dict[str, Any]] = []
+
+    async def submit(
+        self,
+        text: str,
+        *,
+        attachments: list[dict[str, Any]] | None = None,
+        references: list[dict[str, Any]] | None = None,
+        metadata: dict[str, Any] | None = None,
+        **_: Any,
+    ) -> Any:
+        self.submit_calls.append(
+            {
+                "text": text,
+                "attachments": attachments,
+                "references": references,
+                "metadata": metadata,
+            }
+        )
+        reasoning_effort = metadata.get("reasoning_effort") if metadata is not None else None
+        await self.bridge.run_once(
+            text,
+            reasoning_effort=reasoning_effort,
+            attachments=attachments,
+            references=references,
+        )
+        return SimpleNamespace(merged=False)
 
 
 class FakeAdapter:
@@ -75,14 +125,24 @@ class FakeAdapter:
     def detach_ws(self, ws: Any) -> None:
         self.detach_calls.append(ws)
 
+    async def close(self) -> None:
+        self._closed = True
+
     def resolve_approval(self, call_id: str, action: Any) -> None:
         self.resolve_calls.append((call_id, action))
 
 
 class FakeRuntime:
-    """暴露 _sessions dict 让 _send_history_frame 取空历史。"""
+    """通过公开 SessionEngine history 门户返回空历史。"""
 
-    _sessions: dict[str, Any] = {}
+    closed: bool = False
+
+    async def read_session_history(self, session_id: str) -> list[Any]:
+        del session_id
+        return []
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 class FakeCell:
@@ -97,6 +157,7 @@ class FakeCell:
             message_count=0,
         )
         self.bridge = FakeBridge()
+        self.host_dispatcher = FakeHostDispatcher(self.bridge)
         self.adapter = FakeAdapter()
         self.runtime = FakeRuntime()
         self.event_sinks: list[Any] = []
@@ -118,11 +179,45 @@ class FakeCell:
         return False
 
 
+class FakeEphemeralCell:
+    def __init__(self, session_id: str, preset_id: str) -> None:
+        self.thread_id = session_id
+        self.metadata = SimpleNamespace(id=session_id, preset_id=preset_id)
+        self.bridge = FakeBridge()
+        self.host_dispatcher = FakeHostDispatcher(self.bridge)
+        self.adapter = FakeAdapter()
+        self.runtime = FakeRuntime()
+        self.event_sinks: list[Any] = []
+        self.last_active_at = 0.0
+        self.status: str = "idle"
+        self.current_run_task: Any = None
+
+    def attach_ws(self, new_ws: Any) -> None:
+        self.adapter.attach_ws(new_ws)
+
+    def detach_ws(self, ws: Any) -> None:
+        self.adapter.detach_ws(ws)
+
+    def touch(self) -> None:
+        self.last_active_at += 1.0
+
+    def resolve_approval(self, call_id: str, action: Any) -> None:
+        self.adapter.resolve_approval(call_id, action)
+
+    @property
+    def has_pending_approvals(self) -> bool:
+        return False
+
+
 class WSFakeTM:
     def __init__(self) -> None:
         self._cells: dict[str, FakeCell] = {}
+        self.ephemeral_build_calls: list[dict[str, Any]] = []
+        self.ephemeral_close_calls: list[dict[str, Any]] = []
         self.boot_should_raise: type[BaseException] | None = None
         self.resolve_calls: list[tuple[str, str, bool]] = []
+        self.interrupt_calls: list[tuple[str, str]] = []
+        self.interrupt_result = False
         self._started = False
         self._closed = False
 
@@ -148,6 +243,32 @@ class WSFakeTM:
             cell = FakeCell(thread_id)
             self._cells[thread_id] = cell
         return cell
+
+    async def build_ephemeral_session_cell(
+        self,
+        *,
+        session_id: str,
+        preset_id: str,
+    ) -> FakeEphemeralCell:
+        cell = FakeEphemeralCell(session_id, preset_id)
+        self.ephemeral_build_calls.append(
+            {
+                "session_id": session_id,
+                "preset_id": preset_id,
+                "cell": cell,
+            }
+        )
+        return cell
+
+    async def close_ephemeral_session_cell(
+        self,
+        cell: FakeEphemeralCell,
+        *,
+        reason: str = "session_close",
+    ) -> None:
+        self.ephemeral_close_calls.append({"cell": cell, "reason": reason})
+        await cell.adapter.close()
+        await cell.runtime.aclose()
 
     async def create_thread(self, name: str, preset_id: str) -> Any:
         del name, preset_id
@@ -184,15 +305,20 @@ class WSFakeTM:
     def resolve_approval(self, thread_id: str, call_id: str, action: Any) -> None:
         self.resolve_calls.append((thread_id, call_id, action))
 
+    async def interrupt_agent_tree(
+        self,
+        thread_id: str,
+        *,
+        reason: str = "user_interrupt",
+    ) -> bool:
+        self.interrupt_calls.append((thread_id, reason))
+        return self.interrupt_result
+
 
 def _make_cfg() -> Config:
     return Config.model_validate(
         {
-            "model": {
-                "name": "fake",
-                "base_url": "http://127.0.0.1:1234/v1",
-                "api_key": "",
-            },
+            "model": {"preset_id": "local-gemma-4-e4b-it"},
             "web": {"enabled": True, "dev_mode": True},
         }
     )
@@ -212,6 +338,49 @@ def _login(tmp_path: Path, tm: WSFakeTM) -> TestClient:
     )
     assert r.status_code == 200
     return client
+
+
+def _make_task(*, task_id: str, thread_id: str, preset_id: str) -> ScheduledTask:
+    return ScheduledTask(
+        task_id=task_id,
+        name=f"task-{task_id}",
+        lifecycle=TaskLifecycleState.SCHEDULED,
+        origin=TaskOrigin.WEB,
+        trigger=ScheduleTrigger(
+            trigger_type=TriggerType.ONCE,
+            expr="2026-06-15T10:00:00+08:00",
+            timezone="Asia/Shanghai",
+        ),
+        policy=TaskExecutionPolicy(concurrency_policy=ConcurrencyPolicy.FORBID),
+        target=TaskTarget(agent_name="agent", input_text="run me"),
+        next_run_at="2026-06-15T02:00:00+00:00",
+        last_run_at=None,
+        created_by="tester",
+        created_at="2026-06-15T01:00:00+00:00",
+        updated_at="2026-06-15T01:00:00+00:00",
+        delivery=ScheduleDelivery(channel=DeliveryChannel.WEB),
+        thread_id=thread_id,
+        preset_id=preset_id,
+    )
+
+
+def _make_run(*, task_id: str, run_id: str, session_id: str, thread_id: str) -> ScheduledRun:
+    return ScheduledRun(
+        run_id=run_id,
+        task_id=task_id,
+        status=RunStatus.COMPLETED,
+        scheduled_for="2026-06-15T02:00:00+00:00",
+        started_at="2026-06-15T02:00:01+00:00",
+        finished_at="2026-06-15T02:00:03+00:00",
+        session_id=session_id,
+        result_status="ok",
+        final_message_excerpt="done",
+        error_message=None,
+        failure_reason=None,
+        delivery_error=None,
+        silent_suppressed=False,
+        thread_id=thread_id,
+    )
 
 
 def test_ws_unauthenticated_closes_1008(tmp_path: Path) -> None:
@@ -282,6 +451,67 @@ def test_ws_user_input_with_reasoning_effort(tmp_path: Path) -> None:
         client.__exit__(None, None, None)
 
 
+def test_ws_cron_run_uses_run_session_id(tmp_path: Path) -> None:
+    """cron run 专用 WS 用 ScheduledRun.session_id 装配 ephemeral HostDispatcher。"""
+    reset_network_manager_for_test()
+    _seed_password(tmp_path, "pwd")
+    cfg = _make_cfg()
+    tm = WSFakeTM()
+    app = create_app(cfg, tm, home_dir=tmp_path)
+    store = Store(tmp_path / "cron")
+    task = _make_task(
+        task_id="task-1",
+        thread_id=THREAD_ID,
+        preset_id="preset-1",
+    )
+    store.create_task(task)
+    store.append_run(
+        _make_run(
+            task_id="task-1",
+            run_id="run-1",
+            session_id="sched-task-1-run-1",
+            thread_id=THREAD_ID,
+        )
+    )
+    app.state.scheduler_store = store
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        r = client.post(
+            "/api/auth/login",
+            json={"password": "pwd"},
+            headers=CSRF_HEADERS,
+        )
+        assert r.status_code == 200
+
+        with client.websocket_connect("/ws/cron/tasks/task-1/runs/run-1") as ws:
+            history = ws.receive_json()
+            assert history["frame_type"] == "thread.history"
+            ws.send_json(
+                {
+                    "frame_type": "user.input",
+                    "text": "continue this run",
+                    "request_id": "req-cron-run",
+                    "reasoning_effort": "high",
+                }
+            )
+            import time
+
+            time.sleep(0.2)
+
+        assert tm.ephemeral_build_calls
+        call = tm.ephemeral_build_calls[0]
+        assert call["session_id"] == "sched-task-1-run-1"
+        assert call["preset_id"] == "preset-1"
+        bridge = call["cell"].bridge
+        assert ("continue this run", "high") in bridge.run_once_calls
+        assert tm.ephemeral_close_calls == [{"cell": call["cell"], "reason": "session_close"}]
+        assert call["cell"].adapter._closed is True
+        assert call["cell"].runtime.closed is True
+    finally:
+        client.__exit__(None, None, None)
+
+
 def test_ws_generic_channel_writes_local_log(tmp_path: Path) -> None:
     tm = WSFakeTM()
     client = _login(tmp_path, tm)
@@ -309,7 +539,7 @@ def test_ws_generic_channel_writes_local_log(tmp_path: Path) -> None:
     events = [row["event"] for row in rows]
     assert "registered" in events
     assert "frame_dispatch" in events
-    assert "run_task_started" in events
+    assert "run_once_completed" in events
     dispatch = next(row for row in rows if row["event"] == "frame_dispatch")
     assert dispatch["frame_type"] == "user.input"
     assert dispatch["thread_id"] == THREAD_ID
@@ -397,7 +627,7 @@ def test_ws_user_input_spawns_background_run_task(tmp_path: Path) -> None:
         client.__exit__(None, None, None)
 
 
-def test_ws_approval_ack_routed(tmp_path: Path) -> None:
+def test_ws_approval_ack_is_retired(tmp_path: Path) -> None:
     tm = WSFakeTM()
     client = _login(tmp_path, tm)
     try:
@@ -410,13 +640,11 @@ def test_ws_approval_ack_routed(tmp_path: Path) -> None:
                     "action": "accept_once",
                 }
             )
-            # 等 dispatch
-            import time
+            error = ws.receive_json()
+            assert error["frame_type"] == "error"
+            assert "approval.ack" in error["message"]
 
-            time.sleep(0.05)
-
-        # v0.1.6 三态：路由层透传字符串字面值给 thread_manager
-        assert (THREAD_ID, "call-1", "accept_once") in tm.resolve_calls
+        assert tm.resolve_calls == []
     finally:
         client.__exit__(None, None, None)
 
@@ -469,11 +697,11 @@ def test_ws_pong_consumed_by_network_manager(tmp_path: Path) -> None:
                     "action": "reject",
                 }
             )
-            import time
+            error = ws.receive_json()
+            assert error["frame_type"] == "error"
+            assert "approval.ack" in error["message"]
 
-            time.sleep(0.05)
-
-        assert (THREAD_ID, "call-after-pong", "reject") in tm.resolve_calls
+        assert tm.resolve_calls == []
         assert inbound_calls[0] == ("pong", True)
         assert ("approval.ack", False) in inbound_calls
     finally:
@@ -550,158 +778,74 @@ def test_ws_unknown_kind_rejected(tmp_path: Path) -> None:
 
 
 def test_ws_interrupt_with_no_active_run_emits_system_notice(tmp_path: Path) -> None:
-    """收到 InterruptFrame 但 cell.current_run_task is None → 推 SystemNoticeFrame。"""
+    """ThreadManager 判断无活跃工作时，InterruptFrame 推 SystemNoticeFrame。"""
     tm = WSFakeTM()
     client = _login(tmp_path, tm)
     try:
         with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
             _ = ws.receive_json()  # history
-            # 不发 user.input，直接发 interrupt（cell.current_run_task is None）
             ws.send_json({"frame_type": "interrupt"})
             notice = ws.receive_json()
             assert notice["frame_type"] == "system.notice"
             assert notice["notice_key"] == "no_active_run"
             assert notice["source"] == "ws.interrupt"
+            assert tm.interrupt_calls == [(THREAD_ID, "user_interrupt")]
     finally:
         client.__exit__(None, None, None)
 
 
-def test_ws_interrupt_cancels_active_run_task(tmp_path: Path) -> None:
-    """收到 InterruptFrame 时 cell.current_run_task 存在且未 done → 应被 cancel。
-
-    用 ``FakeBridge.hang_forever=True`` 让 run_once 永远 await，模拟长 turn；
-    interrupt 后 ``hang_cancelled`` 应被置位（验证 cancel 链路真的打到 bridge）。
-    """
+def test_ws_interrupt_uses_thread_manager_interrupt_agent_tree(tmp_path: Path) -> None:
+    """InterruptFrame 经 ThreadManager/HostDispatcher 统一入口，不碰 current_run_task。"""
     import time
 
+    class _CancelTrap:
+        def __init__(self) -> None:
+            self.cancelled = False
+
+        def done(self) -> bool:
+            return False
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
     tm = WSFakeTM()
-    # 预先把对应 cell 的 bridge 设为 hang 模式
+    tm.interrupt_result = True
     cell = FakeCell(THREAD_ID)
-    cell.bridge.hang_forever = True
+    trap = _CancelTrap()
+    cell.current_run_task = trap
     tm._cells[THREAD_ID] = cell
 
     client = _login(tmp_path, tm)
     try:
         with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
             _ = ws.receive_json()  # history
-
-            ws.send_json(
-                {
-                    "frame_type": "user.input",
-                    "text": "hello",
-                    "request_id": "req-1",
-                }
-            )
+            ws.send_json({"frame_type": "interrupt"})
             time.sleep(0.1)
 
-            # cell.current_run_task 应仍 active（hang 着）
-            assert cell.current_run_task is not None
-            assert not cell.current_run_task.done()
-
-            # 发 interrupt
-            ws.send_json({"frame_type": "interrupt"})
-            time.sleep(0.2)
-
-            # bridge 应收到 CancelledError 透传
-            assert cell.bridge.hang_cancelled, (
-                "FakeBridge.run_once 没收到 CancelledError，说明 ws.py 的 "
-                "interrupt 分支没 task.cancel() 或链路断了"
-            )
-            # done_callback 应已清掉 current_run_task
-            assert cell.current_run_task is None
+            assert tm.interrupt_calls == [(THREAD_ID, "user_interrupt")]
+            assert trap.cancelled is False
     finally:
         client.__exit__(None, None, None)
 
 
-# ---------------------------------------------------------------------------
-# fix-generic-chat-ws-peek-frame-type：旁路 peek 字段从 "type" 切到 "frame_type"
-# ---------------------------------------------------------------------------
-#
-# 背景：protocol-frame-type-unify-v0.2 把 wire 协议从历史的 ``kind`` / ``type``
-# 统一到 ``frame_type``，前端 useAutoApproval.ts 也按 ``frame_type`` 发帧；
-# 但 ``src/web/websocket/routes.py::_receive_loop`` 的旁路 peek 漏改、仍读 ``preview.get("type")``，
-# 导致 ``auto-approval-toggle`` / ``auto-approval-query`` 帧无法命中旁路，
-# 全部回退到 ``WSFrameC2SAdapter.validate_json`` 被 discriminated union 拒，
-# 报 ``union_tag_invalid``。
-#
-# 下面两个 case 用真实的 ``app.state.auto_approval_policy``（由 create_app
-# 装配出来）走通完整链路，断言收到 ``auto_approval_state`` 帧且
-# ``channel == "generic_chat"``，证明：
-# 1. 旁路确实命中（否则 union 报错，帧型不是 auto_approval_state）
-# 2. handler 拿到了正确的 ``channel`` 关键字（不是 claude_code 默认值）
-
-
-def _wait_for_frame_type(ws: Any, frame_type: str, max_msgs: int = 10) -> dict[str, Any]:
-    """等收到指定 frame_type 的 frame；最多读 max_msgs 个消息。
-
-    跟 ``tests/unit/web/integrations/claude_code/test_route_smart_approval.py::_wait_for_kind``
-    行为对齐，单独在本文件留一份避免跨包 import。
-    """
-    for _ in range(max_msgs):
-        msg = ws.receive_json()
-        if msg.get("frame_type") == frame_type:
-            return msg  # type: ignore[no-any-return]
-    raise AssertionError(f"did not receive frame_type={frame_type}")
-
-
-def test_ws_auto_approval_toggle_bypass_hit(tmp_path: Path) -> None:
-    """通用频道发 auto-approval-toggle 帧 → 旁路命中 → 回 auto_approval_state。
-
-    这是 protocol-frame-type-unify-v0.2 修复的回归测试：旁路 peek 读
-    ``preview.get("frame_type")`` 才能命中，读 ``"type"`` 会让帧落到
-    ``WSFrameC2SAdapter`` 被 union 拒（``union_tag_invalid``）。
-    """
-    tm = WSFakeTM()
-    client = _login(tmp_path, tm)
-    try:
-        # create_app 已装配 app.state.auto_approval_policy；二次确认
-        assert client.app.state.auto_approval_policy is not None  # type: ignore[attr-defined]
-        with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
-            _ = ws.receive_json()  # thread.history
-            ws.send_json(
-                {
-                    "frame_type": "auto-approval-toggle",
-                    "cwd": "/proj/generic-toggle",
-                    "enabled": True,
-                }
-            )
-            msg = _wait_for_frame_type(ws, "auto_approval_state")
-            # 旁路命中的核心证据：channel == "generic_chat"（不是 claude_code
-            # 默认值，也不是 union 拒掉后推的 frame_type="error"）
-            assert msg["channel"] == "generic_chat"
-            assert msg["cwd"] == "/proj/generic-toggle"
-            assert msg["enabled"] is True
-
-        # 持久化也要对：app.state.auto_approval_policy 应能再读出 enabled=True
-        policy = client.app.state.auto_approval_policy  # type: ignore[attr-defined]
-        cfg = policy.get_config("/proj/generic-toggle")
-        assert cfg.enabled is True
-    finally:
-        client.__exit__(None, None, None)
-
-
-def test_ws_auto_approval_query_bypass_hit(tmp_path: Path) -> None:
-    """通用频道发 auto-approval-query 帧 → 旁路命中 → 回 auto_approval_state。
-
-    对称覆盖 query 路径；这条路径是用户报错的直接触发点（前端
-    useAutoApproval.queryAutoApproval 在切 thread / 重连时主动发）。
-    """
+@pytest.mark.parametrize("frame_type", ["auto-approval-set-mode", "auto-approval-query"])
+def test_ws_auto_approval_frame_returns_mode_state(
+    tmp_path: Path,
+    frame_type: str,
+) -> None:
+    """通用频道能查询并设置每 cwd 的审批处置模式。"""
     tm = WSFakeTM()
     client = _login(tmp_path, tm)
     try:
         with client.websocket_connect(f"/ws/threads/{THREAD_ID}") as ws:
             _ = ws.receive_json()  # thread.history
-            ws.send_json(
-                {
-                    "frame_type": "auto-approval-query",
-                    "cwd": "/proj/generic-query",
-                }
-            )
-            msg = _wait_for_frame_type(ws, "auto_approval_state")
-            assert msg["channel"] == "generic_chat"
-            assert msg["cwd"] == "/proj/generic-query"
-            # 新 cwd 默认 enabled=False
-            assert msg["enabled"] is False
+            payload: dict[str, object] = {"frame_type": frame_type, "cwd": "/proj/test"}
+            if frame_type == "auto-approval-set-mode":
+                payload["mode"] = "llm"
+            ws.send_json(payload)
+            message = ws.receive_json()
+            assert message["frame_type"] == "auto_approval_state"
+            assert message["mode"] == ("llm" if frame_type == "auto-approval-set-mode" else "user")
     finally:
         client.__exit__(None, None, None)
 

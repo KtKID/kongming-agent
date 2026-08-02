@@ -34,6 +34,7 @@ class _RouterFakeBridge:
         *,
         reasoning_effort: str | None = None,
         attachments: list[dict[str, object]] | None = None,
+        references: list[dict[str, object]] | None = None,
     ) -> None:
         """记录 Avatar REST chat 触发的 run_once。"""
         self.calls.append(
@@ -68,6 +69,7 @@ class _AvatarChatFakeTM(FakeTM):
         super().__init__()
         self.cells: dict[str, _RouterFakeCell] = {}
         self.refresh_calls: list[str] = []
+        self.pending_avatar_inputs: dict[str, list[dict[str, object]]] = {}
 
     async def boot_or_attach(self, thread_id: str) -> _RouterFakeCell:
         """返回或创建 fake cell。"""
@@ -83,6 +85,69 @@ class _AvatarChatFakeTM(FakeTM):
         """记录 runtime refresh 并返回成功。"""
         self.refresh_calls.append(thread_id)
         return True
+
+    async def submit_avatar_input(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        request_id: str | None = None,
+        reasoning_effort: str | None = None,
+        attachments: list[dict[str, object]] | None = None,
+        avatar_run_id: str | None = None,
+    ) -> object:
+        """复刻 ThreadManager Avatar 输入入口，active run 时进入队列。"""
+        cell = await self.boot_or_attach(thread_id)
+        payload: dict[str, object] = {
+            "text": text,
+            "request_id": request_id,
+            "reasoning_effort": reasoning_effort,
+            "attachments": attachments,
+            "avatar_run_id": avatar_run_id,
+        }
+        if cell.current_run_task is not None:
+            self.pending_avatar_inputs.setdefault(thread_id, []).append(payload)
+            return object()
+        await cell.bridge.run_once(
+            text,
+            reasoning_effort=reasoning_effort,
+            attachments=attachments,
+        )
+        return object()
+
+
+class _FakeApprovalInboxBroadcaster:
+    """记录 Avatar approval resolve 路由到 inbox broadcaster 的调用。"""
+
+    def __init__(self, *, ok: bool = True) -> None:
+        """初始化 resolve 结果和调用记录。"""
+        self.ok = ok
+        self.calls: list[tuple[str, str, dict[str, object]]] = []
+        self.remember_rule = {
+            "expression": "run_shell(git status:*)",
+            "displayText": "记住 /workspace 中的 git status",
+            "scopeCwd": "/workspace",
+        }
+
+    async def resolve(
+        self,
+        thread_id: str,
+        request_id: str,
+        decision: dict[str, object],
+    ) -> bool:
+        """记录 ApprovalInboxBroadcaster.resolve 入参。"""
+        self.calls.append((thread_id, request_id, decision))
+        return self.ok
+
+    def remember_rule_for(
+        self,
+        thread_id: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        """返回路由测试使用的冻结 remember 候选。"""
+        assert thread_id
+        assert request_id
+        return dict(self.remember_rule)
 
 
 def _authed_client(
@@ -195,8 +260,8 @@ def test_debug_register_then_list_and_ack_with_testclient(tmp_path: Path) -> Non
         authed.__exit__(None, None, None)
 
 
-def test_device_token_scope_matrix_for_list_and_ack(tmp_path: Path) -> None:
-    """验证 XSpace device token 对 list 和 ack 的 scope 矩阵。"""
+def test_avatar_v1_bringup_auth_passes_for_list_and_ack(tmp_path: Path) -> None:
+    """验证 Avatar v1 联调期 list 和 ack 直接放行鉴权。"""
     authed = _authed_client(tmp_path)
     anonymous = _anonymous_client(authed.app)
     try:
@@ -230,13 +295,17 @@ def test_device_token_scope_matrix_for_list_and_ack(tmp_path: Path) -> None:
             assert response.status_code == 200, response.text
             assert [item["messageId"] for item in response.json()["items"]] == [message_id]
 
-        denied_ack = anonymous.post(
+        no_auth_response = anonymous.get("/api/avatar/v1/messages")
+        assert no_auth_response.status_code == 200, no_auth_response.text
+        assert [item["messageId"] for item in no_auth_response.json()["items"]] == [message_id]
+
+        pass_through_ack = anonymous.post(
             f"/api/avatar/v1/messages/{message_id}/ack",
             json={"status": "consumed"},
             headers={"Authorization": f"Bearer {wrong_token}"},
         )
-        assert denied_ack.status_code == 403
-        assert denied_ack.json()["error"]["code"] == "avatar_forbidden"
+        assert pass_through_ack.status_code == 200, pass_through_ack.text
+        assert pass_through_ack.json()["status"] == "consumed"
 
         allowed_ack = anonymous.post(
             f"/api/avatar/v1/messages/{message_id}/ack",
@@ -256,11 +325,6 @@ def test_avatar_batch_ack_returns_per_item_errors(tmp_path: Path) -> None:
     anonymous = _anonymous_client(authed.app)
     try:
         message_id = _register_via_manager(authed, title="Batch event")
-        ack_token = _issue_device_token(
-            authed,
-            device_id="avatar-batch-ack",
-            scopes=["avatar.ack"],
-        )
         response = anonymous.post(
             "/api/avatar/v1/messages/ack",
             json={
@@ -268,7 +332,6 @@ def test_avatar_batch_ack_returns_per_item_errors(tmp_path: Path) -> None:
                 "status": "consumed",
                 "consumerId": "xspace-avatar",
             },
-            headers={"Authorization": f"Bearer {ack_token}"},
         )
 
         assert response.status_code == 200, response.text
@@ -286,22 +349,245 @@ def test_avatar_batch_ack_returns_per_item_errors(tmp_path: Path) -> None:
         authed.__exit__(None, None, None)
 
 
+def test_avatar_approval_resolve_routes_three_actions(tmp_path: Path) -> None:
+    """验证 Avatar resolve endpoint 将三态动作映射到 inbox broadcaster。"""
+    authed = _authed_client(tmp_path)
+    manager = _FakeApprovalInboxBroadcaster()
+    authed.app.state.approval_inbox_broadcaster = manager
+    try:
+        actions = ["accept_once", "accept_for_session", "reject"]
+        for idx, action in enumerate(actions):
+            request_id = f"approval-req-{idx}"
+            response = authed.post(
+                f"/api/avatar/v1/approvals/{request_id}/resolve",
+                json={
+                    "threadId": "thread-router-test",
+                    "callId": request_id,
+                    "requestId": request_id,
+                    "action": action,
+                    "clientId": "xspace-avatar",
+                },
+                headers=CSRF_HEADERS,
+            )
+            assert response.status_code == 200, response.text
+            assert response.json() == {
+                "ok": True,
+                "requestId": request_id,
+                "action": action,
+            }
+
+        assert manager.calls == [
+            (
+                "thread-router-test",
+                "approval-req-0",
+                {"allow": True, "remember": False},
+            ),
+            (
+                "thread-router-test",
+                "approval-req-1",
+                {
+                    "allow": True,
+                    "remember": True,
+                    "rememberRule": manager.remember_rule,
+                },
+            ),
+            (
+                "thread-router-test",
+                "approval-req-2",
+                {"allow": False, "remember": False},
+            ),
+        ]
+    finally:
+        authed.__exit__(None, None, None)
+
+
+def test_avatar_approval_resolve_requires_web_session(tmp_path: Path) -> None:
+    """验证匿名 Avatar approval resolve 被全局 AuthMiddleware 拦截。"""
+    authed = _authed_client(tmp_path)
+    anonymous = _anonymous_client(authed.app)
+    manager = _FakeApprovalInboxBroadcaster()
+    authed.app.state.approval_inbox_broadcaster = manager
+    try:
+        response = anonymous.post(
+            "/api/avatar/v1/approvals/approval-req/resolve",
+            json={
+                "threadId": "thread-router-test",
+                "callId": "approval-req",
+                "requestId": "approval-req",
+                "action": "accept_once",
+                "clientId": "xspace-avatar",
+            },
+            headers=CSRF_HEADERS,
+        )
+
+        assert response.status_code == 401, response.text
+        assert manager.calls == []
+    finally:
+        anonymous.close()
+        authed.__exit__(None, None, None)
+
+
+def test_avatar_approval_resolve_requires_csrf_header(tmp_path: Path) -> None:
+    """验证登录态 Avatar approval resolve 缺 CSRF header 时被拦截。"""
+    authed = _authed_client(tmp_path)
+    manager = _FakeApprovalInboxBroadcaster()
+    authed.app.state.approval_inbox_broadcaster = manager
+    try:
+        response = authed.post(
+            "/api/avatar/v1/approvals/approval-req/resolve",
+            json={
+                "threadId": "thread-router-test",
+                "callId": "approval-req",
+                "requestId": "approval-req",
+                "action": "accept_once",
+                "clientId": "xspace-avatar",
+            },
+        )
+
+        assert response.status_code == 403, response.text
+        assert manager.calls == []
+    finally:
+        authed.__exit__(None, None, None)
+
+
+def test_avatar_approval_resolve_rejects_bearer_only(tmp_path: Path) -> None:
+    """验证 Bearer token 不能单独写 Avatar approval resolve。"""
+    authed = _authed_client(tmp_path)
+    anonymous = _anonymous_client(authed.app)
+    token = _issue_device_token(
+        authed,
+        device_id="avatar-approval-resolve",
+        scopes=["avatar.chat"],
+    )
+    manager = _FakeApprovalInboxBroadcaster()
+    authed.app.state.approval_inbox_broadcaster = manager
+    try:
+        response = anonymous.post(
+            "/api/avatar/v1/approvals/approval-req/resolve",
+            json={
+                "threadId": "thread-router-test",
+                "callId": "approval-req",
+                "requestId": "approval-req",
+                "action": "accept_once",
+                "clientId": "xspace-avatar",
+            },
+            headers={
+                **CSRF_HEADERS,
+                "Authorization": f"Bearer {token}",
+            },
+        )
+
+        assert response.status_code == 401, response.text
+        assert manager.calls == []
+    finally:
+        anonymous.close()
+        authed.__exit__(None, None, None)
+
+
+def test_avatar_approval_resolve_returns_not_found_for_missing_pending(
+    tmp_path: Path,
+) -> None:
+    """验证 pending 缺失返回稳定 Avatar 错误。"""
+    authed = _authed_client(tmp_path)
+    manager = _FakeApprovalInboxBroadcaster(ok=False)
+    authed.app.state.approval_inbox_broadcaster = manager
+    try:
+        response = authed.post(
+            "/api/avatar/v1/approvals/missing-req/resolve",
+            json={
+                "threadId": "thread-router-test",
+                "callId": "missing-req",
+                "requestId": "missing-req",
+                "action": "reject",
+                "clientId": "xspace-avatar",
+            },
+            headers=CSRF_HEADERS,
+        )
+
+        assert response.status_code == 404, response.text
+        assert response.json()["error"]["code"] == "avatar_approval_not_found"
+        assert manager.calls == [
+            (
+                "thread-router-test",
+                "missing-req",
+                {"allow": False, "remember": False},
+            )
+        ]
+    finally:
+        authed.__exit__(None, None, None)
+
+
+def test_avatar_approval_resolve_rejects_mismatched_request_id(tmp_path: Path) -> None:
+    """验证 path requestId 和 body 字段不一致时返回稳定错误。"""
+    authed = _authed_client(tmp_path)
+    manager = _FakeApprovalInboxBroadcaster()
+    authed.app.state.approval_inbox_broadcaster = manager
+    try:
+        response = authed.post(
+            "/api/avatar/v1/approvals/path-req/resolve",
+            json={
+                "threadId": "thread-router-test",
+                "callId": "path-req",
+                "requestId": "body-req",
+                "action": "accept_once",
+                "clientId": "xspace-avatar",
+            },
+            headers=CSRF_HEADERS,
+        )
+
+        assert response.status_code == 400, response.text
+        assert response.json()["error"]["code"] == "avatar_invalid_request"
+        assert manager.calls == []
+    finally:
+        authed.__exit__(None, None, None)
+
+
+def test_avatar_approval_resolve_requires_thread_id(tmp_path: Path) -> None:
+    """验证 Avatar approval resolve 必须携带 threadId。"""
+    authed = _authed_client(tmp_path)
+    manager = _FakeApprovalInboxBroadcaster()
+    authed.app.state.approval_inbox_broadcaster = manager
+    try:
+        response = authed.post(
+            "/api/avatar/v1/approvals/path-req/resolve",
+            json={
+                "callId": "path-req",
+                "requestId": "path-req",
+                "action": "accept_once",
+                "clientId": "xspace-avatar",
+            },
+            headers=CSRF_HEADERS,
+        )
+
+        assert response.status_code == 400, response.text
+        assert response.json()["error"]["code"] == "avatar_invalid_request"
+        assert manager.calls == []
+    finally:
+        authed.__exit__(None, None, None)
+
+
+def test_avatar_router_keeps_safety_import_out_of_route_boundary() -> None:
+    """验证 Avatar router 不直接依赖 safety 包。"""
+    router_source = Path("src/hosts/web/routers/avatar.py").read_text(encoding="utf-8")
+    assert "safety." not in router_source
+
+
 def test_avatar_capabilities_and_chat_accepted(tmp_path: Path) -> None:
     """验证 capabilities 和 REST chat accepted 合同。"""
     fake_tm = _AvatarChatFakeTM()
     authed = _authed_client(tmp_path, thread_manager=fake_tm)
     anonymous = _anonymous_client(authed.app)
     try:
-        chat_token = _issue_device_token(
-            authed,
-            device_id="avatar-chat",
-            scopes=["avatar.chat"],
-        )
-        capabilities = anonymous.get(
-            "/api/avatar/v1/capabilities",
-            headers={"Authorization": f"Bearer {chat_token}"},
-        )
-        assert capabilities.status_code == 403
+        capabilities = anonymous.get("/api/avatar/v1/capabilities")
+        assert capabilities.status_code == 200
+        capabilities_body = capabilities.json()
+        assert capabilities_body["avatarChat"] is True
+        assert capabilities_body["avatarRealtimeChat"] is True
+        assert capabilities_body["chatTransports"] == {
+            "websocket": "/ws/avatar/v1/threads/{threadId}",
+            "rest": "/api/avatar/v1/chat",
+        }
+        assert capabilities_body["messageRegistry"] is True
 
         read_token = _issue_device_token(
             authed,
@@ -313,14 +599,7 @@ def test_avatar_capabilities_and_chat_accepted(tmp_path: Path) -> None:
             headers={"Authorization": f"Bearer {read_token}"},
         )
         assert readable_capabilities.status_code == 200
-        capabilities_body = readable_capabilities.json()
-        assert capabilities_body["avatarChat"] is True
-        assert capabilities_body["avatarRealtimeChat"] is True
-        assert capabilities_body["chatTransports"] == {
-            "websocket": "/ws/avatar/v1/threads/{threadId}",
-            "rest": "/api/avatar/v1/chat",
-        }
-        assert capabilities_body["messageRegistry"] is True
+        assert readable_capabilities.json()["avatarChat"] is True
 
         response = anonymous.post(
             "/api/avatar/v1/chat",
@@ -340,7 +619,6 @@ def test_avatar_capabilities_and_chat_accepted(tmp_path: Path) -> None:
                     "capabilities": {"realtime": True},
                 },
             },
-            headers={"Authorization": f"Bearer {chat_token}"},
         )
         assert response.status_code == 200, response.text
         body = response.json()
@@ -377,7 +655,6 @@ def test_avatar_capabilities_and_chat_accepted(tmp_path: Path) -> None:
                     "clientMessageId": "client-msg-2",
                 },
             },
-            headers={"Authorization": f"Bearer {chat_token}"},
         )
         assert existing.status_code == 200, existing.text
         assert existing.json()["threadId"] == body["threadId"]
@@ -386,24 +663,62 @@ def test_avatar_capabilities_and_chat_accepted(tmp_path: Path) -> None:
         authed.__exit__(None, None, None)
 
 
-def test_avatar_register_rejects_bearer_without_cookie(tmp_path: Path) -> None:
-    """验证 debug register 只接受 Web cookie 调试路径。"""
+def test_avatar_rest_chat_queues_when_thread_has_active_run(tmp_path: Path) -> None:
+    """验证 Avatar REST chat 复用 ThreadManager active-run gate。"""
+    fake_tm = _AvatarChatFakeTM()
+    authed = _authed_client(tmp_path, thread_manager=fake_tm)
+    anonymous = _anonymous_client(authed.app)
+    try:
+        meta = authed.portal.call(fake_tm.create_thread, "running", "local-default")
+        cell = authed.portal.call(fake_tm.boot_or_attach, meta.id)
+        original_task = object()
+        cell.current_run_task = original_task
+
+        response = anonymous.post(
+            "/api/avatar/v1/chat",
+            json={
+                "threadId": meta.id,
+                "presetId": None,
+                "cwd": None,
+                "message": {
+                    "text": "avatar while web run is active",
+                    "reasoningEffort": "low",
+                    "attachments": None,
+                },
+                "client": {
+                    "deviceId": "xspace-desktop-main",
+                    "clientMessageId": "client-msg-active-run",
+                },
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["threadId"] == meta.id
+        assert cell.current_run_task is original_task
+        assert cell.bridge.calls == []
+        assert fake_tm.pending_avatar_inputs[meta.id][0]["text"] == (
+            "avatar while web run is active"
+        )
+        assert (
+            fake_tm.pending_avatar_inputs[meta.id][0]["avatar_run_id"] == response.json()["runId"]
+        )
+    finally:
+        anonymous.close()
+        authed.__exit__(None, None, None)
+
+
+def test_avatar_register_allows_pass_through_auth_during_v1_bringup(tmp_path: Path) -> None:
+    """验证 Avatar v1 联调期 debug register 直接放行鉴权。"""
     authed = _authed_client(tmp_path)
     anonymous = _anonymous_client(authed.app)
     try:
-        token = _issue_device_token(
-            authed,
-            device_id="avatar-register-denied",
-            scopes=["avatar.read", "avatar.ack"],
-        )
         response = anonymous.post(
             "/api/avatar/v1/messages",
-            json={"source": "debug", "title": "Denied bearer register"},
-            headers={"Authorization": f"Bearer {token}", **CSRF_HEADERS},
+            json={"source": "debug", "title": "Pass-through register"},
         )
 
-        assert response.status_code == 403
-        assert response.json()["error"]["code"] == "avatar_forbidden"
+        assert response.status_code == 200, response.text
+        assert response.json()["source"] == "debug"
     finally:
         anonymous.close()
         authed.__exit__(None, None, None)

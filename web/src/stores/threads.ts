@@ -7,12 +7,19 @@ import type {
   CreateGenericThreadFromFirstMessageRequest,
   CreateGenericThreadFromFirstMessageResponse,
   CreateThreadRequest,
+  ForkThreadRequest,
   LLMPresetDTO,
   ProjectRegistryEntry,
   RenameThreadRequest,
   ThreadMetadataDTO,
   UpdateThreadPresetRequest,
+  ConversationReferenceDTO,
+  UserInputAttachment,
 } from "@/protocol";
+import type {
+  ReasoningEffort,
+  SubmittedDraft,
+} from "@/components/Composer";
 
 const THREADS_CACHE_KEY = "kongming.sidebar.threads";
 
@@ -23,6 +30,28 @@ function sortThreads(list: ThreadMetadataDTO[]): ThreadMetadataDTO[] {
   return [...list].sort((a, b) => {
     if (a.is_pinned !== b.is_pinned) return a.is_pinned ? -1 : 1;
     return b.updated_at - a.updated_at;
+  });
+}
+
+function normalizeCachedThreads(value: unknown): ThreadMetadataDTO[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): ThreadMetadataDTO[] => {
+    if (item === null || typeof item !== "object") return [];
+    const thread = item as Partial<ThreadMetadataDTO>;
+    if (typeof thread.id !== "string") return [];
+    return [
+      {
+        ...(thread as ThreadMetadataDTO),
+        backend_kind: thread.backend_kind ?? "generic_chat",
+        claude_thread_id: thread.claude_thread_id ?? "",
+        codex_thread_id: thread.codex_thread_id ?? "",
+        thread_kind: thread.thread_kind ?? "chat",
+        source_kind: thread.source_kind ?? "",
+        source_id: thread.source_id ?? "",
+        forked_from_id: thread.forked_from_id ?? null,
+        forked_from_history_index: thread.forked_from_history_index ?? null,
+      },
+    ];
   });
 }
 
@@ -37,8 +66,7 @@ function loadCachedThreads(): ThreadMetadataDTO[] {
   try {
     const raw = window.localStorage.getItem(THREADS_CACHE_KEY);
     if (!raw) return [];
-    const parsed = JSON.parse(raw) as ThreadMetadataDTO[];
-    return Array.isArray(parsed) ? sortThreads(parsed) : [];
+    return sortThreads(normalizeCachedThreads(JSON.parse(raw) as unknown));
   } catch {
     return [];
   }
@@ -65,12 +93,31 @@ export interface PendingNewSession {
   backendKind: "generic_chat" | "claude_code" | "codex";
 }
 
+type ThreadReasoningEffort = Exclude<
+  CreateGenericThreadFromFirstMessageRequest["reasoning_effort"],
+  undefined
+>;
+
+export interface ThreadReasoningSelection {
+  presetId: string;
+  effort: ThreadReasoningEffort;
+}
+
+export interface InitialMessageDraft {
+  text: string;
+  reasoningEffort: ReasoningEffort | null;
+  attachments?: UserInputAttachment[];
+  references?: ConversationReferenceDTO[];
+  restoreDraft: SubmittedDraft;
+}
+
 interface ThreadsState {
   threads: ThreadMetadataDTO[];
   presets: LLMPresetDTO[];
   loading: boolean;
   pendingNewSession: PendingNewSession | null;
-  initialMessage: string | null;
+  reasoningSelectionByThread: Record<string, ThreadReasoningSelection>;
+  initialMessage: InitialMessageDraft | null;
   claudeProjectsRefreshKey: number;
   codexProjectsRefreshKey: number;
   fetchThreads: () => Promise<void>;
@@ -84,6 +131,7 @@ interface ThreadsState {
   createGenericThreadFromFirstMessage: (
     body: CreateGenericThreadFromFirstMessageRequest,
   ) => Promise<ThreadMetadataDTO>;
+  forkThread: (id: string, historyIndex: number) => Promise<ThreadMetadataDTO>;
   updateThreadPreset: (
     id: string,
     presetId: string,
@@ -92,8 +140,13 @@ interface ThreadsState {
   pinThread: (id: string, isPinned: boolean) => Promise<void>;
   deleteThread: (id: string) => Promise<void>;
   setPendingNewSession: (p: PendingNewSession | null) => void;
+  setThreadReasoningSelection: (
+    threadId: string,
+    presetId: string,
+    effort: ThreadReasoningEffort,
+  ) => void;
   startPendingGenericThread: () => void;
-  setInitialMessage: (msg: string | null) => void;
+  setInitialMessage: (msg: InitialMessageDraft | null) => void;
   triggerClaudeProjectsRefresh: () => void;
   triggerCodexProjectsRefresh: () => void;
   addClaudeProject: (cwd: string, alias?: string) => Promise<ProjectRegistryEntry>;
@@ -107,6 +160,7 @@ export const useThreadsStore = create<ThreadsState>((set, get) => ({
   presets: [],
   loading: false,
   pendingNewSession: null,
+  reasoningSelectionByThread: {},
   initialMessage: null,
   claudeProjectsRefreshKey: 0,
   codexProjectsRefreshKey: 0,
@@ -178,6 +232,21 @@ export const useThreadsStore = create<ThreadsState>((set, get) => ({
     return thread;
   },
 
+  forkThread: async (id, historyIndex) => {
+    const body: ForkThreadRequest = { history_index: historyIndex };
+    const forked = await apiPost<ThreadMetadataDTO>(
+      `/api/threads/${encodeURIComponent(id)}/fork`,
+      body,
+    );
+    const threads = sortThreads([
+      forked,
+      ...get().threads.filter((thread) => thread.id !== forked.id),
+    ]);
+    saveCachedThreads(threads);
+    set({ threads });
+    return forked;
+  },
+
   updateThreadPreset: async (id, presetId) => {
     const body: UpdateThreadPresetRequest = { preset_id: presetId };
     const updated = await apiPatch<ThreadMetadataDTO>(
@@ -188,7 +257,9 @@ export const useThreadsStore = create<ThreadsState>((set, get) => ({
       get().threads.map((thread) => (thread.id === id ? updated : thread)),
     );
     saveCachedThreads(threads);
-    set({ threads });
+    const reasoningSelectionByThread = { ...get().reasoningSelectionByThread };
+    delete reasoningSelectionByThread[id];
+    set({ threads, reasoningSelectionByThread });
     return updated;
   },
 
@@ -217,10 +288,19 @@ export const useThreadsStore = create<ThreadsState>((set, get) => ({
     await apiDelete(`/api/threads/${id}`);
     const threads = get().threads.filter((thread) => thread.id !== id);
     saveCachedThreads(threads);
-    set({ threads });
+    const reasoningSelectionByThread = { ...get().reasoningSelectionByThread };
+    delete reasoningSelectionByThread[id];
+    set({ threads, reasoningSelectionByThread });
   },
 
   setPendingNewSession: (pendingNewSession) => set({ pendingNewSession }),
+  setThreadReasoningSelection: (threadId, presetId, effort) =>
+    set((state) => ({
+      reasoningSelectionByThread: {
+        ...state.reasoningSelectionByThread,
+        [threadId]: { presetId, effort },
+      },
+    })),
   startPendingGenericThread: () =>
     set({
       pendingNewSession: {

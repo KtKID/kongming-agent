@@ -81,6 +81,7 @@ class LogReadService:
         tail_lines: int = _DEFAULT_TAIL_LINES,
         max_bytes: int = _DEFAULT_MAX_BYTES,
         query: str = "",
+        thread_id: str | None = None,
     ) -> LogReadResponseDTO:
         """Read the tail of the log source identified by *type*.
 
@@ -93,7 +94,7 @@ class LogReadService:
             6. Parse each line as JSON where possible.
             7. Assemble and return :class:`LogReadResponseDTO`.
         """
-        source = self._registry.get_source(type)
+        source = self._registry.get_source(type, thread_id=thread_id)
         source_dto = _resolved_to_dto(source)
 
         # File missing → empty response.

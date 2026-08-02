@@ -38,6 +38,8 @@ export interface UseAttachmentUploaderReturn {
   attachments: AttachmentState[];
   /** 上传一个 File；返回客户端临时 id（便于上层关联） */
   upload: (file: File, threadId: string) => string;
+  /** 用已上传成功的资产引用恢复 ready 状态列表，并同步附件数量计数器。 */
+  restoreReadyAttachments: (attachments: UserInputAttachment[]) => void;
   /** 移除单个附件（不论状态）。ready 状态附件移除时**不**调后端删除，仅前端丢弃 */
   remove: (id: string) => void;
   /** 清空所有附件（发送后调用） */
@@ -305,6 +307,37 @@ export function useAttachmentUploader(): UseAttachmentUploaderReturn {
   }, []);
 
   /**
+   * 从服务端资产引用恢复 ready 附件列表。
+   *
+   * 输入是 Composer 已提交过的 UserInputAttachment 真源；输出是新的
+   * AttachmentState[]，全部处于 ready 状态。恢复前释放旧 object URL，恢复后
+   * countRef 与 readyAttachments.length 保持一致。
+   */
+  const restoreReadyAttachments = useCallback(
+    (readyAttachments: UserInputAttachment[]): void => {
+      setAttachments((prev) => {
+        for (const a of prev) {
+          if (objectUrlsRef.current.has(a.local_preview_url)) {
+            URL.revokeObjectURL(a.local_preview_url);
+            objectUrlsRef.current.delete(a.local_preview_url);
+          }
+        }
+        return readyAttachments.map((attachment, index) => ({
+          id: `${attachment.asset_id}:${index}`,
+          status: "ready",
+          filename: attachment.asset_id,
+          size_bytes: attachment.size_bytes,
+          mime_type: attachment.mime_type,
+          local_preview_url: attachment.preview_url,
+          attachment,
+        }));
+      });
+      countRef.current = readyAttachments.length;
+    },
+    [],
+  );
+
+  /**
    * 删除单条附件：从列表移除 + 释放对应 object URL。
    * 不管状态如何（uploading 中的也允许删，正在飞的请求结果到达时会发现条目已消失，
    * setAttachments 的 map 会自动跳过）。
@@ -346,11 +379,12 @@ export function useAttachmentUploader(): UseAttachmentUploaderReturn {
 
   // unmount 时兜底 revoke 所有遗留 url，防内存泄漏
   useEffect(() => {
+    const objectUrls = objectUrlsRef.current;
     return () => {
-      for (const url of objectUrlsRef.current) {
+      for (const url of objectUrls) {
         URL.revokeObjectURL(url);
       }
-      objectUrlsRef.current.clear();
+      objectUrls.clear();
     };
   }, []);
 
@@ -378,6 +412,7 @@ export function useAttachmentUploader(): UseAttachmentUploaderReturn {
   return {
     attachments,
     upload,
+    restoreReadyAttachments,
     remove,
     clear,
     readyAttachments,

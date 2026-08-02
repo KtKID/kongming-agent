@@ -11,6 +11,7 @@
  *
  * vitest 资源敏感：用 renderHook（非 watch），unmount 后断言无残留。
  */
+import { StrictMode, type ReactNode } from "react";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import {
@@ -62,6 +63,35 @@ describe("useChatTimeline · 基本订阅", () => {
   it("返回的 state.threadId 与入参一致", () => {
     const { result } = renderHook(() => useChatTimeline("t1"));
     expect(result.current.threadId).toBe("t1");
+  });
+
+  it("StrictMode 双挂载期间保留同一 store 并接收后续历史", () => {
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <StrictMode>{children}</StrictMode>
+    );
+    const { result } = renderHook(() => useChatTimeline("t1"), { wrapper });
+
+    act(() => {
+      getTimelineStore("t1").applyEvent(
+        ev({
+          kind: "history_batch_loaded",
+          threadId: "t1",
+          payload: {
+            messages: [
+              {
+                id: "strict-history-user",
+                frame_type: "text",
+                role: "user",
+                content: "strict persisted",
+              },
+            ],
+          },
+        }),
+      );
+    });
+
+    expect(result.current.historyLoaded).toBe(true);
+    expect(result.current.orderedMessageIds).toEqual(["strict-history-user"]);
   });
 });
 
@@ -166,7 +196,7 @@ describe("useChatTimeline · 渲染次数不失控", () => {
 });
 
 describe("useChatTimeline · disposeTimelineStore 清理路径", () => {
-  it("切 N 个 thread 后，无订阅者的旧 store 被释放，size 不无界增长", () => {
+  it("切 N 个 thread 后，无订阅者的旧 store 被释放，size 不无界增长", async () => {
     const { rerender, unmount } = renderHook(({ tid }) => useChatTimeline(tid), {
       initialProps: { tid: "a" as string | undefined },
     });
@@ -174,18 +204,27 @@ describe("useChatTimeline · disposeTimelineStore 清理路径", () => {
     rerender({ tid: "c" });
     rerender({ tid: "d" });
     rerender({ tid: "e" });
+    await act(async () => {
+      await Promise.resolve();
+    });
     // 切走的 a/b/c/d 应已 dispose，只剩当前 e（+ 可能的 __empty__ 不计入业务 thread）。
     expect(timelineStoreCount({ excludeEmpty: true })).toBe(1);
     unmount();
+    await act(async () => {
+      await Promise.resolve();
+    });
     // 最后一个组件 unmount 后，e 也无订阅者 → 释放。
     expect(timelineStoreCount({ excludeEmpty: true })).toBe(0);
   });
 
-  it("多个组件订阅同一 thread 时，单个 unmount 不误删 store（refcount > 0）", () => {
+  it("多个组件订阅同一 thread 时，单个 unmount 不误删 store（refcount > 0）", async () => {
     const h1 = renderHook(() => useChatTimeline("t1"));
     const h2 = renderHook(() => useChatTimeline("t1"));
     expect(timelineStoreCount({ excludeEmpty: true })).toBe(1);
     h1.unmount();
+    await act(async () => {
+      await Promise.resolve();
+    });
     // 仍有 h2 订阅 → 不删。
     expect(timelineStoreCount({ excludeEmpty: true })).toBe(1);
     act(() => {
@@ -195,6 +234,9 @@ describe("useChatTimeline · disposeTimelineStore 清理路径", () => {
     });
     expect(h2.result.current.orderedMessageIds.length).toBe(1);
     h2.unmount();
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(timelineStoreCount({ excludeEmpty: true })).toBe(0);
   });
 

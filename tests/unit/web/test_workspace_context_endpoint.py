@@ -123,6 +123,14 @@ def _login_client(tmp_path: Path, tm: FakeTM) -> TestClient:
     return client
 
 
+def test_create_app_default_workspace_root_is_home(tmp_path: Path) -> None:
+    client = _login_client(tmp_path, FakeTM([]))
+    try:
+        assert client.app.state.workspace_root == tmp_path
+    finally:
+        client.__exit__(None, None, None)
+
+
 def test_workspace_context_for_claude_code_thread(tmp_path: Path) -> None:
     tm = FakeTM(
         [
@@ -155,10 +163,10 @@ def test_workspace_context_for_claude_code_thread(tmp_path: Path) -> None:
         client.__exit__(None, None, None)
 
 
-def test_workspace_context_empty_cwd_falls_back_to_server_cwd(tmp_path: Path) -> None:
-    """thread.cwd 空时 fallback 到 ``app.state.workspace_root`` (server 启动目录)。
+def test_workspace_context_empty_cwd_falls_back_to_workspace_root(tmp_path: Path) -> None:
+    """thread.cwd 空时 fallback 到 ``app.state.workspace_root``。
 
-    task #2：纯聊天 thread 不再返回 ``workspace_root=""``，统一走 server cwd，
+    task #2：纯聊天 thread 使用配置 workspace root，
     让 files/shell 直接可用，与 ``resolve_workspace_cwd`` helper 行为对齐。
     """
     tm = FakeTM(

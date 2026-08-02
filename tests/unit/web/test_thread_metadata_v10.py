@@ -1,4 +1,4 @@
-"""ThreadMetadata schema_version=11 + v9→v11 兼容懒升级单测。
+"""ThreadMetadata schema_version=13 + v9→v13 兼容懒升级单测。
 
 claude-session-rename-archive-metadata-source 引入 ``is_archived: bool`` 字段，
 把归档真源从 jsonl ``archived`` 事件迁到 thread metadata.json。
@@ -9,7 +9,7 @@ claude-session-rename-archive-metadata-source 引入 ``is_archived: bool`` 字�
 2. v9 文件 + 已含 ``is_archived`` 字段（迁移脚本中间态）→ 保留值
 3. ``is_archived=True`` 持久化往返
 4. v10 默认值（构造未传时 False）
-5. ``THREAD_METADATA_SCHEMA_VERSION == 11``
+5. ``THREAD_METADATA_SCHEMA_VERSION == 13``
 """
 
 from __future__ import annotations
@@ -57,20 +57,22 @@ def _write_v9_metadata(home: Path, data: dict | None = None) -> Path:
 # ── 常量 ────────────────────────────────────────────────────
 
 
-def test_schema_version_constant_is_11() -> None:
-    assert THREAD_METADATA_SCHEMA_VERSION == 11
+def test_schema_version_constant_is_13() -> None:
+    assert THREAD_METADATA_SCHEMA_VERSION == 13
 
 
 # ── v9 → v10 lazy upgrade ──────────────────────────────────
 
 
-def test_v9_file_upgraded_to_v11_default_not_archived(tmp_path: Path) -> None:
-    """v9 文件读出 → schema_version=11、is_archived=False（默认）。"""
+def test_v9_file_upgraded_to_v13_default_not_archived(tmp_path: Path) -> None:
+    """v9 文件读出 → schema_version=13、is_archived=False、无 lineage 时间线边界。"""
     _write_v9_metadata(tmp_path)
     meta = read_thread_metadata(tmp_path, _THREAD_ID)
     assert meta is not None
-    assert meta.schema_version == 11
+    assert meta.schema_version == 13
     assert meta.is_archived is False
+    assert meta.forked_from_id is None
+    assert meta.forked_from_history_index is None
     # 其它字段保真
     assert meta.id == _THREAD_ID
     assert meta.name == "v9 thread"
@@ -88,7 +90,7 @@ def test_v9_file_with_explicit_is_archived_true_preserved(tmp_path: Path) -> Non
     _write_v9_metadata(tmp_path, data)
     meta = read_thread_metadata(tmp_path, "thread-111122223333")
     assert meta is not None
-    assert meta.schema_version == 11
+    assert meta.schema_version == 13
     assert meta.is_archived is True
 
 
@@ -96,7 +98,7 @@ def test_v9_file_with_explicit_is_archived_true_preserved(tmp_path: Path) -> Non
 
 
 def test_default_construction_is_not_archived() -> None:
-    """v11 默认构造未传 is_archived → False。"""
+    """v13 默认构造未传 is_archived → False。"""
     meta = ThreadMetadata(
         id="thread-cafebabe0001",
         name="t",
@@ -105,7 +107,7 @@ def test_default_construction_is_not_archived() -> None:
         created_at=1.0,
         updated_at=1.0,
     )
-    assert meta.schema_version == 11
+    assert meta.schema_version == 13
     assert meta.is_archived is False
 
 
@@ -127,7 +129,7 @@ def test_is_archived_true_round_trip(tmp_path: Path) -> None:
     loaded = read_thread_metadata(tmp_path, meta.id)
     assert loaded is not None
     assert loaded.is_archived is True
-    assert loaded.schema_version == 11
+    assert loaded.schema_version == 13
 
 
 def test_write_v10_then_read_back_preserves_not_archived(tmp_path: Path) -> None:
@@ -145,7 +147,7 @@ def test_write_v10_then_read_back_preserves_not_archived(tmp_path: Path) -> None
     data = json.loads(raw)
     # 落盘文件里 is_archived=False 字段必须存在（pydantic dump 默认导出）
     assert data["is_archived"] is False
-    assert data["schema_version"] == 11
+    assert data["schema_version"] == 13
     loaded = read_thread_metadata(tmp_path, meta.id)
     assert loaded is not None
     assert loaded.is_archived is False
@@ -154,13 +156,13 @@ def test_write_v10_then_read_back_preserves_not_archived(tmp_path: Path) -> None
 # ── 未知更高版本 ────────────────────────────────────────────
 
 
-def test_read_v12_returns_none(tmp_path: Path) -> None:
-    """前向兼容拒绝：v12 文件（未来版本）返回 None。"""
+def test_read_v14_returns_none(tmp_path: Path) -> None:
+    """前向兼容拒绝：v14 文件（未来版本）返回 None。"""
     path = thread_metadata_path(tmp_path, "thread-feedface0001")
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = dict(_V9_DATA)
     payload["id"] = "thread-feedface0001"
-    payload["schema_version"] = 12
+    payload["schema_version"] = 14
     payload["is_archived"] = False
     path.write_text(json.dumps(payload), encoding="utf-8")
     assert read_thread_metadata(tmp_path, "thread-feedface0001") is None

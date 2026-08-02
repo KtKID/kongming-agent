@@ -24,10 +24,9 @@ import time
 import uuid
 from typing import TYPE_CHECKING
 
+from core.contracts import IMAGE_EXT_BY_MIME, AttachmentKind, AttachmentStatus
 from hosts.web.uploads.storage import (
     AttachmentAsset,
-    AttachmentKind,
-    AttachmentStatus,
 )
 
 if TYPE_CHECKING:
@@ -39,12 +38,7 @@ __all__ = ["EXT_BY_MIME", "AssetRegistry", "compute_sha256"]
 #: 允许的 image MIME → 文件扩展名映射。
 #:
 #: §8 validation 会 import 该常量做 MIME 白名单，避免规则散落。
-EXT_BY_MIME: dict[str, str] = {
-    "image/png": ".png",
-    "image/jpeg": ".jpg",
-    "image/webp": ".webp",
-    "image/gif": ".gif",
-}
+EXT_BY_MIME = IMAGE_EXT_BY_MIME
 
 
 def compute_sha256(payload: bytes) -> str:

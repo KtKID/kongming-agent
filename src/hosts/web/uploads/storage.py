@@ -11,17 +11,22 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
+from core.contracts import AttachmentKind, AttachmentStatus
 from infrastructure.config import get_kongming_home
 
-__all__ = ["AssetStorage", "AttachmentAsset", "AttachmentKind", "AttachmentStatus"]
-
-AttachmentKind = Literal["image", "video", "file"]
-AttachmentStatus = Literal["ready", "processing", "failed"]
+__all__ = [
+    "AssetStorage",
+    "AttachmentAsset",
+    "AttachmentAssetRef",
+    "AttachmentKind",
+    "AttachmentStatus",
+]
 
 
 @dataclass(frozen=True)
@@ -47,12 +52,21 @@ class AttachmentAsset:
     created_at: float = 0.0
 
 
+@dataclass(frozen=True, order=True)
+class AttachmentAssetRef:
+    """历史消息对一个 ready 附件的稳定引用。"""
+
+    kind: AttachmentKind
+    asset_id: str
+
+
 # kind → 目录名映射。新增 video / file 时在这里加一条即可。
 _KIND_DIR: dict[AttachmentKind, str] = {
     "image": "images",
     "video": "videos",
     "file": "files",
 }
+_ASSET_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 
 
 class AssetStorage:
@@ -266,3 +280,89 @@ class AssetStorage:
                     removed += 1
             shutil.rmtree(dir_path)
         return removed
+
+    def copy_thread_assets(
+        self,
+        *,
+        source_thread_id: str,
+        target_thread_id: str,
+        references: tuple[AttachmentAssetRef, ...],
+    ) -> int:
+        """复制历史引用的 ready 附件闭包，并把元数据归属改为目标 thread。
+
+        资产 ID 保持稳定，使历史消息里的 ``preview_url`` 和 ``asset_id`` 无需
+        重写；目标 thread 获得独立文件副本，源 thread 删除后仍可继续组装多模态
+        LLM 输入。每个引用都必须同时具备一份 JSON metadata 和一份 payload；
+        缺失、重复 payload 或元数据身份不一致会中止整个 fork。
+
+        Returns:
+            复制的文件数，包含 payload 与 JSON 元数据文件。
+        """
+        copied = 0
+        for reference in sorted(set(references)):
+            if _ASSET_ID_PATTERN.fullmatch(reference.asset_id) is None:
+                raise ValueError(f"invalid attachment asset_id: {reference.asset_id!r}")
+
+            source_dir = self._thread_dir(
+                thread_id=source_thread_id,
+                kind=reference.kind,
+            )
+            metadata_source = self._metadata_path(
+                asset_id=reference.asset_id,
+                thread_id=source_thread_id,
+                kind=reference.kind,
+            )
+            if not metadata_source.is_file():
+                raise FileNotFoundError(f"asset metadata missing: {reference.asset_id}")
+            payload_sources = [
+                candidate
+                for candidate in source_dir.iterdir()
+                if candidate.is_file()
+                and candidate.name.startswith(f"{reference.asset_id}.")
+                and candidate.name != f"{reference.asset_id}.json"
+                and not candidate.name.endswith(".tmp")
+            ]
+            if not payload_sources:
+                raise FileNotFoundError(f"asset payload missing: {reference.asset_id}")
+            if len(payload_sources) > 1:
+                raise ValueError(f"asset payload is ambiguous: {reference.asset_id}")
+
+            metadata = json.loads(metadata_source.read_text(encoding="utf-8"))
+            if not isinstance(metadata, dict):
+                raise ValueError(f"asset metadata must be an object: {reference.asset_id}")
+            if metadata.get("asset_id") != reference.asset_id:
+                raise ValueError(f"asset metadata id mismatch: {reference.asset_id}")
+            if metadata.get("thread_id") != source_thread_id:
+                raise ValueError(f"asset metadata thread mismatch: {reference.asset_id}")
+            if metadata.get("kind") != reference.kind:
+                raise ValueError(f"asset metadata kind mismatch: {reference.asset_id}")
+
+            payload_source = payload_sources[0]
+            target_dir = self._thread_dir(
+                thread_id=target_thread_id,
+                kind=reference.kind,
+            )
+            target_dir.mkdir(parents=True, exist_ok=True)
+            payload_target = target_dir / payload_source.name
+            payload_tmp = payload_target.with_name(payload_target.name + ".tmp")
+            shutil.copy2(payload_source, payload_tmp)
+            os.replace(payload_tmp, payload_target)
+            copied += 1
+
+            metadata["thread_id"] = target_thread_id
+            metadata["storage_path"] = (
+                f"{self._kind_dir(reference.kind)}/{target_thread_id}/{payload_source.name}"
+            )
+            metadata_target = self._metadata_path(
+                asset_id=reference.asset_id,
+                thread_id=target_thread_id,
+                kind=reference.kind,
+            )
+            metadata_tmp = metadata_target.with_name(metadata_target.name + ".tmp")
+            metadata_tmp.write_text(
+                json.dumps(metadata, indent=2, sort_keys=True, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(metadata_tmp, metadata_target)
+            copied += 1
+        return copied

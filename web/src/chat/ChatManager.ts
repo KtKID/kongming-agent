@@ -28,10 +28,11 @@ import type {
   RawFrameEnvelope,
   NetworkHandle,
   ChatProviderKind,
+  ChatEvent,
 } from "@/chat/types";
 import { getChatProvider } from "@/chat/providers";
-import { logChat } from "@/chat/logger";
-import { markThreadRunning } from "@/chat/runtimeWiring";
+import { flushChatDeltaLog, logChat, logChatDelta } from "@/chat/logger";
+import { useThreadDispatchStore } from "@/stores/threadDispatch";
 
 export interface ChatManagerDeps {
   /** 取指定频道 + thread 的发送句柄；真实实现包装现有传输层（#5 注入）。 */
@@ -66,35 +67,37 @@ export class ChatManager implements ChatManagerApi {
       resolvedThreadId: threadId,
       created: threadId !== request.provider.threadId,
     });
-    // 2) 前置入态：预设 thread-status phase=responding，让 isRunning 立即 true。
-    //    chat-running-state-unify #6：三频道一处实现，解决「发送→LLM 回复前
-    //    无法打断」。后端真实 phase（responding→complete/error/idle）会幂等覆盖。
-    markThreadRunning(threadId);
-    logChat("send", "sendMessage.markRunning", { provider: kind, threadId });
-    // 2.5) 用户消息前置入态：往时间线灌一条 user_message 事件，让用户气泡立即
-    //      上屏（取代视图层旧的 appendUser 乐观写入）。turnId 用时间戳保唯一，
-    //      避免与 assistant run_id turn / 其它 user turn 撞键；store 的
-    //      user_message 分支会把 text + attachments 落成 record（缩略图零回归）。
-    const { text, attachments } = request.common;
-    this.deps.timelineFor(threadId).applyEvent({
-      kind: "user_message",
-      provider: kind,
-      threadId,
-      turnId: `${threadId}-turn-${Date.now()}`,
-      createdAt: Date.now(),
-      payload: { text, attachments },
-    });
-    logChat("send", "sendMessage.seedUser", { provider: kind, threadId });
-    // 3) threadId 可能从 pending 占位变成真实 id，回填到 provider 选项后再分发。
+    // 2) threadId 可能从 pending 占位变成真实 id，回填到 provider 选项后再分发。
     const resolved: SendRequest = {
       ...request,
       provider: { ...request.provider, threadId },
     };
-    // 4) provider 翻译成频道 wire frame 并发送。
+    // 3) transport dispatch 是短暂交互态，和服务端 running 投影分开保存。
     const handle = this.deps.resolveHandle(kind, threadId);
-    // 审计：实际下发给 provider 的完整请求（provider 内部再翻成 wire frame）。
     logChat("send", "sendMessage.out", { provider: kind, threadId, request: resolved });
-    await this.provider(kind).send(handle, resolved);
+    useThreadDispatchStore.getState().begin(threadId);
+    try {
+      await this.provider(kind).send(handle, resolved);
+      useThreadDispatchStore.getState().succeed(threadId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      useThreadDispatchStore.getState().fail(threadId, message);
+      throw err;
+    }
+
+    // 4) 非 generic transport 确认发送后再写用户消息，避免失败留下虚假气泡。
+    if (kind !== "generic") {
+      const { text, attachments, references } = request.common;
+      this.deps.timelineFor(threadId).applyEvent({
+        kind: "user_message",
+        provider: kind,
+        threadId,
+        turnId: `${threadId}-turn-${Date.now()}`,
+        createdAt: Date.now(),
+        payload: { text, attachments, references },
+      });
+      logChat("send", "sendMessage.seedUser", { provider: kind, threadId });
+    }
   }
 
   async loadHistory(request: HistoryLoadRequest): Promise<void> {
@@ -110,21 +113,38 @@ export class ChatManager implements ChatManagerApi {
   }
 
   ingestFrame(envelope: RawFrameEnvelope): void {
-    // 审计：入站原始帧（完整）。
-    logChat("recv", "ingestFrame.in", {
-      channel: envelope.channel,
-      threadId: envelope.threadId,
-      connectionId: envelope.connectionId,
-      frame: envelope.frame,
-    });
     const events = this.provider(envelope.channel).mapInboundFrame(envelope);
-    // 审计：翻译出的统一事件（完整），count=0 也记录，便于发现「帧没被翻译」的盲区。
-    logChat("recv", "ingestFrame.events", {
-      channel: envelope.channel,
-      count: events.length,
-      events,
-    });
+    const deltaEvents = events.filter(isAssistantDelta);
+    const normalEvents = events.filter((event) => !isAssistantDelta(event));
+    if (deltaEvents.length === 0) {
+      logChat("recv", "ingestFrame.in", {
+        channel: envelope.channel,
+        threadId: envelope.threadId,
+        connectionId: envelope.connectionId,
+        frame: envelope.frame,
+      });
+    } else {
+      // 原始 delta frame 也会携带正文。只进入 turn 级摘要器，避免每帧产生日志对象。
+      for (const event of deltaEvents) {
+        logChatDelta({
+          threadId: event.threadId,
+          runId: event.runId,
+          turnId: event.turnId,
+          content: typeof event.payload.delta === "string" ? event.payload.delta : undefined,
+          reasoning: typeof event.payload.reasoningDelta === "string" ? event.payload.reasoningDelta : undefined,
+        });
+      }
+    }
+    // 非 delta event 保留完整结构化审计；delta 已由摘要器单独处理。
+    if (normalEvents.length > 0 || events.length === 0) {
+      logChat("recv", "ingestFrame.events", {
+        channel: envelope.channel,
+        count: events.length,
+        events: normalEvents,
+      });
+    }
     for (const event of events) {
+      flushDeltaLogAtBoundary(event);
       this.deps.timelineFor(event.threadId).applyEvent(event);
     }
   }
@@ -152,5 +172,19 @@ export class ChatManager implements ChatManagerApi {
     const status = await this.provider(request.provider).checkSessionStatus(request);
     logChat("result", "checkSessionStatus.out", { provider: request.provider, status });
     return status;
+  }
+}
+
+function isAssistantDelta(event: ChatEvent): boolean {
+  return event.kind === "assistant_message_delta";
+}
+
+function flushDeltaLogAtBoundary(event: ChatEvent): void {
+  if (event.kind === "assistant_message_completed" || event.kind === "turn_completed") {
+    flushChatDeltaLog(event.threadId, event.runId, event.turnId, "terminal");
+    return;
+  }
+  if (event.kind === "error" && event.payload.errorCode === "llm_error") {
+    flushChatDeltaLog(event.threadId, event.runId, event.turnId, "stream-error");
   }
 }

@@ -3,28 +3,42 @@
  */
 
 import { Loader2 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { cn } from "@/lib/utils";
 import { useSchedulerStore } from "../store";
-import { selectSelectedRuns } from "../selectors";
+import { selectSelectedRuns, selectSelectedTask } from "../selectors";
 
 const runStatusLabel: Record<string, string> = {
   running: "运行中",
   success: "成功",
+  completed: "成功",
   failed: "失败",
   silent: "静默",
+  inactivity_timeout: "超时",
+  abandoned: "已中断",
   cancelled: "已取消",
 };
 
 const runStatusColor: Record<string, string> = {
   running: "text-blue-600",
   success: "text-green-600",
+  completed: "text-green-600",
   failed: "text-red-600",
   silent: "text-gray-500",
+  inactivity_timeout: "text-amber-600",
+  abandoned: "text-amber-600",
   cancelled: "text-gray-500",
 };
 
 export function SchedulerRunsPanel() {
+  const navigate = useNavigate();
+  const task = useSchedulerStore(selectSelectedTask);
   const runs = useSchedulerStore(selectSelectedRuns);
   const isLoading = useSchedulerStore((s) => s.isLoadingRuns);
+  const selectedRunId = useSchedulerStore((s) =>
+    task?.taskId ? s.selectedRunIdByTaskId[task.taskId] : null,
+  );
+  const selectRun = useSchedulerStore((s) => s.selectRun);
 
   if (isLoading) {
     return (
@@ -45,9 +59,27 @@ export function SchedulerRunsPanel() {
   return (
     <div className="flex flex-col gap-1.5">
       {runs.map((run) => (
-        <div
+        <button
+          type="button"
           key={run.runId}
-          className="flex items-center gap-2 rounded-md border border-border px-2.5 py-1.5 text-xs"
+          className={cn(
+            "flex w-full items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors",
+            selectedRunId === run.runId
+              ? "border-primary/50 bg-primary/10"
+              : "border-border hover:bg-muted/40",
+          )}
+          onClick={() => {
+            const threadId = run.threadId || task?.threadId || "";
+            selectRun(run.taskId, run.runId);
+            if (!threadId) return;
+            const params = new URLSearchParams({
+              taskId: run.taskId,
+              runId: run.runId,
+            });
+            navigate(`/chat/${threadId}?${params.toString()}`);
+          }}
+          aria-pressed={selectedRunId === run.runId}
+          title="打开本次执行"
         >
           <span className={`font-medium ${runStatusColor[run.status] ?? ""}`}>
             {runStatusLabel[run.status] ?? run.status}
@@ -60,7 +92,7 @@ export function SchedulerRunsPanel() {
               {run.finalMessageExcerpt}
             </span>
           )}
-        </div>
+        </button>
       ))}
     </div>
   );

@@ -30,10 +30,9 @@ def _write_config(tmp_path: Path, body: str = "") -> Path:
 
 
 def test_mcp_and_web_search_defaults(tmp_path: Path) -> None:
-    """默认配置提供关闭的 MCP 与可装配的通用 Web Search 候选。"""
+    """默认配置提供空 MCP server 列表与可装配的通用 Web Search 候选。"""
     cfg = load_config(_write_config(tmp_path), load_env_file=False)
 
-    assert cfg.mcp.enabled is False
     assert cfg.mcp.servers == ()
     assert cfg.web_search.enabled is True
     assert cfg.web_search.provider_name == "minimax_web_search"
@@ -49,7 +48,6 @@ def test_mcp_and_web_search_yaml_parsing(tmp_path: Path) -> None:
             tmp_path,
             """
 mcp:
-  enabled: true
   servers:
     - server_id: minimax
       enabled: true
@@ -80,7 +78,6 @@ web_search:
         load_env_file=False,
     )
 
-    assert cfg.mcp.enabled is True
     assert len(cfg.mcp.servers) == 1
     server = cfg.mcp.servers[0]
     assert server.server_id == "minimax"
@@ -104,12 +101,10 @@ def test_mcp_and_web_search_env_overrides(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """env 白名单覆盖 MCP 总开关和 Web Search 标量 / tuple 字段。"""
+    """env 白名单覆盖 Web Search 标量 / tuple 字段。"""
     config_path = _write_config(
         tmp_path,
         """
-mcp:
-  enabled: false
 web_search:
   enabled: true
   provider_name: yaml_provider
@@ -119,7 +114,6 @@ web_search:
   max_results: 3
 """,
     )
-    monkeypatch.setenv("KONGMING_MCP_ENABLED", "true")
     monkeypatch.setenv("KONGMING_WEB_SEARCH_ENABLED", "false")
     monkeypatch.setenv("KONGMING_WEB_SEARCH_PROVIDER_NAME", "env_provider")
     monkeypatch.setenv("KONGMING_WEB_SEARCH_SEARCH_TOOL_NAME", "env_search")
@@ -128,7 +122,7 @@ web_search:
 
     cfg = load_config(config_path, load_env_file=False)
 
-    assert cfg.mcp.enabled is True
+    assert cfg.mcp.servers == ()
     assert cfg.web_search.enabled is False
     assert cfg.web_search.provider_name == "env_provider"
     assert cfg.web_search.search_tool_name == "env_search"
@@ -142,7 +136,6 @@ def test_mcp_server_rejects_illegal_server_id(tmp_path: Path) -> None:
         tmp_path,
         """
 mcp:
-  enabled: true
   servers:
     - server_id: minimax/web
       command: uvx
@@ -157,7 +150,6 @@ def test_schema_exposes_mcp_and_web_search_field_metas() -> None:
     """schema API 暴露 MCP 与 Web Search 配置字段元信息。"""
     listed_metas = {meta.path: meta for meta in list_field_metas()}
     expectations = {
-        "mcp.enabled": ("bool", True, True),
         "mcp.servers": ("list", False, True),
         "web_search.enabled": ("bool", True, True),
         "web_search.provider_name": ("string", True, True),

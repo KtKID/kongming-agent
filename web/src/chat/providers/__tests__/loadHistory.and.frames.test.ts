@@ -10,7 +10,6 @@
  *
  * #5 GenericChatProvider.mapInboundFrame 帧覆盖补全：
  *   - usage → status 事件（noticeKey usage:{turn}，携带 ThreadUsage）
- *   - approval.request → status 事件（noticeKey approval:{call_id}，内联横幅 record）
  *   - run.interrupted → turn_completed 事件（复位 activeStreamingTurnId / streaming=false）
  *   - cell.evicted → toast-only 副作用，不进时间线（返回 []）
  */
@@ -18,10 +17,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type {
   NormalizedMessage,
   UsageFrame,
-  ApprovalRequestFrame,
   RunInterruptedFrame,
   CellEvictedFrame,
   ClaudeUsage,
+  SystemNoticeFrame,
 } from "@/protocol";
 import type { HistoryLoadRequest, RawFrameEnvelope } from "@/chat/types";
 
@@ -137,6 +136,42 @@ describe("GenericChatProvider.loadHistory（#4）", () => {
 describe("GenericChatProvider.mapInboundFrame 帧覆盖（#5）", () => {
   const p = getChatProvider("generic");
 
+  it("system.notice 完整保留进化处理入口所需字段并归一完成状态", () => {
+    const frame: SystemNoticeFrame = {
+      frame_type: "system.notice",
+      timestamp_ms: 40,
+      notice_key: "self_evolution.review",
+      source: "self_evolution",
+      status: "completed",
+      title: "进化复盘",
+      message: "发现 2 条进化养料",
+      details: {
+        review_id: "evo-review:run-thread-demo-20",
+        nutrients_written: 2,
+      },
+      icon: "success",
+      run_id: "run-thread-demo-20",
+    };
+
+    const events = p.mapInboundFrame(genericEnv(frame));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: "status", provider: "generic" });
+    expect(events[0].payload).toMatchObject({
+      noticeKey: "self_evolution.review",
+      source: "self_evolution",
+      status: "success",
+      title: "进化复盘",
+      message: "发现 2 条进化养料",
+      details: {
+        review_id: "evo-review:run-thread-demo-20",
+        nutrients_written: 2,
+      },
+      icon: "success",
+    });
+    expect(events[0].runId).toBe("run-thread-demo-20");
+  });
+
   it("usage 帧 → status 事件（noticeKey usage:{turn}，携带 ThreadUsage）", () => {
     const usage: ClaudeUsage = {
       provider: "claude",
@@ -161,34 +196,12 @@ describe("GenericChatProvider.mapInboundFrame 帧覆盖（#5）", () => {
     expect(events[0]).toMatchObject({ kind: "status", provider: "generic" });
     expect(events[0].payload.noticeKey).toBe("usage:2");
     expect(events[0].payload.usage).toEqual(usage);
-    // turnId 优先 run_id
-    expect(events[0].turnId).toBe("r1");
+    expect(events[0].turnId).toBe("r1:turn-2");
+    expect(events[0].runId).toBe("r1");
+    expect(events[0].turn).toBe(2);
   });
 
-  it("approval.request 帧 → status 事件（内联横幅 record，带 tool_name/arguments）", () => {
-    const frame: ApprovalRequestFrame = {
-      frame_type: "approval.request",
-      timestamp_ms: 60,
-      call_id: "call-1",
-      tool_name: "Shell",
-      arguments: { cmd: "ls" },
-      reason: "需要确认",
-      turn: 3,
-      policy_hint: "elevated",
-      confirm_token: "deadbeef",
-    };
-    const events = p.mapInboundFrame(genericEnv(frame));
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ kind: "status", provider: "generic" });
-    expect(events[0].payload.noticeKey).toBe("approval:call-1");
-    expect(events[0].payload.callId).toBe("call-1");
-    expect(events[0].payload.toolName).toBe("Shell");
-    expect(events[0].payload.arguments).toEqual({ cmd: "ls" });
-    expect(events[0].payload.policyHint).toBe("elevated");
-    expect(events[0].payload.confirmToken).toBe("deadbeef");
-  });
-
-  it("run.interrupted 帧 → turn_completed 事件（turnId=run_id，复位 streaming）", () => {
+  it("run.interrupted 帧 → turn_completed 事件（turnId=run+turn，复位 streaming）", () => {
     const frame: RunInterruptedFrame = {
       frame_type: "run.interrupted",
       timestamp_ms: 70,
@@ -200,7 +213,9 @@ describe("GenericChatProvider.mapInboundFrame 帧覆盖（#5）", () => {
     const events = p.mapInboundFrame(genericEnv(frame));
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ kind: "turn_completed", provider: "generic" });
-    expect(events[0].turnId).toBe("r5");
+    expect(events[0].turnId).toBe("r5:turn-4");
+    expect(events[0].runId).toBe("r5");
+    expect(events[0].turn).toBe(4);
     expect(events[0].payload.cancelled).toBe(true);
     expect(events[0].payload.cancelReason).toBe("user_interrupt");
   });

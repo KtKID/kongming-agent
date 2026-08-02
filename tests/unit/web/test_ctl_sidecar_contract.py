@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 from pathlib import Path
 
 from click.testing import CliRunner
+from dotenv import dotenv_values
 
 from hosts.web import ctl
 
@@ -17,57 +17,104 @@ def test_main_exports_click_cli() -> None:
     assert callable(ctl.main)
 
 
-def test_repo_dotenv_load_respects_skip_env(monkeypatch) -> None:
-    """pre-push 隔离环境设置 KONGMING_SKIP_DOTENV 时，ctl 不读取仓库 .env。"""
-    calls: list[Path] = []
-    monkeypatch.setenv("KONGMING_SKIP_DOTENV", "T")
-    monkeypatch.setattr(ctl, "load_dotenv", lambda path: calls.append(path))
-
-    ctl._load_repo_dotenv()
-
-    assert calls == []
-
-
-def test_repo_dotenv_load_skips_missing_env(
-    monkeypatch,
+def test_repo_entrypoint_env_loads_only_home_and_config(
     tmp_path: Path,
-    caplog,
-) -> None:
-    """仓库 .env 不存在时记录 debug，输入空目录，输出不调用 dotenv。"""
-    calls: list[Path] = []
-    monkeypatch.delenv("KONGMING_SKIP_DOTENV", raising=False)
-    monkeypatch.setattr(ctl, "_REPO_ROOT", tmp_path)
-    monkeypatch.setattr(ctl, "load_dotenv", lambda path: calls.append(path))
-    caplog.set_level(logging.DEBUG, logger=ctl.__name__)
-
-    ctl._load_repo_dotenv()
-
-    assert calls == []
-    assert "repo .env not present" in caplog.text
-
-
-def test_repo_dotenv_load_warns_on_os_error(
     monkeypatch,
-    tmp_path: Path,
-    caplog,
 ) -> None:
-    """dotenv 读取抛 OSError 时记录 warning，输入不可读 fake，输出不抛。"""
+    """仓库 `.env` 只用于引导 KONGMING_HOME / KONGMING_CONFIG。"""
     env_path = tmp_path / ".env"
-    env_path.write_text("KONGMING_WEB_PORT=1987\n", encoding="utf-8")
-    monkeypatch.delenv("KONGMING_SKIP_DOTENV", raising=False)
+    env_path.write_text(
+        "KONGMING_HOME=/tmp/kongming-home\n"
+        "KONGMING_CONFIG=/tmp/kongming.yaml\n"
+        "KONGMING_WEB_PORT=1987\n"
+        "GLM_API_KEY=glm-live\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(ctl, "_REPO_ROOT", tmp_path)
+    monkeypatch.delenv("KONGMING_SKIP_DOTENV", raising=False)
+    monkeypatch.delenv("KONGMING_HOME", raising=False)
+    monkeypatch.delenv("KONGMING_CONFIG", raising=False)
+    monkeypatch.delenv("KONGMING_WEB_PORT", raising=False)
+    monkeypatch.delenv("GLM_API_KEY", raising=False)
 
-    def _raise_os_error(path: Path) -> bool:
-        assert path == env_path
-        raise OSError("permission denied")
+    ctl._load_repo_entrypoint_env()
 
-    monkeypatch.setattr(ctl, "load_dotenv", _raise_os_error)
-    caplog.set_level(logging.WARNING, logger=ctl.__name__)
+    assert os.environ["KONGMING_HOME"] == "/tmp/kongming-home"
+    assert os.environ["KONGMING_CONFIG"] == "/tmp/kongming.yaml"
+    assert "KONGMING_WEB_PORT" not in os.environ
+    assert "GLM_API_KEY" not in os.environ
 
-    ctl._load_repo_dotenv()
 
-    assert "failed to load repo .env" in caplog.text
-    assert "permission denied" in caplog.text
+def test_sync_repo_dotenv_to_home_merges_runtime_values(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """仓库 `.env` 的运行时变量合并到 home `.env`，已有 home 值保持优先。"""
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    repo.mkdir()
+    home.mkdir()
+    (repo / ".env").write_text(
+        "KONGMING_HOME=/tmp/entry-home\n"
+        "KONGMING_CONFIG=/tmp/entry.yaml\n"
+        "KONGMING_WEB_HOST=0.0.0.0\n"
+        "KONGMING_WEB_PORT=62000\n"
+        "KONGMING_WEB_PASSWORD='123456'\n"
+        "GLM_API_KEY=glm-live\n"
+        "key=lowercase-ignored\n",
+        encoding="utf-8",
+    )
+    (home / ".env").write_text("KONGMING_WEB_PORT=49152\n", encoding="utf-8")
+    monkeypatch.setattr(ctl, "_REPO_ROOT", repo)
+    monkeypatch.delenv("KONGMING_SKIP_DOTENV", raising=False)
+    monkeypatch.delenv("KONGMING_WEB_HOST", raising=False)
+    monkeypatch.delenv("KONGMING_WEB_PORT", raising=False)
+    monkeypatch.delenv("KONGMING_WEB_PASSWORD", raising=False)
+    monkeypatch.delenv("GLM_API_KEY", raising=False)
+
+    updated = ctl._sync_repo_dotenv_to_home(home)
+
+    assert updated == ["KONGMING_WEB_HOST", "KONGMING_WEB_PASSWORD", "GLM_API_KEY"]
+    values = dotenv_values(home / ".env")
+    assert values["KONGMING_WEB_HOST"] == "0.0.0.0"
+    assert values["KONGMING_WEB_PORT"] == "49152"
+    assert values["KONGMING_WEB_PASSWORD"] == "123456"
+    assert values["GLM_API_KEY"] == "glm-live"
+    assert "KONGMING_HOME" not in values
+    assert "KONGMING_CONFIG" not in values
+    assert "key" not in values
+
+
+def test_repo_entrypoint_env_keeps_real_env(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """真实进程入口 env 优先于仓库 `.env`。"""
+    env_path = tmp_path / ".env"
+    env_path.write_text("KONGMING_HOME=/tmp/from-file\n", encoding="utf-8")
+    monkeypatch.setattr(ctl, "_REPO_ROOT", tmp_path)
+    monkeypatch.delenv("KONGMING_SKIP_DOTENV", raising=False)
+    monkeypatch.setenv("KONGMING_HOME", "/tmp/from-env")
+
+    ctl._load_repo_entrypoint_env()
+
+    assert os.environ["KONGMING_HOME"] == "/tmp/from-env"
+
+
+def test_repo_entrypoint_env_respects_skip(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """KONGMING_SKIP_DOTENV 禁用仓库入口 env 引导。"""
+    env_path = tmp_path / ".env"
+    env_path.write_text("KONGMING_HOME=/tmp/from-file\n", encoding="utf-8")
+    monkeypatch.setattr(ctl, "_REPO_ROOT", tmp_path)
+    monkeypatch.setenv("KONGMING_SKIP_DOTENV", "1")
+    monkeypatch.delenv("KONGMING_HOME", raising=False)
+
+    ctl._load_repo_entrypoint_env()
+
+    assert "KONGMING_HOME" not in os.environ
 
 
 def test_status_accepts_home_and_reads_server_json(tmp_path: Path) -> None:
@@ -128,6 +175,48 @@ web:
 
     assert result.exit_code == 0, f"exception={result.exception!r}\noutput={result.output}"
     assert "port 49153" in result.output
+
+
+def test_configured_host_port_ignore_stale_server_json(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """start 使用配置态 host/port；server.json 只代表运行态。"""
+    home = tmp_path / "kongming-home"
+    server_json = home / "web" / "server.json"
+    config = home / "setting.yaml"
+    server_json.parent.mkdir(parents=True)
+    server_json.write_text(
+        json.dumps({"host": "127.0.0.1", "port": 49150, "pid": os.getpid()}),
+        encoding="utf-8",
+    )
+    config.write_text(
+        """
+model:
+  name: fake
+  base_url: http://127.0.0.1:1234/v1
+  api_key: ""
+web:
+  enabled: true
+  host: "127.0.0.1"
+  port: 49151
+""",
+        encoding="utf-8",
+    )
+    (home / ".env").write_text(
+        "KONGMING_WEB_HOST=0.0.0.0\nKONGMING_WEB_PORT=49152\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("KONGMING_CONFIG", raising=False)
+    monkeypatch.delenv("KONGMING_WEB_HOST", raising=False)
+    monkeypatch.delenv("KONGMING_WEB_PORT", raising=False)
+    monkeypatch.delenv("KONGMING_SKIP_DOTENV", raising=False)
+    monkeypatch.setenv("KONGMING_HOME", str(home))
+
+    assert ctl._read_port(home) == 49150
+    assert ctl._read_host(home) == "127.0.0.1"
+    assert ctl._read_configured_port(home) == 49152
+    assert ctl._read_configured_host(home) == "0.0.0.0"
 
 
 def test_status_reads_home_root_setting_yaml(tmp_path: Path, monkeypatch) -> None:

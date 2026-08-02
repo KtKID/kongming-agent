@@ -60,20 +60,27 @@ def _source_to_dto(src: ResolvedLogSource) -> LogSourceDTO:
 
 
 @router.get("/sources", response_model=list[LogSourceDTO])
-async def list_log_sources(request: Request) -> list[LogSourceDTO]:
+async def list_log_sources(
+    request: Request,
+    thread_id: str | None = Query(None, description="当前 thread id，用于加载 Session 日志"),
+) -> list[LogSourceDTO]:
     """List all registered log sources with live file-system metadata."""
     registry = request.app.state.log_source_registry
-    sources = registry.list_sources()
+    try:
+        sources = registry.list_sources(thread_id=thread_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return [_source_to_dto(s) for s in sources]
 
 
 @router.get("/read", response_model=LogReadResponseDTO)
 async def read_log(
+    request: Request,
     type: str = Query(..., description="日志类型"),
     tail_lines: int = Query(500, ge=1, le=5000),
     max_bytes: int = Query(524288, ge=1024, le=5242880),
     query: str = Query("", max_length=200),
-    request: Request = None,  # type: ignore[assignment]
+    thread_id: str | None = Query(None, description="当前 thread id，用于读取 Session 日志"),
 ) -> LogReadResponseDTO:
     """Tail-read a single log source with optional filtering.
 
@@ -82,7 +89,7 @@ async def read_log(
     """
     service: LogReadService = request.app.state.log_read_service
     try:
-        return service.read_tail(type, tail_lines, max_bytes, query)
+        return service.read_tail(type, tail_lines, max_bytes, query, thread_id=thread_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
