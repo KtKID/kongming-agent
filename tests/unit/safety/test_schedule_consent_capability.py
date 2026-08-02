@@ -1,235 +1,245 @@
-"""unit：v0.2 agent-cron-module 模块 6 —— ``schedule`` capability 默认规则。
+"""验证 ``schedule`` 工具遵循 safety v0.6 的 thread permissions 审批链。
 
-覆盖 :mod:`safety.approval.default_rules` 新增的 :data:`DEFAULT_CONSENT_THEN_TRUST_TOOLS`
-锚点常量与 ``schedule`` tool 走 ConsentResolver 的 standard ask 路径：
-
-1. ``DEFAULT_CONSENT_THEN_TRUST_TOOLS`` 含 ``"memory"`` 与 ``"schedule"``（锚点）
-2. ``schedule`` tool 调用走 ConsentResolver fallback → severity=standard
-3. ``schedule`` tool 走 standard ask 不携带 confirm_token
-4. ``schedule`` tool 走 standard ask 时 enriched request 含 policy_hint=standard
-5. SafetyGatedApproval：``schedule`` tool 经 explicit_consent 路径返回
-   ``grant_scope=session`` 时写 ``Grant(capability="tool:schedule")`` 到 GrantStore，
-   下一轮 TrustResolver 通配查询命中 → silent_allow（"首次 consent → 后续 trust"
-   闭环回归）
-
-不破坏既有 capability 锚点：
-
-6. ``DEFAULT_HARD_DENY_COMMANDS`` / ``DEFAULT_APPROVAL_REQUIRED_COMMANDS`` /
-   ``DEFAULT_SENSITIVE_PATHS`` / ``DEFAULT_SKILL_CALL_RULES`` / 现有
-   canonical consent-then-trust 清单保持稳定（回归锚点）
+本文件通过真实 ``SafetyDecisionEngine``、``PermissionsManager`` 和
+``ApprovalManager`` 覆盖 default:ask、remember 写回、同 thread 静默命中与跨
+thread 隔离。人工选择由测试驱动，安全决策、规则生成和持久化均走生产实现。
 """
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
-from core.contracts import ApprovalDecision, ApprovalRequest
-from infrastructure.config.models import ApprovalConfig, Config, ModelSelectionConfig
-from safety.approval.default_rules import (
-    DEFAULT_APPROVAL_REQUIRED_COMMANDS,
-    DEFAULT_CONSENT_THEN_TRUST_TOOLS,
-    DEFAULT_HARD_DENY_COMMANDS,
-    DEFAULT_SENSITIVE_PATHS,
-    DEFAULT_SKILL_CALL_RULES,
-)
-from safety.approval.types import (
-    ApprovalMetadataKeys,
-    BoundaryDecision,
-    BoundaryKind,
-    BoundaryZone,
-    RuntimeBoundaryContext,
-)
-from safety.guards.consent import ConsentResolver
-
-# ---------------------------------------------------------------------------
-# Fixtures / helpers（参考 test_safety_consent_resolver.py 风格）
-# ---------------------------------------------------------------------------
+from core.contracts import ApprovalDecision, ApprovalOutcome, ApprovalProvider, ApprovalRequest
+from infrastructure.config.models import Config, ModelSelectionConfig
+from safety.approval.chain import SafetyGatedApproval, build_safety_chain
+from safety.approval.events import PendingApprovalView
+from safety.approval.manager import ApprovalManager, make_manager_prompt_fn
+from safety.approval.permissions_manager import PermissionsManager
+from safety.approval.rule_models import PermissionRuleRecord
+from safety.approval.types import ApprovalMetadataKeys
+from safety.auto_approval.disposition import ApprovalDispositionMode
+from safety.guards.danger import DangerGuard
+from tools.runtime.approval import InteractiveApproval
 
 
-def _cfg() -> Config:
-    return Config(
-        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
-        approval=ApprovalConfig(mode="interactive"),
-    )
+@dataclass
+class _RecordingApproval:
+    """记录进入人工审批终点的请求并返回固定决定。"""
 
-
-def _runtime() -> RuntimeBoundaryContext:
-    return RuntimeBoundaryContext(boundary_kind=BoundaryKind.HOST)
-
-
-def _approval_zone() -> BoundaryDecision:
-    return BoundaryDecision(zone=BoundaryZone.APPROVAL, matched_rule=None, reason="approval")
-
-
-def _req(
-    *,
-    tool_name: str,
-    arguments: dict[str, Any],
-    call_id: str = "call-sched-1",
-    metadata: dict[str, Any] | None = None,
-) -> ApprovalRequest:
-    return ApprovalRequest(
-        run_id="r1",
-        session_id="s1",
-        turn=1,
-        call_id=call_id,
-        tool_name=tool_name,
-        arguments=arguments,
-        metadata=dict(metadata or {}),
-    )
-
-
-class FakeApproval:
-    """模拟 InteractiveApproval：记录 enriched request 并按预设返回。"""
-
-    def __init__(
-        self,
-        *,
-        outcome: str = "approved",
-        downstream_metadata: dict[str, Any] | None = None,
-    ) -> None:
-        self._outcome = outcome
-        self._downstream_metadata: dict[str, Any] = dict(downstream_metadata or {})
-        self.decided_requests: list[ApprovalRequest] = []
+    outcome: ApprovalOutcome = "approved"
+    requests: list[ApprovalRequest] = field(default_factory=list)
 
     async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
-        self.decided_requests.append(request)
-        return ApprovalDecision(
-            outcome=self._outcome,  # type: ignore[arg-type]
-            reason="fake decided",
-            metadata=dict(self._downstream_metadata),
+        """保存请求并返回测试指定的用户决定。"""
+        self.requests.append(request)
+        return ApprovalDecision(outcome=self.outcome)
+
+
+@dataclass
+class _ApprovalSink:
+    """记录 ApprovalManager 发布和移除的 pending 审批。"""
+
+    pending: list[PendingApprovalView] = field(default_factory=list)
+    removed: list[tuple[str, str]] = field(default_factory=list)
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def emit_approval_required(self, *, pending: PendingApprovalView) -> None:
+        """保存新 pending 并唤醒等待中的测试。"""
+        self.pending.append(pending)
+        self.ready.set()
+
+    async def emit_approval_removed(self, *, request_id: str, reason: str) -> None:
+        """记录已完成 pending 的移除原因。"""
+        self.removed.append((request_id, reason))
+
+
+@dataclass(frozen=True)
+class _UserModeResolver:
+    """让本测试的 default:ask 固定进入用户审批模式。"""
+
+    def mode_for(self, cwd: str) -> ApprovalDispositionMode:
+        """返回 user 模式；cwd 仅用于满足生产门户合同。"""
+        return ApprovalDispositionMode.USER
+
+
+def _config() -> Config:
+    """构造不访问外部模型的最小配置。"""
+    return Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
+
+
+def _request(*, thread_id: str, call_id: str, cwd: Path) -> ApprovalRequest:
+    """构造携带顶层 thread 与 cwd 的 schedule 请求。"""
+    return ApprovalRequest(
+        run_id="run-schedule-v06",
+        session_id="child-session",
+        turn=1,
+        call_id=call_id,
+        tool_name="schedule",
+        arguments={
+            "action": "create",
+            "name": "daily-report",
+            "schedule": "every 1d",
+        },
+        metadata={"cwd": cwd.resolve().as_posix(), "thread_id": thread_id},
+    )
+
+
+def _build_chain(
+    *,
+    kongming_home: Path,
+    permissions: PermissionsManager,
+    interactive_approval: ApprovalProvider,
+) -> SafetyGatedApproval:
+    """用真实 v0.6 owner 装配 schedule 测试链。"""
+    return build_safety_chain(
+        _config(),
+        interactive_approval=interactive_approval,
+        permissions_manager=permissions,
+        danger_guard=DangerGuard(kongming_home=kongming_home),
+        disposition_resolver=_UserModeResolver(),
+    )
+
+
+def _remember_decision(pending: PendingApprovalView) -> dict[str, object]:
+    """把服务端冻结候选原样回传为允许并记住决定。"""
+    rule = pending.remember_rule
+    assert rule is not None
+    return {
+        "allow": True,
+        "remember": True,
+        "rememberRule": {
+            "expression": rule.expression,
+            "displayText": rule.display_text,
+            "scopeCwd": rule.scope_cwd,
+        },
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_schedule_unmatched_request_uses_v06_default_ask(tmp_path: Path) -> None:
+    """schedule 未命中本子时冻结当前 thread 的 exact-tool 记忆候选。"""
+    permissions = PermissionsManager(tmp_path)
+    interactive = _RecordingApproval()
+    chain = _build_chain(
+        kongming_home=tmp_path,
+        permissions=permissions,
+        interactive_approval=interactive,
+    )
+
+    decision = await chain.decide(
+        _request(thread_id="thread-a", call_id="call-schedule-1", cwd=tmp_path)
+    )
+
+    assert decision.outcome == "approved"
+    assert decision.metadata[ApprovalMetadataKeys.DECISION_CLASS] == "explicit_consent"
+    assert decision.metadata[ApprovalMetadataKeys.DECISION_SOURCE] == "user_approval"
+    assert decision.metadata[ApprovalMetadataKeys.MATCHED_RULE] == "default:ask"
+    assert len(interactive.requests) == 1
+    metadata = interactive.requests[0].metadata
+    assert metadata[ApprovalMetadataKeys.REMEMBER_ALLOWED] is True
+    assert metadata[ApprovalMetadataKeys.REMEMBER_THREAD_ID] == "thread-a"
+    assert metadata[ApprovalMetadataKeys.REMEMBER_REVISION] == 0
+    assert metadata[ApprovalMetadataKeys.REMEMBER_RULE] == {
+        "expression": "schedule",
+        "displayText": "记住工具 schedule 的选择",
+        "scopeCwd": None,
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_schedule_remember_allow_is_scoped_to_current_thread(tmp_path: Path) -> None:
+    """真实 Manager 写回后仅当前 thread 静默命中 schedule。"""
+    permissions = PermissionsManager(tmp_path)
+    sink = _ApprovalSink()
+    manager = ApprovalManager(
+        permissions_manager=permissions,
+        event_sinks=[sink],
+        default_timeout_ms=10_000,
+    )
+    tasks: list[asyncio.Task[ApprovalDecision]] = []
+
+    try:
+        prompt_a = make_manager_prompt_fn(
+            manager,
+            "thread-a",
+            default_cwd=tmp_path.resolve().as_posix(),
+        )
+        chain_a = _build_chain(
+            kongming_home=tmp_path,
+            permissions=permissions,
+            interactive_approval=InteractiveApproval(prompt_a),
         )
 
+        sink.ready.clear()
+        first_task = asyncio.create_task(
+            chain_a.decide(_request(thread_id="thread-a", call_id="call-schedule-1", cwd=tmp_path))
+        )
+        tasks.append(first_task)
+        await asyncio.wait_for(sink.ready.wait(), timeout=1)
+        first_pending = sink.pending[-1]
 
-def _make_resolver(
-    *,
-    fake: FakeApproval | None = None,
-) -> tuple[ConsentResolver, FakeApproval]:
-    fake = fake or FakeApproval()
-    resolver = ConsentResolver.from_config(_cfg(), interactive_approval=fake)
-    return resolver, fake
+        assert first_pending.thread_id == "thread-a"
+        assert first_pending.tool_name == "schedule"
+        assert first_pending.matched_rule == "default:ask"
+        assert first_pending.remember_allowed is True
+        assert first_pending.remember_rule is not None
+        assert first_pending.remember_rule.expression == "schedule"
+        assert await manager.resolve(
+            "thread-a",
+            first_pending.request_id,
+            _remember_decision(first_pending),
+        )
+        first_decision = await first_task
 
+        assert first_decision.outcome == "approved"
+        assert (await permissions.snapshot("thread-a")).allow == (
+            PermissionRuleRecord(expression="schedule", scope_cwd=None),
+        )
+        assert (await permissions.snapshot("thread-b")).revision == 0
 
-# ---------------------------------------------------------------------------
-# §1 DEFAULT_CONSENT_THEN_TRUST_TOOLS 锚点
-# ---------------------------------------------------------------------------
+        second_decision = await chain_a.decide(
+            _request(thread_id="thread-a", call_id="call-schedule-2", cwd=tmp_path)
+        )
 
+        assert second_decision.outcome == "approved"
+        assert second_decision.metadata[ApprovalMetadataKeys.DECISION_SOURCE] == "permissions"
+        assert second_decision.metadata[ApprovalMetadataKeys.MATCHED_RULE] == "schedule"
+        assert len(sink.pending) == 1
 
-def test_default_consent_then_trust_tools_includes_memory_and_schedule() -> None:
-    """``schedule`` 与 ``memory`` 同款风格登记到锚点常量。
+        prompt_b = make_manager_prompt_fn(
+            manager,
+            "thread-b",
+            default_cwd=tmp_path.resolve().as_posix(),
+        )
+        chain_b = _build_chain(
+            kongming_home=tmp_path,
+            permissions=permissions,
+            interactive_approval=InteractiveApproval(prompt_b),
+        )
+        sink.ready.clear()
+        other_task = asyncio.create_task(
+            chain_b.decide(_request(thread_id="thread-b", call_id="call-schedule-b", cwd=tmp_path))
+        )
+        tasks.append(other_task)
+        await asyncio.wait_for(sink.ready.wait(), timeout=1)
+        other_pending = sink.pending[-1]
 
-    本常量是文档锚点：实际"首次 consent → 后续 trust"的语义由 ConsentResolver
-    fallback + SafetyGatedApproval 写 grant + TrustResolver 通配三件套合作实现，
-    本测试锁定登记不被无声破坏。
-    """
-    assert isinstance(DEFAULT_CONSENT_THEN_TRUST_TOOLS, tuple)
-    assert "memory" in DEFAULT_CONSENT_THEN_TRUST_TOOLS
-    assert "schedule" in DEFAULT_CONSENT_THEN_TRUST_TOOLS
-
-
-def test_default_consent_then_trust_tools_str_only() -> None:
-    """常量内容只放 tool_name 字符串（避免有人塞 dataclass 进来破坏锚点语义）。"""
-    assert all(isinstance(t, str) and t.strip() for t in DEFAULT_CONSENT_THEN_TRUST_TOOLS)
-
-
-# ---------------------------------------------------------------------------
-# §2 schedule tool 走 ConsentResolver fallback → standard ask
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_schedule_tool_routes_to_standard_consent() -> None:
-    """schedule capability 默认规则：fallback unknown-tool-default → severity=standard。
-
-    ConsentResolver 不为 schedule 写专用分支；命中 ``unknown-tool-default``
-    fallback 与 memory 一致。
-    """
-    resolver, fake = _make_resolver()
-    decision = await resolver.evaluate(
-        _req(
-            tool_name="schedule",
-            arguments={"action": "create", "name": "daily-report", "schedule": "every 1d"},
-        ),
-        _approval_zone(),
-        _runtime(),
-    )
-
-    md = decision.metadata
-    assert decision.outcome == "approved"
-    assert md[ApprovalMetadataKeys.DECISION_CLASS] == "explicit_consent"
-    assert md[ApprovalMetadataKeys.DECISION_SOURCE] == "standard"
-    assert md[ApprovalMetadataKeys.STAGE] == "permission"
-    assert md[ApprovalMetadataKeys.MATCHED_RULE] == "unknown-tool-default"
-    assert md[ApprovalMetadataKeys.BOUNDARY_KIND] == "host"
-    # standard 不携带 confirm_token
-    assert "confirm_token" not in md
-
-    # InteractiveApproval 收到 enriched request
-    assert len(fake.decided_requests) == 1
-    enriched = fake.decided_requests[0]
-    assert enriched.metadata["policy_hint"] == "standard"
-    assert enriched.metadata["severity"] == "standard"
-    assert "confirm_token" not in enriched.metadata
-
-
-@pytest.mark.unit
-@pytest.mark.asyncio
-async def test_schedule_tool_consent_passes_through_rejection() -> None:
-    """用户在 InteractiveApproval 里 reject ⇒ ConsentResolver 透传 outcome=rejected。
-
-    schedule capability 没有 elevated 强度，severity 始终 standard；用户拒绝后
-    决策 metadata 仍然挂上 explicit_consent / standard 元数据。
-    """
-    fake = FakeApproval(outcome="rejected")
-    resolver, _ = _make_resolver(fake=fake)
-    decision = await resolver.evaluate(
-        _req(
-            tool_name="schedule",
-            arguments={"action": "remove", "name": "daily-report"},
-        ),
-        _approval_zone(),
-        _runtime(),
-    )
-
-    md = decision.metadata
-    assert decision.outcome == "rejected"
-    assert md[ApprovalMetadataKeys.DECISION_CLASS] == "explicit_consent"
-    assert md[ApprovalMetadataKeys.DECISION_SOURCE] == "standard"
-
-
-# ---------------------------------------------------------------------------
-# §4 现有 capability 规则不受影响（回归锚点）
-# ---------------------------------------------------------------------------
-
-
-def test_existing_default_tables_unaffected_by_consent_then_trust_tools() -> None:
-    """新增 ``DEFAULT_CONSENT_THEN_TRUST_TOOLS`` 不破坏现有四张默认规则表与
-    canonical consent-then-trust 集合。
-
-    锁定锚点：
-    - hard_deny_commands 仍含 ``host-root-delete``
-    - approval_required_commands 仍含 ``git-push`` profile
-    - sensitive_paths 仍含 ``ssh-material`` block + ``project-env`` elevated
-    - skill_call_rules 仍是空 tuple（deny-by-default）
-    - allow_tools_silent 含低风险只读工具和 agent role 工具，没有把
-      ``schedule`` / ``memory`` 误塞进去
-    """
-    hard_deny_names = {r.name for r in DEFAULT_HARD_DENY_COMMANDS}
-    assert "host-root-delete" in hard_deny_names
-
-    approval_required_names = {r.name for r in DEFAULT_APPROVAL_REQUIRED_COMMANDS}
-    assert "git-push" in approval_required_names
-
-    sensitive_block_matchers = {r.matcher for r in DEFAULT_SENSITIVE_PATHS if r.effect == "block"}
-    assert "~/.ssh/" in sensitive_block_matchers
-    sensitive_elevated_matchers = {
-        r.matcher for r in DEFAULT_SENSITIVE_PATHS if r.effect == "elevated"
-    }
-    assert ".env*" in sensitive_elevated_matchers
-
-    assert DEFAULT_SKILL_CALL_RULES == ()
-
-    assert set(DEFAULT_CONSENT_THEN_TRUST_TOOLS) == {"schedule", "memory"}
+        assert other_pending.thread_id == "thread-b"
+        assert other_pending.remember_rule is not None
+        assert other_pending.remember_rule.expression == "schedule"
+        assert await manager.resolve(
+            "thread-b",
+            other_pending.request_id,
+            {"allow": False, "remember": False},
+        )
+        assert (await other_task).outcome == "rejected"
+        assert (await permissions.snapshot("thread-b")).revision == 0
+    finally:
+        await manager.aclose()
+        await asyncio.gather(*tasks, return_exceptions=True)

@@ -34,7 +34,6 @@ def test_production_child_chain_contains_no_legacy_approval_propagation() -> Non
         _ROOT / "src/application/agents/manager.py",
         _ROOT / "src/application/agents/subagent_tools.py",
         _ROOT / "src/application/agent_workflows/manager.py",
-        _ROOT / "src/application/subagents/manager.py",
         _ROOT / "src/application/subagents/permissions.py",
         _ROOT / "src/hosts/shared/host_dispatcher.py",
     )
