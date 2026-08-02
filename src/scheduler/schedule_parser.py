@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta
 
-from croniter import croniter  # type: ignore[import-untyped,unused-ignore]
+from croniter import croniter  # type: ignore[import-untyped, unused-ignore]
 
 from scheduler.domain import ScheduleTrigger, TriggerType
 from scheduler.timing import to_iso, utc_now

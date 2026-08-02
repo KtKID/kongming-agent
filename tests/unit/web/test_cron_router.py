@@ -22,13 +22,16 @@
 
 from __future__ import annotations
 
+import json
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from fastapi.testclient import TestClient
 
+from core.message import Message
 from hosts.web.app import create_app
 from hosts.web.auth.middleware import CSRF_HEADER_NAME, CSRF_HEADER_VALUE
 from hosts.web.routers.cron import router as cron_router
@@ -38,19 +41,21 @@ from scheduler.domain import (
     ConcurrencyPolicy,
     DeliveryStatus,
     MisfirePolicy,
+    RunFailureReason,
     RunStatus,
     ScheduledRun,
     ScheduledTask,
     ScheduleTrigger,
     SessionMode,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
 from scheduler.store import Store
 from scheduler.timing import to_iso
+from sessions.session_store import _message_to_dict
 from tests.unit.test_web_app_lifespan import _seed_password
 
 CSRF_HEADERS = {CSRF_HEADER_NAME: CSRF_HEADER_VALUE}
@@ -153,18 +158,17 @@ def _make_task(
     *,
     task_id: str = "t-1",
     name: str | None = None,
-    enabled: bool = True,
-    state: TaskState = TaskState.SCHEDULED,
+    lifecycle: TaskLifecycleState = TaskLifecycleState.SCHEDULED,
     trigger: ScheduleTrigger | None = None,
     next_run_at: str | None = None,
     last_run_at: str | None = None,
     preset_id: str = "preset-default",
+    thread_id: str = "",
 ) -> ScheduledTask:
     return ScheduledTask(
         task_id=task_id,
         name=name or f"task-{task_id}",
-        enabled=enabled,
-        state=state,
+        lifecycle=lifecycle,
         origin=TaskOrigin.WEB,
         trigger=trigger or _trigger_interval(10),
         policy=TaskExecutionPolicy(
@@ -179,6 +183,7 @@ def _make_task(
         created_at=_t(0),
         updated_at=_t(0),
         preset_id=preset_id,
+        thread_id=thread_id,
     )
 
 
@@ -192,6 +197,8 @@ def _make_run(
     finished_at: str | None = None,
     final_message_excerpt: str | None = "done",
     delivery_status: DeliveryStatus = DeliveryStatus.DELIVERED,
+    failure_reason: RunFailureReason | None = None,
+    thread_id: str = "",
 ) -> ScheduledRun:
     return ScheduledRun(
         run_id=run_id,
@@ -204,11 +211,55 @@ def _make_run(
         result_status="ok",
         final_message_excerpt=final_message_excerpt,
         error_message=None,
-        failure_reason=None,
+        failure_reason=failure_reason,
         delivery_error=None,
         silent_suppressed=False,
         delivery_status=delivery_status,
+        thread_id=thread_id,
     )
+
+
+def _write_run_session(
+    session_root: Path,
+    session_id: str,
+    messages: list[Message],
+) -> None:
+    session_dir = session_root / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    created_at = time.time()
+    manifest = {
+        "schema_version": "0.1.2",
+        "session_id": session_id,
+        "created_at": created_at,
+        "agent_name": "agent",
+        "model_name": "model",
+        "instruction_sources": [],
+        "instruction_text_hash": "",
+        "cwd": str(session_root.parent),
+        "app_version": None,
+        "format": f"{session_id}.jsonl",
+        "run_count": 0,
+    }
+    (session_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    parent_message_id: str | None = None
+    rows: list[str] = []
+    for message in messages:
+        message_id = str(uuid.uuid4())
+        record = {
+            "schema_version": "0.1.2",
+            "session_id": session_id,
+            "model_name": "model",
+            "message_id": message_id,
+            "parent_message_id": parent_message_id,
+            "created_at": created_at,
+            "message": _message_to_dict(message),
+        }
+        rows.append(json.dumps(record, ensure_ascii=False))
+        parent_message_id = message_id
+    (session_dir / f"{session_id}.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -247,22 +298,10 @@ def _install_cron_router_before_catch_all(app: Any) -> None:
 def _make_cfg() -> Config:
     return Config.model_validate(
         {
-            "model": {
-                "name": "fake",
-                "base_url": "http://127.0.0.1:1234/v1",
-                "api_key": "",
-            },
+            "model": {"preset_id": "local-gemma-4-e4b-it"},
             "web": {
                 "enabled": True,
                 "dev_mode": True,
-                "llm_presets": [
-                    {
-                        "id": "preset-default",
-                        "display_name": "Default",
-                        "base_url": "http://127.0.0.1:1234/v1",
-                        "model": "fake",
-                    }
-                ],
             },
             "scheduler": {
                 # 关闭真实 ticker；store 由测试手动挂入
@@ -286,6 +325,8 @@ def _login_client_with_store(tmp_path: Path) -> tuple[TestClient, Store]:
     """
     _seed_password(tmp_path, "pwd")
     cfg = _make_cfg()
+    cfg.session.backend = "file"
+    cfg.session.file_store_path = str(tmp_path / "sessions")
     tm = _FakeTM()
     app = create_app(cfg, tm, home_dir=tmp_path)
     # router 注册在 batch B/C（task #9）；单测里独立挂入 cron router 不破坏其他测试。
@@ -331,8 +372,7 @@ def test_list_cron_tasks_includes_disabled(tmp_path: Path) -> None:
         store.create_task(
             _make_task(
                 task_id="dead",
-                enabled=False,
-                state=TaskState.PAUSED,
+                lifecycle=TaskLifecycleState.PAUSED,
                 next_run_at=_t(120),
             )
         )
@@ -345,16 +385,16 @@ def test_list_cron_tasks_includes_disabled(tmp_path: Path) -> None:
         assert ids == ["alive", "dead"]
         # 检查关键字段
         alive = next(it for it in items if it["task_id"] == "alive")
-        assert alive["enabled"] is True
-        assert alive["state"] == "scheduled"
+        assert alive["lifecycle"] == "scheduled"
+        assert alive["latest_run_status"] is None
+        assert alive["live_runtime_status"] == "idle"
         assert alive["trigger_type"] == "interval"
         assert alive["trigger_expr"] == "10"
         assert alive["thread_id"] == ""
         assert alive["preset_id"] == "preset-default"
-        # disabled 也要返
+        # paused 也要返
         dead = next(it for it in items if it["task_id"] == "dead")
-        assert dead["enabled"] is False
-        assert dead["state"] == "paused"
+        assert dead["lifecycle"] == "paused"
     finally:
         client.__exit__(None, None, None)
 
@@ -385,8 +425,10 @@ def test_list_cron_runs_global_happy(tmp_path: Path) -> None:
     """跨 task 取最近 run；按 started_at 倒序；包含 task_name 冗余字段。"""
     client, store = _login_client_with_store(tmp_path)
     try:
-        store.create_task(_make_task(task_id="alpha", name="Alpha"))
-        store.create_task(_make_task(task_id="beta", name="Beta"))
+        store.create_task(
+            _make_task(task_id="alpha", name="Alpha", thread_id="thread-aaaaaaaaaaaa")
+        )
+        store.create_task(_make_task(task_id="beta", name="Beta", thread_id="thread-bbbbbbbbbbbb"))
         # 两个 task 各 append 一条 run，时间戳错开
         store.append_run(
             _make_run(
@@ -402,6 +444,7 @@ def test_list_cron_runs_global_happy(tmp_path: Path) -> None:
                 task_id="beta",
                 started_at=_t(20),
                 finished_at=_t(25),
+                thread_id="thread-run-bbbbbbbbbbbb",
             )
         )
 
@@ -421,6 +464,8 @@ def test_list_cron_runs_global_happy(tmp_path: Path) -> None:
         assert runs[0]["status"] == "completed"
         assert runs[0]["delivery_status"] == "delivered"
         assert runs[0]["final_message_excerpt"] == "done"
+        assert runs[0]["session_id"] == "sess-r-beta"
+        assert runs[0]["thread_id"] == "thread-run-bbbbbbbbbbbb"
     finally:
         client.__exit__(None, None, None)
 
@@ -459,7 +504,9 @@ def test_list_cron_runs_global_empty_store(tmp_path: Path) -> None:
 def test_list_task_runs_happy(tmp_path: Path) -> None:
     client, store = _login_client_with_store(tmp_path)
     try:
-        store.create_task(_make_task(task_id="alpha", name="Alpha"))
+        store.create_task(
+            _make_task(task_id="alpha", name="Alpha", thread_id="thread-aaaaaaaaaaaa")
+        )
         store.append_run(_make_run(run_id="r-1", task_id="alpha", started_at=_t(10)))
         store.append_run(_make_run(run_id="r-2", task_id="alpha", started_at=_t(20)))
 
@@ -472,6 +519,33 @@ def test_list_task_runs_happy(tmp_path: Path) -> None:
         assert runs[1]["run_id"] == "r-2"
         # task_name 冗余注入
         assert all(r["task_name"] == "Alpha" for r in runs)
+        assert runs[0]["session_id"] == "sess-r-1"
+        assert runs[0]["thread_id"] == "thread-aaaaaaaaaaaa"
+        assert runs[0]["failure_reason"] is None
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_list_task_runs_exposes_failure_reason(tmp_path: Path) -> None:
+    client, store = _login_client_with_store(tmp_path)
+    try:
+        task = _make_task(task_id="alpha", name="Alpha", thread_id="thread-aaaaaaaaaaaa")
+        store.create_task(task)
+        store.append_run(
+            _make_run(
+                run_id="r-approval",
+                task_id="alpha",
+                status=RunStatus.FAILED,
+                failure_reason=RunFailureReason.NEEDS_APPROVAL,
+            )
+        )
+
+        resp = client.get("/api/cron/tasks/alpha/runs?limit=10")
+
+        assert resp.status_code == 200, resp.text
+        runs = resp.json()
+        assert runs[0]["status"] == "failed"
+        assert runs[0]["failure_reason"] == "needs_approval"
     finally:
         client.__exit__(None, None, None)
 
@@ -482,6 +556,72 @@ def test_list_task_runs_unknown_task_returns_404(tmp_path: Path) -> None:
         resp = client.get("/api/cron/tasks/missing/runs")
         assert resp.status_code == 404
         assert "missing" in resp.text
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_get_cron_run_messages_reads_independent_session(tmp_path: Path) -> None:
+    client, store = _login_client_with_store(tmp_path)
+    try:
+        task = _make_task(task_id="alpha", name="Alpha", thread_id="thread-aaaaaaaaaaaa")
+        run = _make_run(run_id="r-1", task_id="alpha")
+        store.create_task(task)
+        store.append_run(run)
+        _write_run_session(
+            tmp_path / "sessions",
+            run.session_id,
+            [
+                Message.user("ping"),
+                Message.assistant("pong"),
+            ],
+        )
+
+        resp = client.get("/api/cron/tasks/alpha/runs/r-1/messages")
+
+        assert resp.status_code == 200, resp.text
+        messages = resp.json()["messages"]
+        assert [msg["frame_type"] for msg in messages] == ["text", "text"]
+        assert [msg["role"] for msg in messages] == ["user", "assistant"]
+        assert [msg["content"] for msg in messages] == ["ping", "pong"]
+        assert [msg["id"] for msg in messages] == [
+            f"{run.session_id}:0:text",
+            f"{run.session_id}:1:text",
+        ]
+        assert all(msg["provider"] == "generic_chat" for msg in messages)
+        assert all(msg["sessionId"] == run.session_id for msg in messages)
+
+        resp_again = client.get("/api/cron/tasks/alpha/runs/r-1/messages")
+        assert resp_again.status_code == 200, resp_again.text
+        assert [msg["id"] for msg in resp_again.json()["messages"]] == [
+            msg["id"] for msg in messages
+        ]
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_get_cron_run_messages_unknown_run_returns_404(tmp_path: Path) -> None:
+    client, store = _login_client_with_store(tmp_path)
+    try:
+        store.create_task(_make_task(task_id="alpha"))
+
+        resp = client.get("/api/cron/tasks/alpha/runs/missing/messages")
+
+        assert resp.status_code == 404
+        assert "missing" in resp.text
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_get_cron_run_messages_missing_session_returns_404(tmp_path: Path) -> None:
+    client, store = _login_client_with_store(tmp_path)
+    try:
+        store.create_task(_make_task(task_id="alpha"))
+        store.append_run(_make_run(run_id="r-1", task_id="alpha"))
+
+        resp = client.get("/api/cron/tasks/alpha/runs/r-1/messages")
+
+        assert resp.status_code == 404
+        assert "run session not found" in resp.text
     finally:
         client.__exit__(None, None, None)
 
@@ -500,14 +640,12 @@ def test_pause_task_happy(tmp_path: Path) -> None:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["task_id"] == "alpha"
-        assert body["enabled"] is False
-        assert body["state"] == "paused"
+        assert body["lifecycle"] == "paused"
 
         # store 侧确认
         task = store.get_task("alpha")
         assert task is not None
-        assert task.enabled is False
-        assert task.state is TaskState.PAUSED
+        assert task.lifecycle is TaskLifecycleState.PAUSED
 
         # audit 写了一条
         audits = store.list_audits(task_id="alpha")
@@ -536,8 +674,7 @@ def test_resume_task_recomputes_next_run_at(tmp_path: Path) -> None:
         store.create_task(
             _make_task(
                 task_id="alpha",
-                enabled=False,
-                state=TaskState.PAUSED,
+                lifecycle=TaskLifecycleState.PAUSED,
                 trigger=_trigger_interval(5),  # 5 min
                 next_run_at=None,  # paused 之后清空
             )
@@ -546,16 +683,14 @@ def test_resume_task_recomputes_next_run_at(tmp_path: Path) -> None:
         resp = client.post("/api/cron/tasks/alpha/resume", headers=CSRF_HEADERS)
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert body["enabled"] is True
-        assert body["state"] == "scheduled"
+        assert body["lifecycle"] == "scheduled"
         # 重算后 next_run_at 必非空且 ISO8601 文本
         assert body["next_run_at"] is not None
         assert "T" in body["next_run_at"]
 
         task = store.get_task("alpha")
         assert task is not None
-        assert task.enabled is True
-        assert task.state is TaskState.SCHEDULED
+        assert task.lifecycle is TaskLifecycleState.SCHEDULED
         assert task.next_run_at is not None
     finally:
         client.__exit__(None, None, None)
@@ -608,13 +743,19 @@ def test_delete_task_unknown_returns_404(tmp_path: Path) -> None:
 
 
 def test_run_now_happy(tmp_path: Path) -> None:
-    """run_now 推前 next_run_at；返回 202 + 占位 run_id。"""
+    """run_now 排入独立手动请求，保留 recurring 任务的正式日程。"""
     client, store = _login_client_with_store(tmp_path)
     try:
+        next_run_at = to_iso(datetime.now(UTC) + timedelta(hours=1))
         store.create_task(
             _make_task(
                 task_id="alpha",
-                next_run_at=_t(60 * 60),  # 1 小时后
+                trigger=ScheduleTrigger(
+                    trigger_type=TriggerType.CRON,
+                    expr="0 22 * * *",
+                    timezone="Asia/Shanghai",
+                ),
+                next_run_at=next_run_at,
             )
         )
 
@@ -624,17 +765,82 @@ def test_run_now_happy(tmp_path: Path) -> None:
         assert body["status"] == "PENDING"
         assert body["run_id"].startswith("pending-")
 
-        # store next_run_at 已被推前到 ~ now
+        # 正式 cron cursor 必须保留；手动触发走独立持久化字段。
         task = store.get_task("alpha")
         assert task is not None
-        assert task.next_run_at is not None
-        # 不严格断言时间，只看远早于 1 小时后
-        # 简单方式：next_run_at 不再等于原 _t(60*60)
-        assert task.next_run_at != _t(60 * 60)
+        assert task.next_run_at == next_run_at
+        assert task.manual_run_requested_at is not None
+
+        reservations = store.reserve_due_tasks(now=task.manual_run_requested_at)
+        assert len(reservations) == 1
+        assert reservations[0].scheduled_for == task.manual_run_requested_at
+
+        after_reservation = store.get_task("alpha")
+        assert after_reservation is not None
+        assert after_reservation.next_run_at == next_run_at
+        assert after_reservation.manual_run_requested_at is None
 
         # audit
         audits = store.list_audits(task_id="alpha")
         assert any(a["action"] == "run_now" for a in audits)
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_run_now_enqueues_exhausted_once_task(tmp_path: Path) -> None:
+    """已耗尽 one-shot 可排入手动执行，同时保持 EXHAUSTED 生命周期。"""
+    client, store = _login_client_with_store(tmp_path)
+    try:
+        store.create_task(
+            _make_task(
+                task_id="alpha",
+                trigger=_trigger_once("2026-05-09T13:00:00+00:00"),
+                next_run_at="2026-05-09T13:00:00+00:00",
+            )
+        )
+        store.update_task(
+            "alpha",
+            lifecycle=TaskLifecycleState.EXHAUSTED,
+            last_run_at="2026-05-09T13:00:05+00:00",
+            next_run_at=None,
+        )
+
+        resp = client.post("/api/cron/tasks/alpha/run_now", headers=CSRF_HEADERS)
+
+        assert resp.status_code == 202, resp.text
+        task = store.get_task("alpha")
+        assert task is not None
+        assert task.lifecycle is TaskLifecycleState.EXHAUSTED
+        assert task.last_run_at == "2026-05-09T13:00:05+00:00"
+        assert task.next_run_at is None
+        assert task.manual_run_requested_at is not None
+
+        reservations = store.reserve_due_tasks(now=task.manual_run_requested_at)
+        assert len(reservations) == 1
+        assert reservations[0].task.task_id == "alpha"
+
+        after_reservation = store.get_task("alpha")
+        assert after_reservation is not None
+        assert after_reservation.lifecycle is TaskLifecycleState.EXHAUSTED
+        assert after_reservation.manual_run_requested_at is None
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_run_now_rejects_second_pending_request(tmp_path: Path) -> None:
+    """同一任务的手动请求待 ticker 领取时，重复点击返回 409。"""
+    client, store = _login_client_with_store(tmp_path)
+    try:
+        store.create_task(_make_task(task_id="alpha", next_run_at=_t(60)))
+
+        first = client.post("/api/cron/tasks/alpha/run_now", headers=CSRF_HEADERS)
+        second = client.post("/api/cron/tasks/alpha/run_now", headers=CSRF_HEADERS)
+
+        assert first.status_code == 202, first.text
+        assert second.status_code == 409, second.text
+        task = store.get_task("alpha")
+        assert task is not None
+        assert task.manual_run_requested_at is not None
     finally:
         client.__exit__(None, None, None)
 

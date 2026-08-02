@@ -9,7 +9,7 @@
 
 边界约束（参考文档 §7.2）：
 - 序列化 / 反序列化 :mod:`scheduler.domain` 的 dataclass
-- 事务性更新 ``next_run_at`` / ``last_run_at`` / ``state``
+- 事务性更新 ``next_run_at`` / ``last_run_at`` / ``lifecycle``
 - **不**直接调 ``Runner``、**不**解释审批策略
 - 不依赖任何第三方库（``fcntl`` / ``msvcrt`` 来自标准库）
 
@@ -27,10 +27,11 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, fields, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from scheduler.domain import (
     GRACE_MIN_SECONDS,
@@ -50,12 +51,13 @@ from scheduler.domain import (
     ScheduleTrigger,
     SessionMode,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
 from scheduler.timing import (
+    compute_next_run_at,
     grace_seconds_for_period,
     is_stale_recurring,
     is_within_oneshot_grace,
@@ -79,6 +81,10 @@ class SchedulerBusyError(SchedulerStoreError):
 
 class TaskNotFoundError(SchedulerStoreError):
     """指定 ``task_id`` 不存在。"""
+
+
+class ManualRunPendingError(SchedulerStoreError):
+    """指定任务已有尚未被 ticker 领取的手动执行请求。"""
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +156,62 @@ def _now_iso() -> str:
     return to_iso(utc_now())
 
 
+def _now_iso_in_timezone(timezone_key: str) -> str:
+    try:
+        tz = ZoneInfo(timezone_key) if timezone_key else UTC
+    except (ZoneInfoNotFoundError, ValueError):
+        fixed_offsets = {
+            "Asia/Shanghai": timezone(timedelta(hours=8)),
+        }
+        tz = fixed_offsets.get(timezone_key, UTC)
+    return to_iso(utc_now().astimezone(tz))
+
+
+def _to_display_iso(value: Any, timezone_key: str) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = parse_iso(value)
+    except (TypeError, ValueError):
+        return None
+    try:
+        tz = ZoneInfo(timezone_key) if timezone_key else UTC
+    except (ZoneInfoNotFoundError, ValueError):
+        fixed_offsets = {
+            "Asia/Shanghai": timezone(timedelta(hours=8)),
+        }
+        tz = fixed_offsets.get(timezone_key, UTC)
+    return to_iso(parsed.astimezone(tz))
+
+
+_DISPLAY_TIME_PAYLOAD_KEYS = frozenset(
+    {
+        "tick_at",
+        "scheduled_for",
+        "started_at",
+        "finished_at",
+        "delivered_at",
+        "manual_run_requested_at",
+        "original_scheduled_for",
+        "previous_next_run_at",
+        "next_run_at",
+    }
+)
+
+
+def _payload_with_display_times(
+    payload: dict[str, Any],
+    *,
+    timezone_key: str,
+) -> dict[str, Any]:
+    out = dict(payload)
+    for key in _DISPLAY_TIME_PAYLOAD_KEYS:
+        display_value = _to_display_iso(out.get(key), timezone_key)
+        if display_value is not None:
+            out[f"{key}_display"] = display_value
+    return out
+
+
 def _period_seconds(trigger: ScheduleTrigger) -> int:
     """根据 trigger 反推单周期秒数。
 
@@ -177,7 +239,7 @@ def _period_seconds(trigger: ScheduleTrigger) -> int:
         try:
             from zoneinfo import ZoneInfo
 
-            from croniter import croniter  # type: ignore[import-untyped]
+            from croniter import croniter  # type: ignore[import-untyped,unused-ignore]
 
             # 关键修复（v0.2 P1）：cron 表达式必须按 trigger.timezone 解释。
             # croniter(expr, base) 不接受 timezone 参数时按 base.tzinfo 解释，
@@ -219,6 +281,27 @@ def _json_default(obj: Any) -> Any:
 
 def _json_dumps(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, default=_json_default)
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=_json_default)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        _secure_file(path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -269,8 +352,7 @@ def _task_to_dict(task: ScheduledTask) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "task_id": task.task_id,
         "name": task.name,
-        "enabled": task.enabled,
-        "state": task.state.value,
+        "lifecycle": task.lifecycle.value,
         "origin": task.origin.value,
         "trigger": {
             "trigger_type": task.trigger.trigger_type.value,
@@ -314,6 +396,8 @@ def _task_to_dict(task: ScheduledTask) -> dict[str, Any]:
     payload["preset_id"] = task.preset_id
     # scheduled-task-thread：兼容扩展字段，不提升 SCHEMA_VERSION。
     payload["thread_id"] = task.thread_id
+    # manual-run：独立保存试运行请求，绝不借用 next_run_at。
+    payload["manual_run_requested_at"] = task.manual_run_requested_at
     return payload
 
 
@@ -365,8 +449,7 @@ def _dict_to_task(payload: dict[str, Any]) -> ScheduledTask:
     return ScheduledTask(
         task_id=payload["task_id"],
         name=payload["name"],
-        enabled=bool(payload["enabled"]),
-        state=TaskState(payload["state"]),
+        lifecycle=TaskLifecycleState(payload["lifecycle"]),
         origin=TaskOrigin(payload["origin"]),
         trigger=trigger,
         policy=policy,
@@ -379,6 +462,7 @@ def _dict_to_task(payload: dict[str, Any]) -> ScheduledTask:
         delivery=delivery,
         preset_id=payload.get("preset_id", ""),
         thread_id=thread_id,
+        manual_run_requested_at=payload.get("manual_run_requested_at"),
     )
 
 
@@ -419,6 +503,9 @@ def _dict_to_run(payload: dict[str, Any]) -> ScheduledRun:
         delivered_at=payload.get("delivered_at"),
         delivery_status=delivery_status,
         seen_at=payload.get("seen_at"),
+        thread_id=str(payload.get("thread_id", "")),
+        reservation_id=str(payload.get("reservation_id", "")),
+        cancel_reason=payload.get("cancel_reason"),
     )
 
 
@@ -430,6 +517,8 @@ def _dict_to_run(payload: dict[str, Any]) -> ScheduledRun:
 _TASKS_FILENAME = "scheduled_tasks.json"
 _RUNS_DIRNAME = "runs"
 _AUDITS_FILENAME = "audits.jsonl"
+_INCIDENTS_FILENAME = "incidents.jsonl"
+_TICKER_STATUS_FILENAME = "ticker_status.json"
 _LOCK_FILENAME = ".scheduler.lock"
 
 
@@ -441,11 +530,14 @@ class Store:
     单元测试受 env 污染）。
     """
 
-    def __init__(self, home_dir: Path) -> None:
+    def __init__(self, home_dir: Path, *, display_timezone: str = "UTC") -> None:
         self._home = Path(home_dir).resolve()
+        self._display_timezone = display_timezone
         self._tasks_path = self._home / _TASKS_FILENAME
         self._runs_dir = self._home / _RUNS_DIRNAME
         self._audits_path = self._home / _AUDITS_FILENAME
+        self._incidents_path = self._home / _INCIDENTS_FILENAME
+        self._ticker_status_path = self._home / _TICKER_STATUS_FILENAME
         self._lock_path = self._home / _LOCK_FILENAME
         self._home.mkdir(parents=True, exist_ok=True)
         self._runs_dir.mkdir(parents=True, exist_ok=True)
@@ -461,14 +553,14 @@ class Store:
         """检测 ``scheduled_tasks.json`` 的 ``schema_version`` 是否为当前
         :data:`scheduler.domain.SCHEMA_VERSION`。
 
-        不为 ``SCHEMA_VERSION``（包括缺字段、< 当前、> 当前、文件损坏）时
-        采用 **重置式迁移**（与 v0.2 一致；不做字段转换）：
+        v5 使用确定性字段迁移：保留所有 task，把 ``enabled + state`` 收口为
+        ``lifecycle``，并以最新 terminal run 的 ``finished_at`` 纠正
+        ``last_run_at``。其他旧版本沿用重置式迁移。
 
-        1. 把现有 ``scheduled_tasks.json`` 重命名为
+        1. 把现有 ``scheduled_tasks.json`` 复制为
            ``scheduled_tasks.json.v<detected>.bak.<unix_ts>``
            （``v<detected>`` 反映检测到的来源版本，例如 ``v1``、``v2``、``vmissing``）
-        2. 写一份空的当前 schema 文件（``schema_version=SCHEMA_VERSION``、
-           ``tasks=[]``）
+        2. v5 原子写入迁移后的 tasks；其他版本原子写入空 tasks
         3. 写 audit 一条 ``schema_migrated_v<detected>_to_v<current>``，
            ``payload`` 含 ``backup_path`` / ``detected_version`` /
            ``current_schema_version``
@@ -477,10 +569,8 @@ class Store:
         ``scheduled_tasks.json`` 不存在时什么都不做：后续
         :meth:`_write_tasks_payload` 在首次创建任务时按当前 schema 落盘。
 
-        设计权衡（v0.3 cron-delivery）：v0.3 引入 ``ScheduleDelivery`` /
-        ``ScheduledRun.delivered_at`` 等字段。**仍然走重置式而非字段转换**，
-        理由：与 v0.2 一致 / bug 面小 / 用户当前 cron 任务多为已 completed
-        的 oneshot，重置影响小。代价：旧 recurring 任务需用户重新创建。
+        v5 迁移的备份先于新文件写入；解析、映射或原子写失败时原 v5 文件
+        保持原位并让 Store 构造明确失败。
         """
         if not self._tasks_path.exists():
             return
@@ -493,31 +583,70 @@ class Store:
                 detected_version = payload.get("schema_version")
             else:
                 detected_version = "missing"
-        except (OSError, json.JSONDecodeError):
-            detected_version = "unparseable"
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"cron tasks.json 无法解析迁移: {self._tasks_path}") from exc
 
         if detected_version == SCHEMA_VERSION:
             return  # 当前 schema，无需迁移
 
         import time
 
-        # 用 detected_version 生成备份后缀，明确记录来源（v0.3 起不再硬编码 v1）
+        # 用 detected_version 生成备份后缀，明确记录来源。
         if isinstance(detected_version, int) or detected_version in ("missing", "unparseable"):
             bak_label = f"v{detected_version}"
         else:
             bak_label = "vunknown"
 
-        ts = int(time.time())
-        backup = self._tasks_path.with_name(f"{_TASKS_FILENAME}.{bak_label}.bak.{ts}")
-        # 防御：极端情况下同秒多次启动；用 counter 避免覆盖已有备份
-        counter = 1
-        while backup.exists():
-            backup = self._tasks_path.with_name(f"{_TASKS_FILENAME}.{bak_label}.bak.{ts}.{counter}")
-            counter += 1
-        self._tasks_path.rename(backup)
+        original_bytes = self._tasks_path.read_bytes()
+        matching_backups = [
+            candidate
+            for candidate in sorted(
+                self._tasks_path.parent.glob(f"{_TASKS_FILENAME}.{bak_label}.bak.*")
+            )
+            if candidate.read_bytes() == original_bytes
+        ]
+        if matching_backups:
+            backup = matching_backups[0]
+        else:
+            ts = int(time.time())
+            backup = self._tasks_path.with_name(f"{_TASKS_FILENAME}.{bak_label}.bak.{ts}")
+            counter = 1
+            while backup.exists():
+                backup = self._tasks_path.with_name(
+                    f"{_TASKS_FILENAME}.{bak_label}.bak.{ts}.{counter}"
+                )
+                counter += 1
+            with open(backup, "xb") as backup_file:
+                backup_file.write(original_bytes)
+                backup_file.flush()
+                os.fsync(backup_file.fileno())
+            _secure_file(backup)
 
-        # 写一份空的当前 schema 文件
-        self._write_tasks_payload([])
+        migrated_tasks: list[dict[str, Any]]
+        corrections: list[tuple[str, str]]
+        if detected_version == 5:
+            raw_tasks = payload.get("tasks")
+            if not isinstance(raw_tasks, list):
+                raise RuntimeError("scheduler v5 migration requires tasks list")
+            migrated_tasks = []
+            corrections = []
+            for raw_task in raw_tasks:
+                if not isinstance(raw_task, dict):
+                    raise RuntimeError("scheduler v5 migration task must be object")
+                migrated, correction = self._migrate_v5_task(raw_task)
+                migrated_tasks.append(migrated)
+                if correction is not None:
+                    corrections.append((str(raw_task.get("task_id", "")), correction))
+        else:
+            migrated_tasks = []
+            corrections = []
+
+        try:
+            self._write_tasks_payload(migrated_tasks)
+        except BaseException:
+            if not self._tasks_path.exists() or self._tasks_path.read_bytes() != original_bytes:
+                self._restore_tasks_source(original_bytes)
+            raise
 
         # audit + stderr warning
         audit_action = f"schema_migrated_{bak_label}_to_v{SCHEMA_VERSION}"
@@ -531,13 +660,100 @@ class Store:
                 "current_schema_version": SCHEMA_VERSION,
             },
         )
+        for task_id, previous_last_run_at in corrections:
+            self.append_audit(
+                action="schema_migration_last_run_corrected",
+                task_id=task_id,
+                actor="store",
+                payload={
+                    "previous_last_run_at": previous_last_run_at,
+                    "corrected_last_run_at": None,
+                    "reason": "no_terminal_run",
+                },
+            )
 
         print(
             f"[scheduler] WARNING: scheduled_tasks.json schema_version={detected_version!r} "
-            f"!= {SCHEMA_VERSION}; backed up to {backup} and reset to empty v{SCHEMA_VERSION}. "
-            "Old tasks must be recreated.",
+            f"!= {SCHEMA_VERSION}; backed up to {backup} and migrated to v{SCHEMA_VERSION}.",
             file=sys.stderr,
         )
+
+    def _migrate_v5_task(
+        self,
+        raw_task: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        """把一个 v5 task 映射为 v6 lifecycle，并纠正 last_run_at。"""
+        task_id = raw_task.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise RuntimeError("scheduler v5 migration task_id must be non-empty str")
+        trigger = raw_task.get("trigger")
+        if not isinstance(trigger, dict):
+            raise RuntimeError(f"scheduler v5 migration trigger missing: {task_id}")
+        trigger_type_raw = trigger.get("trigger_type")
+        if not isinstance(trigger_type_raw, str):
+            raise RuntimeError(f"scheduler v5 migration trigger type invalid: {task_id}")
+        trigger_type = TriggerType(trigger_type_raw)
+        state = raw_task.get("state")
+        enabled = raw_task.get("enabled")
+        if not isinstance(state, str) or not isinstance(enabled, bool):
+            raise RuntimeError(f"scheduler v5 migration state invalid: {task_id}")
+
+        if state == "deleted":
+            lifecycle = TaskLifecycleState.DELETED
+        elif state == "paused":
+            lifecycle = TaskLifecycleState.PAUSED
+        elif state == "disabled":
+            lifecycle = TaskLifecycleState.DISABLED
+        elif trigger_type is TriggerType.ONCE and state == "completed":
+            lifecycle = TaskLifecycleState.EXHAUSTED
+        elif enabled:
+            lifecycle = TaskLifecycleState.SCHEDULED
+        else:
+            lifecycle = TaskLifecycleState.DISABLED
+
+        terminal_finished_at = self._latest_terminal_finished_at_for_migration(task_id)
+        previous_last_run_at = raw_task.get("last_run_at")
+        correction = (
+            previous_last_run_at
+            if terminal_finished_at is None and isinstance(previous_last_run_at, str)
+            else None
+        )
+        migrated = dict(raw_task)
+        migrated.pop("enabled", None)
+        migrated.pop("state", None)
+        migrated["lifecycle"] = lifecycle.value
+        migrated["last_run_at"] = terminal_finished_at
+        if lifecycle is TaskLifecycleState.EXHAUSTED:
+            migrated["next_run_at"] = None
+        return migrated, correction
+
+    def _latest_terminal_finished_at_for_migration(self, task_id: str) -> str | None:
+        """读取 v5 run JSONL，返回最新 terminal run.finished_at。"""
+        run_path = self._runs_path(task_id)
+        if not run_path.exists():
+            return None
+        candidates: list[str] = []
+        with open(run_path, encoding="utf-8") as run_file:
+            for line in run_file:
+                if not line.strip():
+                    continue
+                try:
+                    raw = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(
+                        f"scheduler v5 run migration parse failed: {run_path}"
+                    ) from exc
+                if raw.get("_superseded"):
+                    continue
+                status = RunStatus(raw["status"])
+                finished_at = raw.get("finished_at")
+                if status is RunStatus.RUNNING or not isinstance(finished_at, str):
+                    continue
+                parse_iso(finished_at)
+                candidates.append(finished_at)
+        if not candidates:
+            return None
+        return max(candidates, key=parse_iso)
 
     # ------------------------------------------------------------------
     # File lock
@@ -608,6 +824,25 @@ class Store:
                 os.unlink(tmp_path)
             raise
 
+    def _restore_tasks_source(self, original_bytes: bytes) -> None:
+        """迁移异常时原子恢复 ``scheduled_tasks.json`` 的原始字节。"""
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(self._tasks_path.parent),
+            suffix=".restore.tmp",
+            prefix=".tasks_",
+        )
+        try:
+            with os.fdopen(fd, "wb") as file:
+                file.write(original_bytes)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(tmp_path, self._tasks_path)
+            _secure_file(self._tasks_path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+            raise
+
     def _load_tasks(self) -> list[ScheduledTask]:
         payload = self._load_tasks_payload()
         raw = payload.get("tasks", []) or []
@@ -642,11 +877,7 @@ class Store:
             return task
 
     def update_task(self, task_id: str, **fields_to_update: Any) -> ScheduledTask:
-        """部分字段更新；自动刷新 ``updated_at``；不存在抛 ``TaskNotFoundError``。
-
-        注意：状态约束（``enabled=False`` 时 ``state`` 必须 ∈ {paused, disabled,
-        completed}）由 dataclass ``__post_init__`` 校验，调用方负责传入合法组合。
-        """
+        """部分字段更新；自动刷新 ``updated_at``；不存在抛 ``TaskNotFoundError``。"""
         with self._scheduler_lock():
             tasks = self._load_tasks()
             updated: ScheduledTask | None = None
@@ -666,6 +897,30 @@ class Store:
             self._save_tasks(tasks)
             return updated
 
+    def request_manual_run(self, task_id: str, *, requested_at: str) -> ScheduledTask:
+        """持久化一条待试运行请求，保留任务原有 ``next_run_at``。
+
+        ticker 在 :meth:`reserve_due_tasks` 内原子领取该请求；同一任务存在待领取
+        请求时拒绝重复提交，防止浏览器双击生成重复 run。
+        """
+        parse_iso(requested_at)
+        with self._scheduler_lock():
+            tasks = self._load_tasks()
+            for idx, task in enumerate(tasks):
+                if task.task_id != task_id:
+                    continue
+                if task.manual_run_requested_at is not None:
+                    raise ManualRunPendingError(f"manual run already pending: {task_id}")
+                updated = replace(
+                    task,
+                    manual_run_requested_at=requested_at,
+                    updated_at=_now_iso(),
+                )
+                tasks[idx] = updated
+                self._save_tasks(tasks)
+                return updated
+            raise TaskNotFoundError(task_id)
+
     def get_task(self, task_id: str) -> ScheduledTask | None:
         for t in self._load_tasks():
             if t.task_id == task_id:
@@ -676,7 +931,7 @@ class Store:
         tasks = self._load_tasks()
         if include_disabled:
             return tasks
-        return [t for t in tasks if t.enabled]
+        return [t for t in tasks if t.lifecycle is TaskLifecycleState.SCHEDULED]
 
     def delete_task(self, task_id: str) -> bool:
         with self._scheduler_lock():
@@ -710,17 +965,45 @@ class Store:
         self._append_run_line(path, _run_to_dict(run))
 
     def supersede_and_append_run(self, run: ScheduledRun) -> None:
-        """状态变更：先把同 ``run_id`` 的最近一条非 superseded 行复制并打上
-        ``_superseded=True``，再 append 新状态行。
+        """状态变更：以单次 append 写入同 ``run_id`` 的最新完整快照。
 
-        不存在旧行时退化为普通 append（首次写入即新状态的少见情况）。
+        逻辑读取始终按 ``run_id`` 选择最后一条非 superseded 快照，因此无需先写
+        tombstone。单次 append + fsync 消除了 tombstone 已落盘、最新快照尚未落盘
+        时 run 从逻辑视图消失的崩溃窗口。
         """
         path = self._runs_path(run.task_id)
-        previous = self._read_last_active_line(path, run_id=run.run_id)
-        if previous is not None:
-            previous["_superseded"] = True
-            self._append_run_line(path, previous)
         self._append_run_line(path, _run_to_dict(run))
+
+    @staticmethod
+    def _finish_run_state(
+        run: ScheduledRun,
+        *,
+        status: RunStatus,
+        failure_reason: RunFailureReason | None,
+        error_message: str | None = None,
+        result_status: str | None = None,
+        silent_suppressed: bool = False,
+        cancel_reason: str | None = None,
+    ) -> ScheduledRun:
+        """生成 run 终态副本，集中维护状态收口时要重置的派生字段。
+
+        输入是当前 latest run；输出保留 run 身份、触发时间、session/thread 和摘要，
+        同时把执行结果、投递状态和未读状态重置为终态收口语义。
+        """
+        return replace(
+            run,
+            status=status,
+            finished_at=_now_iso(),
+            result_status=result_status,
+            error_message=error_message,
+            failure_reason=failure_reason,
+            delivery_error=None,
+            silent_suppressed=silent_suppressed,
+            delivered_at=None,
+            delivery_status=DeliveryStatus.PENDING,
+            seen_at=None,
+            cancel_reason=cancel_reason,
+        )
 
     def _iter_run_payloads(self, path: Path) -> Iterator[dict[str, Any]]:
         if not path.exists():
@@ -736,30 +1019,19 @@ class Store:
                     # 损坏的单行不能阻塞整个流；跳过即可（下游若严格可后续加 strict 参数）
                     continue
 
-    def _read_last_active_line(self, path: Path, *, run_id: str) -> dict[str, Any] | None:
-        last: dict[str, Any] | None = None
-        for payload in self._iter_run_payloads(path):
-            if payload.get("run_id") != run_id:
-                continue
-            if payload.get("_superseded"):
-                continue
-            last = payload
-        return last
-
     def list_runs(self, task_id: str, *, limit: int | None = None) -> list[ScheduledRun]:
-        """按落盘顺序返回非 superseded 行；``limit`` 取最近 N 条。
+        """按落盘顺序折叠每个 ``run_id`` 的最新有效快照。
 
-        语义：每个 ``run_id`` 在物理 jsonl 中可能出现多行（``running`` → ``completed``
-        会先 append 一份带 ``_superseded=True`` 的副本再 append 新状态行；首次
-        append 的"原始"那条不会被回写）。本方法按 ``run_id`` 折叠，只保留每个
-        ``run_id`` 在文件里 **最后一条** 记录；再过滤 ``_superseded=True``。
-
-        这样既保持物理层 append-only，又让逻辑层只看到"当前状态"。
+        当前写路径只追加完整快照。历史文件可能含旧版 ``_superseded=True``
+        tombstone；读取时跳过 tombstone，既兼容完整的旧三行状态迁移，也能在旧进程
+        崩溃只留下 tombstone 时回退到上一条有效快照。
         """
         path = self._runs_path(task_id)
         latest_by_run: dict[str, dict[str, Any]] = {}
         order: list[str] = []
         for payload in self._iter_run_payloads(path):
+            if payload.get("_superseded"):
+                continue
             run_id = payload.get("run_id")
             if not isinstance(run_id, str):
                 continue
@@ -770,8 +1042,6 @@ class Store:
         runs: list[ScheduledRun] = []
         for run_id in order:
             payload = latest_by_run[run_id]
-            if payload.get("_superseded"):
-                continue
             runs.append(_dict_to_run(payload))
         if limit is not None and limit >= 0:
             return runs[-limit:]
@@ -780,6 +1050,29 @@ class Store:
     def get_latest_run(self, task_id: str) -> ScheduledRun | None:
         runs = self.list_runs(task_id)
         return runs[-1] if runs else None
+
+    def get_run(self, task_id: str, run_id: str) -> ScheduledRun | None:
+        """按业务 ``run_id`` 读取当前逻辑状态，支持 ALLOW 下非 latest run。"""
+        for run in self.list_runs(task_id, limit=None):
+            if run.run_id == run_id:
+                return run
+        return None
+
+    def finish_run_if_running(self, run: ScheduledRun) -> bool:
+        """以 ``RUNNING → terminal`` 条件写收口单个 run。
+
+        同一 ``run_id`` 的首个 terminal 写入成功返回 True；迟到完成、重复取消和
+        其他终态竞争返回 False。整个读取与 append-only supersede 写入位于同一
+        scheduler file lock，保证多协程和多进程只产生一个逻辑终态。
+        """
+        if run.status is RunStatus.RUNNING:
+            raise ValueError("terminal run status must not be RUNNING")
+        with self._scheduler_lock():
+            current = self.get_run(run.task_id, run.run_id)
+            if current is None or current.status is not RunStatus.RUNNING:
+                return False
+            self.supersede_and_append_run(run)
+            return True
 
     # ------------------------------------------------------------------
     # v0.3 cron-delivery：跨 task run 聚合查询 + seen 状态
@@ -907,12 +1200,13 @@ class Store:
 
         算法（与 Hermes ``get_due_jobs`` 等价口径，文档 §9）：
 
-        1. 跳过 ``enabled=False`` 或缺 ``next_run_at`` 的任务
-        2. ``next_run_dt > now``：未到点跳过
-        3. one-shot：若 ``last_run_at is None`` 且 ``next_run_at <=
+        1. 原子领取 ``manual_run_requested_at``，它独立于正式日程
+        2. 跳过 lifecycle 非 scheduled 或缺 ``next_run_at`` 的任务
+        3. ``next_run_dt > now``：未到点跳过
+        4. one-shot：若 ``last_run_at is None`` 且 ``next_run_at <=
            now + ONESHOT_GRACE_SECONDS`` → due（不再推进 ``next_run_at``）
-        4. recurring：``period = _period_seconds(trigger)``、``grace = clamp(...)``
-           - 偏移 ≤ grace → 视为正常 due，推进 ``next_run_at = now + period`` 后返回
+        5. recurring：``period = _period_seconds(trigger)``、``grace = clamp(...)``
+           - 偏移 ≤ grace → 视为正常 due，按 trigger 计算下一个匹配时刻后返回
            - 偏移 > grace → 视为 stale，按 ``task.policy.misfire_policy`` 分派：
 
              * ``SKIP``：快进 + 写 audit ``run_skipped_stale``，**不**返回 due
@@ -928,7 +1222,34 @@ class Store:
             mutated = False
 
             for idx, task in enumerate(tasks):
-                if not task.enabled:
+                if task.manual_run_requested_at is not None:
+                    requested_at = task.manual_run_requested_at
+                    claimed = replace(
+                        task,
+                        manual_run_requested_at=None,
+                        updated_at=_now_iso(),
+                    )
+                    tasks[idx] = claimed
+                    mutated = True
+                    self._append_audit_unlocked(
+                        action="run_manual_reserved",
+                        task_id=task.task_id,
+                        actor="scheduler",
+                        payload={
+                            "manual_run_requested_at": requested_at,
+                            "reserved_at": now,
+                        },
+                    )
+                    reservations.append(
+                        DueTaskReservation(
+                            task=claimed,
+                            scheduled_for=requested_at,
+                            reserved_at=now,
+                        )
+                    )
+                    continue
+
+                if task.lifecycle is not TaskLifecycleState.SCHEDULED:
                     continue
                 if not task.next_run_at:
                     continue
@@ -938,8 +1259,6 @@ class Store:
 
                 # one-shot
                 if trigger_type is TriggerType.ONCE:
-                    if task.last_run_at is not None:
-                        continue
                     # P0 修复（v0.2.1）：未到点的 ONCE 任务必须跳过。
                     # is_within_oneshot_grace(future_run_at, now) 对未来时刻
                     # 永远返回 True（因为 future >= now - 120s），需要先判
@@ -950,19 +1269,11 @@ class Store:
                         continue
                     if not is_within_oneshot_grace(next_dt, now_dt):
                         continue
-                    # 关键修复（v0.2 P0）：reserve 时立即归档 ONCE 任务。
-                    #
-                    # 不归档会让 ONCE 在 grace 窗口（120s）内被持续 reserve →
-                    # 持续 fire fresh run，单个一次性任务被触发 100+ 次。
-                    # 这里同步标记 last_run_at + state=COMPLETED + enabled=False
-                    # + next_run_at=None，让下次 tick 进入 ONCE 分支时被
-                    # ``last_run_at is not None`` 跳掉，也不会被外层
-                    # ``not task.enabled`` / ``not task.next_run_at`` 兜底放过。
+                    # 领取和 run 终态正交：原子转 exhausted 防止重复领取，
+                    # last_run_at 只在 terminal ScheduledRun 落盘后写入。
                     archived = replace(
                         task,
-                        last_run_at=now,
-                        state=TaskState.COMPLETED,
-                        enabled=False,
+                        lifecycle=TaskLifecycleState.EXHAUSTED,
                         next_run_at=None,
                         updated_at=_now_iso(),
                     )
@@ -993,15 +1304,26 @@ class Store:
                 period = _period_seconds(task.trigger)
                 grace = grace_seconds_for_period(period)
                 offset = (now_dt - next_dt).total_seconds()
-                advance_to = to_iso(now_dt + timedelta(seconds=period))
                 original_scheduled_for = task.next_run_at
+
+                try:
+                    normal_advance_to = compute_next_run_at(task.trigger, after=next_dt)
+                    if parse_iso(normal_advance_to) <= now_dt:
+                        normal_advance_to = compute_next_run_at(task.trigger, after=now_dt)
+                    stale_advance_to = compute_next_run_at(task.trigger, after=now_dt)
+                except ValueError as exc:
+                    raise SchedulerStoreError(
+                        f"无法推进 recurring task {task.task_id}: {exc}"
+                    ) from exc
 
                 if is_stale_recurring(next_dt, now_dt, period):
                     # stale → 按 misfire_policy 分派
                     misfire = task.policy.misfire_policy
 
                     if misfire is MisfirePolicy.SKIP:
-                        tasks[idx] = replace(task, next_run_at=advance_to, updated_at=_now_iso())
+                        tasks[idx] = replace(
+                            task, next_run_at=stale_advance_to, updated_at=_now_iso()
+                        )
                         mutated = True
                         self._append_audit_unlocked(
                             action="run_skipped_stale",
@@ -1009,7 +1331,7 @@ class Store:
                             actor="scheduler",
                             payload={
                                 "previous_next_run_at": original_scheduled_for,
-                                "advanced_to": advance_to,
+                                "advanced_to": stale_advance_to,
                                 "offset_seconds": offset,
                                 "grace_seconds": grace,
                                 "misfire_policy": misfire.value,
@@ -1019,7 +1341,9 @@ class Store:
 
                     if misfire is MisfirePolicy.CATCH_UP_ONCE:
                         # 补跑 1 次：scheduled_for 保留原 next_run_at；同时推进 next_run_at
-                        tasks[idx] = replace(task, next_run_at=advance_to, updated_at=_now_iso())
+                        tasks[idx] = replace(
+                            task, next_run_at=stale_advance_to, updated_at=_now_iso()
+                        )
                         mutated = True
                         self._append_audit_unlocked(
                             action="run_catch_up_once",
@@ -1027,7 +1351,7 @@ class Store:
                             actor="scheduler",
                             payload={
                                 "original_scheduled_for": original_scheduled_for,
-                                "advanced_to": advance_to,
+                                "advanced_to": stale_advance_to,
                                 "offset_seconds": offset,
                                 "grace_seconds": grace,
                                 "misfire_policy": misfire.value,
@@ -1044,7 +1368,9 @@ class Store:
 
                     if misfire is MisfirePolicy.FIRE_NOW:
                         # 立即触发：scheduled_for 用 now（不是原 next_run_at）；同时推进 next_run_at
-                        tasks[idx] = replace(task, next_run_at=advance_to, updated_at=_now_iso())
+                        tasks[idx] = replace(
+                            task, next_run_at=stale_advance_to, updated_at=_now_iso()
+                        )
                         mutated = True
                         self._append_audit_unlocked(
                             action="run_fire_now",
@@ -1053,7 +1379,7 @@ class Store:
                             payload={
                                 "original_scheduled_for": original_scheduled_for,
                                 "fired_at": now,
-                                "advanced_to": advance_to,
+                                "advanced_to": stale_advance_to,
                                 "offset_seconds": offset,
                                 "grace_seconds": grace,
                                 "misfire_policy": misfire.value,
@@ -1072,7 +1398,7 @@ class Store:
                     raise ValueError(f"unknown misfire_policy: {misfire!r}")
 
                 scheduled_for = original_scheduled_for
-                tasks[idx] = replace(task, next_run_at=advance_to, updated_at=_now_iso())
+                tasks[idx] = replace(task, next_run_at=normal_advance_to, updated_at=_now_iso())
                 mutated = True
                 reservations.append(
                     DueTaskReservation(
@@ -1105,7 +1431,7 @@ class Store:
     # ------------------------------------------------------------------
 
     def recover_stale_runs(self) -> int:
-        """启动时收尾：所有任务的 latest run 处于 ``RUNNING`` → 强制 ``ABANDONED``
+        """启动时收尾：所有任务的每条 ``RUNNING`` run → 强制 ``ABANDONED``
         + ``failure_reason=ABANDONED_ON_RESTART`` + 写 audit ``run_failed``。
 
         返回被收尾的 run 数。
@@ -1114,36 +1440,37 @@ class Store:
         with self._scheduler_lock():
             tasks = self._load_tasks()
             for task in tasks:
-                latest = self.get_latest_run(task.task_id)
-                if latest is None or latest.status is not RunStatus.RUNNING:
-                    continue
-                finished = ScheduledRun(
-                    run_id=latest.run_id,
-                    task_id=latest.task_id,
-                    status=RunStatus.ABANDONED,
-                    scheduled_for=latest.scheduled_for,
-                    started_at=latest.started_at,
-                    finished_at=_now_iso(),
-                    session_id=latest.session_id,
-                    result_status=latest.result_status,
-                    final_message_excerpt=latest.final_message_excerpt,
-                    error_message=latest.error_message,
-                    failure_reason=RunFailureReason.ABANDONED_ON_RESTART,
-                    delivery_error=latest.delivery_error,
-                    silent_suppressed=latest.silent_suppressed,
-                )
-                self.supersede_and_append_run(finished)
-                self._append_audit_unlocked(
-                    action="run_failed",
-                    task_id=task.task_id,
-                    actor="scheduler",
-                    payload={
+                running_runs = [
+                    run
+                    for run in self.list_runs(task.task_id, limit=None)
+                    if run.status is RunStatus.RUNNING
+                ]
+                for running in running_runs:
+                    finished = self._finish_run_state(
+                        running,
+                        status=RunStatus.ABANDONED,
+                        failure_reason=RunFailureReason.ABANDONED_ON_RESTART,
+                        error_message=running.error_message,
+                    )
+                    self.supersede_and_append_run(finished)
+                    payload = {
                         "run_id": finished.run_id,
                         "failure_reason": RunFailureReason.ABANDONED_ON_RESTART.value,
                         "recovery": "abandoned_on_restart",
-                    },
-                )
-                recovered += 1
+                    }
+                    self._append_audit_unlocked(
+                        action="run_failed",
+                        task_id=task.task_id,
+                        actor="scheduler",
+                        payload=payload,
+                    )
+                    self._append_incident_unlocked(
+                        action="run_failed",
+                        task_id=task.task_id,
+                        actor="scheduler",
+                        payload=payload,
+                    )
+                    recovered += 1
         return recovered
 
     # ------------------------------------------------------------------
@@ -1157,40 +1484,136 @@ class Store:
         task_id: str,
         failure_reason: RunFailureReason | None = None,
         error_message: str | None = None,
+        cancel_reason: str | None = None,
     ) -> None:
         """把仍在 RUNNING 的某条 run 收尾为 :attr:`RunStatus.CANCELLED`。
 
-        内部走 :meth:`supersede_and_append_run`：先把当前 RUNNING 行复制并
-        打 ``_superseded=True``，再 append 一条同 ``run_id`` 的 CANCELLED 行。
+        内部走 :meth:`supersede_and_append_run`，单次 append 一条同 ``run_id``
+        的 CANCELLED 完整快照。
 
         - 找不到 ``run_id`` → :class:`TaskNotFoundError`
         - 该 run 已经不是 RUNNING（已 completed / failed / cancelled / ...）
           → :class:`ValueError`，不允许重复收尾
         """
-        latest = self.get_latest_run(task_id)
-        if latest is None or latest.run_id != run_id:
-            raise TaskNotFoundError(f"run_id {run_id!r} not found for task {task_id!r}")
-        if latest.status is not RunStatus.RUNNING:
-            raise ValueError(
-                f"cannot cancel run {run_id!r}: status is {latest.status.value}, expected RUNNING"
+        with self._scheduler_lock():
+            current = self.get_run(task_id, run_id)
+            if current is None:
+                raise TaskNotFoundError(f"run_id {run_id!r} not found for task {task_id!r}")
+            if current.status is not RunStatus.RUNNING:
+                raise ValueError(
+                    f"cannot cancel run {run_id!r}: status is {current.status.value}, "
+                    "expected RUNNING"
+                )
+
+            cancelled = self._finish_run_state(
+                current,
+                status=RunStatus.CANCELLED,
+                error_message=error_message,
+                failure_reason=failure_reason,
+                result_status="cancelled",
+                cancel_reason=cancel_reason,
+            )
+            self.supersede_and_append_run(cancelled)
+
+    # ------------------------------------------------------------------
+    # ticker status / incidents
+    # ------------------------------------------------------------------
+
+    def _record_now_iso(self) -> str:
+        return _now_iso_in_timezone(self._display_timezone)
+
+    def write_ticker_status(self, *, status: str, payload: dict[str, Any]) -> None:
+        record = {
+            "schema_version": SCHEMA_VERSION,
+            **_payload_with_display_times(
+                payload,
+                timezone_key=self._display_timezone,
+            ),
+            "status": status,
+            "updated_at": self._record_now_iso(),
+        }
+        _atomic_write_json(self._ticker_status_path, record)
+
+    def read_ticker_status(self) -> dict[str, Any] | None:
+        if not self._ticker_status_path.exists():
+            return None
+        try:
+            with open(self._ticker_status_path, encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def append_incident(
+        self,
+        *,
+        action: str,
+        task_id: str | None,
+        actor: str,
+        payload: dict[str, Any],
+        severity: str = "error",
+    ) -> None:
+        with self._scheduler_lock():
+            self._append_incident_unlocked(
+                action=action,
+                task_id=task_id,
+                actor=actor,
+                payload=payload,
+                severity=severity,
             )
 
-        cancelled = ScheduledRun(
-            run_id=latest.run_id,
-            task_id=latest.task_id,
-            status=RunStatus.CANCELLED,
-            scheduled_for=latest.scheduled_for,
-            started_at=latest.started_at,
-            finished_at=_now_iso(),
-            session_id=latest.session_id,
-            result_status=None,
-            final_message_excerpt=latest.final_message_excerpt,
-            error_message=error_message,
-            failure_reason=failure_reason,
-            delivery_error=None,
-            silent_suppressed=False,
-        )
-        self.supersede_and_append_run(cancelled)
+    def _append_incident_unlocked(
+        self,
+        *,
+        action: str,
+        task_id: str | None,
+        actor: str,
+        payload: dict[str, Any],
+        severity: str = "error",
+    ) -> None:
+        record = {
+            "incident_id": _new_audit_id(),
+            "task_id": task_id,
+            "action": action,
+            "actor": actor,
+            "severity": severity,
+            "payload": _payload_with_display_times(
+                payload,
+                timezone_key=self._display_timezone,
+            ),
+            "created_at": self._record_now_iso(),
+        }
+        self._incidents_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._incidents_path, "a", encoding="utf-8") as f:
+            f.write(_json_dumps(record) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        _secure_file(self._incidents_path)
+
+    def list_incidents(
+        self,
+        *,
+        limit: int | None = None,
+        task_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if not self._incidents_path.exists():
+            return []
+        out: list[dict[str, Any]] = []
+        with open(self._incidents_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if task_id is not None and record.get("task_id") != task_id:
+                    continue
+                out.append(record)
+        if limit is not None and limit >= 0:
+            return out[-limit:]
+        return out
 
     # ------------------------------------------------------------------
     # audit
@@ -1227,8 +1650,11 @@ class Store:
             "task_id": task_id,
             "action": action,
             "actor": actor,
-            "payload": dict(payload),
-            "created_at": _now_iso(),
+            "payload": _payload_with_display_times(
+                payload,
+                timezone_key=self._display_timezone,
+            ),
+            "created_at": self._record_now_iso(),
         }
         self._audits_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._audits_path, "a", encoding="utf-8") as f:
@@ -1275,6 +1701,7 @@ def _new_audit_id() -> str:
 
 
 __all__ = [
+    "ManualRunPendingError",
     "SchedulerBusyError",
     "SchedulerStoreError",
     "Store",

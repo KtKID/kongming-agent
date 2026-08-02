@@ -25,6 +25,7 @@ from scheduler.domain import (
 )
 from scheduler.timing import (
     compute_first_run_at,
+    compute_next_run_at,
     grace_seconds_for_period,
     is_stale_recurring,
     is_within_oneshot_grace,
@@ -289,6 +290,27 @@ class TestComputeFirstRunAt:
         result_dt = parse_iso(result)
         # 下次触发应该在 (now, now+30s] 区间内
         assert now < result_dt <= now + timedelta(seconds=30)
+
+    def test_cron_next_match_preserves_fixed_local_clock(self) -> None:
+        """已消费北京时间 22:00 后，下一匹配仍是次日北京时间 22:00。"""
+        trigger = ScheduleTrigger(
+            trigger_type=TriggerType.CRON,
+            expr="0 22 * * *",
+            timezone="Asia/Shanghai",
+        )
+        after = datetime(2026, 7, 12, 14, 0, 0, tzinfo=UTC)
+
+        result = parse_iso(compute_next_run_at(trigger, after=after))
+
+        assert result.astimezone(_require_zoneinfo("Asia/Shanghai")) == datetime(
+            2026,
+            7,
+            13,
+            22,
+            0,
+            0,
+            tzinfo=_require_zoneinfo("Asia/Shanghai"),
+        )
 
     def test_invalid_cron_raises(self) -> None:
         """非法 cron → ValueError。"""

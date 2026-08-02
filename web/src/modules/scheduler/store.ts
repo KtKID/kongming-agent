@@ -6,8 +6,39 @@
 
 import { create } from "zustand";
 import { useThreadsStore } from "@/stores/threads";
-import type { SchedulerStoreState, SchedulerTaskVM } from "./types";
+import type {
+  SchedulerStoreState,
+  SchedulerTaskRuntimeStatus,
+  SchedulerTaskVM,
+} from "./types";
 import * as api from "./api";
+
+let tasksRequestGeneration = 0;
+const runsRequestGenerationByTaskId = new Map<string, number>();
+let runsRequestsInFlight = 0;
+
+function mergeTaskSnapshot(
+  tasks: SchedulerTaskVM[],
+  state: SchedulerStoreState,
+): {
+  tasks: SchedulerTaskVM[];
+  taskMap: Record<string, SchedulerTaskVM>;
+  runtimeStatusByTaskId: Record<string, SchedulerTaskRuntimeStatus>;
+} {
+  const mergedTasks = tasks.map((task) => {
+    const hasLiveRun = (state.liveRunIdsByTaskId[task.taskId]?.length ?? 0) > 0;
+    const hasPendingManualRun = state.pendingManualRunTaskId === task.taskId;
+    return hasLiveRun || hasPendingManualRun
+      ? { ...task, liveRuntimeStatus: "running" as const }
+      : task;
+  });
+  const taskMap: Record<string, SchedulerTaskVM> = {};
+  for (const task of mergedTasks) taskMap[task.taskId] = task;
+  const runtimeStatusByTaskId = Object.fromEntries(
+    mergedTasks.map((task) => [task.taskId, task.liveRuntimeStatus]),
+  );
+  return { tasks: mergedTasks, taskMap, runtimeStatusByTaskId };
+}
 
 type SchedulerActions = {
   openDrawer: () => void;
@@ -15,6 +46,7 @@ type SchedulerActions = {
   bootstrap: () => Promise<void>;
   refreshTasks: () => Promise<void>;
   selectTask: (taskId: string | null) => void;
+  selectRun: (taskId: string, runId: string | null) => void;
   loadRuns: (taskId: string) => Promise<void>;
   setFilter: (filter: SchedulerStoreState["filter"]) => void;
   createTask: (
@@ -29,6 +61,13 @@ type SchedulerActions = {
   runNow: (taskId: string) => Promise<void>;
   deleteTask: (taskId: string) => Promise<void>;
   upsertTaskFromWS: (task: SchedulerTaskVM) => void;
+  setTaskRuntimeStatus: (
+    taskId: string,
+    status: SchedulerTaskRuntimeStatus,
+  ) => void;
+  markRunStarted: (taskId: string, runId: string) => void;
+  markRunFinished: (taskId: string, runId: string) => void;
+  markPendingManualRun: (taskId: string | null) => void;
 };
 
 export const useSchedulerStore = create<SchedulerStoreState & SchedulerActions>(
@@ -41,6 +80,10 @@ export const useSchedulerStore = create<SchedulerStoreState & SchedulerActions>(
     tasks: [],
     taskMap: {},
     runsByTaskId: {},
+    runtimeStatusByTaskId: {},
+    liveRunIdsByTaskId: {},
+    selectedRunIdByTaskId: {},
+    pendingManualRunTaskId: null,
     selectedTaskId: null,
     filter: "all",
     errorMessage: null,
@@ -54,30 +97,42 @@ export const useSchedulerStore = create<SchedulerStoreState & SchedulerActions>(
     closeDrawer: () => set({ isDrawerOpen: false }),
 
     bootstrap: async () => {
+      const generation = ++tasksRequestGeneration;
       set({ isLoadingTasks: true, errorMessage: null });
       try {
         const tasks = await api.listTasks();
-        const taskMap: Record<string, SchedulerTaskVM> = {};
-        for (const t of tasks) taskMap[t.taskId] = t;
-        set({ tasks, taskMap, isBootstrapped: true });
+        if (generation !== tasksRequestGeneration) return;
+        const snapshot = mergeTaskSnapshot(tasks, get());
+        set({
+          ...snapshot,
+          isBootstrapped: true,
+        });
       } catch (err) {
-        set({ errorMessage: String(err) });
+        if (generation === tasksRequestGeneration) {
+          set({ errorMessage: String(err) });
+        }
       } finally {
-        set({ isLoadingTasks: false });
+        if (generation === tasksRequestGeneration) {
+          set({ isLoadingTasks: false });
+        }
       }
     },
 
     refreshTasks: async () => {
+      const generation = ++tasksRequestGeneration;
       set({ isLoadingTasks: true, errorMessage: null });
       try {
         const tasks = await api.listTasks();
-        const taskMap: Record<string, SchedulerTaskVM> = {};
-        for (const t of tasks) taskMap[t.taskId] = t;
-        set({ tasks, taskMap });
+        if (generation !== tasksRequestGeneration) return;
+        set(mergeTaskSnapshot(tasks, get()));
       } catch (err) {
-        set({ errorMessage: String(err) });
+        if (generation === tasksRequestGeneration) {
+          set({ errorMessage: String(err) });
+        }
       } finally {
-        set({ isLoadingTasks: false });
+        if (generation === tasksRequestGeneration) {
+          set({ isLoadingTasks: false });
+        }
       }
     },
 
@@ -86,17 +141,39 @@ export const useSchedulerStore = create<SchedulerStoreState & SchedulerActions>(
       if (taskId) void get().loadRuns(taskId);
     },
 
+    selectRun: (taskId, runId) => {
+      set((s) => ({
+        selectedRunIdByTaskId: {
+          ...s.selectedRunIdByTaskId,
+          [taskId]: runId,
+        },
+      }));
+    },
+
     loadRuns: async (taskId) => {
+      const generation = (runsRequestGenerationByTaskId.get(taskId) ?? 0) + 1;
+      runsRequestGenerationByTaskId.set(taskId, generation);
+      runsRequestsInFlight += 1;
       set({ isLoadingRuns: true });
       try {
         const runs = await api.listTaskRuns(taskId);
+        if (runsRequestGenerationByTaskId.get(taskId) !== generation) return;
         set((s) => ({
           runsByTaskId: { ...s.runsByTaskId, [taskId]: runs },
+          selectedRunIdByTaskId: {
+            ...s.selectedRunIdByTaskId,
+            [taskId]:
+              runs.find((run) => run.runId === s.selectedRunIdByTaskId[taskId])
+                ?.runId ??
+              runs[0]?.runId ??
+              null,
+          },
         }));
       } catch {
         // 静默
       } finally {
-        set({ isLoadingRuns: false });
+        runsRequestsInFlight -= 1;
+        set({ isLoadingRuns: runsRequestsInFlight > 0 });
       }
     },
 
@@ -152,6 +229,13 @@ export const useSchedulerStore = create<SchedulerStoreState & SchedulerActions>(
     runNow: async (taskId) => {
       try {
         await api.runTaskNow(taskId);
+        set((s) => ({
+          pendingManualRunTaskId: taskId,
+          runtimeStatusByTaskId: {
+            ...s.runtimeStatusByTaskId,
+            [taskId]: "running",
+          },
+        }));
       } catch (err) {
         set({ errorMessage: String(err) });
       }
@@ -166,10 +250,21 @@ export const useSchedulerStore = create<SchedulerStoreState & SchedulerActions>(
           delete taskMap[taskId];
           const runsByTaskId = { ...s.runsByTaskId };
           delete runsByTaskId[taskId];
+          const runtimeStatusByTaskId = { ...s.runtimeStatusByTaskId };
+          delete runtimeStatusByTaskId[taskId];
+          const liveRunIdsByTaskId = { ...s.liveRunIdsByTaskId };
+          delete liveRunIdsByTaskId[taskId];
+          const selectedRunIdByTaskId = { ...s.selectedRunIdByTaskId };
+          delete selectedRunIdByTaskId[taskId];
           return {
             tasks,
             taskMap,
             runsByTaskId,
+            runtimeStatusByTaskId,
+            liveRunIdsByTaskId,
+            selectedRunIdByTaskId,
+            pendingManualRunTaskId:
+              s.pendingManualRunTaskId === taskId ? null : s.pendingManualRunTaskId,
             selectedTaskId: s.selectedTaskId === taskId ? null : s.selectedTaskId,
           };
         });
@@ -184,6 +279,61 @@ export const useSchedulerStore = create<SchedulerStoreState & SchedulerActions>(
         const tasks = Object.values(taskMap);
         return { tasks, taskMap };
       });
+    },
+
+    setTaskRuntimeStatus: (taskId, status) => {
+      set((s) => ({
+        runtimeStatusByTaskId: {
+          ...s.runtimeStatusByTaskId,
+          [taskId]: status,
+        },
+      }));
+    },
+
+    markRunStarted: (taskId, runId) => {
+      set((s) => {
+        const current = s.liveRunIdsByTaskId[taskId] ?? [];
+        const liveRunIds = current.includes(runId)
+          ? current
+          : [...current, runId];
+        return {
+          liveRunIdsByTaskId: {
+            ...s.liveRunIdsByTaskId,
+            [taskId]: liveRunIds,
+          },
+          runtimeStatusByTaskId: {
+            ...s.runtimeStatusByTaskId,
+            [taskId]: "running",
+          },
+        };
+      });
+    },
+
+    markRunFinished: (taskId, runId) => {
+      set((s) => {
+        const knownLiveRuns = s.liveRunIdsByTaskId[taskId] ?? [];
+        const remaining = knownLiveRuns.filter(
+          (candidate) => candidate !== runId,
+        );
+        const nextRuntimeStatus =
+          remaining.length > 0
+            ? "running"
+            : s.runtimeStatusByTaskId[taskId] ?? "idle";
+        return {
+          liveRunIdsByTaskId: {
+            ...s.liveRunIdsByTaskId,
+            [taskId]: remaining,
+          },
+          runtimeStatusByTaskId: {
+            ...s.runtimeStatusByTaskId,
+            [taskId]: nextRuntimeStatus,
+          },
+        };
+      });
+    },
+
+    markPendingManualRun: (taskId) => {
+      set({ pendingManualRunTaskId: taskId });
     },
   }),
 );

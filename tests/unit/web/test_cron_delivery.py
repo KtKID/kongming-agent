@@ -12,12 +12,17 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from hosts.web.app_support.cron_delivery import WebDeliverySink
+from hosts.web.app_support.cron_delivery import (
+    ThreadTargetSink,
+    WebDeliverySink,
+    make_cron_message_frame,
+)
 from hosts.web.websocket.cron import CronWSBroker, get_broker, reset_broker_for_testing
 from scheduler.delivery import DeliveryStatus
 from scheduler.domain import (
@@ -29,8 +34,8 @@ from scheduler.domain import (
     ScheduleTrigger,
     SessionMode,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
@@ -48,12 +53,16 @@ def _reset_broker_singleton():
     reset_broker_for_testing()
 
 
-def _make_task(*, name: str = "测试任务", task_id: str = "t-web") -> ScheduledTask:
+def _make_task(
+    *,
+    name: str = "测试任务",
+    task_id: str = "t-web",
+    thread_id: str = "thread-111111111111",
+) -> ScheduledTask:
     return ScheduledTask(
         task_id=task_id,
         name=name,
-        enabled=True,
-        state=TaskState.SCHEDULED,
+        lifecycle=TaskLifecycleState.SCHEDULED,
         origin=TaskOrigin.TOOL,
         trigger=ScheduleTrigger(trigger_type=TriggerType.INTERVAL, expr="10", timezone="UTC"),
         policy=TaskExecutionPolicy(
@@ -67,6 +76,7 @@ def _make_task(*, name: str = "测试任务", task_id: str = "t-web") -> Schedul
         created_by="tester",
         created_at="2026-05-04T00:00:00+00:00",
         updated_at="2026-05-04T00:00:00+00:00",
+        thread_id=thread_id,
     )
 
 
@@ -120,6 +130,8 @@ async def test_websink_deliver_calls_broker_broadcast():
     assert payload["task_id"] == "task-abc"
     assert payload["task_name"] == "每天9点早安"
     assert payload["run_id"] == "run-xyz"
+    assert payload["thread_id"] == task.thread_id
+    assert payload["session_id"] == run.session_id
     assert payload["final_message"] == "早安"
     assert payload["delivered_at_iso"] == run.finished_at
     assert payload["scheduled_for"] == run.scheduled_for
@@ -138,6 +150,100 @@ async def test_websink_returns_delivered_even_when_no_subscribers():
     result = await sink.deliver(_make_task(), _make_run(), "msg")
 
     assert result.status is DeliveryStatus.DELIVERED
+
+
+@pytest.mark.asyncio
+async def test_websink_run_started_broadcasts_cron_started_frame():
+    """run_started 广播 cron.run.started，供前端实时显示运行中。"""
+    broker = MagicMock(spec=CronWSBroker)
+    broker.broadcast = AsyncMock()
+    sink = WebDeliverySink(broker)
+    task = _make_task(task_id="task-live")
+    run = replace(
+        _make_run(run_id="run-live"),
+        status=RunStatus.RUNNING,
+        finished_at=None,
+        result_status=None,
+        final_message_excerpt=None,
+    )
+
+    await sink.run_started(task, run)
+
+    broker.broadcast.assert_awaited_once()
+    payload = broker.broadcast.await_args.args[0]
+    assert payload["frame_type"] == "cron.run.started"
+    assert payload["task_id"] == "task-live"
+    assert payload["run_id"] == "run-live"
+    assert payload["thread_id"] == task.thread_id
+    assert payload["session_id"] == run.session_id
+    assert payload["status"] == run.status.value
+
+
+@pytest.mark.asyncio
+async def test_websink_run_finished_broadcasts_cron_finished_frame():
+    """run_finished 广播 cron.run.finished，供前端实时回到空闲。"""
+    broker = MagicMock(spec=CronWSBroker)
+    broker.broadcast = AsyncMock()
+    sink = WebDeliverySink(broker)
+    task = _make_task(task_id="task-live")
+    run = _make_run(run_id="run-live")
+
+    await sink.run_finished(task, run)
+
+    broker.broadcast.assert_awaited_once()
+    payload = broker.broadcast.await_args.args[0]
+    assert payload["frame_type"] == "cron.run.finished"
+    assert payload["task_id"] == "task-live"
+    assert payload["run_id"] == "run-live"
+    assert payload["thread_id"] == task.thread_id
+    assert payload["session_id"] == run.session_id
+    assert payload["final_message"] == run.final_message_excerpt
+
+
+def test_make_cron_message_frame_uses_cron_frame_type():
+    """thread 时间线投递使用 cron.message.appended 专用帧。"""
+    payload = make_cron_message_frame(
+        thread_id="thread-1",
+        task_id="task-1",
+        run_id="run-1",
+        session_id="sess-1",
+        content="done",
+        task_name="daily",
+    )
+
+    assert payload["frame_type"] == "cron.message.appended"
+    assert payload["thread_id"] == "thread-1"
+    assert payload["task_id"] == "task-1"
+    assert payload["run_id"] == "run-1"
+    assert payload["session_id"] == "sess-1"
+    assert payload["content"] == "done"
+    assert payload["task_name"] == "daily"
+    assert payload["message_id"].startswith("cron-msg-")
+
+
+@pytest.mark.asyncio
+async def test_thread_target_sink_broadcasts_raw_final_message():
+    """thread target 投递使用 runner 已落盘的 final_message 原文做实时帧。"""
+    manager = MagicMock()
+    manager.append_cron_message = AsyncMock(return_value=True)
+    sink = ThreadTargetSink(manager)
+
+    ok = await sink.deliver_to_target(
+        "thread:thread-111111111111",
+        _make_task(task_id="task-1", name="daily", thread_id="thread-111111111111"),
+        _make_run(run_id="run-1"),
+        "done",
+    )
+
+    assert ok is True
+    manager.append_cron_message.assert_awaited_once_with(
+        "thread-111111111111",
+        "done",
+        task_id="task-1",
+        run_id="run-1",
+        session_id="sess-run-1",
+        task_name="daily",
+    )
 
 
 # ---------------------------------------------------------------------------

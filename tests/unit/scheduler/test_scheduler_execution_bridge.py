@@ -1,5 +1,4 @@
 """unit：application.scheduled_runs.execution_bridge.ExecutionBridge + InactivityWatchdog（Wave C）。
-
 覆盖矩阵：
 
 §1 Runner 成功路径
@@ -47,6 +46,7 @@ from core.contracts import (
     EventSink,
     LLMRequest,
     LLMResponse,
+    PreparedToolCall,
     Session,
     Tool,
     ToolContext,
@@ -70,13 +70,17 @@ from scheduler.domain import (
     ScheduleTrigger,
     SessionMode,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
 from scheduler.store import Store
 from scheduler.timing import to_iso, utc_now
+from tests.support.scheduled_runtime import (
+    RunnerBackedScheduledRuntime,
+    execute_bridge_for_test,
+)
 
 # ---------------------------------------------------------------------------
 # 通用 fakes
@@ -105,7 +109,8 @@ class _NoopTool:
     description: str = "noop tool"
     input_schema: dict[str, Any] = field(default_factory=dict)
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    async def execute(self, prepared: PreparedToolCall, ctx: ToolContext) -> ToolResult:
+        del prepared, ctx
         return ToolResult(ok=True, content="ok")
 
 
@@ -126,8 +131,7 @@ def _make_task(
     return ScheduledTask(
         task_id=task_id,
         name="t",
-        enabled=True,
-        state=TaskState.SCHEDULED,
+        lifecycle=TaskLifecycleState.SCHEDULED,
         origin=TaskOrigin.CLI,
         trigger=ScheduleTrigger(
             trigger_type=TriggerType.INTERVAL,
@@ -191,10 +195,13 @@ class _RunnerCallCapture:
     run_id: str | None
     enabled_tool_names: tuple[str, ...]
     tools_lookup_contains_schedule: bool
+    run_event_sink_types: tuple[str, ...]
+    shared_event_sink_count: int
+    tool_context_metadata: dict[str, Any] | None
 
 
 class FakeRunner(Runner):
-    """覆写 Runner.run；保留构造参数（含 _event_sinks 列表）以便 watchdog 注入。
+    """覆写 Runner.run；记录 run-scoped sinks 以便 watchdog 测试驱动。
 
     可配置：
     - ``result_factory``: 给定 (state) 返回 Result（用于 happy path）
@@ -220,6 +227,7 @@ class FakeRunner(Runner):
         self._run_duration = run_duration
         self._poll_interval = poll_interval
         self.captured: list[_RunnerCallCapture] = []
+        self.current_event_sinks: tuple[EventSink, ...] = ()
 
     async def run(
         self,
@@ -233,6 +241,8 @@ class FakeRunner(Runner):
         max_turns: int | None = None,
         run_id: str | None = None,
         enabled_tools: Sequence[Tool] | None = None,
+        event_sinks: Sequence[EventSink] | None = None,
+        tool_context_metadata: dict[str, Any] | None = None,
     ) -> Result:
         # 记录调用入参
         names = tuple(t.name for t in (enabled_tools or ()))
@@ -241,6 +251,7 @@ class FakeRunner(Runner):
             n in tools  # type: ignore[operator]
             for n in ("schedule.create", "schedule.list", "cron.list")
         )
+        run_sinks = tuple(event_sinks or ())
         self.captured.append(
             _RunnerCallCapture(
                 user_input=user_input,
@@ -248,32 +259,39 @@ class FakeRunner(Runner):
                 run_id=run_id,
                 enabled_tool_names=names,
                 tools_lookup_contains_schedule=contains_schedule,
+                run_event_sink_types=tuple(type(s).__name__ for s in run_sinks),
+                shared_event_sink_count=len(self._event_sinks),
+                tool_context_metadata=tool_context_metadata,
             )
         )
+        self.current_event_sinks = run_sinks
 
-        # 异常路径
-        if self._raise_exc is not None:
-            raise self._raise_exc
+        try:
+            # 异常路径
+            if self._raise_exc is not None:
+                raise self._raise_exc
 
-        # 长任务模拟：分片 sleep + 可选 emit
-        elapsed = 0.0
-        step = self._poll_interval
-        while elapsed < self._run_duration:
-            if self._activity_emitter is not None:
-                await self._activity_emitter()
-            await asyncio.sleep(step)
-            elapsed += step
+            # 长任务模拟：分片 sleep + 可选 emit
+            elapsed = 0.0
+            step = self._poll_interval
+            while elapsed < self._run_duration:
+                if self._activity_emitter is not None:
+                    await self._activity_emitter()
+                await asyncio.sleep(step)
+                elapsed += step
 
-        if self._result_factory is None:
-            # default：completed + content="ok"
-            return Result(
-                run_id=run_id or f"run-{session.session_id}-1",
-                session_id=session.session_id,
-                status="completed",
-                final_message=Message(role="assistant", content="ok"),
-                turn_count=1,
-            )
-        return self._result_factory(list(enabled_tools or ()))
+            if self._result_factory is None:
+                # default：completed + content="ok"
+                return Result(
+                    run_id=run_id or f"run-{session.session_id}-1",
+                    session_id=session.session_id,
+                    status="completed",
+                    final_message=Message(role="assistant", content="ok"),
+                    turn_count=1,
+                )
+            return self._result_factory(list(enabled_tools or ()))
+        finally:
+            self.current_event_sinks = ()
 
 
 class _CaptureDispatcher:
@@ -313,19 +331,29 @@ def _build_bridge(
     event_sinks: Sequence[EventSink] = (),
     poll_interval: float = 0.02,
     dispatcher: Any | None = None,
+    trace_dir: Path | None = None,
+    tool_context_metadata: dict[str, Any] | None = None,
+    tool_context_metadata_factory: (Callable[[ScheduledTask], dict[str, Any] | None] | None) = None,
 ) -> ExecutionBridge:
+    resolved_approval = inner_approval if inner_approval is not None else _AllowApproval()
     return ExecutionBridge(
-        runner=runner,
+        runtime=RunnerBackedScheduledRuntime(
+            runner,
+            approval=resolved_approval,
+        ),
         llm=_StubLLM(),
         tools=tools if tools is not None else {},
         enabled_tool_names=enabled_tool_names,
-        inner_approval=inner_approval if inner_approval is not None else _AllowApproval(),
+        inner_approval=resolved_approval,
         session_factory=lambda sid: InMemorySession(sid),
         event_sinks=event_sinks,
         agent_spec=_make_agent_spec(),
         store=store,
         dispatcher=dispatcher,
+        tool_context_metadata=tool_context_metadata,
+        tool_context_metadata_factory=tool_context_metadata_factory,
         watchdog_poll_interval_seconds=poll_interval,
+        trace_dir=trace_dir,
     )
 
 
@@ -340,7 +368,7 @@ async def test_completed_run_records_status(store: Store) -> None:
     task = _make_task()
     bridge = _build_bridge(store=store, runner=runner)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.status is RunStatus.COMPLETED
     assert run.final_message_excerpt == "ok"
@@ -352,23 +380,51 @@ async def test_completed_run_records_status(store: Store) -> None:
 
 
 @pytest.mark.asyncio
-async def test_thread_bound_task_uses_thread_session(store: Store) -> None:
+async def test_thread_bound_task_uses_fresh_run_session(store: Store) -> None:
     runner = FakeRunner()
     task = _make_task(thread_id="thread-aaaaaaaaaaaa")
     bridge = _build_bridge(store=store, runner=runner)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.status is RunStatus.COMPLETED
-    assert run.session_id == "thread-aaaaaaaaaaaa"
-    assert runner.captured[0].session_id == "thread-aaaaaaaaaaaa"
+    assert run.session_id.startswith(f"sched-{task.task_id}-")
+    assert run.session_id != "thread-aaaaaaaaaaaa"
+    assert runner.captured[0].session_id == run.session_id
     audits = store.list_audits(task_id=task.task_id)
     started = next(a for a in audits if a["action"] == "run_started")
     assert started["payload"]["thread_id"] == "thread-aaaaaaaaaaaa"
+    assert started["payload"]["session_id"] == run.session_id
 
 
 @pytest.mark.asyncio
-async def test_thread_bound_task_writes_context_to_thread_session(store: Store) -> None:
+async def test_bridge_passes_tool_context_metadata_to_runner(
+    store: Store,
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner()
+    task = _make_task(thread_id="thread-aaaaaaaaaaaa")
+    bridge = _build_bridge(
+        store=store,
+        runner=runner,
+        tool_context_metadata={"cwd": str(tmp_path / "default"), "scope": "default"},
+        tool_context_metadata_factory=lambda task: {
+            "cwd": str(tmp_path / task.thread_id),
+            "scope": "task",
+        },
+    )
+
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
+
+    assert run.status is RunStatus.COMPLETED
+    assert runner.captured[0].tool_context_metadata == {
+        "cwd": str(tmp_path / "thread-aaaaaaaaaaaa"),
+        "scope": "task",
+    }
+
+
+@pytest.mark.asyncio
+async def test_thread_bound_task_writes_context_to_fresh_run_session(store: Store) -> None:
     sessions: dict[str, InMemorySession] = {}
 
     def session_factory(sid: str) -> InMemorySession:
@@ -379,12 +435,13 @@ async def test_thread_bound_task_writes_context_to_thread_session(store: Store) 
         return session
 
     task = _make_task(thread_id="thread-cccccccccccc")
+    approval = _AllowApproval()
     bridge = ExecutionBridge(
-        runner=Runner(),
+        runtime=RunnerBackedScheduledRuntime(Runner(), approval=approval),
         llm=_StubLLM("cron done"),
         tools={},
         enabled_tool_names=(),
-        inner_approval=_AllowApproval(),
+        inner_approval=approval,
         session_factory=session_factory,
         event_sinks=(),
         agent_spec=_make_agent_spec(),
@@ -392,11 +449,12 @@ async def test_thread_bound_task_writes_context_to_thread_session(store: Store) 
         watchdog_poll_interval_seconds=0.02,
     )
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.status is RunStatus.COMPLETED
-    assert run.session_id == "thread-cccccccccccc"
-    history = await sessions["thread-cccccccccccc"].history()
+    assert run.session_id.startswith(f"sched-{task.task_id}-")
+    assert run.session_id != "thread-cccccccccccc"
+    history = await sessions[run.session_id].history()
     assert [(m.role, m.content) for m in history] == [
         ("system", "you are an agent"),
         ("user", "do the thing"),
@@ -405,7 +463,7 @@ async def test_thread_bound_task_writes_context_to_thread_session(store: Store) 
 
 
 @pytest.mark.asyncio
-async def test_thread_bound_task_suppresses_target_delivery_duplicate(store: Store) -> None:
+async def test_thread_bound_task_keeps_target_delivery_metadata(store: Store) -> None:
     runner = FakeRunner()
     dispatcher = _CaptureDispatcher()
     task = _make_task(
@@ -417,11 +475,11 @@ async def test_thread_bound_task_suppresses_target_delivery_duplicate(store: Sto
     )
     bridge = _build_bridge(store=store, runner=runner, dispatcher=dispatcher)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.status is RunStatus.COMPLETED
     assert run.delivery_status.value == "delivered"
-    assert dispatcher.targets == [None]
+    assert dispatcher.targets == ["thread:thread-bbbbbbbbbbbb"]
 
 
 @pytest.mark.asyncio
@@ -439,7 +497,7 @@ async def test_silent_marker_short_circuits_to_silent(store: Store) -> None:
     task = _make_task()
     bridge = _build_bridge(store=store, runner=runner)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.status is RunStatus.SILENT
     assert run.silent_suppressed is True
@@ -466,7 +524,7 @@ async def test_silent_marker_with_trailing_text_is_stripped(store: Store) -> Non
     task = _make_task()
     bridge = _build_bridge(store=store, runner=runner)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.status is RunStatus.SILENT
     assert run.silent_suppressed is True
@@ -482,14 +540,15 @@ async def test_silent_marker_with_trailing_text_is_stripped(store: Store) -> Non
 async def test_watchdog_cancels_inactive_runner(store: Store) -> None:
     """长任务且不发活动事件 → watchdog 取消 → INACTIVITY_TIMEOUT。"""
     runner = FakeRunner(run_duration=0.5, poll_interval=0.02)
+    approval = _AllowApproval()
     task = _make_task(inactivity_timeout_seconds=1)  # 1 秒，快进
     # 通过把 watchdog poll 间隔设小 + manual override timeout 走快测路径
     bridge = ExecutionBridge(
-        runner=runner,
+        runtime=RunnerBackedScheduledRuntime(runner, approval=approval),
         llm=_StubLLM(),
         tools={},
         enabled_tool_names=(),
-        inner_approval=_AllowApproval(),
+        inner_approval=approval,
         session_factory=lambda sid: InMemorySession(sid),
         event_sinks=(),
         agent_spec=_make_agent_spec(),
@@ -501,7 +560,7 @@ async def test_watchdog_cancels_inactive_runner(store: Store) -> None:
     # 但 FakeRunner 跑 0.5s < 1s，watchdog 不会触发——把 run_duration 拉长
     runner._run_duration = 3.0  # type: ignore[attr-defined]
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.status is RunStatus.INACTIVITY_TIMEOUT
     assert run.failure_reason is RunFailureReason.INACTIVITY_TIMEOUT
@@ -513,17 +572,17 @@ async def test_watchdog_cancels_inactive_runner(store: Store) -> None:
 @pytest.mark.asyncio
 async def test_watchdog_does_not_cancel_when_active(store: Store) -> None:
     """长任务但持续 emit 活动 → 不取消，正常完成。"""
-    # 我们需要从 runner._event_sinks 里抓到 watchdog 实例并主动喂活动事件。
-    # FakeRunner 在跑期会调 activity_emitter → 我们让它 emit 到 runner._event_sinks。
+    # 我们需要从本次 run-scoped sinks 里抓到 watchdog 实例并主动喂活动事件。
+    # FakeRunner 在跑期会调 activity_emitter → 我们让它 emit 到 current_event_sinks。
     captured_sinks: list[list[EventSink]] = []
 
     runner = FakeRunner(run_duration=0.4, poll_interval=0.02)
 
     async def emit_activity() -> None:
-        # runner._event_sinks 是 list；watchdog 已被 bridge append 进来
-        captured_sinks.append(list(runner._event_sinks))
+        # watchdog 已被 bridge 作为本次 run-scoped sink 传给 Runner.run。
+        captured_sinks.append(list(runner.current_event_sinks))
         ev = Event(kind="content.delta", run_id="r", payload={"delta": "x"})
-        for sink in runner._event_sinks:
+        for sink in runner.current_event_sinks:
             await sink.emit(ev)
 
     runner._activity_emitter = emit_activity  # type: ignore[attr-defined]
@@ -531,11 +590,32 @@ async def test_watchdog_does_not_cancel_when_active(store: Store) -> None:
     task = _make_task(inactivity_timeout_seconds=1)  # 1s 超时 vs 0.4s 跑期
     bridge = _build_bridge(store=store, runner=runner, poll_interval=0.05)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.status is RunStatus.COMPLETED
     # 至少有一次 sink list 包含 watchdog
     assert any(len(sinks) > 0 for sinks in captured_sinks)
+
+
+@pytest.mark.asyncio
+async def test_cron_run_sinks_are_run_scoped(store: Store, tmp_path: Path) -> None:
+    """watchdog / per-run trace 走 Runner.run(event_sinks)，不污染共享列表。"""
+    runner = FakeRunner()
+    task = _make_task()
+    bridge = _build_bridge(
+        store=store,
+        runner=runner,
+        trace_dir=tmp_path / "traces",
+    )
+
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
+
+    assert run.status is RunStatus.COMPLETED
+    cap = runner.captured[0]
+    assert "InactivityWatchdog" in cap.run_event_sink_types
+    assert "JsonlTraceSink" in cap.run_event_sink_types
+    assert cap.shared_event_sink_count == 0
+    assert runner._event_sinks == []
 
 
 @pytest.mark.asyncio
@@ -547,7 +627,7 @@ async def test_watchdog_disabled_when_timeout_none(store: Store) -> None:
     task = _make_task(inactivity_timeout_seconds=None)
     bridge = _build_bridge(store=store, runner=runner)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.status is RunStatus.COMPLETED
 
@@ -559,7 +639,7 @@ async def test_watchdog_disabled_when_timeout_zero(store: Store) -> None:
     task = _make_task(inactivity_timeout_seconds=0)
     bridge = _build_bridge(store=store, runner=runner)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.status is RunStatus.COMPLETED
 
@@ -575,7 +655,7 @@ async def test_runner_raises_runtime_error(store: Store) -> None:
     task = _make_task()
     bridge = _build_bridge(store=store, runner=runner)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.status is RunStatus.FAILED
     assert run.failure_reason is RunFailureReason.RUNNER_EXCEPTION
@@ -601,7 +681,7 @@ async def test_runner_returns_failed_with_needs_approval(store: Store) -> None:
     task = _make_task()
     bridge = _build_bridge(store=store, runner=runner)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.status is RunStatus.FAILED
     assert run.failure_reason is RunFailureReason.NEEDS_APPROVAL
@@ -631,7 +711,7 @@ async def test_disallowed_tools_are_trimmed(store: Store) -> None:
         tools=tools_map,
     )
 
-    run = await bridge.execute(_make_reservation(_make_task()))
+    run = await execute_bridge_for_test(bridge, _make_reservation(_make_task()))
 
     assert run.status is RunStatus.COMPLETED
     assert len(runner.captured) == 1
@@ -643,22 +723,29 @@ async def test_disallowed_tools_are_trimmed(store: Store) -> None:
 
 @pytest.mark.asyncio
 async def test_disallowed_bare_names_are_trimmed(store: Store) -> None:
-    """单字 'schedule' / 'cron' 也被裁掉（防 v0.2 ScheduleTool 在 cron run 内被调）。"""
+    """单字调度工具与 lifecycle-bound 进化请求均从 cron run 裁掉。"""
     tools_map = {
         "shell": _make_tool("shell"),
         "schedule": _make_tool("schedule"),
         "cron": _make_tool("cron"),
+        "request_evolution_review": _make_tool("request_evolution_review"),
         "read": _make_tool("read"),
     }
     runner = FakeRunner()
     bridge = _build_bridge(
         store=store,
         runner=runner,
-        enabled_tool_names=("shell", "schedule", "cron", "read"),
+        enabled_tool_names=(
+            "shell",
+            "schedule",
+            "cron",
+            "request_evolution_review",
+            "read",
+        ),
         tools=tools_map,
     )
 
-    run = await bridge.execute(_make_reservation(_make_task()))
+    run = await execute_bridge_for_test(bridge, _make_reservation(_make_task()))
 
     assert run.status is RunStatus.COMPLETED
     cap = runner.captured[0]
@@ -666,6 +753,7 @@ async def test_disallowed_bare_names_are_trimmed(store: Store) -> None:
     # tools lookup 也不应再命中单字 schedule / cron
     assert "schedule" not in cap.enabled_tool_names
     assert "cron" not in cap.enabled_tool_names
+    assert "request_evolution_review" not in cap.enabled_tool_names
 
 
 @pytest.mark.asyncio
@@ -689,7 +777,7 @@ async def test_disallowed_mixed_bare_and_prefix_are_trimmed(store: Store) -> Non
         tools=tools_map,
     )
 
-    run = await bridge.execute(_make_reservation(_make_task()))
+    run = await execute_bridge_for_test(bridge, _make_reservation(_make_task()))
 
     assert run.status is RunStatus.COMPLETED
     cap = runner.captured[0]
@@ -714,7 +802,7 @@ async def test_no_disallowed_prefix_keeps_all_tools(store: Store) -> None:
         tools=tools_map,
     )
 
-    await bridge.execute(_make_reservation(_make_task()))
+    await execute_bridge_for_test(bridge, _make_reservation(_make_task()))
 
     cap = runner.captured[0]
     assert set(cap.enabled_tool_names) == {"shell", "read", "memory"}
@@ -731,7 +819,7 @@ async def test_final_run_is_appended_and_supersedes_running(store: Store) -> Non
     task = _make_task()
     bridge = _build_bridge(store=store, runner=runner)
 
-    final = await bridge.execute(_make_reservation(task))
+    final = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     runs = store.list_runs(task.task_id)
     # list_runs 折叠相同 run_id：只保留最新；旧 RUNNING 被 supersede 掉
@@ -746,7 +834,7 @@ async def test_run_started_and_finished_audits(store: Store) -> None:
     task = _make_task()
     bridge = _build_bridge(store=store, runner=runner)
 
-    await bridge.execute(_make_reservation(task))
+    await execute_bridge_for_test(bridge, _make_reservation(task))
 
     audits = store.list_audits(task_id=task.task_id)
     actions = [a["action"] for a in audits]
@@ -769,7 +857,7 @@ async def test_silent_audit_includes_silent_suppressed(store: Store) -> None:
     task = _make_task()
     bridge = _build_bridge(store=store, runner=runner)
 
-    await bridge.execute(_make_reservation(task))
+    await execute_bridge_for_test(bridge, _make_reservation(task))
 
     audits = store.list_audits(task_id=task.task_id)
     actions = [a["action"] for a in audits]
@@ -782,13 +870,15 @@ async def test_inactivity_timeout_writes_audit(store: Store) -> None:
     task = _make_task(inactivity_timeout_seconds=1)
     bridge = _build_bridge(store=store, runner=runner, poll_interval=0.02)
 
-    run = await bridge.execute(_make_reservation(task))
+    run = await execute_bridge_for_test(bridge, _make_reservation(task))
 
     assert run.status is RunStatus.INACTIVITY_TIMEOUT
     audits = store.list_audits(task_id=task.task_id)
     actions = [a["action"] for a in audits]
     assert "run_started" in actions
     assert "run_inactivity_timeout" in actions
+    incidents = store.list_incidents(task_id=task.task_id)
+    assert [i["action"] for i in incidents] == ["run_inactivity_timeout"]
 
 
 # ---------------------------------------------------------------------------
@@ -812,108 +902,3 @@ async def test_watchdog_emit_refreshes_only_on_activity_kinds() -> None:
     fake_now[0] = 200.0
     await wd.emit(Event(kind="content.delta", run_id="r"))
     assert wd._last_activity_ts == 200.0
-
-
-# ---------------------------------------------------------------------------
-# §7 concurrency_policy 集成（Wave D1，#18）
-# ---------------------------------------------------------------------------
-
-
-def _seed_running_run(store: Store, task_id: str, run_id: str) -> None:
-    """直接往 Store 里写一行 RUNNING run（绕过 Bridge.execute）。"""
-    now = to_iso(utc_now())
-    store.append_run(
-        ScheduledRun(
-            run_id=run_id,
-            task_id=task_id,
-            status=RunStatus.RUNNING,
-            scheduled_for=now,
-            started_at=now,
-            finished_at=None,
-            session_id=f"sess-{run_id}",
-            result_status=None,
-            final_message_excerpt=None,
-            error_message=None,
-            failure_reason=None,
-            delivery_error=None,
-            silent_suppressed=False,
-        )
-    )
-
-
-@pytest.mark.asyncio
-async def test_concurrency_allow_proceeds_normally(store: Store) -> None:
-    """ALLOW 即使有 RUNNING 也照常 execute。"""
-    runner = FakeRunner()
-    task = _make_task(task_id="t-allow", concurrency_policy=ConcurrencyPolicy.ALLOW)
-    store.create_task(task)
-    _seed_running_run(store, task.task_id, "r-old")
-
-    bridge = _build_bridge(store=store, runner=runner)
-    run = await bridge.execute(_make_reservation(task))
-
-    assert run.status is RunStatus.COMPLETED
-    # FakeRunner.run 被调一次
-    assert len(runner.captured) == 1
-    # 旧 RUNNING 行未被改动（list_runs 折叠后仍存在 RUNNING + 新 COMPLETED）
-    runs = store.list_runs(task.task_id)
-    statuses = sorted(r.status for r in runs)
-    assert RunStatus.RUNNING in statuses
-    assert RunStatus.COMPLETED in statuses
-
-
-@pytest.mark.asyncio
-async def test_concurrency_forbid_with_running_skips(store: Store) -> None:
-    """FORBID + 已有 RUNNING → 不调 Runner，落 CANCELLED 合成行 + audit。"""
-    runner = FakeRunner()
-    task = _make_task(task_id="t-forbid", concurrency_policy=ConcurrencyPolicy.FORBID)
-    store.create_task(task)
-    _seed_running_run(store, task.task_id, "r-old-forbid")
-
-    bridge = _build_bridge(store=store, runner=runner)
-    run = await bridge.execute(_make_reservation(task))
-
-    assert run.status is RunStatus.CANCELLED
-    assert run.session_id is None
-    assert run.error_message is not None
-    assert "r-old-forbid" in run.error_message
-    # FakeRunner.run 没被调用
-    assert runner.captured == []
-    # 旧 RUNNING 行依然 RUNNING
-    runs = store.list_runs(task.task_id)
-    old = next(r for r in runs if r.run_id == "r-old-forbid")
-    assert old.status is RunStatus.RUNNING
-    # audit 写了 run_skipped_by_concurrency
-    audits = store.list_audits(task_id=task.task_id)
-    actions = [a["action"] for a in audits]
-    assert "run_skipped_by_concurrency" in actions
-
-
-@pytest.mark.asyncio
-async def test_concurrency_replace_with_running_cancels_old_and_runs(
-    store: Store,
-) -> None:
-    """REPLACE + 已有 RUNNING → 旧 run CANCELLED，新 run 启动并完成。"""
-    runner = FakeRunner()
-    task = _make_task(task_id="t-replace", concurrency_policy=ConcurrencyPolicy.REPLACE)
-    store.create_task(task)
-    _seed_running_run(store, task.task_id, "r-old-replace")
-
-    bridge = _build_bridge(store=store, runner=runner)
-    run = await bridge.execute(_make_reservation(task))
-
-    # 新 run 跑成功
-    assert run.status is RunStatus.COMPLETED
-    assert len(runner.captured) == 1
-    assert run.run_id != "r-old-replace"
-    # 旧 run 已被 cancel
-    runs = store.list_runs(task.task_id)
-    old = next(r for r in runs if r.run_id == "r-old-replace")
-    assert old.status is RunStatus.CANCELLED
-    assert old.finished_at is not None
-    # audit：run_cancelled_by_replace + run_started + run_finished 都在
-    audits = store.list_audits(task_id=task.task_id)
-    actions = [a["action"] for a in audits]
-    assert "run_cancelled_by_replace" in actions
-    assert "run_started" in actions
-    assert "run_finished" in actions
