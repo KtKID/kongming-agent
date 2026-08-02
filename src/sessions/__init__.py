@@ -12,22 +12,25 @@ from sessions.session_discovery import (
     most_recent_session,
 )
 from sessions.session_store import SQLiteSession, build_session
-from sessions.task_progress_manager import SessionTaskProgressManager
+from sessions.task_progress_manager import SessionTaskProgressManager, TaskProgressConflictError
 from sessions.task_progress_models import (
     TASK_PROGRESS_MAX_DESC_LENGTH,
     TASK_PROGRESS_MAX_ERROR_LENGTH,
     TASK_PROGRESS_MAX_ID_LENGTH,
     TASK_PROGRESS_MAX_ITEMS,
+    RuntimeTaskProgressStatus,
+    TaskProgressAction,
+    TaskProgressControlMode,
     TaskProgressCounts,
     TaskProgressItem,
     TaskProgressSnapshot,
-    TaskProgressSource,
     TaskProgressStatus,
-    WorkflowTaskProgressInput,
+    TaskProgressTaskDefinition,
 )
 
 __all__ = [
     "FileSession",
+    "RuntimeTaskProgressStatus",
     "SQLiteSession",
     "SessionBootstrap",
     "SessionTaskProgressManager",
@@ -35,14 +38,16 @@ __all__ = [
     "TASK_PROGRESS_MAX_ERROR_LENGTH",
     "TASK_PROGRESS_MAX_ID_LENGTH",
     "TASK_PROGRESS_MAX_ITEMS",
+    "TaskProgressAction",
+    "TaskProgressConflictError",
+    "TaskProgressControlMode",
     "TaskProgressCounts",
     "TaskProgressItem",
     "TaskProgressSnapshot",
-    "TaskProgressSource",
     "TaskProgressStatus",
     "SessionSummary",
     "ValidationResult",
-    "WorkflowTaskProgressInput",
+    "TaskProgressTaskDefinition",
     "build_session",
     "discover_file_sessions",
     "discover_sqlite_sessions",

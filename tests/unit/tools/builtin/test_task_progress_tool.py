@@ -1,4 +1,4 @@
-"""Task progress tool 单元测试。"""
+"""advance_task_progress 工具契约测试。"""
 
 from __future__ import annotations
 
@@ -9,279 +9,226 @@ import pytest
 
 from core.contracts import ToolContext
 from infrastructure.config.models import Config
-from safety.approval.default_rules import DEFAULT_ALLOW_TOOLS_SILENT
-from sessions import TASK_PROGRESS_MAX_ITEMS
+from sessions import (
+    SessionTaskProgressManager,
+    TaskProgressControlMode,
+    TaskProgressTaskDefinition,
+)
+from tests.support.tool_calls import execute_prepared_tool
 from tools import ToolRegistry, register_task_progress_tool
 from tools.builtin.task_progress_tool import build_task_progress_tool_from_config
 
+_SESSION_ID = "thread-abc123abc123"
+_WORKFLOW_ID = "wf-20260619T032911-c05b897f"
+
 
 def _cfg(session_root: Path) -> Config:
+    """构造 file session 配置，输入为根路径，输出为可装配的 Config。"""
     return Config.model_validate(
         {
-            "model": {
-                "name": "fake",
-                "base_url": "http://127.0.0.1:1234/v1",
-                "api_key": "",
-            },
-            "session": {
-                "backend": "file",
-                "file_store_path": str(session_root),
-            },
+            "model": {"preset_id": "local-gemma-4-e4b-it"},
+            "session": {"backend": "file", "file_store_path": str(session_root)},
         }
     )
 
 
-def _ctx(session_id: str = "thread-abc123abc123") -> ToolContext:
+def _ctx(session_id: str = _SESSION_ID) -> ToolContext:
+    """构造当前会话工具上下文，输入为 session ID，输出为 ToolContext。"""
     return ToolContext(run_id="r", session_id=session_id, turn=1, call_id="c")
 
 
-def test_register_task_progress_tool_adds_update_task_progress(tmp_path: Path) -> None:
+def _seed_llm_workflow(session_root: Path, *, task_count: int = 2) -> None:
+    """初始化 LLM 步骤 workflow，输入为根路径和任务数，输出为 v2 快照。"""
+    tasks = [
+        TaskProgressTaskDefinition(
+            task_id=f"step-{index}",
+            task_run_id=f"{index:03d}-step-{index}",
+            desc=f"步骤 {index}",
+            depends_on=(f"step-{index - 1}",) if index else (),
+            display_order=index,
+        )
+        for index in range(task_count)
+    ]
+    SessionTaskProgressManager.from_config(_cfg(session_root)).open_workflow(
+        session_id=_SESSION_ID,
+        workflow_id=_WORKFLOW_ID,
+        title="执行计划",
+        control_mode=TaskProgressControlMode.LLM_STEPS,
+        tasks=tasks,
+    )
+
+
+def test_registers_only_restricted_advance_tool(tmp_path: Path) -> None:
+    """工具注册表公开受限命令名，旧自由更新名从注册表消失。"""
     registry = ToolRegistry()
 
     register_task_progress_tool(registry, _cfg(tmp_path / "sessions"))
 
-    assert "update_task_progress" in registry.names()
-
-
-def test_update_task_progress_is_silent_allowed_by_default() -> None:
-    assert "update_task_progress" in DEFAULT_ALLOW_TOOLS_SILENT
+    assert "advance_task_progress" in registry.names()
+    assert "update_task_progress" not in registry.names()
 
 
 @pytest.mark.asyncio
-async def test_tool_writes_current_session_with_llm_source(tmp_path: Path) -> None:
-    tool = build_task_progress_tool_from_config(_cfg(tmp_path / "sessions"))
+async def test_start_and_next_only_change_authorized_steps(tmp_path: Path) -> None:
+    """start/next 穿过真实 Manager，并保留初始化骨架字段。"""
+    session_root = tmp_path / "sessions"
+    _seed_llm_workflow(session_root)
+    tool = build_task_progress_tool_from_config(_cfg(session_root))
 
-    result = await tool.execute(
+    started = await execute_prepared_tool(
+        tool,
+        {"action": "start", "workflow_id": _WORKFLOW_ID, "step_id": "step-0"},
+        _ctx(),
+    )
+    advanced = await execute_prepared_tool(
+        tool,
         {
-            "tasks": [
-                {
-                    "orchestration_task_id": "manual:run-1",
-                    "task_id": "task-1",
-                    "task_run_id": "run-1",
-                    "desc": "实现 LLM tool",
-                    "status": "completed",
-                }
-            ]
+            "action": "next",
+            "workflow_id": _WORKFLOW_ID,
+            "step_id": "step-0",
+            "next_step_id": "step-1",
         },
         _ctx(),
     )
 
-    assert result.ok is True
-    assert result.data is not None
-    assert result.data["source"] == "llm"
-    assert result.data["session_id"] == "thread-abc123abc123"
-    assert result.data["counts"] == {
+    assert started.ok is True
+    assert advanced.ok is True
+    assert advanced.data is not None
+    assert advanced.data["counts"] == {
         "pending": 0,
-        "in_progress": 0,
+        "in_progress": 1,
         "completed": 1,
-        "total": 1,
+        "failed": 0,
+        "cancelled": 0,
+        "total": 2,
     }
-    path = tmp_path / "sessions" / "thread-abc123abc123" / "task_progress.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["tasks"][0]["orchestration_task_id"] == "manual:run-1"
-    assert data["tasks"][0]["display_order"] == 0
-
-
-@pytest.mark.asyncio
-async def test_tool_derives_progress_key_from_workflow_step_id(tmp_path: Path) -> None:
-    tool = build_task_progress_tool_from_config(_cfg(tmp_path / "sessions"))
-
-    result = await tool.execute(
-        {
-            "tasks": [
-                {
-                    "workflow_id": "wf-20260619T032911-c05b897f",
-                    "step_id": "step1_survey",
-                    "desc": "梳理 workflow 入口",
-                    "status": "in_progress",
-                }
-            ]
-        },
-        _ctx(),
-    )
-
-    assert result.ok is True
-    assert result.data is not None
-    task = result.data["tasks"][0]
-    assert task["id"] == "wf-20260619T032911-c05b897f:step1_survey"
-    assert task["orchestration_task_id"] == "wf-20260619T032911-c05b897f:step1_survey"
-    assert task["workflow_id"] == "wf-20260619T032911-c05b897f"
-    assert task["task_id"] == "step1_survey"
-    assert task["task_run_id"] == "step1_survey"
-    assert task["display_order"] == 0
-
-
-@pytest.mark.asyncio
-async def test_tool_rejects_duplicate_derived_progress_keys(tmp_path: Path) -> None:
-    tool = build_task_progress_tool_from_config(_cfg(tmp_path / "sessions"))
-
-    result = await tool.execute(
-        {
-            "tasks": [
-                {
-                    "workflow_id": "wf-20260619T032911-c05b897f",
-                    "step_id": "step1_survey",
-                    "desc": "x",
-                },
-                {
-                    "workflow_id": "wf-20260619T032911-c05b897f",
-                    "step_id": "step1_survey",
-                    "desc": "y",
-                },
-            ]
-        },
-        _ctx(),
-    )
-
-    assert result.ok is False
-    assert "derives duplicate progress key" in (result.error_message or "")
-
-
-@pytest.mark.asyncio
-async def test_tool_heals_legacy_workflow_key_without_workflow_id(tmp_path: Path) -> None:
-    tool = build_task_progress_tool_from_config(_cfg(tmp_path / "sessions"))
-
-    result = await tool.execute(
-        {
-            "tasks": [
-                {
-                    "orchestration_task_id": "wf-20260619T032911-c05b897f",
-                    "task_id": "step1_survey",
-                    "task_run_id": "wf-20260619T032911-c05b897f::step1_survey::1",
-                    "desc": "梳理 workflow 入口",
-                }
-            ]
-        },
-        _ctx(),
-    )
-
-    assert result.ok is True
-    assert result.data is not None
-    assert (
-        result.data["tasks"][0]["orchestration_task_id"]
-        == "wf-20260619T032911-c05b897f:step1_survey"
-    )
-
-
-@pytest.mark.asyncio
-async def test_tool_rejects_session_id_argument(tmp_path: Path) -> None:
-    tool = build_task_progress_tool_from_config(_cfg(tmp_path / "sessions"))
-
-    result = await tool.execute(
-        {
-            "session_id": "thread-ffffffffffff",
-            "tasks": [
-                {
-                    "orchestration_task_id": "manual:run-1",
-                    "task_id": "task-1",
-                    "task_run_id": "run-1",
-                    "desc": "x",
-                }
-            ],
-        },
-        _ctx(),
-    )
-
-    assert result.ok is False
-    assert "session_id is not accepted" in (result.error_message or "")
-    assert not (tmp_path / "sessions" / "thread-ffffffffffff").exists()
-
-
-@pytest.mark.asyncio
-async def test_tool_requires_current_session(tmp_path: Path) -> None:
-    tool = build_task_progress_tool_from_config(_cfg(tmp_path / "sessions"))
-
-    result = await tool.execute(
-        {
-            "tasks": [
-                {
-                    "orchestration_task_id": "manual:run-1",
-                    "task_id": "task-1",
-                    "task_run_id": "run-1",
-                    "desc": "x",
-                }
-            ]
-        },
-        _ctx(""),
-    )
-
-    assert result.ok is False
-    assert "ToolContext.session_id is required" in (result.error_message or "")
-
-
-@pytest.mark.asyncio
-async def test_tool_rejects_invalid_task_field(tmp_path: Path) -> None:
-    tool = build_task_progress_tool_from_config(_cfg(tmp_path / "sessions"))
-
-    result = await tool.execute(
-        {
-            "tasks": [
-                {
-                    "orchestration_task_id": "manual:run-1",
-                    "task_id": "task-1",
-                    "task_run_id": "run-1",
-                    "desc": "",
-                    "status": "failed",
-                }
-            ]
-        },
-        _ctx(),
-    )
-
-    assert result.ok is False
-    assert "desc must be a non-empty string" in (result.error_message or "")
-
-
-@pytest.mark.asyncio
-async def test_tool_rejects_unknown_task_field(tmp_path: Path) -> None:
-    tool = build_task_progress_tool_from_config(_cfg(tmp_path / "sessions"))
-
-    result = await tool.execute(
-        {
-            "tasks": [
-                {
-                    "task_id": "task-1",
-                    "task_run_id": "run-1",
-                    "desc": "x",
-                    "orchestration_task_id": "manual:run-1",
-                    "rogue": "field",
-                }
-            ]
-        },
-        _ctx(),
-    )
-
-    assert result.ok is False
-    assert "unknown fields" in (result.error_message or "")
-
-
-@pytest.mark.asyncio
-async def test_tool_requires_step_id_or_task_id(tmp_path: Path) -> None:
-    tool = build_task_progress_tool_from_config(_cfg(tmp_path / "sessions"))
-
-    result = await tool.execute(
-        {"tasks": [{"desc": "x"}]},
-        _ctx(),
-    )
-
-    assert result.ok is False
-    assert "step_id must be a non-empty string" in (result.error_message or "")
-
-
-@pytest.mark.asyncio
-async def test_tool_rejects_too_many_tasks(tmp_path: Path) -> None:
-    tool = build_task_progress_tool_from_config(_cfg(tmp_path / "sessions"))
-    tasks = [
-        {
-            "orchestration_task_id": f"manual:run-{index}",
-            "task_id": f"task-{index}",
-            "task_run_id": f"run-{index}",
-            "desc": "x",
-        }
-        for index in range(TASK_PROGRESS_MAX_ITEMS + 1)
+    tasks = advanced.data["tasks"]
+    assert isinstance(tasks, list)
+    assert [(task["task_id"], task["status"], task["desc"]) for task in tasks] == [
+        ("step-0", "completed", "步骤 0"),
+        ("step-1", "in_progress", "步骤 1"),
     ]
+    assert "orchestration_task_id" not in tasks[0]
+    path = session_root / _SESSION_ID / "task_progress.json"
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["workflow_id"] == _WORKFLOW_ID
+    assert persisted["control_mode"] == "llm_steps"
 
-    result = await tool.execute({"tasks": tasks}, _ctx())
+
+@pytest.mark.asyncio
+async def test_final_next_completes_last_step_and_replays_idempotently(tmp_path: Path) -> None:
+    """最后一个 next 自动完成，重复同命令保持同一终态。"""
+    session_root = tmp_path / "sessions"
+    _seed_llm_workflow(session_root, task_count=1)
+    tool = build_task_progress_tool_from_config(_cfg(session_root))
+    start = {"action": "start", "workflow_id": _WORKFLOW_ID, "step_id": "step-0"}
+    finish = {"action": "next", "workflow_id": _WORKFLOW_ID, "step_id": "step-0"}
+
+    await execute_prepared_tool(tool, start, _ctx())
+    first = await execute_prepared_tool(tool, finish, _ctx())
+    replay = await execute_prepared_tool(tool, finish, _ctx())
+
+    assert first.ok is True
+    assert replay.ok is True
+    assert replay.data is not None
+    assert replay.data["counts"]["completed"] == 1
+    assert replay.data["tasks"][0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_recoverable_tool_argument_error_keeps_active_step_in_progress(
+    tmp_path: Path,
+) -> None:
+    """普通工具参数错误不生成业务终态，当前 LLM 步骤可继续完成。"""
+    session_root = tmp_path / "sessions"
+    _seed_llm_workflow(session_root, task_count=1)
+    manager = SessionTaskProgressManager.from_config(_cfg(session_root))
+    tool = build_task_progress_tool_from_config(_cfg(session_root))
+    start = {"action": "start", "workflow_id": _WORKFLOW_ID, "step_id": "step-0"}
+    invalid = {**start, "status": "failed"}
+
+    started = await execute_prepared_tool(tool, start, _ctx())
+    failed_attempt = await execute_prepared_tool(tool, invalid, _ctx())
+    snapshot = manager.read_snapshot(_SESSION_ID)
+
+    assert started.ok is True
+    assert failed_attempt.ok is False
+    assert snapshot.tasks[0].status.value == "in_progress"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (
+            {
+                "action": "start",
+                "workflow_id": _WORKFLOW_ID,
+                "step_id": "step-0",
+                "status": "completed",
+            },
+            "unknown task progress fields",
+        ),
+        (
+            {
+                "action": "start",
+                "workflow_id": _WORKFLOW_ID,
+                "step_id": "step-0",
+                "tasks": [],
+            },
+            "unknown task progress fields",
+        ),
+        (
+            {
+                "action": "start",
+                "workflow_id": _WORKFLOW_ID,
+                "step_id": "step-0",
+                "next_step_id": "step-1",
+            },
+            "only accepted for action=next",
+        ),
+    ],
+)
+async def test_rejects_arbitrary_state_or_shape_fields(
+    tmp_path: Path,
+    arguments: dict[str, object],
+    message: str,
+) -> None:
+    """工具拒绝任意状态、任务数组和不适用的推进字段。"""
+    tool = build_task_progress_tool_from_config(_cfg(tmp_path / "sessions"))
+
+    result = await execute_prepared_tool(tool, arguments, _ctx())
 
     assert result.ok is False
-    assert "at most 128 items" in (result.error_message or "")
+    assert message in (result.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_rejects_runtime_owned_workflow_and_missing_context_session(tmp_path: Path) -> None:
+    """LLM 命令只能作用于 LLM 步骤 workflow，并要求当前 session。"""
+    session_root = tmp_path / "sessions"
+    manager = SessionTaskProgressManager.from_config(_cfg(session_root))
+    manager.open_workflow(
+        session_id=_SESSION_ID,
+        workflow_id=_WORKFLOW_ID,
+        title="运行时任务",
+        control_mode=TaskProgressControlMode.RUNTIME_LIFECYCLE,
+        tasks=[
+            TaskProgressTaskDefinition(
+                task_id="step-0",
+                task_run_id="001-step-0",
+                desc="运行时步骤",
+                display_order=0,
+            )
+        ],
+    )
+    tool = build_task_progress_tool_from_config(_cfg(session_root))
+    command = {"action": "start", "workflow_id": _WORKFLOW_ID, "step_id": "step-0"}
+
+    runtime_result = await execute_prepared_tool(tool, command, _ctx())
+    blank_context_result = await execute_prepared_tool(tool, command, _ctx(""))
+
+    assert runtime_result.ok is False
+    assert "does not accept LLM steps" in (runtime_result.error_message or "")
+    assert blank_context_result.ok is False
+    assert "ToolContext.session_id" in (blank_context_result.error_message or "")

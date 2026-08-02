@@ -15,20 +15,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from application.agent_workflows.context import WorkflowExecutionContext
+from application.agent_workflows.context import WorkflowExecutionContext, WorkflowRuntime
 from application.agent_workflows.strategies.description import (
     WorkflowStrategyCatalogEntry,
     WorkflowStrategyDescription,
     WorkflowStrategyInputField,
 )
-from application.subagents.manager import SubAgentTask
+from application.agent_workflows.task_models import SubAgentTask
 from application.subagents.permissions import to_jsonable
 
 TaskFlowInteractionMode = Literal["auto", "guided", "choice_required", "llm_decide"]
-TaskFlowNodeStatus = Literal["pending", "in_progress", "completed"]
-
 _INTERACTION_MODES = frozenset({"auto", "guided", "choice_required", "llm_decide"})
-_NODE_STATUSES = frozenset({"pending", "in_progress", "completed"})
 _MAX_NODES = 128
 
 
@@ -40,7 +37,6 @@ class TaskFlowPlanNode:
     title: str
     description: str
     depends_on: tuple[str, ...]
-    status: TaskFlowNodeStatus
     metadata: dict[str, object]
 
 
@@ -116,7 +112,7 @@ class TaskFlowStrategy:
 
     mode = "task_flow"
 
-    def __init__(self, manager: Any) -> None:
+    def __init__(self, manager: WorkflowRuntime) -> None:
         """初始化策略，输入为 AgentWorkflowManager facade，输出为可注册策略实例。"""
         self._manager = manager
 
@@ -144,7 +140,7 @@ class TaskFlowStrategy:
             warnings=(
                 "简单任务直接填充 plan.nodes 并调用 run_agent_workflow 创建计划",
                 "多方案任务先向用户提问，用户确认后再把所选方案转换为 plan.nodes",
-                "计划创建后由主 LLM 按步骤执行，每完成一步调用 update_task_progress",
+                "计划创建后由主 LLM 按步骤执行，每完成一步调用 advance_task_progress",
                 "执行中出现意料之外的严重问题时停止推进并询问用户",
             ),
             inputs=(
@@ -185,10 +181,9 @@ class TaskFlowStrategy:
                     name="execution",
                     required=False,
                     type_label="object",
-                    description="执行约束，默认严重意外问题走 ask_user，进度工具为 update_task_progress。",
+                    description="执行约束，默认严重意外问题走 ask_user，进度工具固定为 advance_task_progress。",
                     example={
                         "on_unexpected_severe_issue": "ask_user",
-                        "progress_tool": "update_task_progress",
                     },
                 ),
             ),
@@ -256,6 +251,11 @@ class TaskFlowStrategy:
 
         tasks = _tasks_from_nodes(spec.nodes)
         self._manager.write_workflow_manifest(context=context, tasks=tasks, status="running")
+        self._manager.initialize_task_flow_progress(
+            context=context,
+            tasks=tasks,
+            title=spec.title,
+        )
 
         finished_at = _now_iso()
         artifact_paths = TaskFlowArtifactWriter(context.workflow_dir).write_all(
@@ -274,7 +274,7 @@ class TaskFlowStrategy:
                 "objective": spec.objective,
                 "title": spec.title,
                 "node_count": len(spec.nodes),
-                "progress_tool": "update_task_progress",
+                "progress_tool": "advance_task_progress",
                 "status": "plan_created",
                 "artifact_paths": artifact_paths.as_payload(),
                 "plan_path": str(artifact_paths.plan_path),
@@ -311,7 +311,7 @@ class TaskFlowStrategy:
             }
         )
 
-        from application.agent_workflows.manager import AgentWorkflowResult
+        from application.agent_workflows.models import AgentWorkflowResult
 
         return AgentWorkflowResult(
             workflow_id=context.workflow_id,
@@ -367,6 +367,7 @@ def _parse_nodes(value: object) -> tuple[TaskFlowPlanNode, ...]:
         if node.node_id in seen:
             raise ValueError(f"task_flow plan.nodes contains duplicate id: {node.node_id}")
         seen.add(node.node_id)
+    _validate_node_dependencies(nodes)
     return nodes
 
 
@@ -381,18 +382,14 @@ def _parse_node(value: object, *, index: int) -> TaskFlowPlanNode:
         raise ValueError(f"task_flow plan.nodes[{index}].title must be a non-empty string")
     if description is None:
         description = title
-    status = _optional_string(value.get("status")) or "pending"
-    if status not in _NODE_STATUSES:
-        raise ValueError(
-            f"task_flow plan.nodes[{index}].status must be pending, in_progress, or completed"
-        )
+    if "status" in value:
+        raise ValueError(f"task_flow plan.nodes[{index}].status is managed internally")
     metadata = _object_copy(value.get("metadata")) or {}
     return TaskFlowPlanNode(
         node_id=node_id,
         title=title,
         description=description,
         depends_on=tuple(_coerce_string_array(value.get("depends_on"))),
-        status=status,  # type: ignore[arg-type]
         metadata=metadata,
     )
 
@@ -414,12 +411,48 @@ def _parse_planning(value: object) -> dict[str, object]:
 def _parse_execution(value: object) -> dict[str, object]:
     """解析 execution 配置，输入为任意对象，输出为带默认值的字典。"""
     execution = _object_copy(value) or {}
+    if "progress_tool" in execution:
+        raise ValueError("task_flow execution.progress_tool is fixed to advance_task_progress")
     execution.setdefault("on_unexpected_severe_issue", "ask_user")
-    execution.setdefault("progress_tool", "update_task_progress")
+    execution["progress_tool"] = "advance_task_progress"
     return execution
 
 
-def _tasks_from_nodes(nodes: Sequence[TaskFlowPlanNode]) -> list[SubAgentTask]:
+def _validate_node_dependencies(nodes: Sequence[TaskFlowPlanNode]) -> None:
+    """校验计划依赖图，输入为节点序列，缺失、自依赖或环时抛 ValueError。"""
+    known_ids = {node.node_id for node in nodes}
+    dependencies = {node.node_id: node.depends_on for node in nodes}
+    for node_id, required in dependencies.items():
+        for dependency in required:
+            if dependency not in known_ids:
+                raise ValueError(
+                    "task_flow plan.nodes dependency is missing: "
+                    f"node_id={node_id}, dependency={dependency}"
+                )
+            if dependency == node_id:
+                raise ValueError(f"task_flow plan.nodes cannot depend on itself: {node_id}")
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def _visit(node_id: str) -> None:
+        """深度遍历计划节点，输入为节点 ID，发现环时抛 ValueError。"""
+        if node_id in visited:
+            return
+        if node_id in visiting:
+            raise ValueError(f"task_flow plan.nodes dependencies contain a cycle at: {node_id}")
+        visiting.add(node_id)
+        for dependency in dependencies[node_id]:
+            _visit(dependency)
+        visiting.remove(node_id)
+        visited.add(node_id)
+
+    for node_id in dependencies:
+        _visit(node_id)
+
+
+def _tasks_from_nodes(
+    nodes: Sequence[TaskFlowPlanNode],
+) -> list[SubAgentTask]:
     """把计划节点转换为 workflow 进度任务，输入为节点列表，输出为 SubAgentTask 列表。"""
     tasks: list[SubAgentTask] = []
     for index, node in enumerate(nodes, 1):
@@ -498,7 +531,7 @@ def _node_payload(
         "title": node.title,
         "description": node.description,
         "depends_on": list(node.depends_on),
-        "status": node.status,
+        "status": "pending",
         "display_order": display_order,
         "task_run_id": task.metadata.get("task_run_id"),
         "metadata": to_jsonable(node.metadata),
@@ -510,9 +543,9 @@ def _progress_payload(plan_payload: dict[str, object]) -> dict[str, object]:
     nodes = plan_payload["nodes"]
     node_items = nodes if isinstance(nodes, list) else []
     counts = {
-        "pending": sum(1 for item in node_items if _node_status(item) == "pending"),
-        "in_progress": sum(1 for item in node_items if _node_status(item) == "in_progress"),
-        "completed": sum(1 for item in node_items if _node_status(item) == "completed"),
+        "pending": len(node_items),
+        "in_progress": 0,
+        "completed": 0,
         "total": len(node_items),
     }
     return {
@@ -522,21 +555,11 @@ def _progress_payload(plan_payload: dict[str, object]) -> dict[str, object]:
         "mode": plan_payload["mode"],
         "objective": plan_payload["objective"],
         "title": plan_payload["title"],
-        "progress_tool": "update_task_progress",
-        "status": "plan_created",
+        "progress_tool": "advance_task_progress",
+        "status": "initial_plan",
         "counts": counts,
         "nodes": node_items,
     }
-
-
-def _node_status(value: object) -> str:
-    """读取节点状态，输入为任意节点 payload，输出为状态字符串。"""
-    if not isinstance(value, dict):
-        return "pending"
-    status = value.get("status")
-    if isinstance(status, str) and status in _NODE_STATUSES:
-        return status
-    return "pending"
 
 
 def _node_task_run_id(*, index: int, node_id: str) -> str:

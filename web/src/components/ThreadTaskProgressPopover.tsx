@@ -20,7 +20,6 @@ import {
 import { Button } from "@/components/ui/button";
 import {
   getThreadTaskProgressItemKey,
-  getThreadTaskProgressWorkflowId,
   useThreadTaskProgress,
 } from "@/hooks/useThreadTaskProgress";
 import { useThreadSubAgents } from "@/hooks/useThreadSubAgents";
@@ -87,13 +86,11 @@ export function ThreadTaskProgressPopover({
   const progressSignature = snapshot ? taskProgressSignature(snapshot) : null;
   const subAgentSignature = threadSubAgentsSignature(subAgentItems);
   const hasActiveSubAgents = subAgentItems.some((item) => item.is_active);
-  const currentWorkflowIdList = (snapshot?.tasks ?? [])
-    .map((item) => getThreadTaskProgressWorkflowId(item))
-    .filter((workflowId): workflowId is string => Boolean(workflowId));
-  const currentWorkflowIds = new Set(currentWorkflowIdList);
+  const currentWorkflowId = snapshot?.workflow_id ?? null;
   const currentWorkflowTitle =
-    historyItems.find((item) => item.workflow_id === currentWorkflowIdList[0])
-      ?.title ?? null;
+    snapshot?.title ??
+    historyItems.find((item) => item.workflow_id === currentWorkflowId)?.title ??
+    null;
   const progressCountLabel = snapshot
     ? `${snapshot.counts.completed}/${snapshot.counts.total} 已完成`
     : "当前 thread";
@@ -101,7 +98,7 @@ export function ThreadTaskProgressPopover({
     ? `${currentWorkflowTitle} · ${progressCountLabel}`
     : progressCountLabel;
   const visibleHistoryItems = historyItems.filter(
-    (item) => !currentWorkflowIds.has(item.workflow_id),
+    (item) => item.workflow_id !== currentWorkflowId,
   );
 
   const setOpen = useCallback(
@@ -506,22 +503,24 @@ function taskProgressSignature(snapshot: ThreadTaskProgressSnapshot): string {
   const taskSignature = snapshot.tasks
     .map((item) =>
       [
-        item.orchestration_task_id,
-        getThreadTaskProgressItemKey(item),
+        getThreadTaskProgressItemKey(snapshot.workflow_id, item),
         item.status,
-        item.source_status ?? "",
+        item.error_message ?? "",
         item.display_order,
-        item.updated_at_ms ?? "",
+        item.updated_at_ms,
       ].join(":"),
     )
     .join("|");
   return [
     snapshot.session_id,
-    snapshot.source,
+    snapshot.workflow_id ?? "",
+    snapshot.control_mode ?? "",
     snapshot.updated_at_ms,
     snapshot.counts.pending,
     snapshot.counts.in_progress,
     snapshot.counts.completed,
+    snapshot.counts.failed,
+    snapshot.counts.cancelled,
     snapshot.counts.total,
     taskSignature,
   ].join("#");
@@ -547,7 +546,7 @@ function shouldAutoOpenSnapshot(
   snapshot: ThreadTaskProgressSnapshot | null,
 ): snapshot is ThreadTaskProgressSnapshot {
   return Boolean(
-    snapshot && snapshot.source === "workflow" && snapshot.tasks.length > 0,
+    snapshot && snapshot.workflow_id !== null && snapshot.tasks.length > 0,
   );
 }
 
@@ -573,6 +572,7 @@ function TaskProgressRow({ item }: { item: ThreadTaskProgressDisplayItem }) {
           item.icon_variant === "check_circle" && "text-emerald-500",
           item.icon_variant === "active_ring" && "text-primary",
           item.icon_variant === "ring" && "text-muted-foreground",
+          item.icon_variant === "error_circle" && "text-destructive",
         )}
         data-icon-variant={item.icon_variant}
       >
@@ -580,6 +580,8 @@ function TaskProgressRow({ item }: { item: ThreadTaskProgressDisplayItem }) {
           <CheckCircle2 className="h-3.5 w-3.5" />
         ) : item.icon_variant === "active_ring" ? (
           <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+        ) : item.icon_variant === "error_circle" ? (
+          <XCircle className="h-3.5 w-3.5" />
         ) : (
           <Circle className="h-3 w-3" />
         )}
