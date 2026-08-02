@@ -45,6 +45,10 @@ pyinstaller:
       target: safety/auto_approval
     - source: config/xspace/setting.yaml
       target: config
+    - source: config/model-providers.yaml
+      target: config
+    - source: config/xspace/agent.toml
+      target: config
     - source: web/dist
       target: web/dist
 

@@ -27,8 +27,8 @@ from scheduler.domain import (
     ScheduleTrigger,
     SessionMode,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
@@ -49,7 +49,7 @@ class FakeInner:
     decision_class: str
     decision_source: str = ""
     outcome: str = "approved"
-    matched_rule: str = "test.rule"
+    matched_rule: str = "default:ask"
     reason: str = "test reason"
 
     async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
@@ -70,8 +70,7 @@ def _make_task(approval_mode: ApprovalMode | None) -> ScheduledTask:
     return ScheduledTask(
         task_id="t-audit",
         name="audit test",
-        enabled=True,
-        state=TaskState.SCHEDULED,
+        lifecycle=TaskLifecycleState.SCHEDULED,
         origin=TaskOrigin.TOOL,
         trigger=ScheduleTrigger(
             trigger_type=TriggerType.INTERVAL,
@@ -107,7 +106,7 @@ def _make_bridge_with_store_spy(
     """
     store_spy = MagicMock()
     bridge = ExecutionBridge(
-        runner=MagicMock(),
+        runtime=MagicMock(),
         llm=MagicMock(),
         tools={},
         enabled_tool_names=(),
@@ -144,7 +143,7 @@ async def test_a1_trust_consent_writes_audit() -> None:
         decision_class="explicit_consent",
         decision_source="standard",
         outcome="rejected",
-        matched_rule="shell.execute_script",
+        matched_rule="default:ask",
     )
     bridge, store_spy = _make_bridge_with_store_spy(inner)
     task = _make_task(approval_mode=ApprovalMode.TRUST)
@@ -170,7 +169,7 @@ async def test_a1_trust_consent_writes_audit() -> None:
     assert payload["tool_name"] == "run_shell"
     assert payload["original_decision_class"] == "explicit_consent"
     assert payload["original_decision_source"] == "standard"
-    assert payload["matched_rule"] == "shell.execute_script"
+    assert payload["matched_rule"] == "default:ask"
     assert isinstance(payload["arguments_digest"], str)
     assert payload["arguments_digest"].startswith("sha256:")
 

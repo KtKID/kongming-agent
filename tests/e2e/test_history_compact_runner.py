@@ -5,7 +5,7 @@
 1. runner 构造时不传 ``message_compactor`` 的语义（原样透传 history）没被改变
 2. runner 构造时传入符合 ``core.contracts.MessageCompactor`` Protocol 的对象
    后，每 turn 发给 LLM 的 messages 真的是 compactor 加工后的结果
-3. NativeRuntime.build 默认注入 prompting.HistoryCompactor，用户什么都不传也能
+3. SessionEngine.build 默认注入 prompting.HistoryCompactor，用户什么都不传也能
    防止长对话撞 context 上限
 
 辅助组件用结构化鸭子类型满足 Protocol，避免触碰真实 OpenAI provider。
@@ -22,13 +22,13 @@ from core.session import InMemorySession
 from infrastructure.config.models import (
     ApprovalConfig,
     Config,
-    ModelConfig,
+    ModelSelectionConfig,
     RunnerConfig,
     SessionConfig,
     TraceConfig,
 )
 from prompting import HistoryCompactor
-from runtime_assembly.native_runtime import NativeRuntime
+from runtime_assembly.session_engine import SessionEngine
 
 
 class _CountingCompactor:
@@ -59,12 +59,7 @@ class _FailingCompactor:
 
 def _build_stub_cfg(tmp_path) -> Config:
     return Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="stub-model",
-            base_url="http://127.0.0.1:1234",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         runner=RunnerConfig(max_turns=3),
         session=SessionConfig(backend="memory", store_path=str(tmp_path / "sessions.db")),
         trace=TraceConfig(output_path=str(tmp_path / "trace.jsonl")),
@@ -223,23 +218,23 @@ async def test_runner_compactor_failure_falls_back_to_raw_history(
 
 
 # ---------------------------------------------------------------------------
-# NativeRuntime 层：默认注入 + 显式覆盖
+# SessionEngine 层：默认注入 + 显式覆盖
 # ---------------------------------------------------------------------------
 
 
 async def test_native_runtime_build_disables_compactor_by_default(
     stub_llm, recording_approval, tmp_path
 ):
-    """NativeRuntime.build 默认（cfg.compactor.enabled=False）装 NoopCompactor，
+    """SessionEngine.build 默认（cfg.compactor.enabled=False）装 NoopCompactor，
     不做 FIFO 压缩。显式设 enabled=True 才装 HistoryCompactor（见下一条测试）。
 
     这是 memory-module5-completion task 定下的新默认行为：现有 FIFO 压缩语义
     与 LLM summarize 式压缩差距大，默认关闭、留给后续 task compactor-v2-llm-summarize。
     """
-    from runtime_assembly.native_runtime import _NoopCompactor
+    from runtime_assembly.session_engine import _NoopCompactor
 
     cfg = _build_stub_cfg(tmp_path)
-    runtime = NativeRuntime.build(
+    runtime = SessionEngine.build(
         cfg,
         approval=recording_approval,
         tools={},
@@ -257,7 +252,7 @@ async def test_native_runtime_build_enables_history_compactor_when_configured(
     """cfg.compactor.enabled=True 时装 HistoryCompactor 作为兜底 FIFO 压缩。"""
     cfg = _build_stub_cfg(tmp_path)
     cfg.compactor.enabled = True  # 显式启用 FIFO 压缩
-    runtime = NativeRuntime.build(
+    runtime = SessionEngine.build(
         cfg,
         approval=recording_approval,
         tools={},
@@ -275,7 +270,7 @@ async def test_native_runtime_build_honors_explicit_message_compactor(
     """显式传 message_compactor 覆盖默认。"""
     cfg = _build_stub_cfg(tmp_path)
     custom = _CountingCompactor(keep_recent=1)
-    runtime = NativeRuntime.build(
+    runtime = SessionEngine.build(
         cfg,
         approval=recording_approval,
         tools={},

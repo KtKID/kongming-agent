@@ -54,24 +54,19 @@ async def test_stub_llm_chooses_memory_tool_for_preferences(tmp_path) -> None:
         Config,
         EvolutionConfig,
         EvolutionMemoryConfig,
-        ModelConfig,
+        ModelSelectionConfig,
         RunnerConfig,
     )
-    from runtime_assembly.native_runtime import NativeRuntime
-    from safety import CapabilityPolicy, CapabilitySet
+    from runtime_assembly.session_engine import SessionEngine
     from tests.e2e.conftest import StubLLMProvider
+    from tools.runtime.approval import AutoAllowApproval
     from tools.runtime.registry import ToolRegistry
 
     mem_dir = tmp_path / ".kongming" / "memory"
     mem_dir.mkdir(parents=True)
 
     cfg = Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="stub-model",
-            base_url="http://127.0.0.1:1234",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         runner=RunnerConfig(max_turns=3),
         approval=ApprovalConfig(mode="auto_allow"),
         evolution=EvolutionConfig(
@@ -103,13 +98,12 @@ async def test_stub_llm_chooses_memory_tool_for_preferences(tmp_path) -> None:
     # 第二轮：assistant 终止
     stub.script(content="已记住。")
 
-    # 当前 capability_policy 默认 allow-list 不含 "memory"（README 遗漏 #1 待
-    # Agent 补齐登记）；此处注入空 allow + 空 deny（全开）让测试聚焦于引导文案验证。
-    runtime = NativeRuntime.build(
+    # 测试 Provider 显式允许 memory 调用，让用例聚焦工具引导与真实写入。
+    runtime = SessionEngine.build(
         cfg,
         tools=registry,
         enabled_tool_names=["memory"],
-        capability_policy=CapabilityPolicy(CapabilitySet(allow=frozenset())),
+        approval=AutoAllowApproval(),
     )
     # 替换 llm 为 stub
     runtime._llm = stub  # type: ignore[attr-defined]

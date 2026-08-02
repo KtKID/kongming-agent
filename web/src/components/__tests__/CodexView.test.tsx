@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CodexView } from "@/components/CodexView";
 import type { NormalizedMessage, ThreadMetadataDTO } from "@/protocol";
 import { useThreadsStore } from "@/stores/threads";
+import type { InitialMessageDraft } from "@/stores/threads";
 
 const mockApiGet = vi.fn();
 const mockUseCodexWS = vi.fn();
@@ -40,6 +41,19 @@ function makeSocket(): SocketHandle {
       act(() => {
         listener?.(frame);
       });
+    },
+  };
+}
+
+function initialDraft(text: string): InitialMessageDraft {
+  return {
+    text,
+    reasoningEffort: null,
+    restoreDraft: {
+      text,
+      reasoningEffort: null,
+      attachments: [],
+      references: [],
     },
   };
 }
@@ -91,7 +105,9 @@ describe("CodexView", () => {
         "/foo/codex",
       ),
     );
-    expect(useThreadsStore.getState().initialMessage).toBe("启动 Codex");
+    expect(useThreadsStore.getState().initialMessage).toEqual(
+      initialDraft("启动 Codex"),
+    );
     expect(useThreadsStore.getState().pendingNewSession).toBeNull();
     expect(await screen.findByTestId("codex-target")).toBeInTheDocument();
   });
@@ -106,7 +122,7 @@ describe("CodexView", () => {
     mockApiGet.mockResolvedValue({ messages: [] });
     useThreadsStore.setState({
       pendingNewSession: null,
-      initialMessage: "自动补发首条消息",
+      initialMessage: initialDraft("自动补发首条消息"),
       fetchThreads,
     });
 
@@ -131,5 +147,67 @@ describe("CodexView", () => {
     expect(fetchThreads).toHaveBeenCalled();
     expect(useThreadsStore.getState().initialMessage).toBeNull();
     expect(await screen.findByText("自动补发首条消息")).toBeInTheDocument();
+  });
+
+  it("创建后的首条消息发送失败时恢复草稿且不生成用户气泡", async () => {
+    const handle = makeSocket();
+    handle.socket.send.mockImplementation(() => {
+      throw new Error("codex transport down");
+    });
+    const fetchThreads = vi.fn();
+    mockUseCodexWS.mockReturnValue({
+      socket: handle.socket,
+      state: "open",
+    });
+    mockApiGet.mockResolvedValue({ messages: [] });
+    const attachment = {
+      asset_id: "asset-restored",
+      kind: "image" as const,
+      mime_type: "image/png",
+      size_bytes: 32,
+      preview_url: "/api/uploads/asset-restored",
+      status: "ready" as const,
+    };
+    const reference = {
+      id: "ref-restored",
+      kind: "skill" as const,
+      ref: "skill:restore",
+      label: "恢复引用",
+      activation: "inject_context" as const,
+    };
+    useThreadsStore.setState({
+      pendingNewSession: null,
+      initialMessage: {
+        text: "[$restore](skill:restore)\n\n需要恢复的 Codex 首条消息",
+        reasoningEffort: "high",
+        attachments: [attachment],
+        restoreDraft: {
+          text: "需要恢复的 Codex 首条消息",
+          reasoningEffort: "high",
+          attachments: [attachment],
+          references: [reference],
+        },
+      },
+      fetchThreads,
+    });
+
+    render(
+      <MemoryRouter>
+        <CodexView
+          threadId="thread-1"
+          thread={{ codex_thread_id: "" } as ThreadMetadataDTO}
+        />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("消息输入")).toHaveValue(
+        "需要恢复的 Codex 首条消息",
+      ),
+    );
+    expect(await screen.findByAltText("asset-restored")).toBeInTheDocument();
+    expect(screen.getByText("恢复引用")).toBeInTheDocument();
+    expect(fetchThreads).not.toHaveBeenCalled();
+    expect(screen.getAllByText("需要恢复的 Codex 首条消息")).toHaveLength(1);
   });
 });

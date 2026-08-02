@@ -4,7 +4,7 @@
   T1. 改 name → 返回 task 含新 name；其他字段不变
   T2. 改 schedule（"every 30s" → "0 9 * * *"）→ trigger.expr 更新 + next_run_at 重算
   T3. 改 preset_id → task.preset_id 更新；返回 DTO 含新值
-  T4. 改 enabled=false → task.enabled=False；state 同步 DISABLED
+  T4. 改 lifecycle → task.lifecycle 同步
   T5a. 404：task 不存在
   T5b. 422：schedule 非法
   T6. 入参全 None → 200 幂等返回当前 task（不写 audit）
@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scheduler.domain import ConcurrencyPolicy, TaskState, TriggerType
+from scheduler.domain import ConcurrencyPolicy, TaskLifecycleState, TriggerType
 from tests.unit.web.test_cron_router import (
     CSRF_HEADERS,
     _login_client_with_store,
@@ -183,47 +183,43 @@ def test_patch_preset_id_empty_string(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# T4. 改 enabled=false → state 同步
+# T4. 改 lifecycle
 # ---------------------------------------------------------------------------
 
 
-def test_patch_enabled_false_syncs_state(tmp_path: Path) -> None:
-    """改 enabled=false → state=DISABLED（不抢 PAUSED）。"""
+def test_patch_lifecycle_disabled(tmp_path: Path) -> None:
+    """改 lifecycle=disabled 后单一真源同步到 DTO 与 Store。"""
     client, store = _login_client_with_store(tmp_path)
     try:
         _seed_one_task(store, task_id="edit-4")
         before = store.get_task("edit-4")
         assert before is not None
-        assert before.enabled is True
-        assert before.state is TaskState.SCHEDULED
+        assert before.lifecycle is TaskLifecycleState.SCHEDULED
 
         resp = client.patch(
             "/api/cron/tasks/edit-4",
-            json={"enabled": False},
+            json={"lifecycle": "disabled"},
             headers=CSRF_HEADERS,
         )
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert body["enabled"] is False
-        assert body["state"] == "disabled"
+        assert body["lifecycle"] == "disabled"
 
         after = store.get_task("edit-4")
         assert after is not None
-        assert after.enabled is False
-        assert after.state is TaskState.DISABLED
+        assert after.lifecycle is TaskLifecycleState.DISABLED
     finally:
         client.__exit__(None, None, None)
 
 
-def test_patch_enabled_true_resets_state_to_scheduled(tmp_path: Path) -> None:
-    """改 enabled=true → state=SCHEDULED（从 disabled 回来）。"""
+def test_patch_lifecycle_scheduled_resumes_disabled_task(tmp_path: Path) -> None:
+    """改 lifecycle=scheduled 后 disabled 任务恢复调度。"""
     client, store = _login_client_with_store(tmp_path)
     try:
         # 先种一个 disabled 任务
         task = _make_task(
             task_id="edit-4b",
-            enabled=False,
-            state=TaskState.DISABLED,
+            lifecycle=TaskLifecycleState.DISABLED,
             trigger=_trigger_interval(30),
             next_run_at="2026-05-09T13:00:00+00:00",
         )
@@ -231,17 +227,16 @@ def test_patch_enabled_true_resets_state_to_scheduled(tmp_path: Path) -> None:
 
         resp = client.patch(
             "/api/cron/tasks/edit-4b",
-            json={"enabled": True},
+            json={"lifecycle": "scheduled"},
             headers=CSRF_HEADERS,
         )
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert body["enabled"] is True
-        assert body["state"] == "scheduled"
+        assert body["lifecycle"] == "scheduled"
 
         after = store.get_task("edit-4b")
         assert after is not None
-        assert after.state is TaskState.SCHEDULED
+        assert after.lifecycle is TaskLifecycleState.SCHEDULED
     finally:
         client.__exit__(None, None, None)
 
@@ -474,13 +469,11 @@ def test_dto_includes_input_text_and_agent_name(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_patch_revives_completed_once_task_when_schedule_changes(tmp_path: Path) -> None:
-    """v0.5.4: ONCE 已完成（enabled=False+last_run_at+state=COMPLETED）任务 PATCH
-    改 schedule 时自动复活，避免 ticker.reserve_due_tasks 因两道过滤跳过。
-    """
+def test_patch_revives_exhausted_once_task_when_schedule_changes(tmp_path: Path) -> None:
+    """EXHAUSTED one-shot 改 schedule 时开启新的 SCHEDULED 生命周期。"""
     client, store = _login_client_with_store(tmp_path)
     try:
-        # 1. 创建 ONCE 任务（初始 enabled=True，state=SCHEDULED）
+        # 1. 创建 SCHEDULED one-shot
         task = _make_task(
             task_id="revive-1",
             trigger=_trigger_once("2026-05-09T13:00:00+00:00"),
@@ -488,18 +481,16 @@ def test_patch_revives_completed_once_task_when_schedule_changes(tmp_path: Path)
         )
         store.create_task(task)
 
-        # 2. 模拟已跑完：直接 store.update_task 翻字段（绕过路由）
+        # 2. 模拟已领取并完成
         store.update_task(
             "revive-1",
-            enabled=False,
+            lifecycle=TaskLifecycleState.EXHAUSTED,
             last_run_at="2026-05-09T13:00:05+00:00",
-            state=TaskState.COMPLETED,
         )
         before = store.get_task("revive-1")
         assert before is not None
-        assert before.enabled is False
+        assert before.lifecycle is TaskLifecycleState.EXHAUSTED
         assert before.last_run_at is not None
-        assert before.state is TaskState.COMPLETED
 
         # 3. PATCH 改 schedule（新 ONCE 时间）
         resp = client.patch(
@@ -511,9 +502,8 @@ def test_patch_revives_completed_once_task_when_schedule_changes(tmp_path: Path)
         body = resp.json()
 
         # 4. DTO 反映复活
-        assert body["enabled"] is True
+        assert body["lifecycle"] == "scheduled"
         assert body["last_run_at"] is None
-        assert body["state"] == "scheduled"
         # next_run_at 被重算为新 schedule 的时间（不是 2026-05-09）
         assert body["next_run_at"] is not None
         assert body["next_run_at"].startswith("2026-06-01")
@@ -522,16 +512,15 @@ def test_patch_revives_completed_once_task_when_schedule_changes(tmp_path: Path)
         # 5. store 侧同步
         after = store.get_task("revive-1")
         assert after is not None
-        assert after.enabled is True
+        assert after.lifecycle is TaskLifecycleState.SCHEDULED
         assert after.last_run_at is None
-        assert after.state is TaskState.SCHEDULED
         assert after.trigger.trigger_type is TriggerType.ONCE
     finally:
         client.__exit__(None, None, None)
 
 
 def test_patch_does_not_revive_when_schedule_not_changed(tmp_path: Path) -> None:
-    """v0.5.4: 用户没改 schedule（仅改 name）→ 不复活，三字段保持原状。
+    """仅改 name 时 EXHAUSTED 生命周期保持原状。
 
     这是复活逻辑的边界条件：复活只在用户明确表达"我要让它再跑"（改 schedule）
     时才发生；改个名字不该意外重启已完成任务。
@@ -546,9 +535,8 @@ def test_patch_does_not_revive_when_schedule_not_changed(tmp_path: Path) -> None
         store.create_task(task)
         store.update_task(
             "revive-2",
-            enabled=False,
+            lifecycle=TaskLifecycleState.EXHAUSTED,
             last_run_at="2026-05-09T13:00:05+00:00",
-            state=TaskState.COMPLETED,
         )
 
         resp = client.patch(
@@ -559,16 +547,13 @@ def test_patch_does_not_revive_when_schedule_not_changed(tmp_path: Path) -> None
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["name"] == "改个名"
-        # 三字段保持
-        assert body["enabled"] is False
+        assert body["lifecycle"] == "exhausted"
         assert body["last_run_at"] == "2026-05-09T13:00:05+00:00"
-        assert body["state"] == "completed"
 
         after = store.get_task("revive-2")
         assert after is not None
-        assert after.enabled is False
+        assert after.lifecycle is TaskLifecycleState.EXHAUSTED
         assert after.last_run_at == "2026-05-09T13:00:05+00:00"
-        assert after.state is TaskState.COMPLETED
     finally:
         client.__exit__(None, None, None)
 
@@ -577,16 +562,14 @@ def test_patch_does_not_revive_recurring_task(tmp_path: Path) -> None:
     """v0.5.4: INTERVAL（recurring）任务改 schedule 不走复活分支。
 
     recurring 有自己的 next_run_at 节拍：trigger 重算 + next_run_at 重算就够了；
-    enabled 应保持当前值（手动暂停的任务不能被 schedule 编辑悄悄唤醒，那是
-    pause/resume 端点的语义位）。
+    lifecycle 应保持 PAUSED。
     """
     client, store = _login_client_with_store(tmp_path)
     try:
-        # 种一个手动暂停的 INTERVAL 任务（enabled=False + state=PAUSED）
+        # 种一个手动暂停的 INTERVAL 任务
         task = _make_task(
             task_id="revive-3",
-            enabled=False,
-            state=TaskState.PAUSED,
+            lifecycle=TaskLifecycleState.PAUSED,
             trigger=_trigger_interval(30),
             next_run_at="2026-05-09T13:00:00+00:00",
         )
@@ -603,13 +586,10 @@ def test_patch_does_not_revive_recurring_task(tmp_path: Path) -> None:
         # trigger / next_run_at 更新
         assert body["trigger_type"] == "interval"
         assert body["next_run_at"] is not None
-        # enabled 保持 False（不抢 pause 端点的语义位）
-        assert body["enabled"] is False
+        assert body["lifecycle"] == "paused"
 
         after = store.get_task("revive-3")
         assert after is not None
-        assert after.enabled is False
-        # state 也未被 schedule 编辑挪动
-        assert after.state is TaskState.PAUSED
+        assert after.lifecycle is TaskLifecycleState.PAUSED
     finally:
         client.__exit__(None, None, None)

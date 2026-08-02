@@ -1,4 +1,4 @@
-config_schema_version: v0.5  # 配置结构版本；当前版本为 v0.5。
+config_schema_version: v0.6  # 配置结构版本；当前版本为 v0.6。
 
 # XSpace 打包用 Kongming Web runtime 默认配置。
 #
@@ -10,7 +10,6 @@ config_schema_version: v0.5  # 配置结构版本；当前版本为 v0.5。
 #   1. 新增 Config 字段先写入仓库根 `config/setting.yaml`。
 #   2. 本文件与 `config/xspace/sync-policy.yaml` 共同覆盖全部 Config leaf 字段；
 #      XSpace 需要显式产品默认值时写入本文件，只属于主配置的字段写 main-only 决策。
-#      决策机制详见 `config/xspace/sync-policy.yaml` 和 `scripts/config-xspace-sync.py`。
 #   3. 密钥、token、密码、个人路径不写入安装包；使用空值、环境变量名或 app data 注入。
 #   4. x-space 启动时先把本文件复制/合并到 `<kongming_home>/setting.yaml`，再用
 #      `--config <kongming_home>/setting.yaml` 拉起 sidecar，ready 后调用
@@ -19,29 +18,8 @@ config_schema_version: v0.5  # 配置结构版本；当前版本为 v0.5。
 #      `src/safety/approval/default_rules.py` 和 `src/safety/auto_approval/default_rules.yaml`。
 
 model:
-  # provider 留空时按 base_url 自动推断协议；x-space 设置页可覆盖。
-  provider:
-  name: local-model
-  base_url: http://127.0.0.1:1234/v1
-  provider_routing:
-    openai_compatible:
-      - api.openai.com
-      - open.bigmodel.cn
-      - api.deepseek.com
-      - api.moonshot.cn
-      - api.minimaxi.com
-      - localhost
-      - 127.0.0.1
-    anthropic:
-      - api.anthropic.com
-  # 安装包不内置远端 key；远端模型通过用户设置或 KONGMING_MODEL_API_KEY 注入。
-  api_key: ""
-  timeout: 60.0
-  max_tokens: 4096
-  temperature: 0.7
+  preset_id: local-gemma-4-e4b-it
   reasoning_effort:
-  reasoning_profiles: {}
-
 runner:
   max_turns: 90
 
@@ -79,8 +57,18 @@ tool:
     read_max_bytes: 65536
 
 mcp:
-  # 桌面包默认不主动启动第三方 MCP server；用户或产品配置可按需开启。
-  enabled: false
+  servers:
+  - server_id: minimax
+    command: uvx
+    args:
+    - minimax-coding-plan-mcp
+    - -y
+    env:
+      MINIMAX_API_HOST: https://api.minimax.io
+    secret_env_keys:
+    - MINIMAX_API_KEY
+    initialize_timeout_ms: 30000
+    call_timeout_ms: 60000
 
 web_search:
   # 保持通用 web_search 能力开启；没有底层搜索工具时只产生可诊断的缺失状态。
@@ -118,10 +106,8 @@ evolution:
     enabled: false
     mode: child_agent
     background: true
-    model_name:
-    base_url:
-    api_key_env: EVOLUTION_REVIEWER_API_KEY
-    provider:
+    auto_trigger_enabled: true
+    preset_id:
     reasoning_effort:
     every_n_runs: 5
     min_user_turns: 3
@@ -141,15 +127,17 @@ stream:
   periodic_batch_size: 20
 
 safety:
-  # 产品包内不内置用户私有路径策略；内置安全基线仍由 safety 默认规则提供。
-  hard_deny_commands: []
-  approval_required_commands: []
-  sensitive_paths: []
-  skill_call_rules: []
-  trusted_workdirs: []
-  allow_writes: []
-  allow_tools_silent: []
-  log_silent_reads: false
+  # 每个 cwd 的 user / llm / full_trust 模式独立保存；此处只提供 llm 复核器。
+  approval:
+    llm:
+      provider: openai_compatible
+      model: MiniMax-M2.5
+      base_url: https://api.minimaxi.com/v1
+      # 设置 KONGMING_SAFETY_APPROVAL_LLM_API_KEY 覆盖此值。
+      api_key: ""
+      api_key_header: authorization-bearer
+      timeout_seconds: 15.0
+      prompt_template_path:
 
 scheduler:
   enabled: true
@@ -171,7 +159,7 @@ web:
   # x-space 可传 --port 0 动态分配；固定默认值保留给资源配置和显式端口模式。
   port: 60000
   # 二维码扫码登录使用的服务器 origin；公网填 https://域名，局域网填 http://局域网IP:端口。
-  server_origin:
+  server_origin: https://kongming.ktkid.fun:12306
   # 持久配置默认保持 browser；XSpace 运行态由 `POST /api/xspace/runtime/init` 覆盖。
   host_environment: browser
   dev_mode: false
@@ -180,12 +168,10 @@ web:
   idle_timeout_seconds: 1800
   idle_check_interval_seconds: 60
   dashboard_poll_interval_seconds: 5
-  pending_approval_timeout_seconds: 60
   ws_heartbeat_interval_ms: 30000
   ws_heartbeat_background_interval_ms: 60000
   ws_heartbeat_timeout_ms: 10000
   ws_heartbeat_max_missed: 3
-  llm_presets: []
   full_log:
     enabled: false
     # .kongming/* 运行数据路径统一派生到 kongming_home。
@@ -228,12 +214,8 @@ sitian:
     session_message_max_chars: 500
   analyzer:
     enabled: false
-    model_name: ""
-    base_url: ""
-    api_key_env: SITIAN_ANALYZER_API_KEY
-    max_tokens: 2048
-    temperature: 0.3
-    timeout: 30
+    preset_id:
+    reasoning_effort:
     max_context_chars: 50000
     skip_if_unchanged: true
     full_log_enabled: false

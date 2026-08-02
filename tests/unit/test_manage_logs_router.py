@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from hosts.web.dashboard.logs.registry import LogSourceRegistry
 from hosts.web.dashboard.logs.router import router
 from hosts.web.dashboard.logs.service import LogReadService
-from infrastructure.config.models import Config, ModelConfig
+from infrastructure.config.models import Config, ModelSelectionConfig
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -19,7 +19,7 @@ from infrastructure.config.models import Config, ModelConfig
 
 
 def _test_config() -> Config:
-    return Config(model=ModelConfig(name="test-model", base_url="http://127.0.0.1:1234/v1"))
+    return Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
 
 
 @pytest.fixture()

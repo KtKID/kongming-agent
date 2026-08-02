@@ -10,7 +10,7 @@
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 import { CreateSchedulerTaskDialog } from "@/modules/scheduler/components/CreateSchedulerTaskDialog";
 import { useSchedulerStore } from "@/modules/scheduler/store";
@@ -27,8 +27,9 @@ function makeTask(overrides: Partial<SchedulerTaskVM> = {}): SchedulerTaskVM {
   return {
     taskId: "task-abc",
     name: "原始任务",
-    enabled: true,
-    state: "scheduled",
+    lifecycle: "scheduled",
+    latestRunStatus: null,
+    liveRuntimeStatus: "idle",
     triggerType: "cron",
     triggerExpr: "0 9 * * *",
     nextRunAt: null,
@@ -87,7 +88,59 @@ beforeEach(() => {
   } as never);
 });
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("CreateSchedulerTaskDialog · mode=create", () => {
+  it("一次性模式默认填入当前日期和当前时分", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 5, 15, 17, 8, 0));
+
+    render(
+      <CreateSchedulerTaskDialog
+        open={true}
+        mode="create"
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect((screen.getByPlaceholderText("年") as HTMLInputElement).value).toBe(
+      "2026",
+    );
+    expect((screen.getByPlaceholderText("月") as HTMLInputElement).value).toBe(
+      "6",
+    );
+    expect((screen.getByPlaceholderText("日") as HTMLInputElement).value).toBe(
+      "15",
+    );
+    expect((screen.getByPlaceholderText("时") as HTMLInputElement).value).toBe(
+      "17",
+    );
+    expect((screen.getByPlaceholderText("分") as HTMLInputElement).value).toBe(
+      "08",
+    );
+  });
+
+  it("一次性模式日期输满后聚焦小时输入框", async () => {
+    render(
+      <CreateSchedulerTaskDialog
+        open={true}
+        mode="create"
+        onClose={vi.fn()}
+      />,
+    );
+
+    const user = userEvent.setup();
+    const dayInput = screen.getByPlaceholderText("日") as HTMLInputElement;
+    const hourInput = screen.getByPlaceholderText("时") as HTMLInputElement;
+
+    await user.clear(dayInput);
+    await user.type(dayInput, "16");
+
+    expect(hourInput).toHaveFocus();
+  });
+
   it("渲染 preset 下拉，包含默认占位 + 全部 preset 选项", () => {
     render(
       <CreateSchedulerTaskDialog
@@ -124,7 +177,9 @@ describe("CreateSchedulerTaskDialog · mode=create", () => {
     await user.click(screen.getByRole("button", { name: "每天" }));
     const hourInput = screen.getByPlaceholderText("时") as HTMLInputElement;
     const minuteInput = screen.getByPlaceholderText("分") as HTMLInputElement;
+    await user.clear(hourInput);
     await user.type(hourInput, "9");
+    await user.clear(minuteInput);
     await user.type(minuteInput, "30");
     await user.type(
       screen.getByPlaceholderText(/描述任务内容/),
@@ -145,7 +200,7 @@ describe("CreateSchedulerTaskDialog · mode=edit", () => {
   it("预填字段（name / preset / 时间 / enabled）并显示 enabled toggle + 按钮文案 = 保存", () => {
     const task = makeTask({
       name: "晨报",
-      enabled: false,
+      lifecycle: "disabled",
       triggerType: "cron",
       triggerExpr: "30 9 * * *",
       presetId: "preset-b",
@@ -187,7 +242,7 @@ describe("CreateSchedulerTaskDialog · mode=edit", () => {
   it("提交时调 updateTask 并只发送变化字段", async () => {
     const task = makeTask({
       name: "晨报",
-      enabled: true,
+      lifecycle: "scheduled",
       triggerType: "cron",
       triggerExpr: "30 9 * * *",
       presetId: "preset-a",
@@ -218,7 +273,7 @@ describe("CreateSchedulerTaskDialog · mode=edit", () => {
     const [calledTaskId, calledBody] = updateTask.mock.calls[0]!;
     expect(calledTaskId).toBe("task-abc");
     expect(calledBody.name).toBe("晨报-v2");
-    expect(calledBody.enabled).toBe(false);
+    expect(calledBody.lifecycle).toBe("disabled");
     // h/m 0-pad 到 2 位
     expect(calledBody.schedule).toBe("30 09 * * *");
     // preset 未改 → 不在 body

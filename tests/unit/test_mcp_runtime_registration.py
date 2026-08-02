@@ -17,9 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from core.contracts import ToolContext, ToolResult
+from core.contracts import PreparedToolCall, ToolContext, ToolResult
 from hosts.shared.mcp_runtime_registration import McpRuntimeRegistrationManager
 from infrastructure.config import load_config
+from tests.support.tool_calls import execute_prepared_tool
 from tools import ToolRegistry
 
 
@@ -58,8 +59,14 @@ class _FakeUserSearchTool:
         "required": ["query"],
     }
 
-    async def execute(self, args: dict[str, object], ctx: ToolContext) -> ToolResult:
+    async def execute(
+        self,
+        prepared: PreparedToolCall,
+        ctx: ToolContext,
+    ) -> ToolResult:
         """执行 fake 搜索，输入 tool 参数和上下文，输出 ToolResult。"""
+        del ctx
+        args = prepared.arguments
         query = str(args["query"])
         return ToolResult(
             ok=True,
@@ -156,7 +163,6 @@ async def test_runtime_registration_registers_fake_mcp_web_search(tmp_path: Path
             tmp_path,
             f"""
 mcp:
-  enabled: true
   servers:
     - server_id: minimax
       command: {sys.executable}
@@ -188,7 +194,8 @@ web_search:
         assert "mcp__minimax__web_search" in registry
         assert "web_search" in registry
 
-        tool_result = await registry["web_search"].execute(
+        tool_result = await execute_prepared_tool(
+            registry["web_search"],
             {"query": "kongming deep research", "max_results": 1},
             ToolContext(run_id="r", session_id="s", turn=1, call_id="c"),
         )
@@ -211,8 +218,8 @@ web_search:
 @pytest.mark.parametrize(
     ("mcp_body", "expected_reason"),
     [
-        ("mcp:\n  enabled: false", "mcp_disabled"),
-        ("mcp:\n  enabled: true\n  servers: []", "no_servers_configured"),
+        ("", "no_servers_configured"),
+        ("mcp:\n  servers: []", "no_servers_configured"),
     ],
 )
 async def test_runtime_registration_wraps_user_search_tool_without_mcp_servers(
@@ -249,7 +256,8 @@ web_search:
     assert "custom_search_tool" in registry
     assert "web_search" in registry
 
-    tool_result = await registry["web_search"].execute(
+    tool_result = await execute_prepared_tool(
+        registry["web_search"],
         {"query": "user injected search"},
         ToolContext(run_id="r", session_id="s", turn=1, call_id="c"),
     )
@@ -272,7 +280,6 @@ async def test_runtime_registration_keeps_baseline_when_mcp_command_missing(
             tmp_path,
             """
 mcp:
-  enabled: true
   servers:
     - server_id: minimax
       command: definitely-missing-kongming-mcp-command
@@ -291,12 +298,27 @@ web_search:
         result = await manager.register(registry)
 
         assert result.started_servers == ()
-        assert result.registered_tools == ()
-        assert "web_search" not in registry
+        assert result.registered_tools == ("web_search",)
+        assert "web_search" in registry
         server_diag = result.diagnostics["mcp_manager"]["servers"]["minimax"]
         assert server_diag["status"] == "failed"
         assert server_diag["last_event"] == "missing_command"
         assert result.diagnostics["web_search"]["reason"] == "search_tool_missing"
+        assert result.diagnostics["web_search"]["registered_tool_name"] == "web_search"
+
+        tool_result = await execute_prepared_tool(
+            registry["web_search"],
+            {"query": "mcp missing"},
+            ToolContext(run_id="r", session_id="s", turn=1, call_id="c"),
+        )
+
+        assert tool_result.ok is False
+        assert (
+            tool_result.error_message == "web_search 工具缺失：未连接 MCP 搜索工具或用户搜索工具。"
+        )
+        assert tool_result.data is not None
+        assert tool_result.data["results"] == []
+        assert tool_result.data["diagnostics"]["reason"] == "search_tool_missing"
     finally:
         await manager.aclose()
 
@@ -317,7 +339,6 @@ async def test_runtime_registration_cleans_up_when_start_all_raises(tmp_path: Pa
             tmp_path,
             """
 mcp:
-  enabled: true
   servers:
     - server_id: minimax
       command: fake-mcp
@@ -361,7 +382,6 @@ async def test_runtime_registration_redacts_sensitive_startup_error(tmp_path: Pa
             tmp_path,
             """
 mcp:
-  enabled: true
   servers:
     - server_id: minimax
       command: fake-mcp
@@ -400,7 +420,6 @@ async def test_runtime_registration_clears_manager_when_cleanup_raises(tmp_path:
             tmp_path,
             """
 mcp:
-  enabled: true
   servers:
     - server_id: minimax
       command: fake-mcp
@@ -440,7 +459,6 @@ async def test_runtime_registration_aclose_is_idempotent(tmp_path: Path) -> None
             tmp_path,
             """
 mcp:
-  enabled: true
   servers:
     - server_id: minimax
       command: fake-mcp

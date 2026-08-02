@@ -18,7 +18,7 @@ from pydantic import ValidationError
 from infrastructure.config import load_config
 from infrastructure.config.models import (
     Config,
-    ModelConfig,
+    ModelSelectionConfig,
     SchedulerApprovalConfig,
     SchedulerConfig,
 )
@@ -27,9 +27,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SETTING_YAML = REPO_ROOT / "config" / "setting.yaml"
 
 
-def _minimal_model() -> ModelConfig:
+def _minimal_model() -> ModelSelectionConfig:
     """Build the smallest valid model config for Config(model=...)."""
-    return ModelConfig(name="test-model", base_url="http://127.0.0.1:1234/v1", api_key="")
+    return ModelSelectionConfig(preset_id="local-gemma-4-e4b-it")
 
 
 # ---------------------------------------------------------------------------

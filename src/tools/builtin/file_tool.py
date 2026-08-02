@@ -10,7 +10,7 @@ v1-mini 里需要三个最基本的文件工具，让模型能完成"读 → 改
 安全性边界：
 
 - 这一层**不做**路径白名单 / 路径逃逸防护 / 写权限过滤。这些安全策略由
-  :mod:`safety.policies.capability` 和 :mod:`safety.policies.permission` 在装配层
+  Safety v0.6 三模式决策链在装配层
   串到 :class:`core.contracts.ApprovalProvider` 前面去做；tool 本身只专注于
   "能不能把这件事做对"，不兼职安全审判。
 - 路径统一 :meth:`pathlib.Path.resolve` 后落成绝对路径返回，方便上游审计。
@@ -25,12 +25,33 @@ import json
 from pathlib import Path
 from typing import Any
 
-from core.contracts import Tool, ToolContext
+from core.contracts import PreparedToolCall, Tool, ToolContext
 from tools.runtime.base import BaseBuiltinTool
 
 # 默认读取上限：64KiB，超过截断并在 content 里明确标注。
 # 这不是安全限制（安全归 safety 层），只是避免一次 tool call 把模型上下文打爆。
 _DEFAULT_READ_MAX_BYTES = 64 * 1024
+
+
+def _context_cwd(ctx: ToolContext) -> Path | None:
+    """从 ToolContext 读取默认 cwd，输入为 tool context，输出为绝对路径或 None。"""
+    raw = ctx.metadata.get("cwd")
+    if isinstance(raw, Path):
+        return raw.expanduser().resolve(strict=False)
+    if isinstance(raw, str) and raw.strip():
+        return Path(raw).expanduser().resolve(strict=False)
+    return None
+
+
+def _resolve_tool_path(raw_path: str, ctx: ToolContext) -> Path:
+    """按 ToolContext.cwd 解析工具路径，输入为原始路径，输出为绝对路径。"""
+    path = Path(raw_path).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    base = _context_cwd(ctx)
+    if base is not None:
+        return (base / path).resolve()
+    return path.resolve()
 
 
 class ReadFileTool(BaseBuiltinTool):
@@ -69,20 +90,34 @@ class ReadFileTool(BaseBuiltinTool):
     def __init__(self, *, default_max_bytes: int = _DEFAULT_READ_MAX_BYTES) -> None:
         self._default_max_bytes = default_max_bytes
 
+    def prepare(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> PreparedToolCall:
+        """审批前校验读取参数并冻结绝对路径和读取上限。"""
+        self._validate_args(arguments)
+        raw_path = arguments["path"]
+        if not isinstance(raw_path, str) or not raw_path:
+            raise ValueError("'path' must be a non-empty string")
+        max_bytes = arguments.get("max_bytes", self._default_max_bytes)
+        if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+            raise ValueError("'max_bytes' must be a positive integer if provided")
+        return PreparedToolCall(
+            arguments={
+                "path": str(_resolve_tool_path(raw_path, context)),
+                "max_bytes": max_bytes,
+            }
+        )
+
     async def _run(
         self,
         args: dict[str, Any],
         ctx: ToolContext,
     ) -> tuple[str, dict[str, Any] | None]:
-        raw_path = args["path"]
-        if not isinstance(raw_path, str) or not raw_path:
-            raise ValueError("'path' must be a non-empty string")
-
-        max_bytes = args.get("max_bytes", self._default_max_bytes)
-        if not isinstance(max_bytes, int) or max_bytes <= 0:
-            raise ValueError("'max_bytes' must be a positive integer if provided")
-
-        abs_path = Path(raw_path).expanduser().resolve()
+        del ctx
+        abs_path = Path(args["path"])
+        max_bytes = args["max_bytes"]
         if not abs_path.exists():
             raise FileNotFoundError(f"file not found: {abs_path}")
         if not abs_path.is_file():
@@ -149,21 +184,39 @@ class WriteFileTool(BaseBuiltinTool):
         "required": ["path", "content"],
     }
 
+    def prepare(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> PreparedToolCall:
+        """审批前校验写入参数并冻结绝对路径、文本和 append 模式。"""
+        self._validate_args(arguments)
+        raw_path = arguments["path"]
+        content = arguments["content"]
+        append = arguments.get("append", False)
+        if not isinstance(raw_path, str) or not raw_path:
+            raise ValueError("'path' must be a non-empty string")
+        if not isinstance(content, str):
+            raise ValueError("'content' must be a string")
+        if not isinstance(append, bool):
+            raise ValueError("'append' must be a boolean if provided")
+        return PreparedToolCall(
+            arguments={
+                "path": str(_resolve_tool_path(raw_path, context)),
+                "content": content,
+                "append": append,
+            }
+        )
+
     async def _run(
         self,
         args: dict[str, Any],
         ctx: ToolContext,
     ) -> tuple[str, dict[str, Any] | None]:
-        raw_path = args["path"]
+        del ctx
+        abs_path = Path(args["path"])
         content = args["content"]
-        append = bool(args.get("append", False))
-
-        if not isinstance(raw_path, str) or not raw_path:
-            raise ValueError("'path' must be a non-empty string")
-        if not isinstance(content, str):
-            raise ValueError("'content' must be a string")
-
-        abs_path = Path(raw_path).expanduser().resolve()
+        append = args["append"]
         abs_path.parent.mkdir(parents=True, exist_ok=True)
 
         encoded = content.encode("utf-8")
@@ -213,16 +266,25 @@ class ListDirTool(BaseBuiltinTool):
         "required": ["path"],
     }
 
+    def prepare(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> PreparedToolCall:
+        """审批前校验目录参数并冻结绝对路径。"""
+        self._validate_args(arguments)
+        raw_path = arguments["path"]
+        if not isinstance(raw_path, str) or not raw_path:
+            raise ValueError("'path' must be a non-empty string")
+        return PreparedToolCall(arguments={"path": str(_resolve_tool_path(raw_path, context))})
+
     async def _run(
         self,
         args: dict[str, Any],
         ctx: ToolContext,
     ) -> tuple[str, dict[str, Any] | None]:
-        raw_path = args["path"]
-        if not isinstance(raw_path, str) or not raw_path:
-            raise ValueError("'path' must be a non-empty string")
-
-        abs_path = Path(raw_path).expanduser().resolve()
+        del ctx
+        abs_path = Path(args["path"])
         if not abs_path.exists():
             raise FileNotFoundError(f"path not found: {abs_path}")
         if not abs_path.is_dir():

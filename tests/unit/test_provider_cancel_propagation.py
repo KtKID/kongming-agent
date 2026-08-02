@@ -27,8 +27,9 @@ import pytest
 
 from core.contracts import LLMRequest
 from core.message import Message
-from infrastructure.config.models import ModelConfig
+from infrastructure.config.model_provider_catalog import ProviderProtocol
 from infrastructure.llm_providers.anthropic_messages import AnthropicMessagesProvider
+from tests._helpers.model_runtime import make_model_runtime
 
 _PROVIDER_DIR = Path(__file__).resolve().parents[2] / "src" / "infrastructure" / "llm_providers"
 
@@ -136,13 +137,15 @@ def test_no_provider_module_catches_cancelled_error_silently() -> None:
 
 
 def _make_provider() -> AnthropicMessagesProvider:
+    runtime, credential = make_model_runtime(
+        protocol=ProviderProtocol.ANTHROPIC,
+        name="claude-test",
+        base_url="https://api.anthropic.com",
+        api_key="sk-test",
+    )
     return AnthropicMessagesProvider(
-        model_config=ModelConfig(
-            provider="anthropic",
-            name="claude-test",
-            base_url="https://api.anthropic.com",
-            api_key="sk-test",
-        )
+        model_config=runtime,
+        credential=credential,
     )
 
 

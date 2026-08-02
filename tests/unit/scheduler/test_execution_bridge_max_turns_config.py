@@ -19,7 +19,7 @@ from application.scheduled_runs.execution_bridge import (
 )
 from infrastructure.config.models import (
     Config,
-    ModelConfig,
+    ModelSelectionConfig,
     SchedulerConfig,
 )
 from scheduler.domain import (
@@ -29,8 +29,8 @@ from scheduler.domain import (
     ScheduleTrigger,
     SessionMode,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
@@ -44,8 +44,7 @@ def _make_task(max_turns: int | None) -> ScheduledTask:
     return ScheduledTask(
         task_id="t-mt",
         name="max-turns test",
-        enabled=True,
-        state=TaskState.SCHEDULED,
+        lifecycle=TaskLifecycleState.SCHEDULED,
         origin=TaskOrigin.TOOL,
         trigger=ScheduleTrigger(
             trigger_type=TriggerType.INTERVAL,
@@ -69,7 +68,7 @@ def _make_task(max_turns: int | None) -> ScheduledTask:
 
 def _make_bridge(*, base_config: Config | None) -> ExecutionBridge:
     return ExecutionBridge(
-        runner=MagicMock(),
+        runtime=MagicMock(),
         llm=MagicMock(),
         tools={},
         enabled_tool_names=(),
@@ -84,7 +83,7 @@ def _make_bridge(*, base_config: Config | None) -> ExecutionBridge:
 
 def _config_with_default_max_turns(value: int) -> Config:
     return Config(
-        model=ModelConfig(name="t", base_url="http://127.0.0.1:1234/v1"),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         scheduler=SchedulerConfig(default_max_turns=value),
     )
 

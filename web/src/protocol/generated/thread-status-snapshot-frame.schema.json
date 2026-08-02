@@ -1,0 +1,105 @@
+{
+  "$defs": {
+    "ThreadStatusFrame": {
+      "additionalProperties": false,
+      "description": "``/ws/thread-status`` 上的线程运行阶段广播帧。\n\n``run_end_reason`` 仅在终态帧（run.end 触发的 phase 变更）携带，是\n:class:`core.result.RunEndReason` bitmask 的 int 值。前端据此决定：\n按钮复位（``reason > 0``）+ UI 显示（INTERRUPT 位优先\"已停止\"）。\n非终态帧不携带（None），保证终态字段语义清晰。",
+      "properties": {
+        "frame_type": {
+          "const": "thread-status",
+          "default": "thread-status",
+          "title": "Frame Type",
+          "type": "string"
+        },
+        "threadId": {
+          "title": "Threadid",
+          "type": "string"
+        },
+        "phase": {
+          "enum": [
+            "idle",
+            "responding",
+            "thinking",
+            "tool_calling",
+            "waiting_approval",
+            "complete",
+            "error"
+          ],
+          "title": "Phase",
+          "type": "string"
+        },
+        "sequence": {
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "runId": {
+          "title": "Runid",
+          "type": "string"
+        },
+        "runGeneration": {
+          "title": "Rungeneration",
+          "type": "integer"
+        },
+        "toolName": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Toolname"
+        },
+        "run_end_reason": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Run End Reason"
+        }
+      },
+      "required": [
+        "frame_type",
+        "threadId",
+        "phase",
+        "sequence",
+        "runId",
+        "runGeneration"
+      ],
+      "title": "ThreadStatusFrame",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "新 ``/ws/thread-status`` 连接收到的 active 状态全量快照。",
+  "properties": {
+    "frame_type": {
+      "const": "thread-status.snapshot",
+      "default": "thread-status.snapshot",
+      "type": "string"
+    },
+    "watermark": {
+      "type": "integer"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/ThreadStatusFrame"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "frame_type",
+    "watermark",
+    "items"
+  ],
+  "title": "ThreadStatusSnapshotFrame",
+  "type": "object",
+  "$comment": "由 scripts/export_thread_status_frame_schema.py 自动生成；禁止手工修改。snapshot 与 Python wire 模型保持一致。"
+}

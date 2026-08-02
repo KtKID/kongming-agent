@@ -2,9 +2,16 @@ import { ArrowUp, ArrowDown, Brain, Clock, Cpu, DatabaseZap, Sparkles, Gauge, Ti
 import { useChatStore } from "@/stores/chat";
 import { useThreadsStore } from "@/stores/threads";
 import type { ReasoningEffort } from "@/components/Composer";
-import type { ClaudeUsage, CodexUsage, GenericChatOpenAIUsage, ThreadUsage } from "@/protocol";
+import type {
+  ClaudeUsage,
+  CodexUsage,
+  GenericChatAnthropicUsage,
+  GenericChatOpenAIUsage,
+  ThreadUsage,
+} from "@/protocol";
 
-function fmt(n: number): string {
+function fmt(n: number | null): string {
+  if (n == null) return "—";
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(n);
@@ -36,9 +43,12 @@ function ContextUsageBar({
   current,
   limit,
 }: {
-  current: number;
+  current: number | null;
   limit: number;
 }) {
+  if (current == null) {
+    return <Stat icon={Gauge} label="当前上下文占用未知" value="上下文 —" />;
+  }
   if (!limit || limit <= 0) {
     return <Stat icon={Gauge} label="当前上下文占用（模型上限未知）" value={`上下文 ${fmt(current)}`} />;
   }
@@ -66,7 +76,11 @@ function ContextUsageBar({
  * usage-token-v2-ui-fields: 1h / 5m TTL 细分（``cache_creation.ephemeral_*``）
  * 只在对应值 > 0 时渲染，避免空数据噪声。
  */
-function StatusLineClaude({ usage }: { usage: ClaudeUsage }) {
+function StatusLineClaude({
+  usage,
+}: {
+  usage: ClaudeUsage | GenericChatAnthropicUsage;
+}) {
   const c1h = usage.cache_creation.ephemeral_1h_input_tokens;
   const c5m = usage.cache_creation.ephemeral_5m_input_tokens;
   return (
@@ -74,10 +88,10 @@ function StatusLineClaude({ usage }: { usage: ClaudeUsage }) {
       <Stat icon={ArrowUp} label="本轮纯新增输入（不含 cache）" value={`输入 ${fmt(usage.input_tokens)}`} />
       <Stat icon={DatabaseZap} label="本轮命中 prompt cache" value={`缓存命中 ${fmt(usage.cache_read_input_tokens)}`} />
       <Stat icon={Sparkles} label="本轮新写入 cache（1h+5m 合计）" value={`缓存写入 ${fmt(usage.cache_creation_input_tokens)}`} />
-      {c1h > 0 && (
+      {c1h != null && c1h > 0 && (
         <Stat icon={Clock} label="本轮新写入 cache · 1h TTL" value={`1h ${fmt(c1h)}`} />
       )}
-      {c5m > 0 && (
+      {c5m != null && c5m > 0 && (
         <Stat icon={Timer} label="本轮新写入 cache · 5m TTL" value={`5m ${fmt(c5m)}`} />
       )}
       <Stat icon={ArrowDown} label="本轮输出（含 thinking）" value={`输出 ${fmt(usage.output_tokens)}`} />
@@ -141,6 +155,14 @@ function pickModelName(usage: ThreadUsage | null, threadModel: string): string {
   return threadModel;
 }
 
+function reasoningEffortLabel(effort: ReasoningEffort | null | undefined): string | null {
+  if (!effort || effort === "none") return null;
+  if (effort === "low") return "低";
+  if (effort === "medium") return "中";
+  if (effort === "high") return "高";
+  return "最高";
+}
+
 interface StatusLineProps {
   threadId: string | undefined;
   reasoningEffort?: ReasoningEffort | null;
@@ -168,14 +190,15 @@ export function StatusLine({ threadId, reasoningEffort }: StatusLineProps) {
   });
 
   const modelName = pickModelName(usage, threadModel);
+  const effortLabel = reasoningEffortLabel(reasoningEffort);
 
   return (
     <div className="mx-auto flex max-w-3xl items-center justify-between px-0 py-px text-[8px] tabular-nums text-muted-foreground">
       <span className="inline-flex items-center gap-3">
-        {reasoningEffort && (
+        {effortLabel && (
           <span className="inline-flex items-center gap-1 text-primary">
             <Brain className="h-3 w-3" />
-            深度思考 {reasoningEffort === "low" ? "低" : reasoningEffort === "medium" ? "中" : "高"}
+            深度思考 {effortLabel}
           </span>
         )}
         {modelName && (
@@ -184,7 +207,7 @@ export function StatusLine({ threadId, reasoningEffort }: StatusLineProps) {
             <span>{modelName}</span>
           </span>
         )}
-        {!reasoningEffort && !modelName && <span />}
+        {!effortLabel && !modelName && <span />}
       </span>
       <span className="inline-flex items-center gap-3">
         {usage == null && (

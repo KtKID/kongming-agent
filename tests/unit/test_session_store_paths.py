@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.config.models import Config, ModelConfig, SessionConfig
+from infrastructure.config.models import Config, ModelSelectionConfig, SessionConfig
 from sessions.file_session import FileSession
 from sessions.session_bootstrap import SessionBootstrap
 from sessions.session_store import SQLiteSession, build_session
@@ -16,11 +16,7 @@ from sessions.session_store import SQLiteSession, build_session
 def _base_config(session: SessionConfig) -> Config:
     """构造最小合法 Config，用本地模型地址避开远端 key 校验。"""
     return Config(
-        model=ModelConfig(
-            name="local-test-model",
-            base_url="http://127.0.0.1:1234/v1",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         session=session,
     )
 

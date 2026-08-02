@@ -21,6 +21,7 @@ import pytest
 from core.contracts import ToolContext, ToolResult
 from hosts.shared.mcp_runtime_registration import McpRuntimeRegistrationManager
 from infrastructure.config import load_config
+from tests.support.tool_calls import execute_prepared_tool
 from tools.runtime.registry import ToolRegistry
 
 pytestmark = [pytest.mark.e2e, pytest.mark.live]
@@ -58,7 +59,8 @@ async def test_minimax_mcp_web_search_returns_urls() -> None:
         )
 
         query = "MiniMax Web Search MCP web_search"
-        provider_result = await provider_tool.execute(
+        provider_result = await execute_prepared_tool(
+            provider_tool,
             {"query": query, "max_results": 3},
             ToolContext(
                 run_id="test-minimax-mcp-provider-search",
@@ -69,7 +71,8 @@ async def test_minimax_mcp_web_search_returns_urls() -> None:
             ),
         )
 
-        result = await web_search.execute(
+        result = await execute_prepared_tool(
+            web_search,
             {
                 "query": query,
                 "max_results": 3,

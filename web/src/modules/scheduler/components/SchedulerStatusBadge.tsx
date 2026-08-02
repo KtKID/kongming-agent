@@ -12,10 +12,29 @@ const stateConfig: Record<
     label: "已调度",
     className: "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200",
   },
+  idle: {
+    label: "空闲",
+    className: "bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-200",
+  },
   paused: {
     label: "已暂停",
     className:
       "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200",
+  },
+  disabled: {
+    label: "已停用",
+    className:
+      "bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-200",
+  },
+  exhausted: {
+    label: "已耗尽",
+    className:
+      "bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200",
+  },
+  deleted: {
+    label: "已删除",
+    className:
+      "bg-slate-100 text-slate-500 dark:bg-slate-900 dark:text-slate-400",
   },
   running: {
     label: "运行中",

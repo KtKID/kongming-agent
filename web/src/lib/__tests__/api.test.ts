@@ -3,6 +3,7 @@ import {
   ApiError,
   RateLimitedError,
   apiGet,
+  apiGetThreadSubAgents,
   apiGetThreadTaskProgress,
   apiPost,
 } from "@/lib/api";
@@ -72,6 +73,43 @@ describe("lib/api", () => {
 
     const call = fetchMock.mock.calls[0];
     expect(call[0]).toBe("/api/threads/thread-a%2Fb/task-progress");
+  });
+
+  it("apiGetThreadSubAgents consumes the canonical wrapper", async () => {
+    const subagent = {
+      id: "task-1",
+      agent_id: "child-1",
+      thread_id: "thread-abcdef012345",
+      source: "workflow",
+      workflow_id: "wf-1",
+      workflow_task_id: "step-1",
+      task_id: "task-1",
+      task_run_id: "run-1",
+      task_name: "Step 1",
+      session_id: "session-1",
+      status: "running",
+      started_at: "2026-07-29T00:00:00Z",
+      updated_at: "2026-07-29T00:00:01Z",
+      finished_at: null,
+      started_at_ms: 1,
+      updated_at_ms: 2,
+      finished_at_ms: null,
+      error_message: null,
+    };
+    (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          schema_version: 1,
+          thread_id: "thread-abcdef012345",
+          subagents: [subagent],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    await expect(
+      apiGetThreadSubAgents("thread-abcdef012345"),
+    ).resolves.toEqual([subagent]);
   });
 
   it("401 → 抛 ApiError + redirect /login", async () => {

@@ -160,30 +160,20 @@ def _build_analyzer_provider(cfg: Config) -> LLMProvider | None:
     analyzer_cfg = cfg.sitian.analyzer
     if not analyzer_cfg.enabled:
         return None
-    if not analyzer_cfg.model_name and not analyzer_cfg.base_url:
-        return None
-
-    import os
-
-    from infrastructure.config.models import ModelConfig
-
-    api_key = ""
-    if analyzer_cfg.api_key_env:
-        api_key = os.environ.get(analyzer_cfg.api_key_env, "")
-
-    sitian_model = ModelConfig(
-        name=analyzer_cfg.model_name or cfg.model.name,
-        base_url=analyzer_cfg.base_url or cfg.model.base_url,
-        api_key=api_key or cfg.model.api_key,
-        timeout=analyzer_cfg.timeout,
-        max_tokens=analyzer_cfg.max_tokens,
-        temperature=analyzer_cfg.temperature,
-    )
-    provider_cfg = cfg.model_copy(update={"model": sitian_model})
-
+    from infrastructure.config.model_catalog_manager import ModelCatalogManager
     from infrastructure.llm_providers.provider_factory import build_provider
 
-    return build_provider(provider_cfg)
+    catalog_manager = ModelCatalogManager()
+    resolved_model = catalog_manager.resolve_runtime(
+        cfg.model,
+        preset_id=analyzer_cfg.preset_id,
+        reasoning_effort=analyzer_cfg.reasoning_effort,
+    )
+    return build_provider(
+        cfg,
+        catalog_manager=catalog_manager,
+        resolved_model=resolved_model,
+    )
 
 
 __all__ = ["main"]

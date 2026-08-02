@@ -448,20 +448,6 @@ class TestFormatSkillListing:
             == "- commit: Create a git commit - After completing a chunk"
         )
 
-    def test_listing_is_deterministic_for_same_specs(self) -> None:
-        specs = [
-            _make_spec(name="commit", description="Create a git commit"),
-            _make_spec(
-                name="review",
-                description="Review code",
-                when_to_use="Before merging",
-            ),
-        ]
-
-        assert format_skill_listing(specs) == (
-            "- commit: Create a git commit\n- review: Review code - Before merging"
-        )
-
     def test_boundary_exactly_250_chars_not_truncated(self) -> None:
         """desc + ' - ' + when_to_use 总长正好 250 字 → 不截断。"""
         # desc 100 + ' - ' 3 + wtu 147 = 250

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { ChatMessageItem, MessageViewport } from "@/components/MessageList";
-import { Composer } from "@/components/Composer";
+import { Composer, type SubmittedDraft } from "@/components/Composer";
 import {
   CodexPermissionModeSelector,
   type CodexPermissionMode,
@@ -16,7 +16,11 @@ import type { NormalizedMessage, ThreadMetadataDTO } from "@/protocol";
 import type { ChatItem as GenericChatItem } from "@/stores/chat";
 import { useItemsWithFileSummary } from "@/hooks/useItemsWithFileSummary";
 import { ModifiedFilesSummary } from "@/components/ModifiedFilesSummary";
-import { useThreadsStore } from "@/stores/threads";
+import {
+  useThreadsStore,
+  type InitialMessageDraft,
+} from "@/stores/threads";
+import { useThreadDispatchStore } from "@/stores/threadDispatch";
 
 type CodexMetaItem =
   | { kind: "status"; content?: unknown; id: string }
@@ -71,7 +75,6 @@ function isGenericChatItem(item: CodexRenderItem): item is GenericChatItem {
     item.kind === "user" ||
     item.kind === "assistant" ||
     item.kind === "tool" ||
-    item.kind === "approval" ||
     item.kind === "error"
   );
 }
@@ -228,6 +231,12 @@ export function CodexView({ threadId, thread }: Props) {
   // thread.codex_thread_id（落盘的 resume sid）。参考 ClaudeCodeView 同模式。
   const [resumeSessionId, setResumeSessionId] = useState<string | null>(null);
   const isRunning = useThreadRunning(threadId);
+  const isDispatching = useThreadDispatchStore(
+    (store) =>
+      threadId
+        ? store.byThreadId[threadId]?.phase === "dispatching"
+        : false,
+  );
   const sessionIdForAbort = useMemo(() => {
     const live = resumeSessionId?.trim();
     if (live) return live;
@@ -254,6 +263,9 @@ export function CodexView({ threadId, thread }: Props) {
   const setPendingNewSession = useThreadsStore((s) => s.setPendingNewSession);
   const initialMessage = useThreadsStore((s) => s.initialMessage);
   const setInitialMessage = useThreadsStore((s) => s.setInitialMessage);
+  const [failedInitialDraft, setFailedInitialDraft] =
+    useState<SubmittedDraft | null>(null);
+  const initialSendKeyRef = useRef<InitialMessageDraft | null>(null);
   const createThread = useThreadsStore((s) => s.createThread);
   const fetchThreads = useThreadsStore((s) => s.fetchThreads);
   const isPending =
@@ -307,24 +319,52 @@ export function CodexView({ threadId, thread }: Props) {
   }, [threadId, codexThreadId]);
 
   useEffect(() => {
-    if (!threadId || !socket || state !== "open" || !initialMessage) return;
-    const text = initialMessage;
+    if (
+      !threadId ||
+      !socket ||
+      state !== "open" ||
+      !initialMessage ||
+      !chatManager
+    ) {
+      return;
+    }
+    const pendingMessage = initialMessage;
+    if (initialSendKeyRef.current === pendingMessage) return;
+    initialSendKeyRef.current = pendingMessage;
+    setFailedInitialDraft(null);
     setInitialMessage(null);
-    setItems((prev) => [
-      ...prev,
-      {
-        id: newId(),
-        kind: "user",
-        threadId,
-        content: text,
-        timestampMs: Date.now(),
-      },
-    ]);
-    void chatManager?.sendMessage({
-      common: { text },
-      provider: { provider: "codex", threadId, permissionMode },
-    });
-    fetchThreads();
+    void chatManager
+      .sendMessage({
+        common: {
+          text: pendingMessage.text,
+          attachments: pendingMessage.attachments,
+          reasoningEffort: pendingMessage.reasoningEffort,
+          references: pendingMessage.references,
+        },
+        provider: { provider: "codex", threadId, permissionMode },
+      })
+      .then(() => {
+        setItems((prev) => [
+          ...prev,
+          {
+            id: newId(),
+            kind: "user",
+            threadId,
+            content: pendingMessage.restoreDraft.text,
+            timestampMs: Date.now(),
+            ...(pendingMessage.attachments &&
+            pendingMessage.attachments.length > 0
+              ? { attachments: pendingMessage.attachments }
+              : {}),
+          },
+        ]);
+        void fetchThreads();
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        setFailedInitialDraft(pendingMessage.restoreDraft);
+        toast.error(`发送失败：${message}`);
+      });
   }, [
     threadId,
     socket,
@@ -564,52 +604,71 @@ export function CodexView({ threadId, thread }: Props) {
   // message-runtime #8: reasoningEffort 三频道贯通 — 不再丢 Composer 的 reasoning。
   //   CodexChatProvider 把 reasoningEffort 透传到 wire 帧 options.reasoningEffort；
   //   codex 后端目前不消费 reasoning_effort（待后端 task），但前端契约不再断链。
-  const onSend = (
+  const onSend = async (
     text: string,
     attachments?: import("@/protocol").UserInputAttachment[],
     reasoningEffort?: import("@/chat/types").ReasoningEffort | null,
+    references?: import("@/protocol").ConversationReferenceDTO[],
+    submittedDraft?: SubmittedDraft,
   ) => {
     if (isPending) {
       const pending = pendingNewSession;
       if (!pending) return;
-      void (async () => {
-        try {
-          const created = await createThread(
-            pending.projectName,
-            "",
-            "codex",
-            pending.cwd,
-          );
-          setPendingNewSession(null);
-          setInitialMessage(text);
-          navigate(`/chat/${created.id}`, { replace: true });
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          toast.error(`创建会话失败：${msg}`);
-        }
-      })();
-      return;
+      try {
+        const created = await createThread(
+          pending.projectName,
+          "",
+          "codex",
+          pending.cwd,
+        );
+        setPendingNewSession(null);
+        setInitialMessage({
+          text,
+          reasoningEffort: reasoningEffort ?? null,
+          attachments,
+          references,
+          restoreDraft: submittedDraft ?? {
+            text,
+            reasoningEffort: reasoningEffort ?? null,
+            attachments: attachments ?? [],
+            references: references ?? [],
+          },
+        });
+        navigate(`/chat/${created.id}`, { replace: true });
+        return true;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        toast.error(`创建会话失败：${msg}`);
+        return false;
+      }
     }
 
     if (!threadId) return;
     if (!socket || state !== "open") return;
-    setItems((prev) => [
-      ...prev,
-      {
-        id: newId(),
-        kind: "user",
-        threadId,
-        content: text,
-        timestampMs: Date.now(),
-        // 把刚发的图片附件塞进 user item，让 ChatMessageItem 渲染缩略图。
-        // 不传 attachments → 走纯文本路径（前置 task 已兼容）。
-        ...(attachments && attachments.length > 0 ? { attachments } : {}),
-      },
-    ]);
-    void chatManager?.sendMessage({
-      common: { text, attachments, reasoningEffort },
-      provider: { provider: "codex", threadId, permissionMode },
-    });
+    if (!chatManager) return false;
+    try {
+      await chatManager.sendMessage({
+        common: { text, attachments, reasoningEffort, references },
+        provider: { provider: "codex", threadId, permissionMode },
+      });
+      setItems((prev) => [
+        ...prev,
+        {
+          id: newId(),
+          kind: "user",
+          threadId,
+          content: text,
+          timestampMs: Date.now(),
+          ...(attachments && attachments.length > 0 ? { attachments } : {}),
+        },
+      ]);
+      setFailedInitialDraft(null);
+      return true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast.error(`发送失败：${message}`);
+      return false;
+    }
   };
 
   // 按 user 消息分界插入文件汇总（通用 hook，三频道共用）
@@ -656,10 +715,15 @@ export function CodexView({ threadId, thread }: Props) {
         />
       </div>
       <Composer
-        disabled={(!isPending && state !== "open") || isRunning}
+        disabled={
+          (!isPending && state !== "open") || isRunning || isDispatching
+        }
         isRunning={isRunning}
         onInterrupt={onInterrupt}
-        onSubmit={(text, reasoning, attachments) => onSend(text, attachments, reasoning)}
+        onSubmit={(text, reasoning, attachments, references, submittedDraft) =>
+          onSend(text, attachments, reasoning, references, submittedDraft)
+        }
+        draftSeed={failedInitialDraft}
         threadId={threadId}
       />
     </div>

@@ -160,11 +160,8 @@ class _MockProvider:
 
 _DEFAULT_ANALYZER = SiTianAnalyzerConfig(
     enabled=True,
-    model_name="test-model",
-    base_url="http://127.0.0.1:1234/v1",
-    max_tokens=1024,
-    temperature=0.3,
-    timeout=10,
+    preset_id="test-model",
+    reasoning_effort="high",
     max_context_chars=50000,
     skip_if_unchanged=False,
 )
@@ -190,6 +187,10 @@ def test_analyze_normal_response_produces_alert_and_project() -> None:
     )
     assert isinstance(report, SiTianReport)
     assert report.summary == "1 个项目活跃，发现 1 个 P1 bug"
+    assert provider.last_request.model == ""
+    assert provider.last_request.reasoning_effort == "high"
+    assert provider.last_request.temperature is None
+    assert provider.last_request.max_tokens is None
     assert len(report.top_alerts) == 1
     assert len(report.projects) == 1
 

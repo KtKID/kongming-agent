@@ -37,6 +37,8 @@ def test_pyproject_includes_runtime_packages_and_data() -> None:
         == "safety/auto_approval/default_rules.yaml"
     )
     assert wheel["force-include"]["config/xspace/setting.yaml"] == "config/setting.yaml"
+    assert wheel["force-include"]["config/model-providers.yaml"] == "config/model-providers.yaml"
+    assert wheel["force-include"]["config/xspace/agent.toml"] == "config/agent.toml"
 
 
 def test_build_yaml_is_independent_from_runtime_setting() -> None:
@@ -53,6 +55,14 @@ def test_build_yaml_is_independent_from_runtime_setting() -> None:
     }
     assert {
         "source": "config/xspace/setting.yaml",
+        "target": "config",
+    } in config["pyinstaller"]["data_files"]
+    assert {
+        "source": "config/model-providers.yaml",
+        "target": "config",
+    } in config["pyinstaller"]["data_files"]
+    assert {
+        "source": "config/xspace/agent.toml",
         "target": "config",
     } in config["pyinstaller"]["data_files"]
     assert "config/setting.yaml" not in str(path)

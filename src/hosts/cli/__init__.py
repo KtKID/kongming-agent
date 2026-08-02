@@ -1,8 +1,8 @@
 """kongming-agent CLI 宿主包。
 
 CLI 是第一个真实宿主产品入口，但不是系统核心。具体运行时装配在
-:meth:`runtime_assembly.native_runtime.NativeRuntime.build`，
-交互语义在 :mod:`hosts.cli.adapter` / :mod:`hosts.shared.session_bridge`。
+:meth:`runtime_assembly.session_engine.SessionEngine.build`，
+交互语义在 :mod:`hosts.cli.interactive_loop` / :mod:`hosts.shared.host_dispatcher`。
 
 依赖方向：``hosts.cli`` 消费 ``hosts.shared / tools / infrastructure.config / core``。
 

@@ -27,7 +27,6 @@ class _StubLLM:
         return LLMResponse(
             message=Message(role="assistant", content="ok"),
             finish_reason="stop",
-            usage={},
         )
 
 

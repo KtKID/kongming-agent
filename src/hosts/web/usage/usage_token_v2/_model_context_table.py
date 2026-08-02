@@ -25,6 +25,10 @@ DEFAULT_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "claude-3-5-sonnet": 200_000,  # placeholder
     "claude-3-opus": 200_000,  # placeholder
     # === 国产 ===
+    # GLM-5.2 官方支持 1M context；远端 model 名是 glm-5.2（catalog 里 preset 的
+    # model 字段不带 [1m] 后缀，[1m] 仅在 display_name 作本地 UI 标识）。
+    # 来源：https://docs.bigmodel.cn/cn/guide/models/text/glm-5.2
+    "glm-5.2": 1_000_000,
     "glm-5.1": 128_000,  # placeholder
     "glm-4": 128_000,  # placeholder
     "MiniMax-M3": 200_000,  # placeholder

@@ -11,7 +11,7 @@
 
 - ``memory/`` 只消费 ``core`` 协议，不 import 任何 sibling 模块
   （tools / host / cli / safety / executors / infrastructure.tracing / sessions / prompting / infrastructure.config）
-- 调用方（NativeRuntime / CLI）通过 import ``memory`` 注入 prompt source
+- 调用方（SessionEngine / CLI）通过 import ``memory`` 注入 prompt source
 """
 
 from __future__ import annotations

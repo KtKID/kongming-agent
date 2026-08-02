@@ -1,4 +1,4 @@
-"""unit：``infrastructure.llm_providers.media_adapter`` 模块行为契约。
+"""unit：``core.contracts.media`` 模块行为契约。
 
 对应 ``dev-pipeline/tasks/claude-image-paste-e2e/`` §4 multimodal-assembly
 的测试矩阵 A / B / C / E（pytest #21）。
@@ -19,14 +19,14 @@ from pathlib import Path
 
 import pytest
 
-from core.message import Message
-from hosts.web.uploads.registry import EXT_BY_MIME
-from hosts.web.uploads.storage import AssetStorage
-from infrastructure.llm_providers.media_adapter import (
+from core.contracts import (
+    IMAGE_EXT_BY_MIME,
     ImageMediaPart,
     build_media_part_from_metadata,
     collect_media_parts_from_messages,
 )
+from core.message import Message
+from hosts.web.uploads.storage import AssetStorage
 from sessions.session_store import _message_from_dict, _message_to_dict
 
 # ---------------------------------------------------------------------------
@@ -92,7 +92,7 @@ def test_build_media_part_happy_path_image_png(storage: AssetStorage) -> None:
     """合法 image/png ref → 返回 ImageMediaPart，所有字段对位填充。"""
 
     ref = _make_ref(asset_id="abc123", mime_type="image/png")
-    part = build_media_part_from_metadata(ref, thread_id="thread-x", storage=storage)
+    part = build_media_part_from_metadata(ref, thread_id="thread-x", reader=storage)
 
     assert isinstance(part, ImageMediaPart)
     assert part.kind == "image"
@@ -100,7 +100,7 @@ def test_build_media_part_happy_path_image_png(storage: AssetStorage) -> None:
     assert part.thread_id == "thread-x"
     assert part.mime_type == "image/png"
     assert part.ext == ".png"
-    assert part.storage is storage
+    assert part.reader is storage
 
 
 @pytest.mark.unit
@@ -116,15 +116,15 @@ def test_build_media_part_happy_path_image_png(storage: AssetStorage) -> None:
 def test_build_media_part_ext_lookup_per_mime(
     storage: AssetStorage, mime_type: str, expected_ext: str
 ) -> None:
-    """所有 EXT_BY_MIME 白名单 MIME 都能反查到正确 ext。"""
+    """所有 IMAGE_EXT_BY_MIME 白名单 MIME 都能反查到正确 ext。"""
 
     ref = _make_ref(mime_type=mime_type)
-    part = build_media_part_from_metadata(ref, thread_id="t", storage=storage)
+    part = build_media_part_from_metadata(ref, thread_id="t", reader=storage)
 
     assert isinstance(part, ImageMediaPart)
     assert part.ext == expected_ext
-    # EXT_BY_MIME 的契约真源
-    assert part.ext == EXT_BY_MIME[mime_type]
+    # IMAGE_EXT_BY_MIME 的契约真源
+    assert part.ext == IMAGE_EXT_BY_MIME[mime_type]
 
 
 @pytest.mark.unit
@@ -139,7 +139,7 @@ def test_build_media_part_missing_required_field_returns_none(
 
     ref = _make_ref()
     ref.pop(missing_key)
-    part = build_media_part_from_metadata(ref, thread_id="t", storage=storage)
+    part = build_media_part_from_metadata(ref, thread_id="t", reader=storage)
 
     assert part is None
 
@@ -163,7 +163,7 @@ def test_build_media_part_invalid_field_type_returns_none(
 
     ref = _make_ref()
     ref[field] = bad_value
-    part = build_media_part_from_metadata(ref, thread_id="t", storage=storage)
+    part = build_media_part_from_metadata(ref, thread_id="t", reader=storage)
 
     assert part is None
 
@@ -180,7 +180,7 @@ def test_build_media_part_unknown_or_future_kind_returns_none(
     """
 
     ref = _make_ref(kind=unknown_kind)
-    part = build_media_part_from_metadata(ref, thread_id="t", storage=storage)
+    part = build_media_part_from_metadata(ref, thread_id="t", reader=storage)
 
     assert part is None
 
@@ -198,10 +198,10 @@ def test_build_media_part_unknown_or_future_kind_returns_none(
 def test_build_media_part_image_with_non_whitelisted_mime_returns_none(
     storage: AssetStorage, bad_mime: str
 ) -> None:
-    """image kind 但 mime_type 不在 EXT_BY_MIME → None。"""
+    """image kind 但 mime_type 不在 IMAGE_EXT_BY_MIME → None。"""
 
     ref = _make_ref(mime_type=bad_mime)
-    part = build_media_part_from_metadata(ref, thread_id="t", storage=storage)
+    part = build_media_part_from_metadata(ref, thread_id="t", reader=storage)
 
     assert part is None
 
@@ -231,7 +231,7 @@ def test_image_media_part_load_bytes_round_trip(
         thread_id="tA",
         mime_type="image/png",
         ext=".png",
-        storage=storage,
+        reader=storage,
     )
 
     assert part.load_bytes() == payload
@@ -248,7 +248,7 @@ def test_image_media_part_load_bytes_missing_asset_raises_filenotfound(
         thread_id="tNope",
         mime_type="image/png",
         ext=".png",
-        storage=storage,
+        reader=storage,
     )
 
     with pytest.raises(FileNotFoundError):
@@ -266,7 +266,7 @@ def test_image_media_part_kind_property_is_image(
         thread_id="t",
         mime_type="image/png",
         ext=".png",
-        storage=storage,
+        reader=storage,
     )
     assert part.kind == "image"
 
@@ -280,7 +280,7 @@ def test_image_media_part_is_frozen(storage: AssetStorage) -> None:
         thread_id="t",
         mime_type="image/png",
         ext=".png",
-        storage=storage,
+        reader=storage,
     )
     with pytest.raises(Exception):
         # frozen → FrozenInstanceError
@@ -296,7 +296,7 @@ def test_image_media_part_is_frozen(storage: AssetStorage) -> None:
 def test_collect_media_parts_empty_messages(storage: AssetStorage) -> None:
     """空 messages → 返回空 list。"""
 
-    parts = collect_media_parts_from_messages([], storage=storage, thread_id="t")
+    parts = collect_media_parts_from_messages([], reader=storage, thread_id="t")
     assert parts == []
 
 
@@ -311,7 +311,7 @@ def test_collect_media_parts_single_user_msg_single_attachment(
         metadata={"attachments": [_make_ref(asset_id="a1")]},
     )
 
-    parts = collect_media_parts_from_messages([msg], storage=storage, thread_id="t")
+    parts = collect_media_parts_from_messages([msg], reader=storage, thread_id="t")
 
     assert len(parts) == 1
     assert isinstance(parts[0], ImageMediaPart)
@@ -331,7 +331,7 @@ def test_collect_media_parts_single_user_msg_three_attachments(
     ]
     msg = Message.user("三张图", metadata={"attachments": refs})
 
-    parts = collect_media_parts_from_messages([msg], storage=storage, thread_id="t")
+    parts = collect_media_parts_from_messages([msg], reader=storage, thread_id="t")
 
     assert [p.asset_id for p in parts] == ["a1", "a2", "a3"]
 
@@ -347,7 +347,7 @@ def test_collect_media_parts_two_user_msgs_each_one_attachment(
         Message.assistant("ack"),
         Message.user("second", metadata={"attachments": [_make_ref(asset_id="second")]}),
     ]
-    parts = collect_media_parts_from_messages(msgs, storage=storage, thread_id="t")
+    parts = collect_media_parts_from_messages(msgs, reader=storage, thread_id="t")
 
     assert [p.asset_id for p in parts] == ["first", "second"]
 
@@ -371,7 +371,7 @@ def test_collect_media_parts_assistant_and_tool_attachments_ignored(
         Message.user("good", metadata={"attachments": [_make_ref(asset_id="ok")]}),
     ]
 
-    parts = collect_media_parts_from_messages(msgs, storage=storage, thread_id="t")
+    parts = collect_media_parts_from_messages(msgs, reader=storage, thread_id="t")
 
     assert [p.asset_id for p in parts] == ["ok"]
 
@@ -389,7 +389,7 @@ def test_collect_media_parts_malformed_ref_not_dict_warns_and_skips(
     )
 
     with caplog.at_level(logging.WARNING, logger="infrastructure.llm_providers.media_adapter"):
-        parts = collect_media_parts_from_messages([msg], storage=storage, thread_id="t")
+        parts = collect_media_parts_from_messages([msg], reader=storage, thread_id="t")
 
     assert [p.asset_id for p in parts] == ["good"]
     assert any("malformed attachment ref" in rec.getMessage() for rec in caplog.records)
@@ -413,7 +413,7 @@ def test_collect_media_parts_unknown_kind_warns_and_skips(
     )
 
     with caplog.at_level(logging.WARNING, logger="infrastructure.llm_providers.media_adapter"):
-        parts = collect_media_parts_from_messages([msg], storage=storage, thread_id="t")
+        parts = collect_media_parts_from_messages([msg], reader=storage, thread_id="t")
 
     assert [p.asset_id for p in parts] == ["ok"]
     assert any("unrebuildable attachment ref" in rec.getMessage() for rec in caplog.records)
@@ -435,7 +435,7 @@ def test_collect_media_parts_metadata_none_skipped(
     msg_none = Message(role="user", content="metadata=None", metadata=None)  # type: ignore[arg-type]
 
     parts = collect_media_parts_from_messages(
-        [msg_default, msg_none], storage=storage, thread_id="t"
+        [msg_default, msg_none], reader=storage, thread_id="t"
     )
     assert parts == []
 
@@ -448,7 +448,7 @@ def test_collect_media_parts_metadata_missing_attachments_key_skipped(
 
     msg = Message.user("foo", metadata={"other_key": "x"})
 
-    parts = collect_media_parts_from_messages([msg], storage=storage, thread_id="t")
+    parts = collect_media_parts_from_messages([msg], reader=storage, thread_id="t")
     assert parts == []
 
 
@@ -468,7 +468,7 @@ def test_collect_media_parts_attachments_not_list_skipped(
 
     msg = Message.user("bar", metadata={"attachments": bad_value})
 
-    parts = collect_media_parts_from_messages([msg], storage=storage, thread_id="t")
+    parts = collect_media_parts_from_messages([msg], reader=storage, thread_id="t")
     assert parts == []
 
 
@@ -512,7 +512,7 @@ def test_collect_media_parts_works_on_jsonl_restored_message(
     )
     restored = _message_from_dict(_message_to_dict(original))
 
-    parts = collect_media_parts_from_messages([restored], storage=storage, thread_id="t")
+    parts = collect_media_parts_from_messages([restored], reader=storage, thread_id="t")
 
     assert len(parts) == 1
     assert isinstance(parts[0], ImageMediaPart)

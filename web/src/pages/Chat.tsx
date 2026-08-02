@@ -1,25 +1,32 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, Outlet, useNavigate, useParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, Outlet, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { Workflow } from "lucide-react";
-import { ApprovalDialog, type ApprovalAckSocket } from "@/components/ApprovalDialog";
+import { History, ListChecks, Workflow } from "lucide-react";
 import { ClaudeCodeView } from "@/components/ClaudeCodeView";
 import { CodexView } from "@/components/CodexView";
-import { Composer } from "@/components/Composer";
+import { Composer, type ReasoningEffort } from "@/components/Composer";
 import { FileDrawer } from "@/components/FileDrawer";
 import { GenericEmptyThreadView } from "@/components/GenericEmptyThreadView";
 import { LeftSidebar } from "@/components/LeftSidebar";
 import { MessageList } from "@/components/MessageList";
 import { ModelSwitcher } from "@/components/ModelSwitcher";
 import { ThreadTaskProgressPopover } from "@/components/ThreadTaskProgressPopover";
+import { Button } from "@/components/ui/button";
 import { WhiteboardPanel, type WhiteboardCardItem } from "@/components/WhiteboardPanel";
 import { WorkspaceDock, type WorkspaceDockTab } from "@/components/WorkspaceDock";
 import { WorkspaceFilesPanel } from "@/components/WorkspaceFilesPanel";
 import { WorkspaceGitPanel } from "@/components/WorkspaceGitPanel";
 import { WorkspaceShellPanel } from "@/components/WorkspaceShellPanel";
-import { AutoApprovalToggle } from "@/features/auto-approval/AutoApprovalToggle";
-import type { AutoApprovalSocket } from "@/features/auto-approval/useAutoApproval";
-import { useApprovalDialogStore } from "@/hooks/useApprovalDialog";
+import {
+  useRegisterWebShellRailItems,
+  type WebShellRailItem,
+} from "@/components/web-shell-rail";
+import { ThreadPermissionsManager } from "@/features/thread-permissions";
+import {
+  AutoApprovalModeSelector,
+  type AutoApprovalSocket,
+  useAutoApprovalStore,
+} from "@/features/auto-approval";
 import { useChatLayout } from "@/hooks/useChatLayout";
 import {
   useClientConfig,
@@ -28,23 +35,40 @@ import {
 import { buildWhiteboardCardDraft, type WhiteboardCardKind } from "@/lib/whiteboard-card-templates";
 import { cn } from "@/lib/utils";
 import { ChatManager } from "@/chat/ChatManager";
-import { makeNetworkHandle, getTimelineStore, useChatTimeline } from "@/chat/runtimeWiring";
+import { makeNetworkHandle, getTimelineStore, useChatTimeline, makeCronTimelineKey } from "@/chat/runtimeWiring";
 import { toViewModel, toGenericRenderItems } from "@/chat/ChatRenderAdapter";
 import type { RawFrameEnvelope } from "@/chat/types";
 import { ChoiceManager, type ChoiceState } from "@/modules/choice/ChoiceManager";
 import { ChoicePanel } from "@/modules/choice/ChoicePanel";
+import {
+  PendingInputQueueManager,
+  type PendingInputQueueState,
+} from "@/modules/pending-input/PendingInputQueueManager";
+import { PendingInputQueuePanel } from "@/modules/pending-input/PendingInputQueuePanel";
 import { networkManager } from "@/network";
-import type { ChannelHandle, SocketState } from "@/network";
+import type { ChannelHandle, ChannelKind, SocketState } from "@/network";
 import type {
   CardScope,
   ChoiceRequestFrame,
   ChoiceSubmitFrame,
+  ConversationReferenceDTO,
+  AutoApprovalStateFrame,
+  ErrorFrame,
+  PendingInputChangedFrame,
+  PendingInputSnapshotFrame,
+  PendingInputStartedFrame,
+  UserInputAttachment,
+  WSFrameC2S,
 } from "@/protocol";
 import { useChatStore } from "@/stores/chat";
 import { useConnectionStatusStore } from "@/stores/connectionStatus";
 import { useThreadsStore } from "@/stores/threads";
 import { useModelProvidersStore } from "@/modules/model-providers/store";
+import { ThreadCronRunsPopover } from "@/modules/scheduler/components/ThreadCronRunsPopover";
+import { listTaskRuns, loadRunMessages } from "@/modules/scheduler/api";
+import { useSchedulerStore } from "@/modules/scheduler/store";
 import { useThreadRunning } from "@/hooks/useThreadRunning";
+import { useThreadDispatchStore } from "@/stores/threadDispatch";
 import { useWhiteboardStore } from "@/stores/whiteboard";
 import { useWorkspaceStore } from "@/stores/workspace";
 
@@ -77,23 +101,54 @@ export function ChatPage() {
   const useCompactToolbar = isCompactLayout;
 
   const params = useParams<{ thread_id?: string }>();
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const threadId = params.thread_id;
+  const cronTaskId = searchParams.get("taskId") || null;
+  const cronRunId = searchParams.get("runId") || null;
+  const cronTimelineId =
+    threadId && cronTaskId && cronRunId
+      ? makeCronTimelineKey(threadId, cronRunId)
+      : undefined;
+  const isCronRunContext = Boolean(threadId && cronTaskId && cronRunId);
   const thread = useThreadsStore((s) =>
     threadId ? s.threads.find((item) => item.id === threadId) : undefined,
   );
   const pendingNewSession = useThreadsStore((s) => s.pendingNewSession);
   const setPendingNewSession = useThreadsStore((s) => s.setPendingNewSession);
+  const setThreadReasoningSelection = useThreadsStore(
+    (s) => s.setThreadReasoningSelection,
+  );
+  const savedReasoningSelection = useThreadsStore((s) =>
+    threadId ? s.reasoningSelectionByThread[threadId] : undefined,
+  );
   const updateThreadPreset = useThreadsStore((s) => s.updateThreadPreset);
+  const forkThread = useThreadsStore((s) => s.forkThread);
   const modelFamilies = useModelProvidersStore((s) => s.modelFamilies);
   const loadModelFamilies = useModelProvidersStore((s) => s.loadModelFamilies);
+  const activeModelFamily = useMemo(
+    () => modelFamilies.find((family) => family.presetId === thread?.preset_id),
+    [modelFamilies, thread?.preset_id],
+  );
   const backendKind = thread?.backend_kind ?? "generic_chat";
   const isClaudeCode = backendKind === "claude_code";
   const isCodex = backendKind === "codex";
+  const scheduledTaskId =
+    thread &&
+    (thread.thread_kind === "scheduled_task" ||
+      thread.source_kind === "scheduled_task")
+      ? thread.source_id ?? ""
+      : "";
   const isGenericPendingBlank =
     !threadId && pendingNewSession?.backendKind === "generic_chat";
 
   const genericWsId = thread && !isClaudeCode && !isCodex ? threadId : undefined;
+  const genericConnectionKind: ChannelKind = isCronRunContext ? "cron-run" : "generic";
+  const genericConnectionId =
+    isCronRunContext && cronTaskId && cronRunId
+      ? `${cronTaskId}:${cronRunId}`
+      : genericWsId;
+  const genericTimelineTargetId = cronTimelineId ?? genericWsId;
   const clientConfig = useClientConfig();
   const heartbeatConfig = clientConfig?.heartbeat;
   const [genericHandle, setGenericHandle] = useState<ChannelHandle | null>(null);
@@ -101,6 +156,13 @@ export function ChatPage() {
     useState<SocketState>("closed");
   const [choiceState, setChoiceState] = useState<ChoiceState | null>(null);
   const [choiceSubmitting, setChoiceSubmitting] = useState(false);
+  const [forkingHistoryIndex, setForkingHistoryIndex] = useState<number | null>(
+    null,
+  );
+  const [pendingInputState, setPendingInputState] = useState<PendingInputQueueState>(() =>
+    PendingInputQueueManager.empty(threadId ?? null),
+  );
+  const [restoreDraftToken, setRestoreDraftToken] = useState<number | null>(null);
   const choiceSubmittingRef = useRef(choiceSubmitting);
   choiceSubmittingRef.current = choiceSubmitting;
   const setThreadWsActive = useConnectionStatusStore((s) => s.setThreadWsActive);
@@ -118,28 +180,16 @@ export function ChatPage() {
     };
   }, [genericHandle, genericChannelState]);
 
-  const approvalSocket = useMemo<ApprovalAckSocket | null>(() => {
-    if (!genericHandle) return null;
-    return {
-      send: (frame) => {
-        if (genericChannelState !== "open") return false;
-        genericHandle.send(frame);
-        return true;
-      },
-    };
-  }, [genericHandle, genericChannelState]);
-
   const [isLeftSidebarOpen, setIsLeftSidebarOpen] = useState(!isCompactLayout);
   const [mountedWorkspaceTabs, setMountedWorkspaceTabs] = useState<
     Partial<Record<WorkspaceDockTab, boolean>>
   >({ chat: true });
 
-  // chat-receive-side-unify #5：appendUser 退役——用户气泡改由 ChatManager.sendMessage
-  // 往时间线灌 user_message 事件（见下方 onSend）。底栏 token 仍由 appendUsage 喂养
-  // （useChatStore.usageByThread 是 StatusLine 数据源，与气泡页脚是两个展示位）。
+  // chat-receive-side-unify #5：appendUser 退役。generic_chat 的用户气泡由
+  // pending-input.started 携带后端确认后的 PendingInputDTO 进入时间线；底栏 token
+  // 仍由 appendUsage 喂养（useChatStore.usageByThread 是 StatusLine 数据源）。
   const fetchThreadUsage = useChatStore((s) => s.fetchThreadUsage);
   const appendUsage = useChatStore((s) => s.appendUsage);
-  const pushApproval = useApprovalDialogStore((s) => s.push);
   const globalTitle = useWhiteboardStore((s) => s.globalTitle);
   const projectTitle = useWhiteboardStore((s) => s.projectTitle);
   const cards = useWhiteboardStore((s) => s.cards);
@@ -155,6 +205,7 @@ export function ChatPage() {
   const fetchWorkspaceContext = useWorkspaceStore((s) => s.fetchContext);
   const setActiveWorkspaceTab = useWorkspaceStore((s) => s.setActiveTab);
   const requestOpenWorkspaceFile = useWorkspaceStore((s) => s.requestOpenFile);
+  const selectSchedulerRun = useSchedulerStore((s) => s.selectRun);
   const activeWorkspaceTab = useWorkspaceStore((s) =>
     threadId ? (s.activeTabByThread[threadId] ?? "chat") : "chat",
   );
@@ -196,6 +247,12 @@ export function ChatPage() {
   // （后端 thread-status phase 为唯一真源）。原前端推导的 lastAssistantStreaming
   // 在对话结束后不可靠复位，会把停止按钮卡住——已删除。
   const isRunning = useThreadRunning(threadId);
+  const isDispatching = useThreadDispatchStore(
+    (state) =>
+      threadId
+        ? state.byThreadId[threadId]?.phase === "dispatching"
+        : false,
+  );
 
   useEffect(() => {
     if (threadId) {
@@ -216,6 +273,75 @@ export function ChatPage() {
   }, [fetchThreadUsage, threadId]);
 
   useEffect(() => {
+    if (!cronTaskId || !cronRunId) return;
+    selectSchedulerRun(cronTaskId, cronRunId);
+  }, [cronTaskId, cronRunId, selectSchedulerRun]);
+
+  useEffect(() => {
+    if (!threadId || !scheduledTaskId || cronTaskId || cronRunId) return;
+    let cancelled = false;
+    void listTaskRuns(scheduledTaskId, 1)
+      .then((runs) => {
+        if (cancelled) return;
+        const latest = runs[runs.length - 1];
+        if (!latest?.runId) return;
+        navigate(
+          `/chat/${threadId}?${new URLSearchParams({
+            taskId: latest.taskId || scheduledTaskId,
+            runId: latest.runId,
+          }).toString()}`,
+          { replace: true },
+        );
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        toast.error(`加载定时任务运行记录失败：${String(err)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    cronRunId,
+    cronTaskId,
+    navigate,
+    scheduledTaskId,
+    threadId,
+  ]);
+
+  useEffect(() => {
+    if (!cronTaskId || !cronRunId || !cronTimelineId) return;
+    let cancelled = false;
+    void loadRunMessages(cronTaskId, cronRunId)
+      .then((batch) => {
+        if (cancelled) return;
+        const timelineStore = getTimelineStore(cronTimelineId);
+        timelineStore.resetThread(cronTimelineId);
+        timelineStore.applyHistory({
+          threadId: cronTimelineId,
+          provider: "generic",
+          events: [
+            {
+              kind: "history_batch_loaded",
+              provider: "generic",
+              threadId: cronTimelineId,
+              turnId: `${cronTimelineId}:history`,
+              createdAt: Date.now(),
+              payload: { messages: batch.messages },
+            },
+          ],
+          hasMore: false,
+        });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        toast.error(`加载定时任务执行历史失败：${String(err)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cronTaskId, cronRunId, cronTimelineId]);
+
+  useEffect(() => {
     if (backendKind !== "generic_chat") return;
     void loadModelFamilies();
   }, [backendKind, loadModelFamilies]);
@@ -233,6 +359,11 @@ export function ChatPage() {
     if (!threadId || !thread || !pendingNewSession) return;
     setPendingNewSession(null);
   }, [threadId, thread, pendingNewSession, setPendingNewSession]);
+
+  useEffect(() => {
+    setPendingInputState(PendingInputQueueManager.empty(threadId ?? null));
+    setRestoreDraftToken(null);
+  }, [threadId]);
 
   useEffect(() => {
     if (isCompactLayout) {
@@ -264,7 +395,7 @@ export function ChatPage() {
   }, [genericHandle, genericChannelState]);
 
   useEffect(() => {
-    if (!genericWsId) {
+    if (!genericConnectionId) {
       setGenericHandle(null);
       setGenericChannelState("closed");
       setThreadWsActive(false);
@@ -293,7 +424,7 @@ export function ChatPage() {
         timeoutMs: heartbeatConfig.timeoutMs,
         maxMissed: heartbeatConfig.maxMissed,
       });
-      handle = networkManager.openChannel("generic", genericWsId);
+      handle = networkManager.openChannel(genericConnectionKind, genericConnectionId);
     } catch (err) {
       console.error("[ChatPage] generic channel open failed", err);
       setGenericHandle(null);
@@ -319,7 +450,8 @@ export function ChatPage() {
       setThreadWsLatency(null);
     };
   }, [
-    genericWsId,
+    genericConnectionId,
+    genericConnectionKind,
     heartbeatConfig,
     setThreadWsActive,
     setThreadWsState,
@@ -337,15 +469,53 @@ export function ChatPage() {
   chatManagerRef.current = chatManager;
 
   useEffect(() => {
-    if (!genericWsId || !genericHandle) return;
+    if (!genericTimelineTargetId || !genericHandle) return;
     const off = genericHandle.onMessage((frame) => {
+      if (
+        typeof frame === "object" &&
+        frame !== null &&
+        "frame_type" in frame &&
+        frame.frame_type === "auto_approval_state"
+      ) {
+        useAutoApprovalStore
+          .getState()
+          .applyStateFrame(frame as AutoApprovalStateFrame);
+        return;
+      }
       const manager = chatManagerRef.current;
       if (!manager) return;
+      const inboundFrameType =
+        typeof frame === "object" && frame !== null && "frame_type" in frame
+          ? frame.frame_type
+          : undefined;
+      let timelineThreadId = genericTimelineTargetId;
+      if (inboundFrameType === "cron.message.appended") {
+        const cronFrame = frame as {
+          thread_id?: unknown;
+          task_id?: unknown;
+          run_id?: unknown;
+        };
+        const parentThreadId =
+          typeof cronFrame.thread_id === "string" ? cronFrame.thread_id : genericTimelineTargetId;
+        const taskId = typeof cronFrame.task_id === "string" ? cronFrame.task_id : "";
+        const runId = typeof cronFrame.run_id === "string" ? cronFrame.run_id : "";
+        if (parentThreadId !== genericTimelineTargetId || !taskId || !runId) return;
+        timelineThreadId = makeCronTimelineKey(parentThreadId, runId);
+        if (cronRunId !== runId || cronTaskId !== taskId) {
+          navigate(
+            `/chat/${parentThreadId}?${new URLSearchParams({
+              taskId,
+              runId,
+            }).toString()}`,
+            { replace: true },
+          );
+        }
+      }
       // 主链路：原始帧灌入统一状态机（user/assistant/tool/notice/error/usage record）。
       const envelope: RawFrameEnvelope = {
         connectionId: genericHandle.connId,
         channel: "generic",
-        threadId: genericWsId,
+        threadId: timelineThreadId,
         frame,
         receivedAt: Date.now(),
       };
@@ -356,6 +526,24 @@ export function ChatPage() {
           ? frame.frame_type
           : undefined;
       switch (frameType) {
+        case "pending-input.snapshot":
+          setPendingInputState((prev) =>
+            PendingInputQueueManager.applySnapshot(
+              prev,
+              frame as PendingInputSnapshotFrame,
+            ),
+          );
+          break;
+        case "pending-input.changed":
+          setPendingInputState((prev) =>
+            PendingInputQueueManager.applyChanged(prev, frame as PendingInputChangedFrame),
+          );
+          break;
+        case "pending-input.started":
+          setPendingInputState((prev) =>
+            PendingInputQueueManager.applyStarted(prev, frame as PendingInputStartedFrame),
+          );
+          break;
         case "choice.request":
           setChoiceState(ChoiceManager.receive(frame as ChoiceRequestFrame));
           setChoiceSubmitting(false);
@@ -366,22 +554,26 @@ export function ChatPage() {
             setChoiceSubmitting(false);
           }
           break;
-        case "approval.request":
-          // 审批 dialog 弹窗队列不属于时间线（横幅 record 由 provider 翻成 status）。
-          pushApproval(frame as Parameters<typeof pushApproval>[0]);
-          break;
         case "error":
           // 横幅 record 由 provider 翻成 error record；这里补 toast（旧链路语义）。
-          toast.error(String((frame as { message?: unknown }).message ?? ""));
+          {
+            const errorFrame = frame as ErrorFrame;
+            const message = String(errorFrame.message ?? "");
+            toast.error(message);
+            if (errorFrame.reason === "pending_input_queue_full") {
+              setPendingInputState((prev) =>
+                PendingInputQueueManager.withError(prev, message),
+              );
+              setRestoreDraftToken((token) => (token ?? 0) + 1);
+            }
+          }
           if (choiceSubmittingRef.current) {
             setChoiceSubmitting(false);
           }
           break;
         case "cell.evicted":
-          // thread cell 回收：toast.warning + 清该 thread 的临时流式态。
-          // resetThread 会清空整条时间线（含已 commit 消息），语义过狠；旧链路
-          // clearBuffers 只清 streaming buffer。这里保持「只 toast，不清已落消息」
-          // ——已提交消息保留，下次 thread.history 重连会带回最新真源。
+          // thread cell 回收只提示，不清时间线。TimelineStore 的私有 pending 由自身
+          // 生命周期释放；已提交消息保留，重连后的 thread.history 会回放最新真源。
           toast.warning(
             `cell 已回收（${String((frame as { reason?: unknown }).reason ?? "")}）：${
               String((frame as { message?: unknown }).message ?? "")
@@ -391,7 +583,7 @@ export function ChatPage() {
         case "usage":
           // 底栏 StatusLine 读 useChatStore.usageByThread，与气泡页脚（时间线 record）
           // 是两个展示位；这里保留 appendUsage 副作用，保证底栏 token 不回归。
-          appendUsage(genericWsId, frame as Parameters<typeof appendUsage>[1]);
+          appendUsage(genericTimelineTargetId, frame as Parameters<typeof appendUsage>[1]);
           break;
         case "run.interrupted":
           toast.info("已停止当前任务");
@@ -403,36 +595,86 @@ export function ChatPage() {
     return () => {
       off();
     };
-  }, [genericWsId, genericHandle, pushApproval, appendUsage]);
+  }, [
+    genericTimelineTargetId,
+    genericHandle,
+    appendUsage,
+    cronTaskId,
+    cronRunId,
+    navigate,
+  ]);
 
   // chat-receive-side-unify #5：generic items 投影。
   // useChatTimeline 只订 generic threadId（claude/codex 时 genericWsId=undefined
   // → 回退稳定空 store，不影响）。组件侧 useMemo 投影，store getSnapshot 保持纯净。
-  const timelineState = useChatTimeline(genericWsId);
+  const activeTimelineId = genericTimelineTargetId;
+  const timelineState = useChatTimeline(activeTimelineId);
   const timelineView = useMemo(() => toViewModel(timelineState), [timelineState]);
   const genericItems = useMemo(
     () => toGenericRenderItems(timelineView),
     [timelineView],
   );
+  const canForkAssistantReply =
+    Boolean(threadId) &&
+    !isCronRunContext &&
+    backendKind === "generic_chat" &&
+    (thread?.thread_kind ?? "chat") === "chat" &&
+    !(thread?.claude_thread_id || thread?.codex_thread_id);
+  const onForkAssistant = useCallback(
+    async (historyIndex: number) => {
+      if (!threadId || forkingHistoryIndex !== null) return;
+      setForkingHistoryIndex(historyIndex);
+      try {
+        const forked = await forkThread(threadId, historyIndex);
+        toast.success("已从该回复创建分支");
+        navigate(`/chat/${forked.id}`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        toast.error(`分叉失败：${message}`);
+      } finally {
+        setForkingHistoryIndex(null);
+      }
+    },
+    [forkThread, forkingHistoryIndex, navigate, threadId],
+  );
 
-  const onSend = (
+  const onSend = async (
     text: string,
-    reasoningEffort: "low" | "medium" | "high" | null,
-    attachments?: import("@/protocol").UserInputAttachment[],
+    reasoningEffort: ReasoningEffort | null,
+    attachments?: UserInputAttachment[],
+    references?: ConversationReferenceDTO[],
   ) => {
-    if (!threadId || !chatManager || genericChannelState !== "open") return;
-    const currentFamily = modelFamilies.find(
-      (family) => family.presetId === thread?.preset_id,
-    );
-    void chatManager.sendMessage({
-      common: { text, reasoningEffort, attachments },
-      provider: {
-        provider: "generic",
-        threadId,
-        presetId: thread?.preset_id ?? null,
-        modelFamilyId: currentFamily?.familyId ?? null,
-      },
-    });
+    if (
+      !activeTimelineId ||
+      !chatManager ||
+      genericChannelState !== "open"
+    ) {
+      return false;
+    }
+    if (pendingInputState.items.length >= pendingInputState.maxItems) {
+      const message = `待发送队列已满（最多 ${pendingInputState.maxItems} 条）。`;
+      setPendingInputState((prev) =>
+        PendingInputQueueManager.withError(prev, message),
+      );
+      toast.error(message);
+      return false;
+    }
+    try {
+      await chatManager.sendMessage({
+        common: { text, reasoningEffort, attachments, references },
+        provider: {
+          provider: "generic",
+          threadId: activeTimelineId,
+          presetId: thread?.preset_id ?? null,
+          modelFamilyId: activeModelFamily?.familyId ?? null,
+        },
+      });
+      return true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast.error(`发送失败：${message}`);
+      return false;
+    }
   };
 
   const onChoiceSubmit = async (frame: ChoiceSubmitFrame) => {
@@ -452,6 +694,30 @@ export function ChatPage() {
       toast.error(`选择提交失败：${message}`);
       setChoiceSubmitting(false);
     }
+  };
+
+  const sendPendingInputFrame = (frame: WSFrameC2S) => {
+    if (!genericHandle || genericChannelState !== "open") {
+      toast.error("待发送队列操作失败：连接尚未就绪。");
+      return;
+    }
+    genericHandle.send(frame);
+  };
+
+  const onPendingInputUpdate = (id: string, content: string) => {
+    sendPendingInputFrame(PendingInputQueueManager.buildUpdateFrame(id, content));
+  };
+
+  const onPendingInputCancel = (id: string) => {
+    sendPendingInputFrame(PendingInputQueueManager.buildCancelFrame(id));
+  };
+
+  const onPendingInputSendNow = (id: string) => {
+    sendPendingInputFrame(PendingInputQueueManager.buildSendNowFrame(id));
+  };
+
+  const onPendingInputReorder = (orderedIds: string[]) => {
+    sendPendingInputFrame(PendingInputQueueManager.buildReorderFrame(orderedIds));
   };
 
   const onSelectModelPreset = async (presetId: string) => {
@@ -539,6 +805,76 @@ export function ChatPage() {
     (Boolean(threadId) || pendingNewSession == null);
   const showWorkspaceDock =
     Boolean(threadId) && !isMobileLayout && !isCompactLayout && !isGenericPendingBlank;
+  const railThreadItems = useMemo<WebShellRailItem[]>(() => {
+    if (!threadId) return [];
+    const items: WebShellRailItem[] = [
+      {
+        id: "thread-task-progress",
+        scope: "thread",
+        priority: "p0",
+        label: "任务进度",
+        icon: ListChecks,
+        available: true,
+        render: ({ className, iconClassName, label }) => (
+          <ThreadTaskProgressPopover
+            threadId={threadId}
+            panelClassName="left-[calc(100%+0.75rem)] right-auto top-0"
+            trigger={({ open, disabled, onClick }) => (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className={className}
+                aria-label={label}
+                aria-expanded={open}
+                disabled={disabled}
+                data-testid="web-shell-rail-item-thread-task-progress"
+                onClick={onClick}
+              >
+                <ListChecks className={iconClassName} />
+              </Button>
+            )}
+          />
+        ),
+      },
+    ];
+    if (scheduledTaskId) {
+      items.unshift({
+        id: "thread-cron-runs",
+        scope: "thread",
+        priority: "p0",
+        label: "运行记录",
+        icon: History,
+        available: true,
+        render: ({ className, iconClassName, label }) => (
+          <ThreadCronRunsPopover
+            threadId={threadId}
+            taskId={scheduledTaskId}
+            activeRunId={cronRunId}
+            timezone={clientConfig?.timezone}
+            panelClassName="left-[calc(100%+0.75rem)] right-auto top-0"
+            trigger={({ open, disabled, onClick }) => (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className={className}
+                aria-label={label}
+                aria-expanded={open}
+                disabled={disabled}
+                data-testid="web-shell-rail-item-thread-cron-runs"
+                onClick={onClick}
+              >
+                <History className={iconClassName} />
+              </Button>
+            )}
+          />
+        ),
+      });
+    }
+    return items;
+  }, [clientConfig?.timezone, cronRunId, scheduledTaskId, threadId]);
+  useRegisterWebShellRailItems("chat-thread-tools", railThreadItems);
   const dockChatContent = threadId ? (
     <div className="space-y-3 text-sm" data-testid="dock-chat-context">
       <section className="rounded-lg border border-border/70 bg-background/45 p-3">
@@ -564,17 +900,7 @@ export function ChatPage() {
         <WorkflowViewerEntryLink threadId={threadId} className="w-full justify-center" label="Workflow" />
       </section>
       <section className="rounded-lg border border-border/70 bg-background/45 p-3">
-        <div className="mb-2 font-medium text-foreground">智能审批</div>
-        <div
-          className="text-xs text-muted-foreground"
-          data-testid="dock-auto-approval-status"
-        >
-          {effectiveCwd
-            ? autoApprovalSocket
-              ? `已连接 · ${effectiveCwd}`
-              : `等待连接 · ${effectiveCwd}`
-            : "未绑定 workspace"}
-        </div>
+        <ThreadPermissionsManager threadId={threadId} />
       </section>
     </div>
   ) : null;
@@ -602,6 +928,14 @@ export function ChatPage() {
                 className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-b border-border/60 px-3 py-2"
                 data-testid="chat-thread-toolbar"
               >
+                {scheduledTaskId ? (
+                  <ThreadCronRunsPopover
+                    threadId={threadId}
+                    taskId={scheduledTaskId}
+                    activeRunId={cronRunId}
+                    timezone={clientConfig?.timezone}
+                  />
+                ) : null}
                 <ThreadTaskProgressPopover threadId={threadId} />
                 <WorkflowViewerEntryLink threadId={threadId} />
               </div>
@@ -611,6 +945,16 @@ export function ChatPage() {
                 className="flex shrink-0 gap-2 border-b border-border/60 px-3 py-2"
                 data-testid="chat-thread-toolbar"
               >
+                {scheduledTaskId ? (
+                  <ThreadCronRunsPopover
+                    threadId={threadId}
+                    taskId={scheduledTaskId}
+                    activeRunId={cronRunId}
+                    timezone={clientConfig?.timezone}
+                    className="flex-1 justify-center"
+                    mobileMode={isMobileLayout}
+                  />
+                ) : null}
                 <ThreadTaskProgressPopover
                   threadId={threadId}
                   className="flex-1 justify-center"
@@ -626,7 +970,12 @@ export function ChatPage() {
                 <CodexView />
               ) : isGenericPendingBlank ? (
                 <GenericEmptyThreadView
-                  onCreated={(createdThread) => {
+                  onCreated={(createdThread, reasoningEffort) => {
+                    setThreadReasoningSelection(
+                      createdThread.id,
+                      createdThread.preset_id,
+                      reasoningEffort,
+                    );
                     navigate(`/chat/${createdThread.id}`);
                   }}
                 />
@@ -642,12 +991,32 @@ export function ChatPage() {
                         "flex min-h-0 flex-1 flex-col overflow-hidden",
                       )}
                     >
-                      <div className="min-h-0 flex-1">
-                        <MessageList
-                          threadId={threadId}
-                          items={genericItems}
-                          timezone={clientConfig?.timezone}
-                        />
+                      <div className="flex min-h-0 flex-1 flex-col">
+                        <div
+                          className="min-h-0 flex-1"
+                          data-testid="fork-lineage-message-viewport"
+                        >
+                          <MessageList
+                            threadId={activeTimelineId}
+                            items={genericItems}
+                            timezone={clientConfig?.timezone}
+                            onForkAssistant={
+                              canForkAssistantReply
+                                ? onForkAssistant
+                                : undefined
+                            }
+                            forkingHistoryIndex={forkingHistoryIndex}
+                            forkLineage={
+                              thread?.forked_from_id &&
+                              typeof thread.forked_from_history_index === "number"
+                                ? {
+                                    parentThreadId: thread.forked_from_id,
+                                    historyIndex: thread.forked_from_history_index,
+                                  }
+                                : null
+                            }
+                          />
+                        </div>
                       </div>
                       {choiceState ? (
                         <ChoicePanel
@@ -656,24 +1025,59 @@ export function ChatPage() {
                             choiceSubmitting ||
                             !threadId ||
                             !genericHandle ||
-                            genericChannelState !== "open" ||
-                            isRunning
+                            genericChannelState !== "open"
                           }
                           onChange={setChoiceState}
                           onSubmit={onChoiceSubmit}
                         />
                       ) : null}
+                      <PendingInputQueuePanel
+                        items={pendingInputState.items}
+                        maxItems={pendingInputState.maxItems}
+                        error={pendingInputState.lastError}
+                        disabled={
+                          !threadId ||
+                          !genericHandle ||
+                          genericChannelState !== "open" ||
+                          isDispatching
+                        }
+                        onUpdate={onPendingInputUpdate}
+                        onCancel={onPendingInputCancel}
+                        onSendNow={onPendingInputSendNow}
+                        onReorder={onPendingInputReorder}
+                      />
                       <Composer
                         disabled={
                           !threadId ||
                           !genericHandle ||
                           genericChannelState !== "open" ||
-                          isRunning
+                          isDispatching
                         }
                         onSubmit={onSend}
                         threadId={threadId}
                         isRunning={isRunning}
+                        allowSubmitWhileRunning
+                        restoreDraftToken={restoreDraftToken}
                         onInterrupt={onInterrupt}
+                        reasoningOptions={activeModelFamily?.supportedReasoningEfforts}
+                        defaultReasoningEffort={activeModelFamily?.defaultReasoningEffort}
+                        reasoningSelectionKey={
+                          activeModelFamily?.presetId ?? thread?.preset_id ?? null
+                        }
+                        initialReasoningEffort={
+                          savedReasoningSelection &&
+                          savedReasoningSelection.presetId === thread?.preset_id
+                            ? savedReasoningSelection.effort
+                            : undefined
+                        }
+                        onReasoningEffortChange={(effort) => {
+                          if (!threadId || !thread?.preset_id) return;
+                          setThreadReasoningSelection(
+                            threadId,
+                            thread.preset_id,
+                            effort,
+                          );
+                        }}
                         modelSwitcher={
                           <ModelSwitcher
                             currentPresetId={thread?.preset_id}
@@ -689,7 +1093,7 @@ export function ChatPage() {
                         }
                         leftActions={
                           effectiveCwd && autoApprovalSocket ? (
-                            <AutoApprovalToggle
+                            <AutoApprovalModeSelector
                               cwd={effectiveCwd}
                               socket={autoApprovalSocket}
                             />
@@ -772,9 +1176,6 @@ export function ChatPage() {
           ) : null}
         </div>
         <FileDrawer mobileMode={isMobileLayout} />
-        {!threadId || isClaudeCode || isCodex ? null : (
-          <ApprovalDialog socket={approvalSocket} />
-        )}
         <Outlet />
       </div>
     </div>

@@ -32,9 +32,15 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from core.contracts import FinishReason, LLMStreamChunk
+from core.contracts import (
+    FinishReason,
+    LLMStreamChunk,
+    ProviderUsageFamily,
+    ProviderUsageSnapshot,
+)
 from core.errors import ProviderError
 from core.message import Message, ToolCall
+from infrastructure.llm_providers.usage import ProviderUsageManager
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +67,6 @@ class _AnthropicParserState:
     content_blocks: dict[int, _AnthropicBlock] = field(default_factory=dict)
 
     stop_reason: str | None = None
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_creation_input_tokens: int | None = None
-    cache_read_input_tokens: int | None = None
     model_name: str | None = None
     message_id: str | None = None
     chunk_count: int = 0
@@ -79,8 +81,11 @@ class AnthropicStreamParser:
 
     _STALL_THRESHOLD_SECONDS = 30.0
 
-    def __init__(self) -> None:
+    def __init__(self, *, usage_manager: ProviderUsageManager | None = None) -> None:
+        """初始化单流 parser，输入为 usage 门户，输出为空。"""
         self._state = _AnthropicParserState()
+        manager = usage_manager or ProviderUsageManager()
+        self._usage_stream = manager.start_stream(ProviderUsageFamily.ANTHROPIC_MESSAGES)
 
     @property
     def chunk_count(self) -> int:
@@ -190,21 +195,9 @@ class AnthropicStreamParser:
         if isinstance(model_name, str):
             self._state.model_name = model_name
 
-        usage = message.get("usage") or {}
+        usage = message.get("usage")
         if isinstance(usage, dict):
-            input_tokens = usage.get("input_tokens")
-            if isinstance(input_tokens, int):
-                self._state.input_tokens = input_tokens
-            cache_creation = usage.get("cache_creation_input_tokens")
-            if isinstance(cache_creation, int):
-                self._state.cache_creation_input_tokens = cache_creation
-            cache_read = usage.get("cache_read_input_tokens")
-            if isinstance(cache_read, int):
-                self._state.cache_read_input_tokens = cache_read
-            # message_start 也可能给 output_tokens=0，累加到 state
-            output_tokens = usage.get("output_tokens")
-            if isinstance(output_tokens, int):
-                self._state.output_tokens = output_tokens
+            self._usage_stream.ingest(usage)
 
     async def _handle_content_block_start(
         self,
@@ -331,12 +324,9 @@ class AnthropicStreamParser:
             if isinstance(stop_reason, str):
                 self._state.stop_reason = stop_reason
 
-        usage = data.get("usage") or {}
+        usage = data.get("usage")
         if isinstance(usage, dict):
-            output_tokens = usage.get("output_tokens")
-            if isinstance(output_tokens, int):
-                # message_delta 给的是当前流总输出 tokens（不是增量），覆盖即可
-                self._state.output_tokens = output_tokens
+            self._usage_stream.ingest(usage, terminal=True)
 
     # ------------------------------------------------------------------
     # 终态聚合
@@ -421,26 +411,9 @@ class AnthropicStreamParser:
             tool_calls=tool_calls or None,
         )
 
-    def _build_usage(self) -> dict[str, Any]:
-        # task#3.1：透传 SDK 原生字段 + provider_kind，让 web.usage_token 按 channel 解析
-        cache_read = self._state.cache_read_input_tokens or 0
-        cache_creation = self._state.cache_creation_input_tokens or 0
-        # 派生 prompt_tokens = input + cache_read + cache_creation（**修 lossy bug**：
-        # 不含 cache 两项的旧实现会让 web 显示的输入 token 比真实小 N 万）
-        prompt_tokens = self._state.input_tokens + cache_read + cache_creation
-        out: dict[str, Any] = {
-            "provider_kind": "anthropic",
-            # Anthropic 原生字段
-            "input_tokens": self._state.input_tokens,
-            "output_tokens": self._state.output_tokens,
-            "cache_read_input_tokens": cache_read,
-            "cache_creation_input_tokens": cache_creation,
-            # 兼容老消费者
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": self._state.output_tokens,
-            "total_tokens": prompt_tokens + self._state.output_tokens,
-        }
-        return out
+    def _build_usage(self) -> ProviderUsageSnapshot:
+        """构造终态 usage，输入为已聚合 fragment，输出为 canonical snapshot。"""
+        return self._usage_stream.finalize(provider_response_id=self._state.message_id)
 
     def _build_provider_metadata(self) -> dict[str, Any]:
         meta: dict[str, Any] = {}
@@ -448,11 +421,6 @@ class AnthropicStreamParser:
             meta["id"] = self._state.message_id
         if self._state.model_name is not None:
             meta["model"] = self._state.model_name
-        if self._state.cache_creation_input_tokens is not None:
-            meta["cache_creation_input_tokens"] = self._state.cache_creation_input_tokens
-        if self._state.cache_read_input_tokens is not None:
-            meta["cache_read_input_tokens"] = self._state.cache_read_input_tokens
-
         # thinking 累积内容写到 reasoning_content（截断 500，对齐非流式 / OpenAI parser）
         thinking_parts: list[str] = []
         for idx in sorted(self._state.content_blocks.keys()):

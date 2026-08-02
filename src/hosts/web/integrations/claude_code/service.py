@@ -22,15 +22,20 @@ import asyncio
 import logging
 import re
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
 from hosts.web.integrations.claude_code._attachment_prefix import AttachmentPrefixBuilder
-from hosts.web.integrations.claude_code.approval import ApprovalBridge
+from hosts.web.integrations.claude_code.contracts import ClaudeApprovalProtocol
 from hosts.web.integrations.claude_code.normalizer import ClaudeNormalizer
+from hosts.web.protocol import UsageSummaryUpdatedFrame
 from hosts.web.shared.session_manager import SessionManager
-from hosts.web.websocket.thread_status import get_broadcaster
+from hosts.web.websocket.thread_status import (
+    get_thread_status_manager,
+    publish_normalized_status,
+)
+from hosts.web.websocket.thread_status_manager import ThreadStatusRunLease
 from network.network_log import log_network_exception
 
 if TYPE_CHECKING:
@@ -55,7 +60,7 @@ class ClaudeCodeService:
     def __init__(
         self,
         normalizer: ClaudeNormalizer,
-        approval: ApprovalBridge,
+        approval: ClaudeApprovalProtocol,
         sessions: SessionManager,
         *,
         client_factory: Any = None,
@@ -160,11 +165,35 @@ class ClaudeCodeService:
         # 2. 复用或新建 client（connect 失败也要走 error 路径）
         client = self._clients.get(session_id) if session_id else None
         is_new_client = client is None
-        register_id: str | None = None
+        if client is None:
+            client = self._client_factory(options=opts)
+        if client is None:
+            raise RuntimeError("claude client factory returned no client")
+        register_id = register_id_override or session_id or f"pending-{id(client)}"
         record: Any = None
+        status_lease: ThreadStatusRunLease | None = None
         try:
-            if client is None:
-                client = self._client_factory(options=opts)
+            run_index = self._run_counters.get(register_id, 0) + 1
+            self._run_counters[register_id] = run_index
+            status_manager = get_thread_status_manager()
+            status_lease = await status_manager.begin_run(
+                register_id,
+                f"{register_id}-{run_index}",
+            )
+            await status_manager.publish_status(
+                status_lease,
+                phase="responding",
+            )
+            current_task = asyncio.current_task()
+            if current_task is None:
+                raise RuntimeError("claude query requires an active asyncio task")
+            record = await self._sessions.register(
+                register_id,
+                writer,
+                query_task=current_task,
+            )
+
+            if is_new_client:
                 await client.connect()
                 if session_id:
                     self._clients[session_id] = client
@@ -176,25 +205,26 @@ class ClaudeCodeService:
                 if isinstance(effective_cwd, str) and effective_cwd:
                     self._approval.set_active_cwd(effective_cwd)
 
-            # 4. 注册 session：
-            #    优先级 register_id_override > options["sessionId"] > placeholder。
-            #    v0.1.6 thread-bound 路径走 override，让 thread_id 直接当 session id
-            #    用，避免 SystemMessage(init) 之前 placeholder 与前端不一致的歧义。
-            register_id = register_id_override or session_id or f"pending-{id(client)}"
-            record = await self._sessions.register(register_id, writer)
-
-            # run_index：per-thread 自增，用于构造 run_id（跟 core.Runner 一致）
-            run_index = self._run_counters.get(register_id, 0) + 1
-            self._run_counters[register_id] = run_index
-
             # 5. 主循环——把 async for 包成 task 以便能被 abort cancel
             query_task = asyncio.create_task(
-                self._consume(client, command, writer, register_id, run_index=run_index),
+                self._consume(
+                    client,
+                    command,
+                    writer,
+                    register_id,
+                    status_lease=status_lease,
+                    run_index=run_index,
+                ),
             )
             record.query_task = query_task
             await query_task
         except asyncio.CancelledError:
             logger.info("claude-code service.query cancelled (session=%s)", register_id)
+            if status_lease is not None:
+                await get_thread_status_manager().publish_status(
+                    status_lease,
+                    phase="idle",
+                )
             # 通知前端 aborted
             try:
                 await writer.send_json(
@@ -215,6 +245,11 @@ class ClaudeCodeService:
                 )
         except Exception as exc:
             logger.exception("claude-code service.query failed")
+            if status_lease is not None:
+                await get_thread_status_manager().publish_status(
+                    status_lease,
+                    phase="error",
+                )
             try:
                 await writer.send_json(
                     {
@@ -239,7 +274,7 @@ class ClaudeCodeService:
                 and self._clients.get(session_id) is client
             ):
                 try:
-                    await client.disconnect()
+                    await cast(ClaudeSDKClient, client).disconnect()
                 except Exception as disconnect_exc:
                     log_network_exception(
                         "hosts.web.integrations.claude_code.service",
@@ -251,8 +286,7 @@ class ClaudeCodeService:
         finally:
             # 6. 清 active writer + unregister
             self._approval.clear_active_writer()
-            if register_id is not None:
-                await self._sessions.unregister(register_id)
+            await self._sessions.unregister(register_id)
 
     # ----- 中止 / 关停 -----
 
@@ -365,6 +399,7 @@ class ClaudeCodeService:
         writer: Any,
         register_id: str,
         *,
+        status_lease: ThreadStatusRunLease,
         run_index: int = 0,
     ) -> None:
         """主流式循环——单独包成方法以便能用 task.cancel() 强制中断。
@@ -379,7 +414,7 @@ class ClaudeCodeService:
 
         # 当前用于出站消息 sessionId 字段的真值——首次见到 session_created 后切换
         active_sid = register_id
-        broadcaster = get_broadcaster()
+        status_manager = get_thread_status_manager()
 
         async for msg in client.receive_response():
             # AssistantMessage 到达时：从 SDK jsonl 真源派生最新 usage 推前端刷新。
@@ -398,13 +433,11 @@ class ClaudeCodeService:
                             register_id
                         )
                         if usage_dto is not None:
-                            await broadcaster.broadcast(
-                                {
-                                    "type": "usage_summary_updated",
-                                    "threadId": register_id,
-                                    "usage": usage_dto.model_dump(),
-                                }
+                            frame = UsageSummaryUpdatedFrame(
+                                threadId=register_id,
+                                usage=usage_dto.model_dump(),
                             )
+                            await status_manager.broadcast(frame.model_dump())
                     except Exception as exc:
                         log_network_exception(
                             "hosts.web.integrations.claude_code.service",
@@ -457,13 +490,11 @@ class ClaudeCodeService:
                             register_id
                         )
                         if usage_dto is not None:
-                            await broadcaster.broadcast(
-                                {
-                                    "type": "usage_summary_updated",
-                                    "threadId": register_id,
-                                    "usage": usage_dto.model_dump(),
-                                }
+                            frame = UsageSummaryUpdatedFrame(
+                                threadId=register_id,
+                                usage=usage_dto.model_dump(),
                             )
+                            await status_manager.broadcast(frame.model_dump())
                     except Exception as exc:
                         log_network_exception(
                             "hosts.web.integrations.claude_code.service",
@@ -484,7 +515,11 @@ class ClaudeCodeService:
                         session_id=active_sid,
                         frame_kind=n.get("kind"),
                     )
-                await broadcaster.emit(register_id, dict(n))
+                await publish_normalized_status(
+                    status_manager,
+                    status_lease,
+                    dict(n),
+                )
 
     @staticmethod
     def _is_thread_id(s: str) -> bool:

@@ -8,24 +8,25 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.config.models import Config, ModelConfig
-from sitian.config import SiTianConfig, SiTianSourceConfig
+from infrastructure.config.models import Config, ModelSelectionConfig
+from sitian.config import SiTianAnalyzerConfig, SiTianConfig, SiTianSourceConfig
+from sitian.models import SiTianReport
 from sitian.scanners import SiTianScanSource
 from sitian.service import SiTianReadState, SiTianRunOnce
 from sitian.store import SiTianRecordsStore
 
 
-def _build_cfg(*, source: SiTianSourceConfig) -> Config:
+def _build_cfg(*, source: SiTianSourceConfig, analyzer_enabled: bool = False) -> Config:
     return Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="stub-model",
-            base_url="http://127.0.0.1:1234",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         sitian=SiTianConfig(
             default_scan_interval_sec=60,
             idle_sleep_sec=2,
+            analyzer=SiTianAnalyzerConfig(
+                enabled=analyzer_enabled,
+                preset_id="local-gemma-4-e4b-it",
+                skip_if_unchanged=False,
+            ),
             sources=[source],
         ),
     )
@@ -56,6 +57,7 @@ def test_sitian_run_once_materializes_workspace_state(tmp_path: Path) -> None:
         )
     )
 
+    assert result.failed_sources == {}
     assert result.scanned_source_ids == ("general",)
     state_payload = asyncio.run(SiTianReadState(store=store))
     assert state_payload["workspaceState"] is not None
@@ -65,6 +67,62 @@ def test_sitian_run_once_materializes_workspace_state(tmp_path: Path) -> None:
     assert "SiTian Summary" in str(state_payload["latestSummary"])
     assert (store.root_dir / "workspace_state.json").exists()
     assert (store.root_dir / "latest_suggestions.json").exists()
+
+
+@pytest.mark.unit
+def test_sitian_run_once_writes_analyzer_markdown_to_latest_analysis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sitian.analyzer as analyzer_mod
+
+    project_dir = tmp_path / "general-channel"
+    project_dir.mkdir()
+    (project_dir / "todo.md").write_text("# TODO\nfinish sitian\n", encoding="utf-8")
+
+    async def _fake_analyze(*args, **kwargs) -> SiTianReport:
+        return SiTianReport(
+            report_id="report-test",
+            generated_at="2026-05-09T10:00:00Z",
+            summary="analyzer summary",
+            model_name="fake-model",
+            errors=(),
+            top_alerts=(),
+            projects=(),
+        )
+
+    monkeypatch.setattr(analyzer_mod, "sitian_analyze", _fake_analyze)
+
+    cfg = _build_cfg(
+        source=SiTianSourceConfig(
+            id="general",
+            kind="generic_channel",
+            path=str(project_dir),
+            scan_interval_sec=30,
+        ),
+        analyzer_enabled=True,
+    )
+    store = SiTianRecordsStore(tmp_path / "records")
+
+    fake_provider: object = object()
+    asyncio.run(
+        SiTianRunOnce(
+            cfg,
+            store=store,
+            now=datetime(2026, 5, 9, 10, 0, 0, tzinfo=UTC),
+            llm_provider=fake_provider,  # type: ignore[arg-type]
+        )
+    )
+
+    summary_text = (store.root_dir / "latest_summary.md").read_text(encoding="utf-8")
+    analysis_text = (store.root_dir / "latest_analysis.md").read_text(encoding="utf-8")
+    state_payload = asyncio.run(SiTianReadState(store=store))
+
+    assert summary_text.startswith("# SiTian Summary")
+    assert analysis_text.startswith("# 司天巡检 2026-05-09T10:00:00Z")
+    assert "analyzer summary" in analysis_text
+    assert state_payload["latestSummary"] == summary_text
+    assert state_payload["latestAnalysis"] == analysis_text
 
 
 @pytest.mark.unit
@@ -297,12 +355,7 @@ def test_sitian_suggestions_claude_workspace_produces_per_project_work_items(
         os.utime(session_file, (base_ts + i * 100, base_ts + i * 100))
 
     cfg = Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="stub-model",
-            base_url="http://127.0.0.1:1234",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         sitian=SiTianConfig(
             default_scan_interval_sec=60,
             idle_sleep_sec=2,

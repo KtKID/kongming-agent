@@ -256,7 +256,7 @@ class AvatarChatRequest(BaseModel):
     thread_id: str | None = Field(default=None, max_length=256)
     preset_id: str | None = Field(default=None, max_length=256)
     cwd: str = ""
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    reasoning_effort: Literal["none", "low", "medium", "high", "max"] | None = None
     attachments: list[UserInputAttachment] | None = None
     client_message_id: str | None = Field(default=None, max_length=256)
     device_id: str | None = Field(default=None, max_length=256)

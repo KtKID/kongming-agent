@@ -26,12 +26,15 @@ import pytest
 
 from application.agent_roles import AgentRoleManager
 from application.agent_workflows.manager import AgentWorkflowManager
-from application.subagents.manager import SubAgentManager, SubAgentRun
+from application.agent_workflows.task_models import SubAgentRun
 from core import AgentSpec, InMemorySession
 from hosts.cli.main import _apply_model_preset_or_exit
 from infrastructure.config import load_config
-from runtime_assembly.native_runtime import NativeRuntime
+from infrastructure.config.model_catalog_manager import ModelCatalogManager
+from runtime_assembly.session_engine import SessionEngine
 from sessions import SessionBootstrap, build_session
+from tests.support.workflow_agent_tree import bind_workflow_agent_tree
+from tests.support.workflow_strategy_manager import WorkflowStrategyTestManager
 from tools import (
     AutoAllowApproval,
     ToolRegistry,
@@ -73,14 +76,14 @@ def _assert_roundtable_usage_from_result(workflow_dir: Path, *, expected_runs: i
     assert roundtable["estimated_child_output_tokens"] > 0
 
 
-class _FakeRoundtableSubAgentManager:
-    """测试用 roundtable 子 agent manager，按 stage 返回稳定结构化输出。"""
+class _FakeRoundtableTaskExecutor:
+    """测试用 roundtable task executor，按 stage 返回稳定结构化输出。"""
 
     def __init__(self) -> None:
         """初始化 fake manager，输入为空，输出为记录任务的实例。"""
         self.tasks: list[Any] = []
 
-    async def run_task(
+    async def execute_task(
         self,
         *,
         workflow_id: str,
@@ -181,7 +184,7 @@ def _instructions() -> str:
             "第一步调用 list_agent_roles，参数为空对象。",
             "如果列表里没有 risk_skeptic，第二步调用 create_agent_role，参数为：",
             '{"id":"risk_skeptic","title":"风险质询者","role":"专门寻找方案失败路径和隐藏风险"}',
-            "第三步调用 run_agent_workflow，mode 必须是 roundtable_review，payload 必须包含：",
+            "第三步调用 run_agent_workflow，mode 必须是 roundtable_review，payload 只包含业务字段：",
             'topic="检查动态角色 roundtable 是否有审计快照"',
             'participants={"select":["risk_skeptic"]}',
             'input_source={"root_dir":".","paths":["src"],"include":[],"exclude":[],"max_files":5,"max_bytes_per_file":20000}',
@@ -244,7 +247,7 @@ def _us_iran_instructions() -> str:
             '{"id":"diplomacy_window_analyst","title":"外交窗口分析师","role":"评估谈判窗口、协议约束、各方政治激励和可验证承诺"}',
             "如果列表里没有 escalation_risk_analyst，调用 create_agent_role 创建：",
             '{"id":"escalation_risk_analyst","title":"升级风险分析师","role":"评估军事升级、误判链条、区域外溢和关键触发点"}',
-            "创建后调用 run_agent_workflow，mode 必须是 roundtable_review，payload 必须包含：",
+            "创建后调用 run_agent_workflow，mode 必须是 roundtable_review，payload 只包含业务字段：",
             'topic="美国伊朗局势：升级风险、外交窗口和误判风险"',
             'objective="基于 brief/us_iran_2026_06_11.md，给出分角色圆桌判断，并标出证据和不确定项"',
             'participants={"select":["diplomacy_window_analyst","escalation_risk_analyst"]}',
@@ -283,9 +286,9 @@ async def test_minimax_parent_creates_agent_role_and_runs_roundtable(tmp_path: P
     registry = ToolRegistry()
     register_agent_role_tool(registry, role_manager)
     register_agent_workflow_tool(registry, handle)
-    fake_subagents = _FakeRoundtableSubAgentManager()
-    manager = AgentWorkflowManager(
-        subagents=fake_subagents,  # type: ignore[arg-type]
+    fake_subagents = _FakeRoundtableTaskExecutor()
+    manager = WorkflowStrategyTestManager(
+        task_executor=fake_subagents,
         config=cfg,
         workspace_root=tmp_path,
         role_manager=role_manager,
@@ -299,7 +302,8 @@ async def test_minimax_parent_creates_agent_role_and_runs_roundtable(tmp_path: P
         sessions[session_id] = session
         return session
 
-    runtime = NativeRuntime.build(
+    resolved_model = ModelCatalogManager().resolve_runtime(cfg.model)
+    runtime = SessionEngine.build(
         cfg,
         approval=AutoAllowApproval(),
         tools=registry,
@@ -308,7 +312,7 @@ async def test_minimax_parent_creates_agent_role_and_runs_roundtable(tmp_path: P
         agent_spec=AgentSpec(
             name="agent-role-live-parent",
             instructions=_instructions(),
-            default_model=cfg.model.name,
+            default_model=resolved_model.name,
             tool_names=(),
             max_turns=8,
             reasoning_effort=cfg.model.reasoning_effort,
@@ -345,8 +349,11 @@ async def test_minimax_parent_creates_agent_role_and_runs_roundtable(tmp_path: P
     assert roles["roles"] == [
         {
             "id": "risk_skeptic",
-            "title": "风险质询者",
-            "role": "专门寻找方案失败路径和隐藏风险",
+            "nickname": "风险质询者",
+            "model": "",
+            "role_desc": "专门寻找方案失败路径和隐藏风险",
+            "reasoning_effort": "medium",
+            "max_turns": 3,
         }
     ]
     assert any(task.metadata["roundtable_agent"] == "risk_skeptic" for task in fake_subagents.tasks)
@@ -380,9 +387,10 @@ async def test_minimax_parent_runs_real_us_iran_roundtable_and_writes_child_logs
             "scheduler": cfg.scheduler.model_copy(update={"enabled": False}),
         }
     )
+    resolved_model = ModelCatalogManager().resolve_runtime(cfg.model)
     bootstrap = SessionBootstrap(
         agent_name="agent-role-us-iran-live",
-        model_name=cfg.model.name,
+        model_name=resolved_model.name,
         instruction_sources=[],
         instruction_text_hash="test",
         created_at=1.0,
@@ -398,7 +406,7 @@ async def test_minimax_parent_runs_real_us_iran_roundtable_and_writes_child_logs
     registry = ToolRegistry(build_file_tools())
     register_agent_role_tool(registry, role_manager)
     register_agent_workflow_tool(registry, handle)
-    runtime = NativeRuntime.build(
+    runtime = SessionEngine.build(
         cfg,
         approval=AutoAllowApproval(),
         tools=registry,
@@ -407,14 +415,19 @@ async def test_minimax_parent_runs_real_us_iran_roundtable_and_writes_child_logs
         agent_spec=AgentSpec(
             name="agent-role-us-iran-parent",
             instructions=_us_iran_instructions(),
-            default_model=cfg.model.name,
+            default_model=resolved_model.name,
             tool_names=(),
             max_turns=20,
             reasoning_effort=cfg.model.reasoning_effort,
         ),
     )
+    binding = bind_workflow_agent_tree(
+        runtime,
+        parent_session_id="live-agent-role-us-iran-roundtable",
+    )
     manager = AgentWorkflowManager(
-        subagents=SubAgentManager(runtime),
+        runtime=runtime,
+        agent_manager=binding.manager,
         config=cfg,
         workspace_root=e2e_root,
         role_manager=role_manager,
@@ -425,8 +438,11 @@ async def test_minimax_parent_runs_real_us_iran_roundtable_and_writes_child_logs
         result = await runtime.run(
             "按系统指令执行美国伊朗局势真实子 agent roundtable e2e。",
             session_id="live-agent-role-us-iran-roundtable",
+            thread_id="live-agent-role-us-iran-roundtable",
+            agent_id=str(binding.parent_agent["agent_id"]),
         )
     finally:
+        await binding.aclose()
         await runtime.aclose()
 
     parent_session = _session_factory("live-agent-role-us-iran-roundtable")

@@ -1,78 +1,110 @@
-"""_derive_generic v2 派生器单测。
+"""generic_chat usage 派生器单元测试。
 
-覆盖：anthropic vs openai_compatible 分支 / 取最后一条 / 不累加 / 缺 usage 跳过
-/ 文件不存在 / 未知 provider / model_name 透传。
+覆盖 canonical snapshot 的 family 路由、最后一条选择、unknown 保真、坏行跳过
+和 model_name 透传。FileSession 之外的 provider 数据由其他派生器测试负责。
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
+from core.contracts import ProviderUsageFamily
 from hosts.web.usage.usage_token_v2._derive_generic import derive_from_session
 from hosts.web.usage.usage_token_v2._models import (
     GenericChatAnthropicUsage,
     GenericChatOpenAIUsage,
 )
+from infrastructure.llm_providers.usage import ProviderUsageManager
 
 
-def _write_jsonl(path: Path, entries: list[dict]) -> None:
+def _write_jsonl(path: Path, entries: list[dict[str, Any]]) -> None:
+    """写入测试 JSONL，输入为路径和记录，输出为空。"""
     with path.open("w", encoding="utf-8") as fh:
-        for e in entries:
-            fh.write(json.dumps(e) + "\n")
+        for entry in entries:
+            fh.write(json.dumps(entry) + "\n")
 
 
-def _message_entry(usage: dict | None, model: str = "claude-opus-4") -> dict:
-    """模拟 FileSession.append 的 jsonl 行。"""
-    entry: dict = {
+def _message_entry(
+    usage: dict[str, Any] | None,
+    model: str = "claude-opus-4",
+) -> dict[str, Any]:
+    """构造 FileSession 消息记录，输入为 usage/model，输出为 JSON 行对象。"""
+    entry: dict[str, Any] = {
         "schema_version": 1,
         "session_id": "sid",
         "model_name": model,
         "message_id": "msg",
         "parent_message_id": None,
         "created_at": 1234567890.0,
-        "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+        "message": {"role": "assistant", "content": "hi"},
     }
     if usage is not None:
         entry["usage"] = usage
     return entry
 
 
+def _snapshot(
+    family: ProviderUsageFamily,
+    raw_usage: dict[str, Any],
+) -> dict[str, Any]:
+    """经真实 ProviderUsageManager 构造 snapshot payload。"""
+    return (
+        ProviderUsageManager()
+        .normalize(
+            family=family,
+            raw_usage=raw_usage,
+        )
+        .to_payload()
+    )
+
+
 def test_returns_none_when_file_missing(tmp_path: Path) -> None:
-    assert derive_from_session(tmp_path / "nope.jsonl", "anthropic") is None
+    assert derive_from_session(tmp_path / "nope.jsonl") is None
 
 
 def test_returns_none_when_no_usage_lines(tmp_path: Path) -> None:
-    p = tmp_path / "no-usage.jsonl"
-    _write_jsonl(p, [_message_entry(None), _message_entry(None)])
-    assert derive_from_session(p, "anthropic") is None
+    path = tmp_path / "no-usage.jsonl"
+    _write_jsonl(path, [_message_entry(None), _message_entry(None)])
+    assert derive_from_session(path) is None
 
 
-def test_anthropic_provider_returns_anthropic_dto(tmp_path: Path) -> None:
-    p = tmp_path / "anth.jsonl"
+def test_anthropic_snapshot_family_routes_and_preserves_cache(tmp_path: Path) -> None:
+    path = tmp_path / "anthropic.jsonl"
+    first = _snapshot(
+        ProviderUsageFamily.ANTHROPIC_MESSAGES,
+        {
+            "input_tokens": 999,
+            "output_tokens": 999,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        },
+    )
+    last = _snapshot(
+        ProviderUsageFamily.ANTHROPIC_MESSAGES,
+        {
+            "input_tokens": 5,
+            "output_tokens": 10,
+            "cache_read_input_tokens": 100,
+            "cache_creation_input_tokens": 3,
+            "cache_creation": {
+                "ephemeral_1h_input_tokens": 3,
+                "ephemeral_5m_input_tokens": 0,
+            },
+        },
+    )
     _write_jsonl(
-        p,
+        path,
         [
-            _message_entry({"input_tokens": 999, "output_tokens": 999}),  # 不取
-            _message_entry(
-                {
-                    "input_tokens": 5,
-                    "output_tokens": 10,
-                    "cache_read_input_tokens": 100,
-                    "cache_creation_input_tokens": 3,
-                    "cache_creation": {
-                        "ephemeral_1h_input_tokens": 3,
-                        "ephemeral_5m_input_tokens": 0,
-                    },
-                },
-                model="claude-sonnet-4",
-            ),
+            _message_entry(first),
+            _message_entry(last, model="claude-sonnet-4"),
         ],
     )
-    result = derive_from_session(p, "anthropic")
+
+    result = derive_from_session(path)
+
     assert isinstance(result, GenericChatAnthropicUsage)
-    assert result.provider == "claude"
-    # 取最后一条不累加
     assert result.input_tokens == 5
     assert result.cache_read_input_tokens == 100
     assert result.cache_creation_input_tokens == 3
@@ -81,26 +113,23 @@ def test_anthropic_provider_returns_anthropic_dto(tmp_path: Path) -> None:
     assert result.model == "claude-sonnet-4"
 
 
-def test_openai_provider_returns_openai_dto(tmp_path: Path) -> None:
-    p = tmp_path / "oai.jsonl"
-    _write_jsonl(
-        p,
-        [
-            _message_entry(
-                {
-                    "input_tokens": 200,
-                    "cached_input_tokens": 100,
-                    "output_tokens": 50,
-                    "reasoning_output_tokens": 10,
-                    "total_tokens": 250,
-                },
-                model="gpt-4o",
-            ),
-        ],
+def test_openai_snapshot_family_routes_without_provider_hint(tmp_path: Path) -> None:
+    path = tmp_path / "openai.jsonl"
+    usage = _snapshot(
+        ProviderUsageFamily.OPENAI_CHAT_COMPLETIONS,
+        {
+            "prompt_tokens": 200,
+            "completion_tokens": 50,
+            "total_tokens": 250,
+            "prompt_tokens_details": {"cached_tokens": 100},
+            "completion_tokens_details": {"reasoning_tokens": 10},
+        },
     )
-    result = derive_from_session(p, "openai_compatible")
+    _write_jsonl(path, [_message_entry(usage, model="gpt-4o")])
+
+    result = derive_from_session(path)
+
     assert isinstance(result, GenericChatOpenAIUsage)
-    assert result.provider == "openai"
     assert result.last.input_tokens == 200
     assert result.last.cached_input_tokens == 100
     assert result.last.output_tokens == 50
@@ -109,54 +138,34 @@ def test_openai_provider_returns_openai_dto(tmp_path: Path) -> None:
     assert result.model == "gpt-4o"
 
 
-def test_takes_last_usage_not_accumulated(tmp_path: Path) -> None:
-    p = tmp_path / "multi.jsonl"
-    _write_jsonl(
-        p,
-        [
-            _message_entry({"input_tokens": 100, "output_tokens": 50}),
-            _message_entry({"input_tokens": 200, "output_tokens": 80}),
-            _message_entry({"input_tokens": 300, "output_tokens": 120}),
-        ],
+def test_unknown_metric_reaches_web_as_none(tmp_path: Path) -> None:
+    path = tmp_path / "unknown.jsonl"
+    usage = _snapshot(
+        ProviderUsageFamily.ANTHROPIC_MESSAGES,
+        {"input_tokens": 5, "output_tokens": 2, "cache_read_input_tokens": 9},
     )
-    result = derive_from_session(p, "anthropic")
-    assert result is not None
-    # 取最后一条
-    assert result.input_tokens == 300
-    assert result.output_tokens == 120
+    _write_jsonl(path, [_message_entry(usage)])
+
+    result = derive_from_session(path)
+
+    assert isinstance(result, GenericChatAnthropicUsage)
+    assert result.cache_read_input_tokens == 9
+    assert result.cache_creation_input_tokens is None
+    assert result.context_usage is None
 
 
-def test_unknown_provider_returns_none(tmp_path: Path) -> None:
-    """未知 provider → 返回 None（防御兜底）。"""
-    p = tmp_path / "x.jsonl"
-    _write_jsonl(p, [_message_entry({"input_tokens": 1, "output_tokens": 1})])
-    # 故意传 bogus provider 类型——运行时返 None（不抛）
-    result = derive_from_session(p, "unknown")  # type: ignore[arg-type]
-    assert result is None
-
-
-def test_skips_message_without_usage(tmp_path: Path) -> None:
-    """有 message 但无 usage 的行被跳过；后续含 usage 的行被取到。"""
-    p = tmp_path / "mixed.jsonl"
-    _write_jsonl(
-        p,
-        [
-            _message_entry(None),  # user message 没 usage
-            _message_entry(None),  # tool result 没 usage
-            _message_entry({"input_tokens": 99, "output_tokens": 11}),
-        ],
+def test_skips_invalid_usage_and_malformed_lines(tmp_path: Path) -> None:
+    path = tmp_path / "malformed.jsonl"
+    valid = _snapshot(
+        ProviderUsageFamily.OPENAI_RESPONSES,
+        {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
     )
-    result = derive_from_session(p, "anthropic")
-    assert result is not None
-    assert result.input_tokens == 99
-
-
-def test_skips_malformed_line(tmp_path: Path) -> None:
-    p = tmp_path / "malformed.jsonl"
-    valid = _message_entry({"input_tokens": 7, "output_tokens": 3})
-    with p.open("w", encoding="utf-8") as fh:
+    with path.open("w", encoding="utf-8") as fh:
         fh.write("INVALID\n")
-        fh.write(json.dumps(valid) + "\n")
-    result = derive_from_session(p, "anthropic")
-    assert result is not None
-    assert result.input_tokens == 7
+        fh.write(json.dumps(_message_entry({"provider_kind": "legacy"})) + "\n")
+        fh.write(json.dumps(_message_entry(valid)) + "\n")
+
+    result = derive_from_session(path)
+
+    assert isinstance(result, GenericChatOpenAIUsage)
+    assert result.last.total_tokens == 10

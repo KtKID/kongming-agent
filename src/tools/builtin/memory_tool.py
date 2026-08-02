@@ -13,9 +13,9 @@ v0.1.3 提供四个 action：
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
-from core.contracts import EventSink, ToolContext
+from core.contracts import EventSink, PreparedToolCall, ToolContext
 from memory import (
     ENTRY_DELIMITER,
     MEMORY_MAX_CHARS,
@@ -56,9 +56,9 @@ class MemoryTool(BaseBuiltinTool):
 
     name = "memory"
     description = (
-        "跨会话持久化的长期记忆系统。"
+        "这是跨会话持久化的长期记忆系统"
         "当你需要记住用户偏好、环境事实、错误坑点或任何下次对话需要继承的信息时，"
-        "必须使用本工具，不要用 write_file/shell 工具手动创建文件。"
+        "memory系统必须使用本工具操作，不要用 write_file/shell 工具手动创建或修改文件。"
         "记忆文件存储于 .kongming/memory/ 目录，但你只能通过本工具的 target 参数"
         "(memory/user/errors) 访问，不能通过文件路径访问。"
         "操作类型:view 查看 / add 追加 / replace 替换片段 / remove 删除片段。"
@@ -114,13 +114,47 @@ class MemoryTool(BaseBuiltinTool):
         self._view_max_chars = view_max_chars
         self._event_sinks: tuple[EventSink, ...] = tuple(event_sinks)
 
+    def prepare(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> PreparedToolCall:
+        """审批前校验 action/target 并冻结 action 专属参数与默认值。"""
+        del context
+        self._validate_args(arguments)
+        action = arguments["action"]
+        target = arguments["target"]
+        if action not in {"view", "add", "replace", "remove"}:
+            raise ValueError("action must be one of view/add/replace/remove")
+        if target not in {"memory", "user", "errors"}:
+            raise ValueError("target must be one of memory/user/errors")
+        prepared: dict[str, Any] = {"action": action, "target": target}
+        reason = arguments.get("reason")
+        if reason is not None:
+            if not isinstance(reason, str):
+                raise ValueError("reason must be a string when provided")
+            prepared["reason"] = reason
+        if action == "add":
+            prepared["content"] = self._required_text(arguments, "content", action)
+        elif action == "replace":
+            prepared["old_text"] = self._required_text(arguments, "old_text", action)
+            new_text = arguments.get("new_text", "")
+            if new_text is None:
+                new_text = ""
+            if not isinstance(new_text, str):
+                raise ValueError("replace new_text must be a string when provided")
+            prepared["new_text"] = new_text
+        elif action == "remove":
+            prepared["text"] = self._required_text(arguments, "text", action)
+        return PreparedToolCall(arguments=prepared)
+
     async def _run(
         self,
         args: dict[str, Any],
         ctx: ToolContext,
     ) -> tuple[str, dict[str, Any] | None]:
-        action: str = args["action"]
-        target: MemoryTarget = args["target"]
+        action = str(args["action"])
+        target = cast(MemoryTarget, args["target"])
 
         if action == "view":
             return self._do_view(target)
@@ -130,8 +164,7 @@ class MemoryTool(BaseBuiltinTool):
             return await self._do_replace(target, args, ctx)
         elif action == "remove":
             return await self._do_remove(target, args, ctx)
-        else:
-            return f"Unknown action: {action!r}", None
+        raise AssertionError(f"unreachable prepared memory action: {action!r}")
 
     def _do_view(self, target: MemoryTarget) -> tuple[str, dict[str, Any] | None]:
         """查看指定分区的活态条目。"""
@@ -186,13 +219,7 @@ class MemoryTool(BaseBuiltinTool):
         self, target: MemoryTarget, args: dict[str, Any], ctx: ToolContext
     ) -> tuple[str, dict[str, Any] | None]:
         """追加新条目。"""
-        content = args.get("content")
-        if not content or not content.strip():
-            return "add requires 'content' parameter.", {
-                "success": False,
-                "error": "missing content",
-            }
-
+        content = args["content"]
         reason = args.get("reason")
         action = MemoryWriteAction(action="add", target=target, content=content, reason=reason)
         result = await execute_write(
@@ -219,20 +246,14 @@ class MemoryTool(BaseBuiltinTool):
         self, target: MemoryTarget, args: dict[str, Any], ctx: ToolContext
     ) -> tuple[str, dict[str, Any] | None]:
         """精确替换片段。"""
-        old_text = args.get("old_text")
-        new_text = args.get("new_text")
-        if not old_text:
-            return "replace requires 'old_text' parameter.", {
-                "success": False,
-                "error": "missing old_text",
-            }
-
+        old_text = args["old_text"]
+        new_text = args["new_text"]
         reason = args.get("reason")
         action = MemoryWriteAction(
             action="replace",
             target=target,
             old_text=old_text,
-            new_text=new_text or "",
+            new_text=new_text,
             reason=reason,
         )
         result = await execute_write(
@@ -258,10 +279,7 @@ class MemoryTool(BaseBuiltinTool):
         self, target: MemoryTarget, args: dict[str, Any], ctx: ToolContext
     ) -> tuple[str, dict[str, Any] | None]:
         """精确删除片段。"""
-        text = args.get("text")
-        if not text:
-            return "remove requires 'text' parameter.", {"success": False, "error": "missing text"}
-
+        text = args["text"]
         reason = args.get("reason")
         action = MemoryWriteAction(action="remove", target=target, text=text, reason=reason)
         result = await execute_write(
@@ -290,6 +308,14 @@ class MemoryTool(BaseBuiltinTool):
             "user": self._store.user_entries,
             "errors": self._store.error_entries,
         }.get(target, [])
+
+    @staticmethod
+    def _required_text(arguments: dict[str, Any], key: str, action: str) -> str:
+        """读取 action 必填文本，输入参数/字段/action，输出非空字符串。"""
+        value = arguments.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{action} requires non-empty {key!r}")
+        return value
 
 
 def build_memory_tool(

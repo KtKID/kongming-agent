@@ -43,6 +43,10 @@ const modelFamilies: ConnectedModelFamily[] = [
     presetId: "preset-a",
     model: "test-model",
     connected: true,
+    supportedReasoningEfforts: ["none", "high", "max"],
+    defaultReasoningEffort: "high",
+    reasoningAdapter: "deepseek_anthropic_thinking",
+    contextWindowTokens: 131072,
   },
 ];
 
@@ -86,10 +90,40 @@ describe("GenericEmptyThreadView", () => {
         text: "hello generic",
         preset_id: "preset-a",
         cwd: "",
-        reasoning_effort: null,
+        reasoning_effort: "high",
       }),
     );
-    expect(onCreated).toHaveBeenCalledWith(created);
+    expect(onCreated).toHaveBeenCalledWith(created, "high");
+  });
+
+  it("首发显式关闭后把 none 连同真实 thread 交给上层", async () => {
+    const user = userEvent.setup();
+    const created = makeThread({ message_count: 1 });
+    const createGenericThreadFromFirstMessage = vi.fn().mockResolvedValue(created);
+    const onCreated = vi.fn();
+    useThreadsStore.setState({
+      createGenericThreadFromFirstMessage,
+    } as unknown as Parameters<typeof useThreadsStore.setState>[0]);
+
+    render(<GenericEmptyThreadView onCreated={onCreated} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("composer-model-switcher")).toHaveTextContent("Test Model"),
+    );
+    await user.click(screen.getByRole("button", { name: /深度思考/ }));
+    await user.click(screen.getByRole("menuitemradio", { name: "关闭" }));
+    await user.type(screen.getByLabelText("消息输入"), "disable reasoning");
+    await user.click(screen.getByRole("button", { name: /发送/ }));
+
+    await waitFor(() =>
+      expect(createGenericThreadFromFirstMessage).toHaveBeenCalledWith({
+        text: "disable reasoning",
+        preset_id: "preset-a",
+        cwd: "",
+        reasoning_effort: "none",
+      }),
+    );
+    expect(onCreated).toHaveBeenCalledWith(created, "none");
   });
 
   it("创建失败时保留输入内容和项目选择", async () => {
@@ -119,5 +153,23 @@ describe("GenericEmptyThreadView", () => {
     expect(screen.getByTestId("thread-project-selector-trigger")).toHaveTextContent(
       "project-a",
     );
+  });
+
+  it("Composer 只展示当前模型支持的思考档位", async () => {
+    const user = userEvent.setup();
+
+    render(<GenericEmptyThreadView onCreated={vi.fn()} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("composer-model-switcher")).toHaveTextContent("Test Model"),
+    );
+
+    await user.click(screen.getByRole("button", { name: /深度思考/ }));
+
+    expect(screen.getByRole("menuitemradio", { name: "关闭" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitemradio", { name: "高" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitemradio", { name: "最高" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitemradio", { name: "低" })).toBeNull();
+    expect(screen.queryByRole("menuitemradio", { name: "中" })).toBeNull();
   });
 });

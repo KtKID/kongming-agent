@@ -164,6 +164,27 @@ class CodexUsage(BaseModel):
 # =============================================================================
 
 
+class GenericChatCacheCreation(BaseModel):
+    """generic_chat 的 Anthropic cache TTL 细分，未知值保持 None。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ephemeral_1h_input_tokens: int | None = Field(default=None, ge=0)
+    ephemeral_5m_input_tokens: int | None = Field(default=None, ge=0)
+
+
+class GenericChatTokenBreakdown(BaseModel):
+    """generic_chat 的 OpenAI token 细分，未知值保持 None。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    input_tokens: int | None = Field(default=None, ge=0)
+    cached_input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    reasoning_output_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+
+
 class GenericChatAnthropicUsage(BaseModel):
     """generic_chat 通道（底层 LLMProvider 是 Anthropic 系）的 token 用量。
 
@@ -176,13 +197,13 @@ class GenericChatAnthropicUsage(BaseModel):
 
     provider: Literal["claude"] = "claude"
 
-    input_tokens: int = Field(default=0, ge=0)
-    output_tokens: int = Field(default=0, ge=0)
-    cache_read_input_tokens: int = Field(default=0, ge=0)
-    cache_creation_input_tokens: int = Field(default=0, ge=0)
-    cache_creation: ClaudeCacheCreation = Field(default_factory=ClaudeCacheCreation)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    cache_read_input_tokens: int | None = Field(default=None, ge=0)
+    cache_creation_input_tokens: int | None = Field(default=None, ge=0)
+    cache_creation: GenericChatCacheCreation = Field(default_factory=GenericChatCacheCreation)
 
-    context_usage: int = Field(default=0, ge=0)
+    context_usage: int | None = Field(default=None, ge=0)
     model: str = ""
     context_window: int = Field(default=0, ge=0)
 
@@ -198,7 +219,7 @@ class GenericChatOpenAIUsage(BaseModel):
 
     provider: Literal["openai"] = "openai"
 
-    last: CodexTokenBreakdown
+    last: GenericChatTokenBreakdown
     """最近一次 API call 的用量。"""
 
     model: str = ""
@@ -223,6 +244,8 @@ __all__ = [
     "CodexTokenBreakdown",
     "CodexUsage",
     "GenericChatAnthropicUsage",
+    "GenericChatCacheCreation",
     "GenericChatOpenAIUsage",
+    "GenericChatTokenBreakdown",
     "ThreadUsage",
 ]

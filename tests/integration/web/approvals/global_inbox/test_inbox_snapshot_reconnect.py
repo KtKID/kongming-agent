@@ -21,9 +21,10 @@ def _make_payload(request_id: str, thread_id: str = "thread-aaa") -> dict[str, A
         "toolName": "Read",
         "toolInput": {"path": "/tmp/x"},
         "autoApproveAtMs": 1_000_000_999,
-        "autoRejectAtMs": None,
         "blockedByRule": None,
         "isElevated": False,
+        "danger": False,
+        "rememberAllowed": False,
         "channel": "claude_code",
         "cwd": "/proj/x",
         "arrivedAtMs": 1_000_000_000,
@@ -45,6 +46,8 @@ async def test_new_subscriber_receives_snapshot_with_all_pending(
 
     # 新 ws 连上 → handler 立刻调 push_snapshot
     with authed_client.websocket_connect("/ws/thread-status") as ws:
+        status_snapshot = ws.receive_json()
+        assert status_snapshot["frame_type"] == "thread-status.snapshot"
         snapshot = ws.receive_json()
         assert snapshot["frame_type"] == "approval.inbox.snapshot"
         items = snapshot["items"]
@@ -66,6 +69,12 @@ async def test_snapshot_empty_when_no_pending(
 ) -> None:
     """无 pending 时 snapshot.items 为空列表。"""
     with authed_client.websocket_connect("/ws/thread-status") as ws:
+        status_snapshot = ws.receive_json()
+        assert status_snapshot == {
+            "frame_type": "thread-status.snapshot",
+            "watermark": 0,
+            "items": [],
+        }
         snapshot = ws.receive_json()
         assert snapshot == {"frame_type": "approval.inbox.snapshot", "items": []}
 
@@ -82,6 +91,8 @@ async def test_snapshot_reflects_removed_pending(
     assert broadcaster.pending_count == 1
 
     with authed_client.websocket_connect("/ws/thread-status") as ws:
+        status_snapshot = ws.receive_json()
+        assert status_snapshot["frame_type"] == "thread-status.snapshot"
         snapshot = ws.receive_json()
         assert snapshot["frame_type"] == "approval.inbox.snapshot"
         ids = [item["requestId"] for item in snapshot["items"]]

@@ -11,8 +11,8 @@ v1-mini 单协程执行，不加锁；后续如果出现多任务共享 session 
 from __future__ import annotations
 
 import uuid
-from typing import Any
 
+from core.contracts.provider_usage import ProviderUsageSnapshot
 from core.message import Message
 
 
@@ -28,7 +28,12 @@ class InMemorySession:
         self._messages: list[Message] = []
         self._run_count: int = 0
 
-    async def append(self, message: Message, *, usage: dict[str, Any] | None = None) -> None:
+    async def append(
+        self,
+        message: Message,
+        *,
+        usage: ProviderUsageSnapshot | None = None,
+    ) -> None:
         self._messages.append(message)
 
     async def history(self) -> list[Message]:
@@ -42,6 +47,10 @@ class InMemorySession:
     async def advance_run_index(self) -> int:
         # 内存后端无持久化；进程重启后从 0 重数（与 history 同语义）。
         self._run_count += 1
+        return self._run_count
+
+    async def get_run_count(self) -> int:
+        # 只读返回，不递增；与 advance_run_index 共享同一实例字段。
         return self._run_count
 
     def __len__(self) -> int:

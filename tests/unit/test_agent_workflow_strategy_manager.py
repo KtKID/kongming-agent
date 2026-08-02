@@ -27,7 +27,7 @@ from application.agent_workflows.strategies.description import (
 from application.agent_workflows.strategies.manager import (
     AgentWorkflowStrategyManager,
 )
-from infrastructure.config.models import Config, ModelConfig
+from infrastructure.config.models import Config, ModelSelectionConfig
 
 
 class _AuditWriter:
@@ -96,6 +96,9 @@ def _context_factory(request: WorkflowRunRequest) -> WorkflowExecutionContext:
         started_at="2026-06-07T00:00:00+00:00",
         desc=request.desc,
         audit_writer=_AuditWriter(),
+        # fake strategy 不调用 runtime，注入空对象满足新增的必填字段。
+        runtime=object(),  # type: ignore[arg-type]
+        parent_agent=request.parent_agent,
     )
 
 
@@ -202,16 +205,9 @@ async def test_strategy_manager_describes_planned_strategy_but_refuses_run() -> 
 
 def test_agent_workflow_manager_registers_parallel_strategy_catalog(tmp_path: Path) -> None:
     """验证 workflow manager 默认注册 parallel 策略，输入为临时配置，输出为目录和详情断言。"""
-    cfg = Config(
-        model=ModelConfig(
-            name="fake-model",
-            base_url="http://127.0.0.1:1234/v1",
-            api_key="",
-        )
-    )
+    cfg = Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
     cfg.session.file_store_path = str(tmp_path / "sessions")
     manager = AgentWorkflowManager(
-        subagents=object(),  # type: ignore[arg-type]
         config=cfg,
         workspace_root=tmp_path,
         role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
@@ -253,7 +249,8 @@ def test_agent_workflow_manager_registers_parallel_strategy_catalog(tmp_path: Pa
     assert deep_research_entry.runnable is True
 
     description = manager.describe_workflow_strategy("parallel")
-    assert description.inputs[0].name == "task_specs"
+    assert any(field.name == "task_specs" for field in description.inputs)
+    assert "subagent_runtime" not in {field.name for field in description.inputs}
     assert "互不依赖" in description.summary
 
     map_reduce_description = manager.describe_workflow_strategy("map_reduce")

@@ -7,16 +7,23 @@ import pytest
 
 from core.contracts import LLMRequest, LLMResponse
 from core.message import Message
-from infrastructure.config.models import ModelConfig
+from infrastructure.config.model_provider_catalog import (
+    ProviderProtocol,
+    ResolvedModelConfig,
+    ResolvedModelCredential,
+)
 from infrastructure.llm_providers.anthropic_messages import AnthropicMessagesProvider
 from infrastructure.llm_providers.base import BaseLLMProvider
 from infrastructure.llm_providers.openai_responses import OpenAIResponsesProvider
+from tests._helpers.model_runtime import make_model_runtime
 
 
-def _make_config(**overrides: object) -> ModelConfig:
-    defaults = dict(name="test-model", base_url="http://127.0.0.1:1234/v1", api_key="")
+def _make_config(
+    **overrides: object,
+) -> tuple[ResolvedModelConfig, ResolvedModelCredential]:
+    defaults = dict(name="test-model", base_url="http://127.0.0.1:1234/v1")
     defaults.update(overrides)
-    return ModelConfig(**defaults)  # type: ignore[arg-type]
+    return make_model_runtime(**defaults)  # type: ignore[arg-type]
 
 
 def _make_base_provider(**overrides: object) -> BaseLLMProvider:
@@ -29,10 +36,10 @@ def _make_base_provider(**overrides: object) -> BaseLLMProvider:
             return LLMResponse(
                 message=Message.assistant("ok"),
                 finish_reason="stop",
-                usage={},
             )
 
-    return _Concrete(model_config=_make_config(**overrides))
+    runtime, credential = _make_config(**overrides)
+    return _Concrete(model_config=runtime, credential=credential)
 
 
 # ---------------------------------------------------------------------------
@@ -186,11 +193,19 @@ async def test_timeout_per_request() -> None:
 @pytest.mark.unit
 def test_both_providers_reuse() -> None:
     """OpenAI 和 Anthropic 各自独立复用，不互相污染。"""
+    openai_runtime, openai_credential = _make_config(name="gpt-4o")
+    anthropic_runtime, anthropic_credential = _make_config(
+        name="claude-3-opus",
+        base_url="http://127.0.0.1:1234/v1",
+        protocol=ProviderProtocol.ANTHROPIC,
+    )
     openai_provider = OpenAIResponsesProvider(
-        model_config=_make_config(name="gpt-4o"),
+        model_config=openai_runtime,
+        credential=openai_credential,
     )
     anthropic_provider = AnthropicMessagesProvider(
-        model_config=_make_config(name="claude-3-opus", base_url="http://127.0.0.1:1234/v1"),
+        model_config=anthropic_runtime,
+        credential=anthropic_credential,
     )
 
     oc1 = openai_provider._ensure_client()

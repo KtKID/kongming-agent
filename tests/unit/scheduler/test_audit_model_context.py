@@ -15,11 +15,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from application.scheduled_runs.execution_bridge import ExecutionBridge, _CronAuditWriterSink
-from infrastructure.config.models import (
-    Config,
-    LLMPresetConfig,
-    ModelConfig,
-)
+from infrastructure.config.model_catalog_manager import ModelCatalogManager
+from infrastructure.config.models import Config, ModelSelectionConfig
 from scheduler.domain import (
     ConcurrencyPolicy,
     MisfirePolicy,
@@ -29,8 +26,8 @@ from scheduler.domain import (
     ScheduleTrigger,
     SessionMode,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
@@ -44,8 +41,7 @@ def _make_task(preset_id: str = "") -> ScheduledTask:
     return ScheduledTask(
         task_id="t-ctx",
         name="ctx",
-        enabled=True,
-        state=TaskState.SCHEDULED,
+        lifecycle=TaskLifecycleState.SCHEDULED,
         origin=TaskOrigin.TOOL,
         trigger=ScheduleTrigger(trigger_type=TriggerType.INTERVAL, expr="60", timezone="UTC"),
         policy=TaskExecutionPolicy(
@@ -81,27 +77,23 @@ def _make_run(status: RunStatus = RunStatus.COMPLETED) -> ScheduledRun:
     )
 
 
-def _make_config(*, model_name: str = "default-model") -> Config:
-    return Config(model=ModelConfig(name=model_name, base_url="http://127.0.0.1:1234/v1"))
-
-
-def _make_preset(preset_id: str, model_name: str) -> LLMPresetConfig:
-    return LLMPresetConfig(
-        id=preset_id,
-        display_name=preset_id,
-        base_url="https://api.example.com/v1",
-        model=model_name,
-    )
+def _make_config(*, preset_id: str = "local-gemma-4-e4b-it") -> Config:
+    return Config(model=ModelSelectionConfig(preset_id=preset_id))
 
 
 def _make_bridge(
     *,
     base_config: Config | None = None,
-    preset_map: dict[str, LLMPresetConfig] | None = None,
     store: Any = None,
 ) -> ExecutionBridge:
+    catalog_manager = ModelCatalogManager() if base_config is not None else None
+    default_model = (
+        catalog_manager.resolve_runtime(base_config.model)
+        if catalog_manager is not None and base_config is not None
+        else None
+    )
     return ExecutionBridge(
-        runner=MagicMock(),
+        runtime=MagicMock(),
         llm=MagicMock(),
         tools={},
         enabled_tool_names=(),
@@ -111,7 +103,8 @@ def _make_bridge(
         agent_spec=MagicMock(),
         store=store or MagicMock(),
         base_config=base_config,
-        preset_map=preset_map,
+        model_catalog_manager=catalog_manager,
+        default_model=default_model,
     )
 
 
@@ -120,52 +113,43 @@ def _make_bridge(
 # ---------------------------------------------------------------------------
 
 
-def test_x1_preset_hit_uses_preset_model() -> None:
-    """X1: task.preset_id 命中 preset_map → model_name = preset.model（不查 cfg.model）。"""
-    bridge = _make_bridge(
-        base_config=_make_config(model_name="local-gemma"),
-        preset_map={"minimax-m2-7": _make_preset("minimax-m2-7", "MiniMax-M2.7")},
-    )
-    ctx = bridge._resolve_run_audit_context(_make_task(preset_id="minimax-m2-7"))
-    assert ctx["preset_id"] == "minimax-m2-7"
-    assert ctx["model_name"] == "MiniMax-M2.7"
+def test_x1_preset_hit_uses_catalog_model() -> None:
+    """X1: task preset 命中 catalog 时审计记录实际 remote model。"""
+    bridge = _make_bridge(base_config=_make_config())
+    ctx = bridge._resolve_run_audit_context(_make_task(preset_id="bigmodel-glm5"))
+    assert ctx["preset_id"] == "bigmodel-glm5"
+    assert ctx["model_name"] == "glm-5.1"
 
 
 def test_x2_empty_preset_falls_back_to_cfg_model() -> None:
-    """X2: task.preset_id="" → fallback cfg.model.name。"""
-    bridge = _make_bridge(base_config=_make_config(model_name="gemma-4-e4b-it"))
+    """X2: task.preset_id="" → fallback setting 的默认 preset。"""
+    bridge = _make_bridge(base_config=_make_config())
     ctx = bridge._resolve_run_audit_context(_make_task(preset_id=""))
-    assert ctx["preset_id"] == ""
+    assert ctx["preset_id"] == "local-gemma-4-e4b-it"
     assert ctx["model_name"] == "gemma-4-e4b-it"
 
 
-def test_x3_unknown_preset_falls_back_to_cfg_model() -> None:
-    """X3: task.preset_id 不在 preset_map 中 → fallback cfg.model.name。"""
-    bridge = _make_bridge(
-        base_config=_make_config(model_name="default-fb"),
-        preset_map={"existing-preset": _make_preset("existing-preset", "Other-Model")},
-    )
+def test_x3_unknown_preset_keeps_requested_id_and_empty_model() -> None:
+    """X3: 未知 task preset 在失败审计中保留请求 ID。"""
+    bridge = _make_bridge(base_config=_make_config())
     ctx = bridge._resolve_run_audit_context(_make_task(preset_id="nonexistent"))
     # preset_id 字段是 task 显式声明的，即使未命中 preset_map 也保留原值（审计真实意图）
     assert ctx["preset_id"] == "nonexistent"
-    assert ctx["model_name"] == "default-fb"
+    assert ctx["model_name"] == ""
 
 
 def test_x4_no_base_config_returns_empty_model_name() -> None:
     """X4: base_config=None 且无 preset → model_name=""。"""
     bridge = _make_bridge(base_config=None)
     ctx = bridge._resolve_run_audit_context(_make_task(preset_id=""))
-    assert ctx == {"preset_id": "", "model_name": ""}
+    assert ctx == {"preset_id": "", "model_name": "", "thread_id": ""}
 
 
-def test_x5_preset_hit_with_none_base_config() -> None:
-    """X5: 即使 base_config=None，preset 命中仍能拿到 model_name（不需要 cfg）。"""
-    bridge = _make_bridge(
-        base_config=None,
-        preset_map={"glm5": _make_preset("glm5", "glm-5.1")},
-    )
-    ctx = bridge._resolve_run_audit_context(_make_task(preset_id="glm5"))
-    assert ctx == {"preset_id": "glm5", "model_name": "glm-5.1"}
+def test_x5_preset_without_composition_dependencies_keeps_requested_id() -> None:
+    """X5: 缺少 composition 依赖时审计仍保留请求 preset。"""
+    bridge = _make_bridge(base_config=None)
+    ctx = bridge._resolve_run_audit_context(_make_task(preset_id="bigmodel-glm5"))
+    assert ctx == {"preset_id": "bigmodel-glm5", "model_name": "", "thread_id": ""}
 
 
 # ---------------------------------------------------------------------------
@@ -247,18 +231,16 @@ def _assert_audit_call_has_ctx(call, *, expected_preset: str, expected_model: st
 def test_x8_emit_finishing_audit_completed_includes_ctx() -> None:
     """X8: COMPLETED status → run_finished audit 含 ctx。"""
     store_spy = MagicMock()
-    bridge = _make_bridge(
-        base_config=_make_config(model_name="m1"),
-        preset_map={"p1": _make_preset("p1", "ModelA")},
-        store=store_spy,
-    )
-    task = _make_task(preset_id="p1")
+    bridge = _make_bridge(base_config=_make_config(), store=store_spy)
+    task = _make_task(preset_id="bigmodel-glm5")
     run = _make_run(status=RunStatus.COMPLETED)
     bridge._emit_finishing_audit(task=task, run=run)
 
     assert store_spy.append_audit.call_count == 1
     _assert_audit_call_has_ctx(
-        store_spy.append_audit.call_args, expected_preset="p1", expected_model="ModelA"
+        store_spy.append_audit.call_args,
+        expected_preset="bigmodel-glm5",
+        expected_model="glm-5.1",
     )
     assert store_spy.append_audit.call_args.kwargs["action"] == "run_finished"
 
@@ -267,7 +249,7 @@ def test_x9_emit_finishing_audit_failed_includes_ctx() -> None:
     """X9: FAILED status → run_failed audit 含 ctx。"""
     store_spy = MagicMock()
     bridge = _make_bridge(
-        base_config=_make_config(model_name="fb-model"),
+        base_config=_make_config(),
         store=store_spy,
     )
     task = _make_task(preset_id="")
@@ -276,16 +258,18 @@ def test_x9_emit_finishing_audit_failed_includes_ctx() -> None:
 
     assert store_spy.append_audit.call_count == 1
     payload = store_spy.append_audit.call_args.kwargs["payload"]
-    assert payload["preset_id"] == ""
-    assert payload["model_name"] == "fb-model"
+    assert payload["preset_id"] == "local-gemma-4-e4b-it"
+    assert payload["model_name"] == "gemma-4-e4b-it"
     assert store_spy.append_audit.call_args.kwargs["action"] == "run_failed"
+    store_spy.append_incident.assert_called_once()
+    assert store_spy.append_incident.call_args.kwargs["action"] == "run_failed"
 
 
 def test_x10_emit_finishing_audit_silent_writes_two_with_ctx() -> None:
     """X10: SILENT status 写 2 行 audit（run_silent_suppressed + run_finished），都含 ctx。"""
     store_spy = MagicMock()
     bridge = _make_bridge(
-        base_config=_make_config(model_name="silent-model"),
+        base_config=_make_config(),
         store=store_spy,
     )
     task = _make_task(preset_id="")
@@ -297,27 +281,26 @@ def test_x10_emit_finishing_audit_silent_writes_two_with_ctx() -> None:
     assert actions == ["run_silent_suppressed", "run_finished"]
     for call in store_spy.append_audit.call_args_list:
         payload = call.kwargs["payload"]
-        assert payload["preset_id"] == ""
-        assert payload["model_name"] == "silent-model"
+        assert payload["preset_id"] == "local-gemma-4-e4b-it"
+        assert payload["model_name"] == "gemma-4-e4b-it"
 
 
 def test_x11_record_skipped_by_concurrency_includes_ctx() -> None:
     """X11: _record_skipped_by_concurrency 的 audit 含 ctx。"""
     store_spy = MagicMock()
-    bridge = _make_bridge(
-        base_config=_make_config(model_name="skip-model"),
-        preset_map={"abc": _make_preset("abc", "AbcModel")},
-        store=store_spy,
-    )
-    task = _make_task(preset_id="abc")
+    bridge = _make_bridge(base_config=_make_config(), store=store_spy)
+    task = _make_task(preset_id="deepseek-pro")
     bridge._record_skipped_by_concurrency(
-        task=task, scheduled_for="2026-05-17T00:00:00Z", reason="locked"
+        task=task,
+        scheduled_for="2026-05-17T00:00:00Z",
+        reason="locked",
+        run_id="run-skipped-x11",
     )
 
     # 1 次 append_run + 1 次 append_audit
     audit_calls = [c for c in store_spy.append_audit.call_args_list]
     assert len(audit_calls) == 1
     payload = audit_calls[0].kwargs["payload"]
-    assert payload["preset_id"] == "abc"
-    assert payload["model_name"] == "AbcModel"
+    assert payload["preset_id"] == "deepseek-pro"
+    assert payload["model_name"] == "deepseek-v4-pro"
     assert audit_calls[0].kwargs["action"] == "run_skipped_by_concurrency"

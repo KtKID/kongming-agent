@@ -4,6 +4,13 @@
  * 不放 fetch / WS / UI 逻辑，只定义前端视图模型和事件模型。
  */
 
+import type {
+  CreateCronTaskRequest,
+  CronRunStatus,
+  CronTaskLifecycle,
+  UpdateCronTaskRequest,
+} from "@/protocol";
+
 // ---------------------------------------------------------------------------
 // 任务视图模型
 // ---------------------------------------------------------------------------
@@ -11,8 +18,9 @@
 export type SchedulerTaskVM = {
   taskId: string;
   name: string;
-  enabled: boolean;
-  state: "scheduled" | "paused" | "running" | "completed" | "failed";
+  lifecycle: CronTaskLifecycle;
+  latestRunStatus: CronRunStatus | null;
+  liveRuntimeStatus: SchedulerTaskRuntimeStatus;
   triggerType: "once" | "cron" | "interval" | "seconds";
   triggerExpr: string;
   nextRunAt: string | null;
@@ -27,6 +35,8 @@ export type SchedulerTaskVM = {
   agentName: string;
 };
 
+export type SchedulerTaskRuntimeStatus = "idle" | "running";
+
 // ---------------------------------------------------------------------------
 // 运行记录视图模型
 // ---------------------------------------------------------------------------
@@ -35,10 +45,13 @@ export type SchedulerRunVM = {
   runId: string;
   taskId: string;
   taskName: string;
+  sessionId: string;
+  threadId: string;
   scheduledFor: string;
   startedAt: string | null;
   finishedAt: string | null;
-  status: "running" | "success" | "failed" | "silent" | "cancelled";
+  status: CronRunStatus;
+  failureReason: string | null;
   finalMessageExcerpt: string | null;
   deliveryStatus: string;
   deliveryError: string | null;
@@ -65,18 +78,7 @@ export type SchedulerFormModel = {
 // 创建请求 DTO
 // ---------------------------------------------------------------------------
 
-export type CreateSchedulerTaskRequest = {
-  name: string;
-  agent_name: string;
-  input_text: string;
-  preset_id?: string;
-  schedule_type: "once" | "cron";
-  once_at?: string;
-  cron_expr?: string;
-  timezone: string;
-  concurrency_policy?: "forbid" | "allow" | "replace";
-  enabled?: boolean;
-};
+export type CreateSchedulerTaskRequest = CreateCronTaskRequest;
 
 // ---------------------------------------------------------------------------
 // 编辑请求 DTO（PATCH /api/cron/tasks/{task_id}，v0.5.3）
@@ -88,15 +90,7 @@ export type CreateSchedulerTaskRequest = {
 //   `parse_schedule` 统一解析。
 // - `agent` 对应 create 时的 `agent_name`（这里精简掉 _name 后缀）。
 
-export type UpdateSchedulerTaskRequest = {
-  name?: string;
-  schedule?: string;
-  agent?: string;
-  input_text?: string;
-  preset_id?: string;
-  enabled?: boolean;
-  concurrency_policy?: "forbid" | "allow" | "replace";
-};
+export type UpdateSchedulerTaskRequest = UpdateCronTaskRequest;
 
 // ---------------------------------------------------------------------------
 // Store 状态
@@ -110,7 +104,11 @@ export type SchedulerStoreState = {
   tasks: SchedulerTaskVM[];
   taskMap: Record<string, SchedulerTaskVM>;
   runsByTaskId: Record<string, SchedulerRunVM[]>;
+  runtimeStatusByTaskId: Record<string, SchedulerTaskRuntimeStatus>;
+  liveRunIdsByTaskId: Record<string, string[]>;
+  selectedRunIdByTaskId: Record<string, string | null>;
+  pendingManualRunTaskId: string | null;
   selectedTaskId: string | null;
-  filter: "all" | "running" | "paused" | "completed" | "failed";
+  filter: "all" | CronTaskLifecycle;
   errorMessage: string | null;
 };

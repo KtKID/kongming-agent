@@ -14,18 +14,20 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
 
 from core.contracts import ToolContext, ToolResult
 from scheduler.domain import (
     DueTaskReservation,
     RunStatus,
     ScheduledRun,
-    TaskState,
+    ScheduledRunSubmitDisposition,
+    ScheduledRunSubmitReceipt,
+    TaskLifecycleState,
     TriggerType,
 )
 from scheduler.store import Store
 from scheduler.timing import parse_iso, to_iso, utc_now
+from tests.support.tool_calls import execute_prepared_tool
 from tools.builtin.schedule_tool import ScheduleTool, build_schedule_tool
 
 
@@ -81,7 +83,8 @@ class TestScheduleToolCreate:
         store = Store(home_dir=tmp_path / "cron")
         tool = build_schedule_tool(store)
 
-        result = await tool.execute(
+        result = await execute_prepared_tool(
+            tool,
             {
                 "action": "create",
                 "name": "missing provisioner",
@@ -97,7 +100,8 @@ class TestScheduleToolCreate:
 
     async def test_create_every_seconds_succeeds(self, tmp_path: Path) -> None:
         tool, store = _make_tool(tmp_path)
-        r: ToolResult = await tool.execute(
+        r: ToolResult = await execute_prepared_tool(
+            tool,
             {
                 "action": "create",
                 "name": "drink water",
@@ -117,7 +121,7 @@ class TestScheduleToolCreate:
         assert task is not None
         assert task.name == "drink water"
         assert task.target.agent_name == "default"
-        assert task.enabled is True
+        assert task.lifecycle is TaskLifecycleState.SCHEDULED
         # audit 落了 create
         audits = store.list_audits(task_id=task_id)
         actions = [a["action"] for a in audits]
@@ -125,7 +129,8 @@ class TestScheduleToolCreate:
 
     async def test_create_iso8601_one_shot_sets_next_run(self, tmp_path: Path) -> None:
         tool, _store = _make_tool(tmp_path)
-        r = await tool.execute(
+        r = await execute_prepared_tool(
+            tool,
             {
                 "action": "create",
                 "name": "future",
@@ -151,7 +156,8 @@ class TestScheduleToolCreate:
             thread_provisioner=provisioner,
         )
 
-        result = await tool.execute(
+        result = await execute_prepared_tool(
+            tool,
             {
                 "action": "create",
                 "name": "daily-1012",
@@ -197,7 +203,8 @@ class TestScheduleToolCreate:
         tool, store = _make_tool(tmp_path)
         past_schedule = to_iso(utc_now() - timedelta(minutes=10))
 
-        result = await tool.execute(
+        result = await execute_prepared_tool(
+            tool,
             {
                 "action": "create",
                 "name": "past-once",
@@ -224,7 +231,8 @@ class TestScheduleToolCreate:
         """
         for schedule_expr in ["every 30s", "every 5m", "0 9 * * *", "*/30 * * * * *"]:
             tool, store = _make_tool(tmp_path / schedule_expr.replace(" ", "_").replace("*", "x"))
-            r = await tool.execute(
+            r = await execute_prepared_tool(
+                tool,
                 {
                     "action": "create",
                     "name": f"test {schedule_expr}",
@@ -257,7 +265,8 @@ class TestScheduleToolCreate:
         应返回结构化错误而不是抛异常。"""
         tool, _ = _make_tool(tmp_path)
         # parse_schedule 接受 5 字段；用 croniter 拒绝的字段值（month=13）
-        r = await tool.execute(
+        r = await execute_prepared_tool(
+            tool,
             {
                 "action": "create",
                 "name": "bad-cron",
@@ -272,7 +281,8 @@ class TestScheduleToolCreate:
 
     async def test_create_invalid_schedule_returns_error(self, tmp_path: Path) -> None:
         tool, _ = _make_tool(tmp_path)
-        r = await tool.execute(
+        r = await execute_prepared_tool(
+            tool,
             {
                 "action": "create",
                 "name": "bad",
@@ -287,7 +297,8 @@ class TestScheduleToolCreate:
 
     async def test_create_missing_name_returns_error(self, tmp_path: Path) -> None:
         tool, _ = _make_tool(tmp_path)
-        r = await tool.execute(
+        r = await execute_prepared_tool(
+            tool,
             {"action": "create", "schedule": "every 10s", "input": "x"},
             _ctx(),
         )
@@ -297,7 +308,8 @@ class TestScheduleToolCreate:
 
     async def test_create_missing_schedule_returns_error(self, tmp_path: Path) -> None:
         tool, _ = _make_tool(tmp_path)
-        r = await tool.execute(
+        r = await execute_prepared_tool(
+            tool,
             {"action": "create", "name": "n", "input": "x"},
             _ctx(),
         )
@@ -306,7 +318,8 @@ class TestScheduleToolCreate:
 
     async def test_create_missing_input_returns_error(self, tmp_path: Path) -> None:
         tool, _ = _make_tool(tmp_path)
-        r = await tool.execute(
+        r = await execute_prepared_tool(
+            tool,
             {"action": "create", "name": "n", "schedule": "every 10s"},
             _ctx(),
         )
@@ -315,7 +328,8 @@ class TestScheduleToolCreate:
 
     async def test_create_invalid_concurrency_returns_error(self, tmp_path: Path) -> None:
         tool, _ = _make_tool(tmp_path)
-        r = await tool.execute(
+        r = await execute_prepared_tool(
+            tool,
             {
                 "action": "create",
                 "name": "n",
@@ -337,7 +351,7 @@ class TestScheduleToolCreate:
 class TestScheduleToolList:
     async def test_list_empty(self, tmp_path: Path) -> None:
         tool, _ = _make_tool(tmp_path)
-        r = await tool.execute({"action": "list"}, _ctx())
+        r = await execute_prepared_tool(tool, {"action": "list"}, _ctx())
         assert r.ok is True
         assert r.content == "(no tasks)"
         assert r.data is not None
@@ -345,15 +359,17 @@ class TestScheduleToolList:
 
     async def test_list_returns_tasks(self, tmp_path: Path) -> None:
         tool, _ = _make_tool(tmp_path)
-        await tool.execute(
+        await execute_prepared_tool(
+            tool,
             {"action": "create", "name": "t1", "schedule": "every 10s", "input": "x"},
             _ctx(),
         )
-        await tool.execute(
+        await execute_prepared_tool(
+            tool,
             {"action": "create", "name": "t2", "schedule": "every 30s", "input": "y"},
             _ctx(),
         )
-        r = await tool.execute({"action": "list"}, _ctx())
+        r = await execute_prepared_tool(tool, {"action": "list"}, _ctx())
         assert r.ok is True
         assert r.data is not None
         assert r.data["count"] == 2
@@ -371,40 +387,43 @@ class TestScheduleToolList:
 class TestScheduleToolPauseResume:
     async def test_pause_then_resume(self, tmp_path: Path) -> None:
         tool, store = _make_tool(tmp_path)
-        create = await tool.execute(
+        create = await execute_prepared_tool(
+            tool,
             {"action": "create", "name": "p", "schedule": "every 10s", "input": "x"},
             _ctx(),
         )
         task_id = create.data["task_id"]
 
-        r_pause = await tool.execute({"action": "pause", "task_id": task_id}, _ctx())
+        r_pause = await execute_prepared_tool(tool, {"action": "pause", "task_id": task_id}, _ctx())
         assert r_pause.ok is True
         task = store.get_task(task_id)
         assert task is not None
-        assert task.enabled is False
-        assert task.state is TaskState.PAUSED
+        assert task.lifecycle is TaskLifecycleState.PAUSED
         # audit 落了 pause
         actions = [a["action"] for a in store.list_audits(task_id=task_id)]
         assert "pause" in actions
 
-        r_resume = await tool.execute({"action": "resume", "task_id": task_id}, _ctx())
+        r_resume = await execute_prepared_tool(
+            tool, {"action": "resume", "task_id": task_id}, _ctx()
+        )
         assert r_resume.ok is True
         task = store.get_task(task_id)
         assert task is not None
-        assert task.enabled is True
-        assert task.state is TaskState.SCHEDULED
+        assert task.lifecycle is TaskLifecycleState.SCHEDULED
         actions = [a["action"] for a in store.list_audits(task_id=task_id)]
         assert "resume" in actions
 
     async def test_pause_unknown_task(self, tmp_path: Path) -> None:
         tool, _ = _make_tool(tmp_path)
-        r = await tool.execute({"action": "pause", "task_id": "task-nosuch"}, _ctx())
+        r = await execute_prepared_tool(tool, {"action": "pause", "task_id": "task-nosuch"}, _ctx())
         assert r.ok is False
         assert r.error_message == "task_not_found"
 
     async def test_resume_unknown_task(self, tmp_path: Path) -> None:
         tool, _ = _make_tool(tmp_path)
-        r = await tool.execute({"action": "resume", "task_id": "task-nosuch"}, _ctx())
+        r = await execute_prepared_tool(
+            tool, {"action": "resume", "task_id": "task-nosuch"}, _ctx()
+        )
         assert r.ok is False
         assert r.error_message == "task_not_found"
 
@@ -417,13 +436,14 @@ class TestScheduleToolPauseResume:
 class TestScheduleToolRemove:
     async def test_remove_existing(self, tmp_path: Path) -> None:
         tool, store = _make_tool(tmp_path)
-        create = await tool.execute(
+        create = await execute_prepared_tool(
+            tool,
             {"action": "create", "name": "to-rm", "schedule": "every 10s", "input": "x"},
             _ctx(),
         )
         task_id = create.data["task_id"]
 
-        r = await tool.execute({"action": "remove", "task_id": task_id}, _ctx())
+        r = await execute_prepared_tool(tool, {"action": "remove", "task_id": task_id}, _ctx())
         assert r.ok is True
         assert store.get_task(task_id) is None
         actions = [a["action"] for a in store.list_audits(task_id=task_id)]
@@ -431,7 +451,9 @@ class TestScheduleToolRemove:
 
     async def test_remove_unknown(self, tmp_path: Path) -> None:
         tool, _ = _make_tool(tmp_path)
-        r = await tool.execute({"action": "remove", "task_id": "task-nosuch"}, _ctx())
+        r = await execute_prepared_tool(
+            tool, {"action": "remove", "task_id": "task-nosuch"}, _ctx()
+        )
         assert r.ok is False
         assert r.error_message == "task_not_found"
 
@@ -441,16 +463,21 @@ class TestScheduleToolRemove:
 # ---------------------------------------------------------------------------
 
 
-class _StubBridge:
+class _StubScheduledRunManager:
     """run_now 测试用：捕获 reservation 并合成 COMPLETED ScheduledRun。"""
 
     def __init__(self) -> None:
         self.reservations: list[DueTaskReservation] = []
+        self.runs: dict[str, ScheduledRun] = {}
+        self.aclose_called = False
 
-    async def execute(self, reservation: DueTaskReservation) -> ScheduledRun:
+    async def submit_scheduled_run(
+        self,
+        reservation: DueTaskReservation,
+    ) -> ScheduledRunSubmitReceipt:
         self.reservations.append(reservation)
         now = to_iso(utc_now())
-        return ScheduledRun(
+        run = ScheduledRun(
             run_id=f"run-stub-{reservation.task.task_id}",
             task_id=reservation.task.task_id,
             status=RunStatus.COMPLETED,
@@ -465,13 +492,18 @@ class _StubBridge:
             delivery_error=None,
             silent_suppressed=False,
         )
+        self.runs[run.run_id] = run
+        return ScheduledRunSubmitReceipt(
+            reservation_id=reservation.reservation_id,
+            task_id=reservation.task.task_id,
+            run_id=run.run_id,
+            session_id=run.session_id or "",
+            thread_id=reservation.task.thread_id,
+            disposition=ScheduledRunSubmitDisposition.ACCEPTED,
+        )
 
-
-class _StubRuntime:
-    """run_now 测试用：仅暴露 aclose。"""
-
-    def __init__(self) -> None:
-        self.aclose_called = False
+    async def wait_for_run(self, run_id: str) -> ScheduledRun:
+        return self.runs[run_id]
 
     async def aclose(self) -> None:
         self.aclose_called = True
@@ -481,39 +513,41 @@ class TestScheduleToolRunNow:
     async def test_run_now_without_factory_returns_error(self, tmp_path: Path) -> None:
         tool, _ = _make_tool(tmp_path)
         # 先 create 拿到一个 task_id
-        create = await tool.execute(
+        create = await execute_prepared_tool(
+            tool,
             {"action": "create", "name": "n", "schedule": "every 10s", "input": "x"},
             _ctx(),
         )
         task_id = create.data["task_id"]
 
-        r = await tool.execute({"action": "run_now", "task_id": task_id}, _ctx())
+        r = await execute_prepared_tool(tool, {"action": "run_now", "task_id": task_id}, _ctx())
         assert r.ok is False
         assert r.error_message == "runtime_factory_missing"
 
     async def test_run_now_unknown_task(self, tmp_path: Path) -> None:
         store = Store(home_dir=tmp_path / "cron")
 
-        def factory(_: Store) -> tuple[Any, Any]:
-            return _StubRuntime(), _StubBridge()
+        def factory(_: Store) -> _StubScheduledRunManager:
+            return _StubScheduledRunManager()
 
         tool = build_schedule_tool(
             store,
             runtime_factory_fn=factory,
             thread_provisioner=_FakeThreadProvisioner(),
         )
-        r = await tool.execute({"action": "run_now", "task_id": "task-nosuch"}, _ctx())
+        r = await execute_prepared_tool(
+            tool, {"action": "run_now", "task_id": "task-nosuch"}, _ctx()
+        )
         assert r.ok is False
         assert r.error_message == "task_not_found"
 
-    async def test_run_now_invokes_bridge_and_closes_runtime(self, tmp_path: Path) -> None:
+    async def test_run_now_invokes_shared_scheduled_run_manager(self, tmp_path: Path) -> None:
         store = Store(home_dir=tmp_path / "cron")
-        stub_bridge = _StubBridge()
-        stub_runtime = _StubRuntime()
+        stub_manager = _StubScheduledRunManager()
 
-        def factory(s: Store) -> tuple[Any, Any]:
+        def factory(s: Store) -> _StubScheduledRunManager:
             assert s is store
-            return stub_runtime, stub_bridge
+            return stub_manager
 
         tool = build_schedule_tool(
             store,
@@ -521,56 +555,63 @@ class TestScheduleToolRunNow:
             thread_provisioner=_FakeThreadProvisioner(),
         )
         # 先 create
-        create = await tool.execute(
+        create = await execute_prepared_tool(
+            tool,
             {"action": "create", "name": "n", "schedule": "every 10s", "input": "x"},
             _ctx(),
         )
         task_id = create.data["task_id"]
 
-        r = await tool.execute({"action": "run_now", "task_id": task_id}, _ctx())
+        r = await execute_prepared_tool(tool, {"action": "run_now", "task_id": task_id}, _ctx())
         assert r.ok is True
         assert r.data is not None
         assert r.data["status"] == RunStatus.COMPLETED.value
         assert r.data["task_id"] == task_id
         assert r.data["run_id"].startswith("run-stub-")
-        # bridge.execute 被调一次
-        assert len(stub_bridge.reservations) == 1
-        assert stub_bridge.reservations[0].task.task_id == task_id
-        # runtime.aclose 被调
-        assert stub_runtime.aclose_called is True
+        assert len(stub_manager.reservations) == 1
+        assert stub_manager.reservations[0].task.task_id == task_id
+        assert stub_manager.aclose_called is False
         # audit 落 run_now
         actions = [a["action"] for a in store.list_audits(task_id=task_id)]
         assert "run_now" in actions
 
-    async def test_run_now_closes_runtime_on_bridge_error(self, tmp_path: Path) -> None:
-        """bridge.execute 抛错时 runtime.aclose 仍然被调。"""
+    async def test_run_now_surfaces_shared_manager_submit_error(self, tmp_path: Path) -> None:
+        """共享 manager submit 抛错时 ToolResult 返回稳定错误。"""
         store = Store(home_dir=tmp_path / "cron")
-        stub_runtime = _StubRuntime()
 
-        class _ExplodingBridge:
-            async def execute(self, reservation: DueTaskReservation) -> ScheduledRun:
+        class _ExplodingManager:
+            async def submit_scheduled_run(
+                self,
+                reservation: DueTaskReservation,
+            ) -> ScheduledRunSubmitReceipt:
+                del reservation
                 raise RuntimeError("bridge boom")
 
-        def factory(_: Store) -> tuple[Any, Any]:
-            return stub_runtime, _ExplodingBridge()
+            async def wait_for_run(self, run_id: str) -> ScheduledRun:
+                raise AssertionError(f"unexpected wait: {run_id}")
+
+            async def aclose(self) -> None:
+                return None
+
+        def factory(_: Store) -> _ExplodingManager:
+            return _ExplodingManager()
 
         tool = build_schedule_tool(
             store,
             runtime_factory_fn=factory,
             thread_provisioner=_FakeThreadProvisioner(),
         )
-        create = await tool.execute(
+        create = await execute_prepared_tool(
+            tool,
             {"action": "create", "name": "n", "schedule": "every 10s", "input": "x"},
             _ctx(),
         )
         task_id = create.data["task_id"]
 
-        r = await tool.execute({"action": "run_now", "task_id": task_id}, _ctx())
+        r = await execute_prepared_tool(tool, {"action": "run_now", "task_id": task_id}, _ctx())
         assert r.ok is False
         assert r.error_message is not None
         assert "bridge boom" in r.error_message
-        # 即便失败 aclose 仍走 finally
-        assert stub_runtime.aclose_called is True
 
 
 # ---------------------------------------------------------------------------
@@ -581,15 +622,15 @@ class TestScheduleToolRunNow:
 class TestScheduleToolGuards:
     async def test_unknown_action(self, tmp_path: Path) -> None:
         tool, _ = _make_tool(tmp_path)
-        r = await tool.execute({"action": "fly_to_moon"}, _ctx())
+        r = await execute_prepared_tool(tool, {"action": "fly_to_moon"}, _ctx())
         assert r.ok is False
         assert r.error_message == "invalid action"
 
     async def test_missing_action(self, tmp_path: Path) -> None:
         tool, _ = _make_tool(tmp_path)
-        r = await tool.execute({}, _ctx())
+        r = await execute_prepared_tool(tool, {}, _ctx())
         assert r.ok is False
-        assert r.error_message == "missing action"
+        assert r.error_message == "missing required args: ['action']"
 
 
 # ---------------------------------------------------------------------------

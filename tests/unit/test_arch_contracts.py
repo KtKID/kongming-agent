@@ -75,6 +75,37 @@ def test_sibling_packages_do_not_redefine_eventsink(pkg: str) -> None:
     )
 
 
+def test_llm_providers_do_not_import_hosts() -> None:
+    """LLM provider 层禁止直接依赖宿主层模块。
+
+    多模态上传资产由宿主层通过 ``core.contracts.AssetBytesReader`` 注入，
+    provider 只消费协议与 provider 自身适配逻辑。
+    """
+
+    violations: list[str] = []
+    for file in _iter_python_files("infrastructure/llm_providers"):
+        tree = ast.parse(file.read_text(encoding="utf-8"), filename=str(file))
+        for node in ast.walk(tree):
+            module: str | None = None
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "hosts" or alias.name.startswith("hosts."):
+                        module = alias.name
+                        break
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module
+            if module is None:
+                continue
+            if module == "hosts" or module.startswith("hosts."):
+                violations.append(f"{file.relative_to(REPO_ROOT)}:{node.lineno}:{module}")
+
+    assert not violations, (
+        "infrastructure/llm_providers must consume host capabilities through "
+        "core.contracts Protocols. Found host imports at: "
+        f"{violations}"
+    )
+
+
 def test_import_linter_contracts() -> None:
     """以子进程方式运行 ``lint-imports``，在 unit 层强制回归 .importlinter 合约。
 

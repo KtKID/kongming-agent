@@ -15,7 +15,7 @@ import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast, get_args
+from typing import Any, Literal, cast
 
 from ruamel.yaml import YAML
 
@@ -25,9 +25,7 @@ from infrastructure.config.writer import PatchItem, round_trip_update
 
 ProfileDecisionAction = Literal["sync-copy", "xspace-keep", "main-only"]
 
-_VALID_ACTIONS: frozenset[str] = frozenset(
-    str(action) for action in get_args(ProfileDecisionAction)
-)
+_VALID_ACTIONS: frozenset[str] = frozenset(("sync-copy", "xspace-keep", "main-only"))
 
 
 @dataclass(frozen=True)
@@ -257,7 +255,7 @@ class ConfigProfileManager:
         )
 
     def sync_copy(self, path: str, reason: str = "XSpace profile 继承主配置值") -> None:
-        """把主配置字段复制到已存在的 XSpace profile，并记录 sync-copy 决策。
+        """把主配置字段复制到 XSpace profile，并记录 sync-copy 决策。
 
         Args:
             path: Config leaf dot-path。
@@ -460,7 +458,7 @@ def _write_policy(
             break
     else:
         decisions.append(replacement_data)
-    decisions.sort(key=lambda item: str(item.get("path", "")) if isinstance(item, dict) else "")
+        decisions.sort(key=lambda item: str(item.get("path", "")) if isinstance(item, dict) else "")
 
     policy_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = policy_path.with_name(f"{policy_path.name}.tmp.{os.getpid()}.{time.time_ns()}")

@@ -5,11 +5,12 @@
 - _tools_to_anthropic_format：tools schema 无 function 包装
 - _parse_response：stop_reason 映射、usage 归一化、tool_use block 解析
 - _normalize_stop_reason：各种 stop_reason 映射
-- native_runtime 分发：provider=anthropic → AnthropicMessagesProvider
+- session_engine 分发：provider=anthropic → AnthropicMessagesProvider
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -18,8 +19,15 @@ import pytest
 
 from core.contracts import LLMRequest
 from core.message import Message, ToolCall
-from infrastructure.config.models import Config, ModelConfig, ReasoningProfile
+from infrastructure.config.model_catalog_manager import ModelCatalogManager
+from infrastructure.config.model_provider_catalog import (
+    ProviderProtocol,
+    ReasoningAdapter,
+    ReasoningCapability,
+)
+from infrastructure.config.models import ApiKeyHeader, Config, ModelSelectionConfig
 from infrastructure.llm_providers.anthropic_messages import AnthropicMessagesProvider
+from tests._helpers.model_runtime import make_model_runtime
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -28,14 +36,36 @@ def _make_provider(
     api_key: str = "sk-ant-test",
     base_url: str = "https://api.anthropic.com",
     name: str = "claude-sonnet-4-5",
+    api_key_header: ApiKeyHeader | None = None,
 ) -> AnthropicMessagesProvider:
+    runtime, credential = make_model_runtime(
+        protocol=ProviderProtocol.ANTHROPIC,
+        name=name,
+        base_url=base_url,
+        api_key=api_key,
+        api_key_header=api_key_header,
+    )
     return AnthropicMessagesProvider(
-        model_config=ModelConfig(
-            provider="anthropic",
-            name=name,
-            base_url=base_url,
-            api_key=api_key,
-        )
+        model_config=runtime,
+        credential=credential,
+    )
+
+
+def _minimax_reasoning_profile() -> ReasoningCapability:
+    """MiniMax-M3 Anthropic 兼容端点的 catalog reasoning capability。"""
+    return ReasoningCapability(
+        adapter=ReasoningAdapter.CONFIGURABLE_PATCH,
+        enabled_patch={"thinking": {"type": "adaptive"}},
+        disabled_patch={"thinking": {"type": "disabled"}},
+        supported_efforts=("high",),
+        default_effort="high",
+        supports_disabled=True,
+        effort_map={
+            "low": "high",
+            "medium": "high",
+            "high": "high",
+            "max": "high",
+        },
     )
 
 
@@ -164,16 +194,18 @@ def test_parse_response_text_only() -> None:
     resp = provider._parse_response(data)
     assert resp.message.content == "Hello!"
     assert resp.finish_reason == "stop"
-    assert resp.usage["prompt_tokens"] == 10
-    assert resp.usage["completion_tokens"] == 5
-    assert resp.usage["total_tokens"] == 15
+    assert resp.usage is not None
+    assert resp.usage.input_uncached_tokens.value == 10
+    assert resp.usage.output_total_tokens.value == 5
+    assert resp.usage.input_total_tokens.value is None
+    assert resp.usage.total_tokens.value is None
     # provider_metadata 默认为空 dict（无扩展字段）
     assert isinstance(resp.provider_metadata, dict)
 
 
 @pytest.mark.unit
-def test_parse_response_provider_metadata_cache_tokens() -> None:
-    """Anthropic cache token 字段被提取到 provider_metadata。"""
+def test_parse_response_cache_tokens_use_canonical_snapshot() -> None:
+    """Anthropic cache token 字段进入 canonical usage snapshot。"""
     provider = _make_provider()
     data: dict[str, Any] = {
         "id": "msg_abc",
@@ -188,8 +220,13 @@ def test_parse_response_provider_metadata_cache_tokens() -> None:
         },
     }
     resp = provider._parse_response(data)
-    assert resp.provider_metadata["cache_creation_input_tokens"] == 80
-    assert resp.provider_metadata["cache_read_input_tokens"] == 30
+    assert resp.usage is not None
+    assert resp.usage.input_uncached_tokens.value == 100
+    assert resp.usage.cache_write_tokens.value == 80
+    assert resp.usage.cache_read_tokens.value == 30
+    assert resp.usage.input_total_tokens.value == 210
+    assert resp.usage.output_total_tokens.value == 20
+    assert resp.usage.total_tokens.value == 230
     assert resp.provider_metadata["id"] == "msg_abc"
     assert resp.provider_metadata["model"] == "claude-sonnet-4-5"
 
@@ -263,8 +300,35 @@ def test_build_headers_contains_api_key_and_version() -> None:
     assert "Authorization" not in headers
 
 
+@pytest.mark.unit
+def test_build_headers_uses_explicit_bearer_header() -> None:
+    provider = _make_provider(
+        api_key="sk-compatible",
+        base_url="https://api.minimaxi.com/anthropic",
+        api_key_header="authorization-bearer",
+    )
+
+    headers = provider._build_headers()
+
+    assert headers["Authorization"] == "Bearer sk-compatible"
+    assert "x-api-key" not in headers
+
+
+@pytest.mark.unit
+def test_build_headers_does_not_switch_by_host() -> None:
+    provider = _make_provider(
+        api_key="sk-compatible",
+        base_url="https://api.minimaxi.com/anthropic",
+    )
+
+    headers = provider._build_headers()
+
+    assert headers["x-api-key"] == "sk-compatible"
+    assert "Authorization" not in headers
+
+
 # ---------------------------------------------------------------------------
-# native_runtime 分发
+# session_engine 分发
 # ---------------------------------------------------------------------------
 
 
@@ -273,91 +337,150 @@ def test_build_headers_contains_api_key_and_version() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.unit
-def test_minimax_profile_injects_reasoning_effort_via_build_payload() -> None:
-    """MiniMax-M2.7* 经 AnthropicMessagesProvider._build_payload 注入 reasoning_effort。
+def _make_reasoning_provider(
+    *,
+    name: str = "MiniMax-M3",
+    capability: ReasoningCapability | None = None,
+) -> AnthropicMessagesProvider:
+    """构造带 catalog capability 的 Anthropic-compatible provider。"""
+    runtime, credential = make_model_runtime(
+        protocol=ProviderProtocol.ANTHROPIC,
+        name=name,
+        base_url="https://api.anthropic.com",
+        api_key="sk-ant-test",
+        reasoning=capability,
+        reasoning_effort="high" if capability is not None else None,
+    )
+    return AnthropicMessagesProvider(model_config=runtime, credential=credential)
 
-    spec 验证项 #4：MiniMax-M2.7* 只在 Anthropic-compatible 路径下发送白名单字段。
+
+@pytest.mark.unit
+def test_minimax_profile_injects_thinking_toggle_via_build_payload() -> None:
+    """MiniMax-M3 经 AnthropicMessagesProvider._build_payload 注入 thinking 开关。
+
+    spec 验证项：MiniMax M3 只发送 thinking.type，不发送顶层 reasoning_effort。
     """
-    provider = AnthropicMessagesProvider(
-        model_config=ModelConfig(
-            provider="anthropic",
-            name="MiniMax-M2.7-3B",
-            base_url="https://api.anthropic.com",
-            api_key="sk-ant-test",
-            reasoning_effort="medium",
-            reasoning_profiles={
-                "MiniMax-M2.7": ReasoningProfile(
-                    match="prefix",
-                    adapter="anthropic_compatible_reasoning",
-                    supported_efforts=["low", "medium", "high"],
-                )
-            },
-        )
-    )
-    request = LLMRequest(model="MiniMax-M2.7-3B", messages=(Message.user("hi"),))
+    provider = _make_reasoning_provider(capability=_minimax_reasoning_profile())
+    request = LLMRequest(model="MiniMax-M3", messages=(Message.user("hi"),))
     payload = provider._build_payload(request)
-    assert payload.get("reasoning_effort") == "medium"
+    assert payload.get("thinking") == {"type": "adaptive"}
+    assert "reasoning_effort" not in payload
 
 
 @pytest.mark.unit
-def test_minimax_profile_not_sent_when_profiles_empty() -> None:
-    """reasoning_profiles 为空时，Anthropic provider 静默跳过 reasoning（有意设计）。"""
-    provider = AnthropicMessagesProvider(
-        model_config=ModelConfig(
-            provider="anthropic",
-            name="MiniMax-M2.7-3B",
-            base_url="https://api.anthropic.com",
-            api_key="sk-ant-test",
-            reasoning_effort="medium",
-            # reasoning_profiles 未配置 → 静默跳过
-        )
+def test_minimax_request_reasoning_effort_overrides_config() -> None:
+    """请求级 reasoning_effort 覆盖 Anthropic provider 配置默认值。"""
+    provider = _make_reasoning_provider(capability=_minimax_reasoning_profile())
+    request = LLMRequest(
+        model="MiniMax-M3",
+        messages=(Message.user("hi"),),
+        reasoning_effort="low",
     )
-    request = LLMRequest(model="MiniMax-M2.7-3B", messages=(Message.user("hi"),))
+    payload = provider._build_payload(request)
+    assert payload.get("thinking") == {"type": "adaptive"}
+    assert "reasoning_effort" not in payload
+
+
+@pytest.mark.unit
+def test_minimax_request_reasoning_none_disables_thinking() -> None:
+    """MiniMax-M3 请求级 reasoning_effort='none' 映射到 thinking disabled。"""
+    provider = _make_reasoning_provider(capability=_minimax_reasoning_profile())
+    request = LLMRequest(
+        model="MiniMax-M3",
+        messages=(Message.user("hi"),),
+        reasoning_effort="none",
+    )
+    payload = provider._build_payload(request)
+    assert payload.get("thinking") == {"type": "disabled"}
+    assert "reasoning_effort" not in payload
+
+
+@pytest.mark.unit
+def test_minimax_payload_logs_reasoning_decision(caplog: pytest.LogCaptureFixture) -> None:
+    """MiniMax payload 构造记录 reasoning 开关、请求档位和归一档位。"""
+    provider = _make_reasoning_provider(capability=_minimax_reasoning_profile())
+    request = LLMRequest(model="MiniMax-M3", messages=(Message.user("hi"),))
+
+    with caplog.at_level(logging.INFO, logger="infrastructure.llm_providers.anthropic_messages"):
+        payload = provider._build_payload(request)
+
+    assert payload.get("thinking") == {"type": "adaptive"}
+    assert "llm.reasoning provider=anthropic" in caplog.text
+    assert "switch=enabled" in caplog.text
+    assert "requested_effort=high" in caplog.text
+    assert "normalized_effort=high" in caplog.text
+    assert "payload_keys=['thinking']" in caplog.text
+
+
+@pytest.mark.unit
+def test_minimax_profile_not_sent_when_capability_empty() -> None:
+    """catalog 未声明 reasoning capability 时保持 payload 干净。"""
+    provider = _make_reasoning_provider()
+    request = LLMRequest(model="MiniMax-M3", messages=(Message.user("hi"),))
     payload = provider._build_payload(request)
     assert "reasoning_effort" not in payload
 
 
 @pytest.mark.unit
-def test_non_minimax_anthropic_model_not_sent_reasoning() -> None:
-    """非白名单模型（如 claude-sonnet）无 profile 命中，不注入 reasoning 参数。"""
-    provider = AnthropicMessagesProvider(
-        model_config=ModelConfig(
-            provider="anthropic",
-            name="claude-sonnet-4-5",
-            base_url="https://api.anthropic.com",
-            api_key="sk-ant-test",
-            reasoning_effort="high",
-            reasoning_profiles={
-                "MiniMax-M2.7": ReasoningProfile(
-                    match="prefix",
-                    adapter="anthropic_compatible_reasoning",
-                    supported_efforts=["low", "medium", "high"],
-                )
-            },
-        )
-    )
-    # request.model 是 claude-sonnet，不命中 MiniMax-M2.7 prefix
+def test_anthropic_model_without_capability_skips_reasoning() -> None:
+    """模型 snapshot 无 capability 时不注入 reasoning 参数。"""
+    provider = _make_reasoning_provider(name="claude-sonnet-4-5")
     request = LLMRequest(model="claude-sonnet-4-5", messages=(Message.user("hi"),))
     payload = provider._build_payload(request)
     assert "reasoning_effort" not in payload
 
 
 @pytest.mark.unit
-def test_native_runtime_dispatches_anthropic_provider() -> None:
-    """provider=anthropic 时 NativeRuntime.build 应使用 AnthropicMessagesProvider。"""
-    cfg = Config(
-        model=ModelConfig(
-            provider="anthropic",
-            name="claude-sonnet-4-5",
-            base_url="https://api.anthropic.com",
-            api_key="sk-ant-test",
-        )
+def test_deepseek_anthropic_profile_injects_output_config_effort() -> None:
+    """DeepSeek Anthropic-compatible profile 注入 thinking + output_config.effort。"""
+    capability = ReasoningCapability(
+        adapter=ReasoningAdapter.DEEPSEEK_ANTHROPIC_THINKING,
+        supported_efforts=("high", "max"),
+        default_effort="high",
+        supports_disabled=True,
+        effort_map={"low": "high", "medium": "high", "high": "high", "max": "max"},
     )
+    provider = _make_reasoning_provider(name="deepseek-v4-pro", capability=capability)
+    request = LLMRequest(
+        model="deepseek-v4-pro",
+        messages=(Message.user("hi"),),
+        reasoning_effort="max",
+    )
+    payload = provider._build_payload(request)
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["output_config"] == {"effort": "max"}
+    assert "reasoning_effort" not in payload
 
-    from runtime_assembly.native_runtime import NativeRuntime
 
-    runtime = NativeRuntime.build(cfg)
+@pytest.mark.unit
+def test_deepseek_anthropic_low_maps_to_high() -> None:
+    """DeepSeek Anthropic profile 按配置把 low 映射到 high。"""
+    capability = ReasoningCapability(
+        adapter=ReasoningAdapter.DEEPSEEK_ANTHROPIC_THINKING,
+        supported_efforts=("high", "max"),
+        default_effort="high",
+        supports_disabled=True,
+        effort_map={"low": "high", "medium": "high", "high": "high", "max": "max"},
+    )
+    provider = _make_reasoning_provider(name="deepseek-v4-pro", capability=capability)
+    request = LLMRequest(
+        model="deepseek-v4-pro",
+        messages=(Message.user("hi"),),
+        reasoning_effort="low",
+    )
+    payload = provider._build_payload(request)
+    assert payload["output_config"] == {"effort": "high"}
+
+
+@pytest.mark.unit
+def test_native_runtime_dispatches_anthropic_provider() -> None:
+    """provider=anthropic 时 SessionEngine.build 应使用 AnthropicMessagesProvider。"""
+    cfg = Config(model=ModelSelectionConfig(preset_id="minimax-m3"))
+    manager = ModelCatalogManager(environ={"MINIMAX_API_KEY": "sk-ant-test"})
+
+    from runtime_assembly.session_engine import SessionEngine
+
+    runtime = SessionEngine.build(cfg, model_catalog_manager=manager)
     assert runtime is not None
     # runner 内部持有 llm；通过 runner 的 _llm 属性验证类型
     assert isinstance(runtime._llm, AnthropicMessagesProvider)
@@ -366,19 +489,11 @@ def test_native_runtime_dispatches_anthropic_provider() -> None:
 @pytest.mark.unit
 def test_native_runtime_dispatches_openai_provider_by_default() -> None:
     """provider=openai_compatible 时应使用 OpenAIResponsesProvider。"""
-    from infrastructure.config.models import Config, ModelConfig
     from infrastructure.llm_providers.openai_responses import OpenAIResponsesProvider
-    from runtime_assembly.native_runtime import NativeRuntime
+    from runtime_assembly.session_engine import SessionEngine
 
-    cfg = Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="gemma-4-e4b-it",
-            base_url="http://127.0.0.1:1234/v1",
-            api_key="",
-        )
-    )
-    runtime = NativeRuntime.build(cfg)
+    cfg = Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
+    runtime = SessionEngine.build(cfg)
     assert isinstance(runtime._llm, OpenAIResponsesProvider)
 
 
@@ -475,8 +590,10 @@ async def test_stream_basic_text_block_e2e() -> None:
     assert chunks[-1].message is not None
     assert chunks[-1].message.content == "你好"
     assert chunks[-1].finish_reason == "stop"
-    assert chunks[-1].usage["prompt_tokens"] == 10
-    assert chunks[-1].usage["completion_tokens"] == 2
+    assert chunks[-1].usage is not None
+    assert chunks[-1].usage.input_uncached_tokens.value == 10
+    assert chunks[-1].usage.output_total_tokens.value == 2
+    assert chunks[-1].usage.input_total_tokens.value is None
 
     await provider.aclose()
 

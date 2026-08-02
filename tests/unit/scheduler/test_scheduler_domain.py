@@ -5,7 +5,7 @@
 2. 常量值
 3. ScheduleTrigger 构造与 frozen 不变性
 4. TaskExecutionPolicy 默认值与边界
-5. ScheduledTask 不变量（enabled / state 状态约束 + 必填字段）
+5. ScheduledTask 生命周期与必填字段
 6. ScheduledRun 字段
 7. DueTaskReservation / TaskExecutionContext / ScheduledRunRequest
 """
@@ -35,8 +35,8 @@ from scheduler.domain import (
     SessionMode,
     TaskExecutionContext,
     TaskExecutionPolicy,
+    TaskLifecycleState,
     TaskOrigin,
-    TaskState,
     TaskTarget,
     TriggerType,
 )
@@ -67,8 +67,7 @@ def _make_policy() -> TaskExecutionPolicy:
 
 def _make_task(
     *,
-    enabled: bool = True,
-    state: TaskState = TaskState.SCHEDULED,
+    lifecycle: TaskLifecycleState = TaskLifecycleState.SCHEDULED,
     task_id: str = "t1",
     name: str = "task-1",
     created_by: str = "user-a",
@@ -78,8 +77,7 @@ def _make_task(
     return ScheduledTask(
         task_id=task_id,
         name=name,
-        enabled=enabled,
-        state=state,
+        lifecycle=lifecycle,
         origin=TaskOrigin.CLI,
         trigger=_make_trigger(),
         policy=_make_policy(),
@@ -170,8 +168,8 @@ def test_silent_marker_constant():
 
 
 def test_schema_version_constant():
-    # v0.5：scheduler-approval-task-level-v0.5 引入 TaskExecutionPolicy.approval_mode
-    assert SCHEMA_VERSION == 5
+    # v0.6：任务持久化状态收口为 lifecycle 单一真源
+    assert SCHEMA_VERSION == 6
 
 
 # ---------------------------------------------------------------------------
@@ -289,35 +287,22 @@ def test_task_execution_policy_retry_limit_negative_rejected():
 
 
 # ---------------------------------------------------------------------------
-# 5. ScheduledTask 不变量
+# 5. ScheduledTask 生命周期
 # ---------------------------------------------------------------------------
 
 
-def test_scheduled_task_disabled_with_scheduled_state_rejected():
-    with pytest.raises(ValueError, match="enabled=False"):
-        _make_task(enabled=False, state=TaskState.SCHEDULED)
+@pytest.mark.parametrize("lifecycle", list(TaskLifecycleState))
+def test_scheduled_task_accepts_each_lifecycle_state(
+    lifecycle: TaskLifecycleState,
+) -> None:
+    task = _make_task(lifecycle=lifecycle)
+
+    assert task.lifecycle is lifecycle
 
 
-def test_scheduled_task_disabled_with_paused_state_ok():
-    task = _make_task(enabled=False, state=TaskState.PAUSED)
-    assert task.enabled is False
-    assert task.state is TaskState.PAUSED
-
-
-def test_scheduled_task_disabled_with_disabled_state_ok():
-    task = _make_task(enabled=False, state=TaskState.DISABLED)
-    assert task.state is TaskState.DISABLED
-
-
-def test_scheduled_task_disabled_with_completed_state_ok():
-    task = _make_task(enabled=False, state=TaskState.COMPLETED)
-    assert task.state is TaskState.COMPLETED
-
-
-def test_scheduled_task_enabled_with_running_state_ok():
-    task = _make_task(enabled=True, state=TaskState.RUNNING)
-    assert task.enabled is True
-    assert task.state is TaskState.RUNNING
+def test_scheduled_task_rejects_non_enum_lifecycle() -> None:
+    with pytest.raises(TypeError, match="lifecycle"):
+        _make_task(lifecycle="running")  # type: ignore[arg-type]
 
 
 def test_scheduled_task_empty_task_id_rejected():
@@ -341,8 +326,7 @@ def test_scheduled_task_trigger_wrong_type_rejected():
         ScheduledTask(
             task_id="t1",
             name="task-1",
-            enabled=True,
-            state=TaskState.SCHEDULED,
+            lifecycle=TaskLifecycleState.SCHEDULED,
             origin=TaskOrigin.CLI,
             trigger={"trigger_type": "cron"},  # type: ignore[arg-type]
             policy=_make_policy(),

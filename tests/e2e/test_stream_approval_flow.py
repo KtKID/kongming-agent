@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from core import AgentSpec, InMemorySession, Runner
-from core.contracts import LLMStreamChunk, ToolContext, ToolResult
+from core.contracts import LLMStreamChunk, PreparedToolCall, ToolContext, ToolResult
 from core.message import Message, ToolCall
 from tests.e2e.conftest import MemoryEventSink, RecordingApproval, StubLLMStreamProvider
 
@@ -28,8 +28,13 @@ class StubTool:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    async def execute(self, args: dict, ctx: ToolContext) -> ToolResult:
-        self.calls.append(args)
+    async def execute(
+        self,
+        prepared: PreparedToolCall,
+        ctx: ToolContext,
+    ) -> ToolResult:
+        del ctx
+        self.calls.append(dict(prepared.arguments))
         return ToolResult(ok=True, content="echo-result")
 
 

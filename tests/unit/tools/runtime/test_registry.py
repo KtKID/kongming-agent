@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from core.contracts import ToolContext, ToolResult
+from core.contracts import PreparedToolCall, ToolContext, ToolResult
 from tools import ToolRegistry
 
 
@@ -19,8 +19,9 @@ class _FakeTool:
         self.input_schema: dict[str, Any] = {"type": "object"}
 
     async def execute(
-        self, args: dict[str, Any], ctx: ToolContext
+        self, prepared: PreparedToolCall, ctx: ToolContext
     ) -> ToolResult:  # pragma: no cover - 本测试不会触发
+        del prepared, ctx
         return ToolResult(ok=True, content="")
 
 

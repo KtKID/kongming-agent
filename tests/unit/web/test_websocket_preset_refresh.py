@@ -40,6 +40,7 @@ class _FakeBridge:
         *,
         reasoning_effort: str | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        references: list[dict[str, Any]] | None = None,
     ) -> None:
         """记录用户输入参数，并等待测试释放任务。"""
         self.calls.append(
@@ -104,6 +105,7 @@ async def test_user_input_sends_error_when_runtime_refresh_fails() -> None:
             "error_code": "internal",
             "message": "模型切换尚未完成，runtime 刷新失败；请稍后重试。",
             "turn": None,
+            "reason": None,
             "timestamp_ms": websocket.sent[0]["timestamp_ms"],
         }
     ]

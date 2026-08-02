@@ -8,16 +8,32 @@ store；如果 store 写入失败，回滚刚创建的 thread。
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Protocol
 
-from scheduler.domain import DeliveryChannel, ScheduleDelivery, ScheduledTask
+from scheduler.domain import (
+    DeliveryChannel,
+    RunStatus,
+    ScheduleDelivery,
+    ScheduledRun,
+    ScheduledTask,
+    TaskRuntimeStatus,
+)
 from scheduler.store import Store
 
 _THREAD_TARGET_PREFIX = "thread:"
 _SCHEDULED_TASK_SOURCE_KIND = "scheduled_task"
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SchedulerTaskProjection:
+    """任务生命周期、最近运行结果和 live 状态的只读投影。"""
+
+    task: ScheduledTask
+    latest_run_status: RunStatus | None
+    live_runtime_status: TaskRuntimeStatus
 
 
 class ScheduleThreadProvisioner(Protocol):
@@ -43,6 +59,14 @@ class ScheduleThreadProvisioner(Protocol):
         ...
 
 
+class ScheduledRunLiveReader(Protocol):
+    """定时任务 live owner 的只读投影合同。"""
+
+    def has_live_task(self, task_id: str) -> bool:
+        """返回指定 task 是否存在 pending/running run。"""
+        ...
+
+
 class SchedulerManager:
     """scheduler 模块对外业务门户。"""
 
@@ -51,14 +75,111 @@ class SchedulerManager:
         store: Store,
         *,
         thread_provisioner: ScheduleThreadProvisioner | None = None,
+        live_reader: ScheduledRunLiveReader | None = None,
     ) -> None:
         self._store = store
         self._thread_provisioner = thread_provisioner
+        self._live_reader = live_reader
+
+    def bind_live_reader(self, live_reader: ScheduledRunLiveReader) -> None:
+        """绑定进程内唯一 ScheduledRunManager，供面板读取真实 live 状态。"""
+        self._live_reader = live_reader
 
     @property
     def store(self) -> Store:
         """当前 manager 操作的 scheduler store。"""
         return self._store
+
+    def recover_stale_runs_on_startup(self) -> int:
+        """启动期收口旧进程遗留的 RUNNING run。
+
+        返回被标记为 abandoned 的 run 数；调用方应在 ticker / run_now 入口暴露前调用。
+        """
+        return self._store.recover_stale_runs()
+
+    def project_task(self, task: ScheduledTask) -> SchedulerTaskProjection:
+        """从 task owner 与 run owner 组合稳定展示投影。"""
+        runs = self._store.list_runs(task.task_id, limit=None)
+        latest_terminal = next(
+            (run for run in reversed(runs) if run.status is not RunStatus.RUNNING),
+            None,
+        )
+        latest_status = latest_terminal.status if latest_terminal is not None else None
+        has_live_run = (
+            self._live_reader.has_live_task(task.task_id)
+            if self._live_reader is not None
+            else any(run.status is RunStatus.RUNNING for run in runs)
+        )
+        live_status = TaskRuntimeStatus.RUNNING if has_live_run else TaskRuntimeStatus.IDLE
+        return SchedulerTaskProjection(
+            task=task,
+            latest_run_status=latest_status,
+            live_runtime_status=live_status,
+        )
+
+    def list_task_projections(self) -> list[SchedulerTaskProjection]:
+        """返回所有任务的生命周期与运行态投影。"""
+        return [self.project_task(task) for task in self._store.list_tasks(include_disabled=True)]
+
+    def get_task(self, task_id: str) -> ScheduledTask | None:
+        """经 scheduler 门户读取单个 task。"""
+        return self._store.get_task(task_id)
+
+    def update_task(
+        self,
+        task_id: str,
+        *,
+        fields_to_update: dict[str, object],
+    ) -> ScheduledTask:
+        """经 scheduler 门户更新 task 持久化状态。"""
+        return self._store.update_task(task_id, **fields_to_update)
+
+    def delete_task(self, task_id: str) -> bool:
+        """经 scheduler 门户删除 task。"""
+        return self._store.delete_task(task_id)
+
+    def request_manual_run(
+        self,
+        task_id: str,
+        *,
+        requested_at: str,
+    ) -> ScheduledTask:
+        """经 scheduler 门户登记手动运行请求。"""
+        return self._store.request_manual_run(task_id, requested_at=requested_at)
+
+    def list_runs(
+        self,
+        task_id: str,
+        *,
+        limit: int | None = None,
+    ) -> list[ScheduledRun]:
+        """经 scheduler 门户读取单 task 的逻辑 run 列表。"""
+        return self._store.list_runs(task_id, limit=limit)
+
+    def list_recent_runs(
+        self,
+        *,
+        limit: int,
+        cursor: str | None,
+    ) -> list[ScheduledRun]:
+        """经 scheduler 门户读取跨 task 最近 run。"""
+        return self._store.list_recent_runs(limit=limit, cursor=cursor)
+
+    def append_audit(
+        self,
+        *,
+        action: str,
+        task_id: str | None,
+        actor: str,
+        payload: dict[str, object],
+    ) -> None:
+        """经 scheduler 门户追加 task 审计。"""
+        self._store.append_audit(
+            action=action,
+            task_id=task_id,
+            actor=actor,
+            payload=payload,
+        )
 
     async def create_task_with_thread(
         self,
@@ -84,7 +205,7 @@ class SchedulerManager:
             ValueError: Store 拒绝创建任务或 thread id 不合法。
         """
         if self._thread_provisioner is None:
-            raise RuntimeError("thread_provisioner required for scheduled task thread")
+            raise RuntimeError("thread manager provisioner required for scheduled task thread")
 
         thread_id = await self._thread_provisioner.create_scheduled_task_thread(
             task_id=task.task_id,
@@ -133,6 +254,8 @@ def bind_task_to_thread(task: ScheduledTask, *, thread_id: str) -> ScheduledTask
 
 __all__ = [
     "ScheduleThreadProvisioner",
+    "ScheduledRunLiveReader",
     "SchedulerManager",
+    "SchedulerTaskProjection",
     "bind_task_to_thread",
 ]

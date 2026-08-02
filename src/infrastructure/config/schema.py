@@ -25,10 +25,8 @@ scheduler / web / workflow / sitian）
 **editable 默认策略**（README 已定）：
 
 - 标量（bool/int/float/str/enum）默认 ``True``；
-- 强约束标量锁定为 ``False``：``model.api_key`` / ``web.dev_mode`` / ``host.kind``；
-- list 与嵌套 dict 一期统一 ``False``（``safety.*_commands`` / ``safety.sensitive_paths`` /
-  ``model.reasoning_profiles`` / ``web.llm_presets`` / ``safety.trusted_workdirs`` /
-  ``safety.allow_writes`` / ``safety.allow_tools_silent`` / ``model.provider_routing``）；
+- 强约束标量锁定为 ``False``：``web.dev_mode`` / ``host.kind``；
+- list 与嵌套 dict 一期统一 ``False``；
   ``scheduler.approval`` 拆为两个独立子字段（``mode`` / ``allow_write_file_create_in_cwd``）
   暴露给 UI 编辑——安全关键字段必须可见。
 
@@ -125,79 +123,18 @@ _FIELD_METAS: list[FieldMeta] = [
     # group: model
     # =======================================================================
     FieldMeta(
-        path="model.provider",
-        type="enum",
-        editable=True,
-        enum=["openai_compatible", "anthropic"],
-        desc="provider 协议。通常省略让 URL 决定；仅未知厂商 + URL 无强信号时显式写。下次对话生效。",
-        group="model",
-    ),
-    FieldMeta(
-        path="model.name",
+        path="model.preset_id",
         type="string",
         editable=True,
-        desc="模型名，透传给 provider 的 model 字段。下次对话生效。",
-        group="model",
-    ),
-    FieldMeta(
-        path="model.base_url",
-        type="string",
-        editable=True,
-        desc="provider HTTP 服务根地址。本地模型也走这个字段。下次对话生效。",
-        group="model",
-    ),
-    FieldMeta(
-        path="model.provider_routing",
-        type="dict",
-        editable=False,
-        desc="host → provider 路由表（按协议分组）。一期只读，请在 yaml 内手工维护。",
-        group="model",
-    ),
-    FieldMeta(
-        path="model.api_key",
-        type="string",
-        editable=False,
-        desc="鉴权密钥。锁定不可在 UI 编辑（防误改泄漏）；请走 .env 文件或环境变量。",
-        group="model",
-    ),
-    FieldMeta(
-        path="model.timeout",
-        type="float",
-        editable=True,
-        desc="单次请求超时（秒）。下次对话生效。",
-        min_value=0.0,
-        group="model",
-    ),
-    FieldMeta(
-        path="model.max_tokens",
-        type="int",
-        editable=True,
-        desc="单次响应最大 token 数。下次对话生效。",
-        min_value=1.0,
-        group="model",
-    ),
-    FieldMeta(
-        path="model.temperature",
-        type="float",
-        editable=True,
-        desc="采样温度 [0, 2]。0 最确定，2 最随机。下次对话生效。",
-        min_value=0.0,
-        max_value=2.0,
+        desc="默认模型 preset ID；静态模型定义由 model-providers.yaml 管理。下次运行生效。",
         group="model",
     ),
     FieldMeta(
         path="model.reasoning_effort",
         type="enum",
         editable=True,
-        enum=["low", "medium", "high"],
-        desc="推理深度。仅当 reasoning_profiles 命中模型时生效；不命中静默忽略。下次对话生效。",
-        group="model",
-    ),
-    FieldMeta(
-        path="model.reasoning_profiles",
-        type="dict",
-        editable=False,
-        desc="模型 reasoning 能力声明表（key=模型名/前缀）。一期只读，请在 yaml 内手工维护。",
+        enum=["none", "low", "medium", "high", "max"],
+        desc="默认推理档位；留空时采用 catalog 模型默认值。下次运行生效。",
         group="model",
     ),
     # =======================================================================
@@ -394,14 +331,6 @@ _FIELD_METAS: list[FieldMeta] = [
     ),
     # ---- mcp ----
     FieldMeta(
-        path="mcp.enabled",
-        type="bool",
-        editable=True,
-        desc="是否启用 MCP client 启动与工具注册。需重启生效。",
-        restart_required=True,
-        group="tool_approval",
-    ),
-    FieldMeta(
         path="mcp.servers",
         type="list",
         editable=False,
@@ -544,62 +473,13 @@ _FIELD_METAS: list[FieldMeta] = [
         group="tool_approval",
     ),
     # =======================================================================
-    # group: safety —— 整段一期只读
+    # group: safety —— LLM 审批复核器
     # =======================================================================
     FieldMeta(
-        path="safety.hard_deny_commands",
-        type="list",
+        path="safety.approval.llm",
+        type="dict",
         editable=False,
-        desc="用户追加的 hard-block 命令规则。一期只读，请在 yaml 内手工维护。",
-        group="safety",
-    ),
-    FieldMeta(
-        path="safety.approval_required_commands",
-        type="list",
-        editable=False,
-        desc="用户追加的需审批命令规则。一期只读，请在 yaml 内手工维护。",
-        group="safety",
-    ),
-    FieldMeta(
-        path="safety.sensitive_paths",
-        type="list",
-        editable=False,
-        desc="用户追加的路径风险规则。一期只读，请在 yaml 内手工维护。",
-        group="safety",
-    ),
-    FieldMeta(
-        path="safety.skill_call_rules",
-        type="list",
-        editable=False,
-        desc="用户追加的 skill 调用规则（v0.1.6）。一期只读，请在 yaml 内手工维护。",
-        group="safety",
-    ),
-    FieldMeta(
-        path="safety.trusted_workdirs",
-        type="list",
-        editable=False,
-        desc="默认作用域的低风险工作目录（项目相对路径）。一期只读，请在 yaml 内手工维护。",
-        group="safety",
-    ),
-    FieldMeta(
-        path="safety.allow_writes",
-        type="list",
-        editable=False,
-        desc="静默放行的写路径（字符串字面前缀比对，写绝对路径）。一期只读。",
-        group="safety",
-    ),
-    FieldMeta(
-        path="safety.allow_tools_silent",
-        type="list",
-        editable=False,
-        desc="静默放行的工具名集合。一期只读，请在 yaml 内手工维护。",
-        group="safety",
-    ),
-    FieldMeta(
-        path="safety.log_silent_reads",
-        type="bool",
-        editable=False,
-        desc="silent_allow + read 是否写 trace（默认 false 防膨胀）。一期只读，需重启生效。",
+        desc="llm 处置模式的 default:ask 复核模型。模型故障时保留人工审批；请在 setting.yaml 配置。需重启生效。",
         restart_required=True,
         group="safety",
     ),
@@ -712,15 +592,6 @@ _FIELD_METAS: list[FieldMeta] = [
         group="host_observ",
     ),
     FieldMeta(
-        path="web.pending_approval_timeout_seconds",
-        type="int",
-        editable=True,
-        desc="单次审批等待上限（秒，超时默认拒绝），下限 10。需重启生效。",
-        restart_required=True,
-        min_value=10.0,
-        group="host_observ",
-    ),
-    FieldMeta(
         path="web.ws_heartbeat_interval_ms",
         type="int",
         editable=True,
@@ -754,14 +625,6 @@ _FIELD_METAS: list[FieldMeta] = [
         desc="连续丢失几次 pong 判定连接死亡。需重启生效。",
         restart_required=True,
         min_value=1.0,
-        group="host_observ",
-    ),
-    FieldMeta(
-        path="web.llm_presets",
-        type="list",
-        editable=False,
-        desc="LLM preset 列表；浏览器创建 thread 时下拉选其一。一期只读，请在 yaml 内手工维护。需重启生效。",
-        restart_required=True,
         group="host_observ",
     ),
     FieldMeta(
@@ -955,34 +818,18 @@ _FIELD_METAS: list[FieldMeta] = [
         group="host_observ",
     ),
     FieldMeta(
-        path="evolution.learning.model_name",
-        type="string",
+        path="evolution.learning.auto_trigger_enabled",
+        type="bool",
         editable=True,
-        desc="reviewer 模型名（留空继承主 agent）。需重启生效。",
+        desc="是否按 cadence 自动触发 reviewer；关闭后仍可通过公开 Tool 显式触发。需重启生效。",
         restart_required=True,
         group="host_observ",
     ),
     FieldMeta(
-        path="evolution.learning.base_url",
+        path="evolution.learning.preset_id",
         type="string",
         editable=True,
-        desc="reviewer 独立 API 地址（留空继承主 agent）。需重启生效。",
-        restart_required=True,
-        group="host_observ",
-    ),
-    FieldMeta(
-        path="evolution.learning.api_key_env",
-        type="string",
-        editable=True,
-        desc="reviewer API key 所在的环境变量名（填变量名不填 key 本身）。需重启生效。",
-        restart_required=True,
-        group="host_observ",
-    ),
-    FieldMeta(
-        path="evolution.learning.provider",
-        type="string",
-        editable=True,
-        desc="reviewer provider 类型：openai_compatible / anthropic（留空自动检测）。需重启生效。",
+        desc="reviewer 专用 preset ID；留空继承主模型。需重启生效。",
         restart_required=True,
         group="host_observ",
     ),
@@ -990,7 +837,7 @@ _FIELD_METAS: list[FieldMeta] = [
         path="evolution.learning.reasoning_effort",
         type="enum",
         editable=True,
-        enum=["low", "medium", "high"],
+        enum=["none", "low", "medium", "high", "max"],
         desc="reviewer 推理深度（留空继承主 agent）。需重启生效。",
         restart_required=True,
         group="host_observ",
@@ -1178,55 +1025,20 @@ _FIELD_METAS: list[FieldMeta] = [
         group="sitian",
     ),
     FieldMeta(
-        path="sitian.analyzer.model_name",
+        path="sitian.analyzer.preset_id",
         type="string",
         editable=True,
-        desc="司天分析层模型名；留空表示禁用或由调用方决定。需重启生效。",
+        desc="司天分析层专用 preset ID；留空继承主模型。需重启生效。",
         restart_required=True,
         group="sitian",
     ),
     FieldMeta(
-        path="sitian.analyzer.base_url",
-        type="string",
+        path="sitian.analyzer.reasoning_effort",
+        type="enum",
         editable=True,
-        desc="司天分析层 API 根地址。需重启生效。",
+        enum=["none", "low", "medium", "high", "max"],
+        desc="司天分析层默认推理档位；留空采用 catalog 默认。需重启生效。",
         restart_required=True,
-        group="sitian",
-    ),
-    FieldMeta(
-        path="sitian.analyzer.api_key_env",
-        type="string",
-        editable=True,
-        desc="司天分析层 API key 所在环境变量名（填变量名）。需重启生效。",
-        restart_required=True,
-        group="sitian",
-    ),
-    FieldMeta(
-        path="sitian.analyzer.max_tokens",
-        type="int",
-        editable=True,
-        desc="司天分析层单次响应最大 token 数。需重启生效。",
-        restart_required=True,
-        min_value=1.0,
-        group="sitian",
-    ),
-    FieldMeta(
-        path="sitian.analyzer.temperature",
-        type="float",
-        editable=True,
-        desc="司天分析层采样温度 [0, 2]。需重启生效。",
-        restart_required=True,
-        min_value=0.0,
-        max_value=2.0,
-        group="sitian",
-    ),
-    FieldMeta(
-        path="sitian.analyzer.timeout",
-        type="int",
-        editable=True,
-        desc="司天分析层单次请求超时（秒）。需重启生效。",
-        restart_required=True,
-        min_value=1.0,
         group="sitian",
     ),
     FieldMeta(

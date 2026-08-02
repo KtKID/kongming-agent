@@ -13,6 +13,7 @@ import type {
   ChatHistoryBatch,
   ChatTimelineState,
   UserInputAttachment,
+  ConversationReferenceDTO,
   ReasoningEffort,
 } from "../types";
 
@@ -72,9 +73,15 @@ describe("chat/types · 真源复用（不出现第二份同名定义）", () =>
     expectTypeOf<UserInputAttachment>().toHaveProperty("preview_url");
   });
 
-  it("ReasoningEffort 复用 Composer 的 low/medium/high union", () => {
-    const efforts: ReasoningEffort[] = ["low", "medium", "high"];
-    expect(efforts).toHaveLength(3);
+  it("ReasoningEffort 复用 Composer 的 none/low/medium/high/max union", () => {
+    const efforts: ReasoningEffort[] = ["none", "low", "medium", "high", "max"];
+    expect(efforts).toHaveLength(5);
+  });
+
+  it("ConversationReferenceDTO 来自 @/protocol（id / ref / activation 等真源字段）", () => {
+    expectTypeOf<ConversationReferenceDTO>().toHaveProperty("id");
+    expectTypeOf<ConversationReferenceDTO>().toHaveProperty("ref");
+    expectTypeOf<ConversationReferenceDTO>().toHaveProperty("activation");
   });
 });
 

@@ -25,6 +25,7 @@ from typing import Any, Literal
 import pytest
 
 from core.contracts import Event, ToolContext
+from tests.support.tool_calls import execute_prepared_tool
 from tools.builtin.skill_tool import (
     SKILL_TOOL_SCHEMA,
     SkillSecurityError,
@@ -105,7 +106,7 @@ async def test_skill_tool_happy_path(tmp_path: Path) -> None:
     spec = _make_spec(tmp_path, name="demo", body="hello world")
     tool = SkillTool(specs={spec.name: spec})
 
-    result = await tool.execute({"skill": "demo"}, _ctx())
+    result = await execute_prepared_tool(tool, {"skill": "demo"}, _ctx())
 
     assert result.ok is True
     assert result.content == "hello world"
@@ -126,7 +127,7 @@ async def test_skill_tool_arguments_substitution(tmp_path: Path) -> None:
     spec = _make_spec(tmp_path, name="echo", body=body)
     tool = SkillTool(specs={spec.name: spec})
 
-    result = await tool.execute({"skill": "echo", "args": "hello"}, _ctx())
+    result = await execute_prepared_tool(tool, {"skill": "echo", "args": "hello"}, _ctx())
 
     assert result.ok is True
     assert result.content == "echo: hello"
@@ -143,7 +144,7 @@ async def test_skill_tool_three_variables(tmp_path: Path) -> None:
     tool = SkillTool(specs={spec.name: spec})
 
     ctx = _ctx(session_id="my-session-42")
-    result = await tool.execute({"skill": "vars", "args": "abc"}, ctx)
+    result = await execute_prepared_tool(tool, {"skill": "vars", "args": "abc"}, ctx)
 
     assert result.ok is True
     skill_dir_str = str(spec.body_path.parent)
@@ -161,7 +162,7 @@ async def test_skill_tool_rejects_command_substitution(tmp_path: Path) -> None:
     sink = _CollectingSink()
     tool = SkillTool(specs={spec.name: spec}, event_sinks=[sink])
 
-    result = await tool.execute({"skill": "bad"}, _ctx())
+    result = await execute_prepared_tool(tool, {"skill": "bad"}, _ctx())
 
     assert result.ok is False
     assert result.error_message is not None
@@ -185,7 +186,7 @@ async def test_skill_tool_unknown_name(tmp_path: Path) -> None:
     sink = _CollectingSink()
     tool = SkillTool(specs={spec.name: spec}, event_sinks=[sink])
 
-    result = await tool.execute({"skill": "nonexistent"}, _ctx())
+    result = await execute_prepared_tool(tool, {"skill": "nonexistent"}, _ctx())
 
     assert result.ok is False
     assert result.error_message is not None
@@ -209,7 +210,7 @@ async def test_skill_tool_oserror(tmp_path: Path) -> None:
     sink = _CollectingSink()
     tool = SkillTool(specs={spec.name: spec}, event_sinks=[sink])
 
-    result = await tool.execute({"skill": "missing"}, _ctx())
+    result = await execute_prepared_tool(tool, {"skill": "missing"}, _ctx())
 
     assert result.ok is False
     assert result.error_message is not None
@@ -237,7 +238,7 @@ async def test_skill_tool_unicode_decode_error(tmp_path: Path) -> None:
     sink = _CollectingSink()
     tool = SkillTool(specs={spec.name: spec}, event_sinks=[sink])
 
-    result = await tool.execute({"skill": "binary"}, _ctx())
+    result = await execute_prepared_tool(tool, {"skill": "binary"}, _ctx())
 
     assert result.ok is False
     kinds = [e.kind for e in sink.events]
@@ -302,7 +303,7 @@ async def test_skill_tool_emits_invoked_completed_in_order(tmp_path: Path) -> No
     tool = SkillTool(specs={spec.name: spec}, event_sinks=[sink])
 
     ctx = _ctx(run_id="run-A", turn=3)
-    result = await tool.execute({"skill": "demo"}, ctx)
+    result = await execute_prepared_tool(tool, {"skill": "demo"}, ctx)
 
     assert result.ok is True
     kinds = [e.kind for e in sink.events]
@@ -328,7 +329,7 @@ async def test_skill_tool_sink_exception_isolated(tmp_path: Path) -> None:
     tool = SkillTool(specs={spec.name: spec}, event_sinks=[raising, sink_b, sink_c])
 
     # 不抛
-    result = await tool.execute({"skill": "demo"}, _ctx())
+    result = await execute_prepared_tool(tool, {"skill": "demo"}, _ctx())
 
     assert result.ok is True
     # 后两个 sink 收到完整事件序列
@@ -372,7 +373,7 @@ async def test_skill_tool_completed_payload_fields(tmp_path: Path) -> None:
     sink = _CollectingSink()
     tool = SkillTool(specs={spec.name: spec}, event_sinks=[sink])
 
-    result = await tool.execute({"skill": "demo"}, _ctx())
+    result = await execute_prepared_tool(tool, {"skill": "demo"}, _ctx())
     assert result.ok is True
 
     completed_events = [e for e in sink.events if e.kind == "skill.completed"]
@@ -401,7 +402,7 @@ async def test_skill_tool_args_default_empty_string(tmp_path: Path) -> None:
     spec = _make_spec(tmp_path, name="demo", body="x=$ARGUMENTS;")
     tool = SkillTool(specs={spec.name: spec})
 
-    result = await tool.execute({"skill": "demo"}, _ctx())
+    result = await execute_prepared_tool(tool, {"skill": "demo"}, _ctx())
     assert result.ok is True
     assert result.content == "x=;"
 
@@ -410,7 +411,7 @@ async def test_skill_tool_rejects_non_string_args(tmp_path: Path) -> None:
     spec = _make_spec(tmp_path, name="demo", body="x")
     tool = SkillTool(specs={spec.name: spec})
 
-    result = await tool.execute({"skill": "demo", "args": 123}, _ctx())
+    result = await execute_prepared_tool(tool, {"skill": "demo", "args": 123}, _ctx())
     assert result.ok is False
     assert result.error_message is not None
     assert "args" in result.error_message

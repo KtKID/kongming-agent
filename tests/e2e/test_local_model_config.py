@@ -2,7 +2,7 @@
 
 覆盖 plan.md "e2e 主链路基线"的第六条：
 
-> 使用 ``http://127.0.0.1:1234`` + ``gemma-4-e4b-it`` 且不提供 ``api_key``，
+> 使用 ``http://127.0.0.1:62000/v1`` + ``gemma-4-e4b-it`` 且不提供 ``api_key``，
 > 系统仍能成功启动并完成最小请求。
 
 默认只验证 **配置加载 + 装配** 能走通，不发真实 HTTP 请求（本地模型服务
@@ -18,8 +18,10 @@ from pathlib import Path
 import pytest
 
 from infrastructure.config import load_config
-from infrastructure.config.models import Config, ModelConfig
-from runtime_assembly.native_runtime import NativeRuntime
+from infrastructure.config.model_catalog_manager import ModelCatalogManager
+from infrastructure.config.model_provider_catalog import ModelProviderCatalogError
+from infrastructure.config.models import Config, ModelSelectionConfig
+from runtime_assembly.session_engine import SessionEngine
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 LOCAL_MODEL_YAML = REPO_ROOT / "config" / "setting.yaml"
@@ -34,54 +36,42 @@ def test_local_model_config_loads_from_yaml() -> None:
     # load_env_file=False：隔离本地 .env，只测 YAML 结构本身
     cfg = load_config(LOCAL_MODEL_YAML, load_env_file=False)
     assert isinstance(cfg, Config)
-    # provider 在 v0.1.x 起为可选字段（可由 base_url + 路由表自动推断），yaml 可省略
-    assert cfg.model.provider == raw["model"].get("provider")
-    assert cfg.model.name == raw["model"]["name"]
-    assert cfg.model.base_url.rstrip("/") == raw["model"]["base_url"].rstrip("/")
-    assert cfg.model.api_key == ""
-    assert cfg.model.is_local is True
+    assert cfg.model.preset_id == raw["model"]["preset_id"]
+    runtime = ModelCatalogManager(environ={}).resolve_runtime(cfg.model)
+    assert runtime.name == "gemma-4-e4b-it"
+    assert runtime.base_url == "http://127.0.0.1:62000/v1"
 
 
 @pytest.mark.e2e
 def test_local_model_empty_api_key_is_allowed() -> None:
     """本地 base_url 下 api_key 可以为空，不应抛 ValidationError。"""
-    cfg = Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="gemma-4-e4b-it",
-            base_url="http://127.0.0.1:1234",
-            api_key="",
-        )
-    )
-    assert cfg.model.is_local is True
-    assert cfg.model.api_key == ""
+    cfg = Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
+    manager = ModelCatalogManager(environ={})
+    runtime = manager.resolve_runtime(cfg.model)
+    credential = manager.resolve_credential(runtime)
+    assert credential.value == ""
 
 
 @pytest.mark.e2e
 def test_remote_model_without_api_key_is_rejected() -> None:
-    """非本地 base_url + 空 api_key 应该被 pydantic 校验拒绝。
-
-    pydantic v2 的 ValidationError 会被 load_config 外层包装成
-    :class:`ConfigValidationError`，但直接构造 ``Config`` 时走的是原生
-    ValidationError。这里不走 load_config，直接构造验证跨字段校验。
-    """
-    from pydantic import ValidationError
-
-    with pytest.raises(ValidationError):
-        Config(
-            model=ModelConfig(
-                provider="openai_compatible",
-                name="gemma-4-e4b-it",
-                base_url="https://api.openai.com",
-                api_key="",
-            )
-        )
+    """远端 catalog preset 缺少 provider key 时由 Manager 拒绝。"""
+    cfg = Config(model=ModelSelectionConfig(preset_id="bigmodel-glm5-1m"))
+    manager = ModelCatalogManager(environ={})
+    runtime = manager.resolve_runtime(cfg.model)
+    with pytest.raises(ModelProviderCatalogError) as caught:
+        manager.resolve_credential(runtime)
+    assert caught.value.details["credential_envs"] == (
+        "GLM_API_KEY",
+        "BIGMODEL_API_KEY",
+        "ZHIPU_API_KEY",
+        "ZAI_API_KEY",
+    )
 
 
 @pytest.mark.e2e
 def test_local_model_native_runtime_build_succeeds(local_model_config: Config) -> None:
-    """本地模型配置下 ``NativeRuntime.build`` 能成功装配（不发真实请求）。"""
-    runtime = NativeRuntime.build(local_model_config)
+    """本地模型配置下 ``SessionEngine.build`` 能成功装配（不发真实请求）。"""
+    runtime = SessionEngine.build(local_model_config)
     assert runtime is not None
     # 装配层应挂好 config / agent_spec / runner
     assert runtime.config is local_model_config
@@ -100,7 +90,7 @@ def test_local_model_build_with_explicit_approval_and_tools(
     registry = ToolRegistry([ReadFileTool()])
     approval = AutoAllowApproval()
 
-    runtime = NativeRuntime.build(
+    runtime = SessionEngine.build(
         local_model_config,
         tools=registry,
         approval=approval,
@@ -111,17 +101,13 @@ def test_local_model_build_with_explicit_approval_and_tools(
 
 
 @pytest.mark.e2e
-def test_load_config_env_override_api_key(
+def test_load_config_env_override_preset_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``KONGMING_MODEL_API_KEY`` 环境变量应当覆盖 YAML 中的 api_key 字段。"""
-    monkeypatch.setenv("KONGMING_MODEL_API_KEY", "override-key-123")
-    try:
-        cfg = load_config(LOCAL_MODEL_YAML, load_env_file=False)
-    finally:
-        # monkeypatch fixture 会自动 undo，这里无需手动清理。
-        pass
-    assert cfg.model.api_key == "override-key-123"
+    """``KONGMING_MODEL_PRESET_ID`` 覆盖 YAML 中的运行时选择。"""
+    monkeypatch.setenv("KONGMING_MODEL_PRESET_ID", "bigmodel-glm5-1m")
+    cfg = load_config(LOCAL_MODEL_YAML, load_env_file=False)
+    assert cfg.model.preset_id == "bigmodel-glm5-1m"
 
 
 # ---------------------------------------------------------------------------
@@ -133,9 +119,7 @@ def test_load_config_env_override_api_key(
 @pytest.mark.slow
 @pytest.mark.skipif(
     os.getenv("KONGMING_E2E_REAL_MODEL") != "1",
-    reason=(
-        "requires local model service at 127.0.0.1:1234; set KONGMING_E2E_REAL_MODEL=1 to enable"
-    ),
+    reason="requires local model service at 127.0.0.1:62000; set KONGMING_E2E_REAL_MODEL=1 to enable",
 )
 async def test_local_model_real_request_roundtrip() -> None:
     """真模型路径：本地模型服务在线时发起一次最小请求，验证闭环。
@@ -144,7 +128,7 @@ async def test_local_model_real_request_roundtrip() -> None:
     这样测试套件在无本地模型服务的环境下仍能全绿。
     """
     cfg = load_config(LOCAL_MODEL_YAML)
-    runtime = NativeRuntime.build(cfg)
+    runtime = SessionEngine.build(cfg)
     result = await runtime.run(
         "Respond with the single word 'ok'.",
         session_id="local-real",

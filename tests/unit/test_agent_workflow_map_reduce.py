@@ -2,7 +2,7 @@
 
 本脚本验证 map_reduce 策略注册、通用 payload 入口、fake mapper 子 agent、reducer 产物和 run_agent_workflow tool 分流。
 作用是用可重复 pytest 覆盖 map_reduce v0.1 的 runtime 集成边界，避免依赖真实模型 smoke。
-关键执行流程：创建临时源码树，构造 MapReduce payload，用 fake SubAgentManager 返回 code_findings JSON，断言 workflow/root/map_reduce/reports 产物完整。
+关键执行流程：创建临时源码树，构造 MapReduce payload，用确定性 workflow task executor 返回 code_findings JSON，断言 workflow/root/map_reduce/reports 产物完整。
 关键函数：_payload 构造 workflow 输入，_mapper_output 构造 mapper JSON，test_* 覆盖 manager 和 tool 入口。
 """
 
@@ -16,10 +16,11 @@ from typing import Any
 import pytest
 
 from application.agent_roles import AgentRoleManager
-from application.agent_workflows.manager import AgentWorkflowManager
-from application.subagents.manager import SubAgentRun
+from application.agent_workflows.task_models import SubAgentRun
 from core.contracts import ToolContext
-from infrastructure.config.models import Config, ModelConfig
+from infrastructure.config.models import Config, ModelSelectionConfig
+from tests.support.tool_calls import execute_prepared_tool
+from tests.support.workflow_strategy_manager import WorkflowStrategyTestManager
 from tools.agent_workflow_tool import (
     AgentWorkflowHandle,
     build_run_agent_workflow_tool,
@@ -28,15 +29,15 @@ from tools.agent_workflow_tool import (
 _FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "agent_workflows" / "map_reduce"
 
 
-class _FakeSubAgentManager:
-    """测试用子 agent manager，按 shard metadata 返回结构化 mapper JSON。"""
+class _FakeWorkflowTaskExecutor:
+    """测试用 workflow task executor，按 shard metadata 返回结构化 mapper JSON。"""
 
     def __init__(self, *, content_suffix: str = "") -> None:
         """初始化 fake manager，输入为空，输出为记录任务的实例。"""
         self.tasks: list[Any] = []
         self._content_suffix = content_suffix
 
-    async def run_task(
+    async def execute_task(
         self, *, workflow_id: str, parent_session_id: str, task: Any, audit_writer: Any
     ) -> SubAgentRun:
         """运行 fake mapper，输入为任务 metadata，输出为 completed SubAgentRun。"""
@@ -58,14 +59,14 @@ class _FakeSubAgentManager:
         )
 
 
-class _RawTextSubAgentManager:
-    """测试用 raw_text 子 agent manager，按任务顺序返回随机数样式文本。"""
+class _RawTextWorkflowTaskExecutor:
+    """测试用 raw_text workflow executor，按任务顺序返回随机数样式文本。"""
 
     def __init__(self) -> None:
         """初始化 fake manager，输入为空，输出为记录任务的实例。"""
         self.tasks: list[Any] = []
 
-    async def run_task(
+    async def execute_task(
         self, *, workflow_id: str, parent_session_id: str, task: Any, audit_writer: Any
     ) -> SubAgentRun:
         """运行 fake raw_text mapper，输入为任务 metadata，输出为数字文本。"""
@@ -84,10 +85,10 @@ class _RawTextSubAgentManager:
         )
 
 
-class _SlowSubAgentManager:
-    """测试用慢速子 agent manager，用于触发 mapper timeout。"""
+class _SlowWorkflowTaskExecutor:
+    """测试用慢速 workflow executor，用于触发 mapper timeout。"""
 
-    async def run_task(
+    async def execute_task(
         self, *, workflow_id: str, parent_session_id: str, task: Any, audit_writer: Any
     ) -> SubAgentRun:
         """延迟返回 fake mapper，输入为任务，输出为会被 timeout 截断的 run。"""
@@ -106,13 +107,7 @@ class _SlowSubAgentManager:
 
 def _config(tmp_path: Path) -> Config:
     """构造测试配置，输入为临时目录，输出为 file session 配置。"""
-    cfg = Config(
-        model=ModelConfig(
-            name="fake-model",
-            base_url="http://127.0.0.1:1234/v1",
-            api_key="",
-        )
-    )
+    cfg = Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
     cfg.session.file_store_path = str(tmp_path / "sessions")
     return cfg
 
@@ -173,7 +168,8 @@ def _payload() -> dict[str, Any]:
 def _load_map_reduce_fixture(name: str) -> dict[str, Any]:
     """读取 map_reduce fixture，输入为文件名，输出为 JSON 对象。"""
     path = _FIXTURE_ROOT / name
-    return json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return payload
 
 
 def _mapper_output(*, shard_id: str, files: list[str]) -> dict[str, Any]:
@@ -236,9 +232,9 @@ def _write_sample_tree(tmp_path: Path) -> None:
 async def test_map_reduce_workflow_runs_fake_mappers_and_writes_artifacts(tmp_path: Path) -> None:
     """验证 map_reduce 完整 fake 链路，输入为临时源码树，输出为产物和 reducer 断言。"""
     _write_sample_tree(tmp_path)
-    subagents = _FakeSubAgentManager()
-    manager = AgentWorkflowManager(
-        subagents=subagents,  # type: ignore[arg-type]
+    subagents = _FakeWorkflowTaskExecutor()
+    manager = WorkflowStrategyTestManager(
+        task_executor=subagents,
         config=_config(tmp_path),
         workspace_root=tmp_path,
         role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
@@ -296,14 +292,21 @@ async def test_map_reduce_workflow_runs_fake_mappers_and_writes_artifacts(tmp_pa
         for task in subagents.tasks
     )
 
-    actions = [
-        json.loads(line)["action"]
+    audit_records = [
+        json.loads(line)
         for line in (result.workflow_dir / "audit.jsonl").read_text(encoding="utf-8").splitlines()
     ]
+    actions = [record["action"] for record in audit_records]
     assert "map_reduce_started" in actions
     assert actions.count("map_mapper_started") == 3
     assert actions.count("map_mapper_output_validated") == 3
     assert "map_reduce_completed" in actions
+    assert all("subagent_runtime" not in record["payload"] for record in audit_records)
+    assert all("runtime_spec" not in record["payload"] for record in audit_records)
+    assert all(
+        record["payload"]["resolved_runtime"]["model"] == "gemma-4-e4b-it"
+        for record in audit_records
+    )
 
 
 @pytest.mark.asyncio
@@ -312,8 +315,8 @@ async def test_map_reduce_rejects_validation_repair_retries(tmp_path: Path) -> N
     _write_sample_tree(tmp_path)
     payload = _payload()
     payload["limits"]["validation_repair_retries"] = 1
-    manager = AgentWorkflowManager(
-        subagents=_FakeSubAgentManager(),  # type: ignore[arg-type]
+    manager = WorkflowStrategyTestManager(
+        task_executor=_FakeWorkflowTaskExecutor(),
         config=_config(tmp_path),
         workspace_root=tmp_path,
         role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
@@ -333,8 +336,8 @@ async def test_map_reduce_rejects_single_file_above_token_limit(tmp_path: Path) 
     _write_sample_tree(tmp_path)
     payload = _payload()
     payload["shard_strategy"]["max_estimated_tokens_per_shard"] = 1
-    manager = AgentWorkflowManager(
-        subagents=_FakeSubAgentManager(),  # type: ignore[arg-type]
+    manager = WorkflowStrategyTestManager(
+        task_executor=_FakeWorkflowTaskExecutor(),
         config=_config(tmp_path),
         workspace_root=tmp_path,
         role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
@@ -354,8 +357,8 @@ async def test_map_reduce_marks_oversized_mapper_output_as_failed_shard(tmp_path
     _write_sample_tree(tmp_path)
     payload = _payload()
     payload["mapper"]["max_output_chars"] = 10
-    manager = AgentWorkflowManager(
-        subagents=_FakeSubAgentManager(content_suffix="oversized"),  # type: ignore[arg-type]
+    manager = WorkflowStrategyTestManager(
+        task_executor=_FakeWorkflowTaskExecutor(content_suffix="oversized"),
         config=_config(tmp_path),
         workspace_root=tmp_path,
         role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
@@ -399,8 +402,8 @@ async def test_map_reduce_records_mapper_timeout_as_failed_shard(tmp_path: Path)
     }
     payload["limits"]["max_concurrency"] = 1
     payload["limits"]["mapper_timeout_seconds"] = 1
-    manager = AgentWorkflowManager(
-        subagents=_SlowSubAgentManager(),  # type: ignore[arg-type]
+    manager = WorkflowStrategyTestManager(
+        task_executor=_SlowWorkflowTaskExecutor(),
         config=_config(tmp_path),
         workspace_root=tmp_path,
         role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
@@ -451,8 +454,8 @@ async def test_map_reduce_records_reducer_timeout_artifacts(
     monkeypatch.setattr(asyncio, "to_thread", _slow_to_thread)
     payload = _payload()
     payload["limits"]["reducer_timeout_seconds"] = 1
-    manager = AgentWorkflowManager(
-        subagents=_FakeSubAgentManager(),  # type: ignore[arg-type]
+    manager = WorkflowStrategyTestManager(
+        task_executor=_FakeWorkflowTaskExecutor(),
         config=_config(tmp_path),
         workspace_root=tmp_path,
         role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
@@ -506,8 +509,10 @@ async def test_run_agent_workflow_tool_passes_map_reduce_payload_to_manager() ->
             mode: str,
             parent_session_id: str,
             payload: dict[str, object],
+            parent_agent: dict[str, object] | None = None,
         ) -> Any:
             """记录 workflow payload 调用，输入为 mode/session/payload，输出为 fake 结果。"""
+            del parent_agent
             self.mode = mode
             self.parent_session_id = parent_session_id
             self.payload = payload
@@ -568,8 +573,10 @@ async def test_run_agent_workflow_tool_unwraps_map_reduce_spec_payload() -> None
             mode: str,
             parent_session_id: str,
             payload: dict[str, object],
+            parent_agent: dict[str, object] | None = None,
         ) -> Any:
             """记录 workflow payload 调用，输入为 mode/session/payload，输出为 fake 结果。"""
+            del mode, parent_session_id, parent_agent
             self.payload = payload
 
             class _Result:
@@ -592,7 +599,8 @@ async def test_run_agent_workflow_tool_unwraps_map_reduce_spec_payload() -> None
     tool = build_run_agent_workflow_tool(handle)
 
     wrapped_payload = {"MapReduceWorkflowSpec": _payload()}
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {"mode": "map_reduce", "payload": wrapped_payload},
         ToolContext(run_id="r", session_id="parent-session", turn=1, call_id="c"),
     )
@@ -620,9 +628,10 @@ async def test_run_agent_workflow_tool_normalizes_minimax_tool_argument_shapes()
             mode: str,
             parent_session_id: str,
             payload: dict[str, object],
+            parent_agent: dict[str, object] | None = None,
         ) -> Any:
             """记录 workflow payload 调用，输入为 mode/session/payload，输出为 fake 结果。"""
-            del mode, parent_session_id
+            del mode, parent_session_id, parent_agent
             self.payload = dict(payload)
 
             class _Result:
@@ -690,7 +699,8 @@ async def test_run_agent_workflow_tool_normalizes_minimax_tool_argument_shapes()
     handle.bind(manager)
     tool = build_run_agent_workflow_tool(handle)
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {"mode": "map_reduce", "payload": payload},
         ToolContext(run_id="r", session_id="parent-session", turn=1, call_id="c"),
     )
@@ -727,9 +737,9 @@ async def test_run_agent_workflow_tool_normalizes_cli_session_map_reduce_payload
 ) -> None:
     """验证 CLI 真实失败参数被归一化，输入为绝对 file_list，输出为可执行 workflow。"""
     _write_sample_tree(tmp_path)
-    subagents = _FakeSubAgentManager()
-    manager = AgentWorkflowManager(
-        subagents=subagents,  # type: ignore[arg-type]
+    subagents = _FakeWorkflowTaskExecutor()
+    manager = WorkflowStrategyTestManager(
+        task_executor=subagents,
         config=_config(tmp_path),
         workspace_root=tmp_path,
         role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
@@ -764,7 +774,8 @@ async def test_run_agent_workflow_tool_normalizes_cli_session_map_reduce_payload
         "mapper_retries": 1,
     }
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {"mode": "map_reduce", "payload": payload},
         ToolContext(run_id="r", session_id="parent-session", turn=1, call_id="c"),
     )
@@ -788,9 +799,9 @@ async def test_run_agent_workflow_tool_runs_inline_raw_text_map_reduce(
     """验证 CLI 失败 fixture 回放，输入为 noop inline，输出为 3 个 raw_text mapper 报告。"""
     fixture = _load_map_reduce_fixture("cli-5f68e28fc030-inline-noop.json")
     expected = fixture["expected_after_fix"]
-    subagents = _RawTextSubAgentManager()
-    manager = AgentWorkflowManager(
-        subagents=subagents,  # type: ignore[arg-type]
+    subagents = _RawTextWorkflowTaskExecutor()
+    manager = WorkflowStrategyTestManager(
+        task_executor=subagents,
         config=_config(tmp_path),
         workspace_root=tmp_path,
         role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
@@ -799,7 +810,8 @@ async def test_run_agent_workflow_tool_runs_inline_raw_text_map_reduce(
     handle.bind(manager)
     tool = build_run_agent_workflow_tool(handle)
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         fixture["arguments"],
         ToolContext(run_id="r", session_id=fixture["session_id"], turn=1, call_id="inline-call"),
     )
@@ -832,9 +844,9 @@ async def test_run_agent_workflow_tool_runs_absolute_temp_placeholder_map_reduce
     """验证 CLI 临时绝对占位路径 fixture 回放，输入为 /tmp 文件，输出为 5 个 raw_text mapper。"""
     fixture = _load_map_reduce_fixture("cli-7b3b9df541d4-absolute-temp-placeholder.json")
     expected = fixture["expected_after_fix"]
-    subagents = _RawTextSubAgentManager()
-    manager = AgentWorkflowManager(
-        subagents=subagents,  # type: ignore[arg-type]
+    subagents = _RawTextWorkflowTaskExecutor()
+    manager = WorkflowStrategyTestManager(
+        task_executor=subagents,
         config=_config(tmp_path),
         workspace_root=tmp_path,
         role_manager=AgentRoleManager(role_dir=tmp_path / "roles"),
@@ -843,7 +855,8 @@ async def test_run_agent_workflow_tool_runs_absolute_temp_placeholder_map_reduce
     handle.bind(manager)
     tool = build_run_agent_workflow_tool(handle)
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         fixture["arguments"],
         ToolContext(
             run_id="r",
@@ -890,16 +903,19 @@ async def test_run_agent_workflow_tool_failure_content_guides_model_in_chinese()
             mode: str,
             parent_session_id: str,
             payload: dict[str, object],
+            parent_agent: dict[str, object] | None = None,
         ) -> Any:
             """抛出模拟校验错误，输入为 workflow 调用，输出为异常。"""
+            del mode, parent_session_id, payload, parent_agent
             raise ValueError("$.input_source: expected object")
 
     handle = AgentWorkflowHandle()
     handle.bind(_Manager())
     tool = build_run_agent_workflow_tool(handle)
 
-    result = await tool.execute(
-        {"mode": "map_reduce", "payload": {"bad": True}},
+    result = await execute_prepared_tool(
+        tool,
+        {"mode": "map_reduce", "payload": _payload()},
         ToolContext(run_id="r", session_id="parent-session", turn=1, call_id="c"),
     )
 

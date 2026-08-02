@@ -3,7 +3,7 @@
 每个 thread 在 ``.kongming/web/threads/<thread_id>/metadata.json`` 落一份
 :class:`ThreadMetadata` 文件。本文件提供：
 
-- :class:`ThreadMetadata` Pydantic 模型（当前 schema_version=11）
+- :class:`ThreadMetadata` Pydantic 模型（当前 schema_version=13）
 - :func:`thread_metadata_path` —— 路径常量
 - :func:`write_thread_metadata` —— 原子写入（``tmp.replace(path)``）
 - :func:`read_thread_metadata` —— 读 + 校验；schema_version 不匹配 / JSON
@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # ``claude_thread_id`` / ``codex_thread_id`` 都表示 provider 底层可恢复 thread id。
 # 一个 Kongming thread 绑定一个 provider session/thread；老 v5 文件读入时把
 # ``sdk_session_id`` 迁移为 ``claude_thread_id``。
-THREAD_METADATA_SCHEMA_VERSION = 11
+THREAD_METADATA_SCHEMA_VERSION = 13
 
 
 class ThreadMetadata(BaseModel):
@@ -58,7 +58,7 @@ class ThreadMetadata(BaseModel):
         id: thread ID，格式 ``thread-<hex12>``。与 session_id 同值。
         name: 用户给 thread 起的名（最长 200 字符）。
         preset_id: 创建时选的 LLM preset ID（来自
-            :class:`infrastructure.config.models.LLMPresetConfig`）。``backend_kind="claude_code"``
+            model catalog preset）。``backend_kind="claude_code"``
             时允许空字符串占位（claude_code 由 SDK 内部选 model，不需要 preset）。
         backend_kind: 后端类型；``"generic_chat"`` 表示走 InputAssembler + LLM provider 的
             原有路径；``"claude_code"`` 表示走 ``/ws/claude-code``+ Claude Agent SDK。
@@ -106,8 +106,11 @@ class ThreadMetadata(BaseModel):
 
             ``None`` 表示该 thread 还没跑过任何 turn。
         is_pinned: 置顶标记；``True`` 时 UI 列表优先排列。v0.2.4 新增。
-        schema_version: 当前 ``11``；``Literal[1, ..., 11]`` 同时接受老文件，
-            写盘时永远写 ``11``。
+        forked_from_id: 直接父 thread ID；普通 thread 为 ``None``。
+        forked_from_history_index: fork 快照中最后一条复制的终态 assistant
+            在目标 thread Session.history() 中的零基位置；无法对应气泡时为 ``None``。
+        schema_version: 当前 ``13``；``Literal[1, ..., 13]`` 同时接受老文件，
+            写盘时永远写 ``13``。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -167,9 +170,15 @@ class ThreadMetadata(BaseModel):
     ``{is_archived: true}`` 触发；scanner 真源由本字段决定，jsonl 内的
     历史 ``archived`` 事件不再被读取。"""
 
-    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] = 11
-    """schema 版本号（当前 v11，scheduled-task-thread 引入）。
-    ``Literal[1..11]`` 接受所有历史文件，写盘永远写 11。"""
+    forked_from_id: Annotated[str, Field(pattern=r"^thread-[a-f0-9]{12}$")] | None = None
+    """完整对话 fork 的直接父 thread ID；用于 lineage 展示与审计。"""
+
+    forked_from_history_index: Annotated[int, Field(ge=0)] | None = None
+    """fork 快照终态 assistant 在目标 Session.history() 的零基位置。"""
+
+    schema_version: Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13] = 13
+    """schema 版本号（当前 v13，完整对话 fork 的时间线边界引入）。
+    ``Literal[1..13]`` 接受所有历史文件，写盘永远写 13。"""
 
 
 def thread_metadata_path(home: Path, thread_id: str) -> Path:
@@ -220,7 +229,7 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
 
     - 文件不存在 / 不是普通文件
     - JSON 解析失败（损坏 / 编码异常）
-    - schema_version 不在 ``{1, ..., 11}``（更高版本 = 该进程不认识，拒绝）
+    - schema_version 不在 ``{1, ..., 13}``（更高版本 = 该进程不认识，拒绝）
     - 字段校验失败（缺字段 / 类型不对 / 正则不匹配）
 
     **v1 → v2 懒升级**：``schema_version=1`` 且缺 ``backend_kind`` 时，
@@ -260,8 +269,15 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
     补 ``thread_kind="chat"``、``source_kind=""`` 和 ``source_id=""``，
     老 thread 默认进入普通聊天分组。
 
-    返回的 :class:`ThreadMetadata` 实例已是最新 v11 形态。下次
-    :func:`write_thread_metadata` 会以 v11 写盘（默认 ``schema_version=11``，
+    **v11 → v12 懒升级**（完整对话 fork）：
+    补 ``forked_from_id=None``，老 thread 默认没有父 thread。
+
+    **v12 → v13 懒升级**（fork 时间线定位）：
+    补 ``forked_from_history_index=None``。旧 metadata 没有可靠的复制终点，
+    前端省略分隔线以避免落到错误气泡之后。
+
+    返回的 :class:`ThreadMetadata` 实例已是最新 v13 形态。下次
+    :func:`write_thread_metadata` 会以 v13 写盘（默认 ``schema_version=13``，
     无需调用方关心）。本函数**不**自己回写——避免读盘函数有副作用。
 
     所有 ``None`` 路径都会记 warning 日志，便于排查。
@@ -345,6 +361,16 @@ def read_thread_metadata(home: Path, thread_id: str) -> ThreadMetadata | None:
         data.setdefault("source_kind", "")
         data.setdefault("source_id", "")
         data["schema_version"] = 11
+    # v11 → v12 懒升级（完整对话 fork）：
+    # 补直接父 thread lineage，老 thread 默认没有父 thread。
+    if data.get("schema_version") == 11:
+        data.setdefault("forked_from_id", None)
+        data["schema_version"] = 12
+    # v12 → v13 懒升级（fork 时间线定位）：历史 metadata 缺少快照终态的
+    # 精确位置，保留 None 让前端避免显示在错误的消息边界。
+    if data.get("schema_version") == 12:
+        data.setdefault("forked_from_history_index", None)
+        data["schema_version"] = 13
     # 兜底：任何 version 下如果 sdk_session_id 仍残留，强制迁移
     if "sdk_session_id" in data:
         data.setdefault("claude_thread_id", str(data.pop("sdk_session_id")))

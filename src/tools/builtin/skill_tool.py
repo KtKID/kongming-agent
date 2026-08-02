@@ -34,7 +34,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final, Protocol, runtime_checkable
 
-from core.contracts import Event, EventSink, ToolContext, ToolResult
+from core.contracts import Event, EventSink, PreparedToolCall, ToolContext, ToolResult
 from core.errors import AgentError
 
 # ---------------------------------------------------------------------------
@@ -200,7 +200,35 @@ class SkillTool:
         self._specs: dict[str, _SkillSpecLike] = dict(specs)
         self._sinks: tuple[EventSink, ...] = tuple(event_sinks)
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    def prepare(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> PreparedToolCall:
+        """审批前校验 skill/args 并冻结标准化参数。"""
+        del context
+        if not isinstance(arguments, dict):
+            raise TypeError(f"tool args must be dict, got {type(arguments).__name__}")
+        skill_name_raw = arguments.get("skill")
+        if not isinstance(skill_name_raw, str) or not skill_name_raw.strip():
+            raise ValueError("'skill' parameter is required and must be a non-empty string")
+        args_value = arguments.get("args", "")
+        if args_value is None:
+            args_value = ""
+        if not isinstance(args_value, str):
+            raise TypeError("'args' must be a string when provided")
+        return PreparedToolCall(
+            arguments={
+                "skill": skill_name_raw.strip(),
+                "args": args_value,
+            }
+        )
+
+    async def execute(
+        self,
+        prepared: PreparedToolCall,
+        ctx: ToolContext,
+    ) -> ToolResult:
         """7-step skill execution flow（与 plan.md 模块 3 锁定的契约一致）。
 
         步骤：
@@ -216,31 +244,9 @@ class SkillTool:
         6. ``substitute_vars`` 单次替换。
         7. emit ``skill.completed`` + 返回 ``ToolResult(ok=True, content=substituted)``。
         """
-        # Step 1: 参数校验。
-        if not isinstance(args, dict):
-            return ToolResult(
-                ok=False,
-                content="",
-                error_message=f"tool args must be dict, got {type(args).__name__}",
-            )
-        skill_name_raw = args.get("skill")
-        if not isinstance(skill_name_raw, str) or not skill_name_raw.strip():
-            return ToolResult(
-                ok=False,
-                content="",
-                error_message="'skill' parameter is required and must be a non-empty string",
-            )
-        skill_name = skill_name_raw.strip()
-
-        args_value = args.get("args", "")
-        if args_value is None:
-            args_value = ""
-        if not isinstance(args_value, str):
-            return ToolResult(
-                ok=False,
-                content="",
-                error_message="'args' must be a string when provided",
-            )
+        # Step 1: 参数已由 prepare 校验和标准化。
+        skill_name = str(prepared.arguments["skill"])
+        args_value = str(prepared.arguments["args"])
 
         # Step 2: 查 spec。unknown skill 不 emit invoked / failed。
         spec = self._specs.get(skill_name)

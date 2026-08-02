@@ -18,6 +18,7 @@ from pathlib import Path
 from core.contracts import ToolContext, ToolResult
 from scheduler.domain import ApprovalMode
 from scheduler.store import Store
+from tests.support.tool_calls import execute_prepared_tool
 from tools.builtin.schedule_tool import ScheduleTool, build_schedule_tool
 
 
@@ -62,7 +63,8 @@ def _make_tool(tmp_path: Path) -> tuple[ScheduleTool, Store]:
 async def test_t1_create_with_trust_persists_approval_mode(tmp_path: Path) -> None:
     """T1: schedule(action=create, approval_mode='trust') 落盘 task.policy.approval_mode == TRUST。"""
     tool, store = _make_tool(tmp_path)
-    r: ToolResult = await tool.execute(
+    r: ToolResult = await execute_prepared_tool(
+        tool,
         {
             "action": "create",
             "name": "trust task",
@@ -93,7 +95,7 @@ async def test_t1_create_with_trust_persists_approval_mode(tmp_path: Path) -> No
     assert create_audits[0]["payload"].get("approval_mode") == "trust"
 
     # list 输出也带 approval_mode
-    list_result = await tool.execute({"action": "list"}, _ctx())
+    list_result = await execute_prepared_tool(tool, {"action": "list"}, _ctx())
     assert list_result.ok
     assert list_result.data is not None
     listed = [t for t in list_result.data["tasks"] if t["task_id"] == task_id]
@@ -104,7 +106,8 @@ async def test_t1_create_with_trust_persists_approval_mode(tmp_path: Path) -> No
 async def test_t2_create_without_approval_mode_defaults_to_none(tmp_path: Path) -> None:
     """T2: 缺省 approval_mode → task.policy.approval_mode is None（走全局）。"""
     tool, store = _make_tool(tmp_path)
-    r = await tool.execute(
+    r = await execute_prepared_tool(
+        tool,
         {
             "action": "create",
             "name": "no mode task",
@@ -136,7 +139,8 @@ async def test_t2_create_without_approval_mode_defaults_to_none(tmp_path: Path) 
 async def test_t3_create_with_invalid_approval_mode_returns_error(tmp_path: Path) -> None:
     """T3: approval_mode='invalid' → ToolResult.ok=False + error_message 含 invalid。"""
     tool, store = _make_tool(tmp_path)
-    r = await tool.execute(
+    r = await execute_prepared_tool(
+        tool,
         {
             "action": "create",
             "name": "bad mode task",

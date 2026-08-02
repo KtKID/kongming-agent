@@ -3,9 +3,9 @@ backend 必须跟随 ``config.session.backend`` —— 不能始终回退 InMemo
 
 历史 bug（cron-delivery-v0.3 M2 修复目标）：
 
-- v0.2 ``build_cron_execution_bridge`` 调 ``NativeRuntime.build`` 时**没传**
+- v0.2 ``build_cron_execution_bridge`` 调 ``SessionEngine.build`` 时**没传**
   ``session_factory``；
-- ``NativeRuntime.build`` 的 fallback 是 ``InMemorySession``；
+- ``SessionEngine.build`` 的 fallback 是 ``InMemorySession``；
 - 结果：即便用户配置 ``backend: file``，cron fresh session 仍走内存，
   ``.kongming/sessions/sched-*`` 目录从来不创建，跑完即丢。
 
@@ -14,28 +14,58 @@ backend 必须跟随 ``config.session.backend`` —— 不能始终回退 InMemo
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from infrastructure.config.models import Config, ModelConfig
+from core.agent_spec import AgentSpec
+from infrastructure.config.model_catalog_manager import ModelCatalogManager
+from infrastructure.config.models import Config, ModelSelectionConfig
 from scheduler.runtime_factory import build_cron_execution_bridge
 from scheduler.store import Store
 
 
 def _make_config_with_file_backend(tmp_path: Path) -> Config:
-    cfg = Config(
-        model=ModelConfig(
-            name="fake-model",
-            base_url="http://127.0.0.1:11434",
-            api_key="sk-fake",
-        )
-    )
+    cfg = Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
     cfg.session.backend = "file"
     cfg.session.file_store_path = str(tmp_path / "sessions")
     cfg.scheduler.enabled = False  # 不启动 ticker；本测试只测装配
     return cfg
+
+
+def _write_scheduler_catalog(tmp_path: Path) -> ModelCatalogManager:
+    """构造含默认与 task 专用 preset 的本地 catalog。"""
+    path = tmp_path / "catalog.yaml"
+    path.write_text(
+        """\
+version: 2
+providers:
+  - provider_id: scheduler-test
+    default_preset_id: scheduler-default
+    display_name: Scheduler Test
+    region_label: Local
+    description: scheduler test provider
+    logo_text: S
+    protocol: openai
+    default_base_url: http://127.0.0.1:11434/v1
+    request_defaults: {}
+    models:
+      - preset_id: scheduler-default
+        model: default-model
+      - preset_id: scheduler-task
+        model: task-model
+        reasoning:
+          adapter: glm_thinking_toggle
+          supported_efforts: [high]
+          default_effort: high
+          supports_disabled: true
+""",
+        encoding="utf-8",
+    )
+    return ModelCatalogManager(builtin_path=path, user_path=tmp_path / "missing.yaml")
 
 
 @pytest.mark.asyncio
@@ -59,15 +89,41 @@ async def test_cron_runtime_uses_file_backend_when_configured(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_cron_task_preset_drives_snapshot_agent_spec_and_audit(tmp_path: Path) -> None:
+    """task preset 解析一次后同时驱动 provider model、AgentSpec 和 audit。"""
+    manager = _write_scheduler_catalog(tmp_path)
+    cfg = _make_config_with_file_backend(tmp_path)
+    cfg.model = ModelSelectionConfig(preset_id="scheduler-default")
+    runtime, bridge = build_cron_execution_bridge(
+        cfg,
+        Store(tmp_path / "cron"),
+        model_catalog_manager=manager,
+    )
+    try:
+        snapshot = bridge._resolve_model("scheduler-task")
+        assert snapshot is not None
+        spec = bridge._resolve_effective_agent_spec(snapshot)
+        audit = bridge._resolve_run_audit_context(
+            SimpleNamespace(preset_id="scheduler-task", thread_id="thread-test"),  # type: ignore[arg-type]
+            snapshot,
+        )
+        assert snapshot.name == "task-model"
+        assert spec.default_model == "task-model"
+        assert spec.reasoning_effort == "high"
+        assert spec.metadata["model_preset_id"] == "scheduler-task"
+        assert audit == {
+            "preset_id": "scheduler-task",
+            "model_name": "task-model",
+            "thread_id": "thread-test",
+        }
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
 async def test_cron_runtime_uses_memory_backend_when_configured(tmp_path: Path) -> None:
     """``cfg.session.backend='memory'`` → 仍然返回 InMemorySession。"""
-    cfg = Config(
-        model=ModelConfig(
-            name="fake-model",
-            base_url="http://127.0.0.1:11434",
-            api_key="sk-fake",
-        )
-    )
+    cfg = Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
     cfg.session.backend = "memory"
     cfg.scheduler.enabled = False
 
@@ -108,6 +164,37 @@ async def test_cron_session_persists_messages_to_disk(tmp_path: Path) -> None:
             line for line in messages_jsonl.read_text(encoding="utf-8").splitlines() if line.strip()
         ]
         assert len(lines) == 2
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cron_file_session_metadata_uses_effective_agent_model(tmp_path: Path) -> None:
+    """cron preset 命中时，FileSession metadata 写入本次 run 的实际模型。"""
+    from core.message import Message
+
+    cfg = _make_config_with_file_backend(tmp_path)
+    store = Store(tmp_path / "cron")
+
+    runtime, bridge = build_cron_execution_bridge(cfg, store)
+    try:
+        sid = "sched-task-effective-model"
+        agent_spec = AgentSpec(
+            name="default",
+            instructions="",
+            default_model="MiniMax-M3",
+            max_turns=5,
+        )
+        session = bridge._build_session_for_agent(sid, agent_spec)
+        await session.append(Message(role="user", content="ping"))
+
+        session_dir = tmp_path / "sessions" / sid
+        manifest = json.loads((session_dir / "manifest.json").read_text(encoding="utf-8"))
+        record = json.loads(
+            (session_dir / f"{sid}.jsonl").read_text(encoding="utf-8").splitlines()[0]
+        )
+        assert manifest["model_name"] == "MiniMax-M3"
+        assert record["model_name"] == "MiniMax-M3"
     finally:
         await runtime.aclose()
 
@@ -178,7 +265,7 @@ async def test_cron_runtime_dispatcher_default_none_keeps_v02_behavior(
 
 
 def test_cron_runtime_forwards_tools_and_enabled_names(tmp_path: Path) -> None:
-    """Explicit tools wiring should be forwarded into NativeRuntime.build."""
+    """Explicit tools wiring should be forwarded into SessionEngine.build."""
     cfg = _make_config_with_file_backend(tmp_path)
     store = Store(tmp_path / "cron")
     fake_runtime = type(
@@ -197,7 +284,7 @@ def test_cron_runtime_forwards_tools_and_enabled_names(tmp_path: Path) -> None:
     tools = {"read_file": object()}
 
     with patch(
-        "runtime_assembly.native_runtime.NativeRuntime.build",
+        "runtime_assembly.session_engine.SessionEngine.build",
         return_value=fake_runtime,
     ) as mock_build:
         _runtime, _bridge = build_cron_execution_bridge(

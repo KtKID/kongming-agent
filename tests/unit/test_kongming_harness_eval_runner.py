@@ -9,9 +9,27 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNNER_PATH = REPO_ROOT / "scripts" / "run_kongming_harness_eval.py"
+
+
+@pytest.fixture(autouse=True)
+def _clear_retired_model_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """隔离开发机遗留的 v0.5 静态 model 环境变量。"""
+    monkeypatch.setenv("KONGMING_SKIP_DOTENV", "1")
+    for name in (
+        "KONGMING_MODEL_PROVIDER",
+        "KONGMING_MODEL_NAME",
+        "KONGMING_MODEL_BASE_URL",
+        "KONGMING_MODEL_API_KEY",
+        "KONGMING_MODEL_API_KEY_HEADER",
+        "KONGMING_MODEL_TIMEOUT",
+        "KONGMING_MODEL_MAX_TOKENS",
+        "KONGMING_MODEL_TEMPERATURE",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _load_runner_module():
@@ -45,8 +63,8 @@ async def test_fixture_runtime_suite_runs_real_tool_loop(
     run_dir = tmp_path / "unit-runtime"
     assert os.environ.get("KONGMING_HOME") is None
     summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
-    assert summary["total"] == 9
-    assert summary["passed"] == 9
+    assert summary["total"] == 12
+    assert summary["passed"] == 12
     assert summary["score"] == 1.0
     assert summary["environment_id"] == "fixture-full"
     assert summary["profile"] == "full"
@@ -57,14 +75,14 @@ async def test_fixture_runtime_suite_runs_real_tool_loop(
         "uses_real_llm_provider": False,
         "tool_execution_checks_tool_loop": True,
         "non_tool_tasks_check": [
-            "NativeRuntime.run request/response path",
+            "SessionEngine.run request/response path",
             "session persistence",
             "deterministic scorer behavior",
         ],
     }
     report = (run_dir / "report.md").read_text(encoding="utf-8")
     assert "工具执行" in report
-    assert "通过数：`9 / 9`" in report
+    assert "通过数：`12 / 12`" in report
     assert "环境预设：`fixture-full`" in report
     assert "Fixture 验证边界" in report
     assert "Environment config hash：`sha256:" in report
@@ -102,7 +120,7 @@ async def test_fixture_runtime_suite_runs_real_tool_loop(
     ]
     assert all(result["ok"] for result in details["tool_results"])
 
-    session_id = "unit-runtime-tool_execution_runner_001"
+    session_id = "unit-runtime-tool_execution_runner_001-trial1"
     session_dir = run_dir / "sessions" / session_id
     session_jsonl = session_dir / f"{session_id}.jsonl"
     assert (session_dir / "manifest.json").is_file()
@@ -253,10 +271,10 @@ environments:
 
 
 @pytest.mark.unit
-def test_environment_resolver_records_preset_key_presence(
+def test_environment_resolver_resolves_preset_from_provider_catalog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """resolver 必须记录 preset 对应密钥是否存在。"""
+    """resolver 必须能从 provider catalog 解析内置 preset。"""
 
     runner = _load_runner_module()
     monkeypatch.setenv("MINIMAX_API_KEY", "dummy-key")
@@ -265,6 +283,66 @@ def test_environment_resolver_records_preset_key_presence(
 
     assert resolved.preset == "minimax-m3"
     assert resolved.api_keys_present == {"MINIMAX_API_KEY": True}
+
+
+@pytest.mark.unit
+def test_environment_resolver_records_user_catalog_key_presence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """用户 catalog preset 命中时记录 provider-specific key 状态。"""
+
+    runner = _load_runner_module()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("KONGMING_HOME", str(home))
+    monkeypatch.setenv("EVAL_MINIMAX_API_KEY", "dummy-key")
+    user_catalog = {
+        "version": 2,
+        "providers": [
+            {
+                "provider_id": "eval-provider",
+                "default_preset_id": "eval-minimax",
+                "display_name": "Eval Provider",
+                "region_label": "Test",
+                "description": "Harness eval test provider.",
+                "logo_text": "E",
+                "protocol": "anthropic",
+                "default_base_url": "https://api.minimaxi.com/anthropic",
+                "default_api_key_env": "EVAL_MINIMAX_API_KEY",
+                "request_defaults": {
+                    "timeout_seconds": 60,
+                    "max_tokens": 4096,
+                    "temperature": 0.7,
+                },
+                "models": [
+                    {
+                        "preset_id": "eval-minimax",
+                        "display_name": "Eval MiniMax",
+                        "model": "minimax-m3",
+                    }
+                ],
+            }
+        ],
+    }
+    (home / "model-providers.yaml").write_text(
+        yaml.safe_dump(user_catalog, allow_unicode=True),
+        encoding="utf-8",
+    )
+    payload = yaml.safe_load((REPO_ROOT / "config" / "setting.yaml").read_text(encoding="utf-8"))
+    config_path = tmp_path / "setting.yaml"
+    config_path.write_text(yaml.safe_dump(payload, allow_unicode=True), encoding="utf-8")
+
+    resolved = runner.resolve_eval_environment(
+        "minimax-full-ci",
+        runner.EvalEnvironmentOverrides(
+            config=str(config_path),
+            preset="eval-minimax",
+        ),
+    )
+
+    assert resolved.preset == "eval-minimax"
+    assert resolved.api_keys_present == {"EVAL_MINIMAX_API_KEY": True}
 
 
 @pytest.mark.unit
@@ -327,10 +405,10 @@ async def test_python_api_runs_environment(tmp_path: Path, monkeypatch: pytest.M
         runner.EvalEnvironmentOverrides(run_id="unit-python-api", output_dir=str(tmp_path)),
     )
 
-    assert summary["passed"] == summary["total"] == 9
+    assert summary["passed"] == summary["total"] == 12
     assert summary["environment_id"] == "fixture-full"
     assert summary["run_dir"] == str(tmp_path / "unit-python-api")
-    assert rerun_summary["passed"] == rerun_summary["total"] == 9
+    assert rerun_summary["passed"] == rerun_summary["total"] == 12
     assert rerun_summary["run_dir"] == str(tmp_path / "unit-python-api")
 
 

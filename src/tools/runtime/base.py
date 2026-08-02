@@ -4,7 +4,7 @@
 本文件只提供一个内部便利基类 :class:`BaseBuiltinTool`，让 ``tools/`` 目录下第一批
 builtin tool（``file_tools.py`` / ``shell_tool.py`` 等）少写一点样板：
 
-- 统一参数校验（第一版只做字段存在性检查，不引 jsonschema 重依赖）
+- 在审批前统一参数校验（第一版只做字段存在性检查，不引 jsonschema 重依赖）
 - 统一异常包装（把 tool 实现里的普通异常转成 ``ToolResult(ok=False, error_message=...)``
   这种结构化失败，避免 runner 侧裸异常中断主链路）
 - 强制让子类只需要实现 :meth:`_run`，不必关心 ``ToolResult`` 构造细节
@@ -13,7 +13,7 @@ builtin tool（``file_tools.py`` / ``shell_tool.py`` 等）少写一点样板：
 
 - 不做路径白名单 / 命令黑名单（安全策略归 ``safety/``，tools 层不做）
 - 不做审批决策（审批由 :class:`core.contracts.ApprovalProvider` 和装配层串联）
-- 不依赖 :mod:`safety.policies.capability` / :mod:`safety.policies.permission`
+- 不依赖 safety 内部决策器或 permissions 持久化实现
   （硬约束，import-linter 会红）
 """
 
@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.contracts import ToolContext, ToolResult
+from core.contracts import PreparedToolCall, ToolContext, ToolResult
 
 
 class BaseBuiltinTool:
@@ -30,12 +30,12 @@ class BaseBuiltinTool:
     子类必须覆盖 :attr:`name` / :attr:`description` / :attr:`input_schema` 三个类属性，
     并实现 :meth:`_run`。
 
-    :meth:`execute` 的流程固定为：
+    :meth:`prepare` 与 :meth:`execute` 的流程固定为：
 
-    1. 调用 :meth:`_validate_args` 校验参数（当前仅 required 字段存在性）。
-    2. 调用 :meth:`_run` 执行真正的工具逻辑，拿到自由形态的输出。
-    3. 把输出序列化成 ``ToolResult``，统一 ``ok`` / ``content`` / ``data`` 字段。
-    4. 任意异常被捕获并转成 ``ToolResult(ok=False, error_message=str(exc))``。
+    1. ``prepare`` 调用 :meth:`_validate_args`，在审批前冻结参数。
+    2. ``execute`` 只消费 ``PreparedToolCall`` 并调用 :meth:`_run`。
+    3. 执行输出统一序列化成 ``ToolResult``。
+    4. 执行异常被捕获并转成 ``ToolResult(ok=False, error_message=str(exc))``。
 
     这保证所有 builtin tool 对外呈现的行为一致：runner 拿到的永远是结构化
     ``ToolResult``，而不是时好时坏的裸异常。
@@ -46,28 +46,29 @@ class BaseBuiltinTool:
     description: str = ""
     input_schema: dict[str, Any] = {}
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-        """统一入口。子类通常**不需要**覆盖这个方法。
+    def prepare(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> PreparedToolCall:
+        """在审批前完成默认 required 校验并返回独立参数快照。"""
+        del context
+        validated = self._validate_args(arguments)
+        return PreparedToolCall(arguments=dict(validated))
+
+    async def execute(
+        self,
+        prepared: PreparedToolCall,
+        ctx: ToolContext,
+    ) -> ToolResult:
+        """执行已准备快照。子类通常无需覆盖这个方法。
 
         Args:
-            args: 模型传入的工具调用参数。
+            prepared: 审批前生成的参数与执行范围快照。
             ctx: runner 注入的执行上下文。
         """
         try:
-            validated = self._validate_args(args)
-        except Exception as exc:
-            error_message = f"argument validation failed: {exc}"
-            return ToolResult(
-                ok=False,
-                content=self._format_failure_content(
-                    stage="参数校验",
-                    error_message=error_message,
-                ),
-                error_message=error_message,
-            )
-
-        try:
-            content, data = await self._run(validated, ctx)
+            content, data = await self._run(dict(prepared.arguments), ctx)
         except Exception as exc:
             error_message = str(exc)
             return ToolResult(

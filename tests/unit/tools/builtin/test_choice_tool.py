@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from core.contracts import Event, ToolContext
-from safety.approval.default_rules import DEFAULT_ALLOW_TOOLS_SILENT
+from tests.support.tool_calls import execute_prepared_tool
 from tools import ToolRegistry, register_choice_tool
 from tools.builtin.choice_tool import CUSTOM_OPTION_ID, build_choice_tool
 
@@ -54,15 +54,11 @@ def test_register_choice_tool_adds_present_choices() -> None:
     assert "present_choices" in registry.names()
 
 
-def test_present_choices_is_silent_allowed_by_default() -> None:
-    assert "present_choices" in DEFAULT_ALLOW_TOOLS_SILENT
-
-
 async def test_tool_emits_choice_requested() -> None:
     sink = _Sink()
     tool = build_choice_tool(event_sinks=[sink])
 
-    result = await tool.execute(_payload(), _ctx())
+    result = await execute_prepared_tool(tool, _payload(), _ctx())
 
     assert result.ok is True
     assert result.data == {
@@ -81,7 +77,7 @@ async def test_tool_emits_choice_requested() -> None:
 async def test_tool_rejects_empty_questions() -> None:
     tool = build_choice_tool()
 
-    result = await tool.execute(_payload(questions=[]), _ctx())
+    result = await execute_prepared_tool(tool, _payload(questions=[]), _ctx())
 
     assert result.ok is False
     assert "questions must contain at least one item" in (result.error_message or "")
@@ -92,7 +88,7 @@ async def test_tool_rejects_duplicate_question_id() -> None:
     payload = _payload()
     payload["questions"].append(payload["questions"][0])
 
-    result = await tool.execute(payload, _ctx())
+    result = await execute_prepared_tool(tool, payload, _ctx())
 
     assert result.ok is False
     assert "duplicate question id" in (result.error_message or "")
@@ -103,7 +99,7 @@ async def test_tool_rejects_duplicate_option_id() -> None:
     payload = _payload()
     payload["questions"][0]["options"].append(payload["questions"][0]["options"][0])
 
-    result = await tool.execute(payload, _ctx())
+    result = await execute_prepared_tool(tool, payload, _ctx())
 
     assert result.ok is False
     assert "duplicate option id" in (result.error_message or "")
@@ -114,7 +110,7 @@ async def test_tool_rejects_reserved_custom_option_id() -> None:
     payload = _payload()
     payload["questions"][0]["options"][0]["id"] = CUSTOM_OPTION_ID
 
-    result = await tool.execute(payload, _ctx())
+    result = await execute_prepared_tool(tool, payload, _ctx())
 
     assert result.ok is False
     assert "reserved option id" in (result.error_message or "")

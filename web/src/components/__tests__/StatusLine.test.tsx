@@ -114,6 +114,33 @@ describe("StatusLine v2", () => {
     expect(screen.getByText(/5m 200/)).toBeTruthy();
   });
 
+  it("generic_chat 未报告指标显示为空态，cache hit 保留真实数值", () => {
+    const tid = "thread-unknown-usage";
+    useChatStore.setState({
+      usageByThread: {
+        [tid]: {
+          provider: "claude",
+          input_tokens: 194,
+          output_tokens: 119,
+          cache_read_input_tokens: 9088,
+          cache_creation_input_tokens: null,
+          cache_creation: {
+            ephemeral_1h_input_tokens: null,
+            ephemeral_5m_input_tokens: null,
+          },
+          context_usage: null,
+          model: "MiniMax-M3",
+          context_window: 204800,
+        },
+      },
+    });
+
+    render(<StatusLine threadId={tid} />);
+    expect(screen.getByText("缓存命中 9.1K")).toBeTruthy();
+    expect(screen.getByText("缓存写入 —")).toBeTruthy();
+    expect(screen.getByText("上下文 —")).toBeTruthy();
+  });
+
   it("usage=null 时底栏显示「等待对话」占位（不带模型名）", () => {
     const tid = "thread-eeeeeeeeeeee";
     // 不设 usage、不设 thread → modelName 为空

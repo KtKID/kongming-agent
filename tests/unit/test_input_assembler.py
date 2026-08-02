@@ -22,6 +22,10 @@ import pytest
 
 from core.message import Message
 from prompting.assembly.input_assembler import InputAssembler
+from prompting.context_sources.conversation_reference_manager import (
+    ConversationReferenceContext,
+    ConversationReferenceManager,
+)
 from prompting.instructions.instruction_loader import InstructionSource
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -103,6 +107,60 @@ async def test_empty_history_with_sources_adds_system() -> None:
     assert result.metadata["added_system"] is True
     assert "agent_spec" in result.metadata["instruction_sources"]
     _dump_assemble_result("empty-history-with-sources", result, sources)
+
+
+@pytest.mark.unit
+async def test_conversation_reference_context_injected_before_latest_user(tmp_path: Path) -> None:
+    """latest user message 带 skill reference 时，assembler 前置 markdown 链接。"""
+    _write_skill(tmp_path, "skill-creator", "Create a new skill.")
+    manager = ConversationReferenceManager(
+        ConversationReferenceContext(home=tmp_path / "home", workspace=tmp_path / "workspace")
+    )
+    assembler = InputAssembler(conversation_reference_manager=manager)
+    history = [
+        Message.user(
+            "old",
+            metadata={
+                "conversation_references": [
+                    {
+                        "id": "old-ref",
+                        "kind": "skill",
+                        "ref": "skill:skill-creator",
+                        "label": "Old Skill",
+                        "activation": "inject_context",
+                    }
+                ]
+            },
+        ),
+        Message.assistant("old response"),
+        Message.user(
+            "new",
+            metadata={
+                "conversation_references": [
+                    {
+                        "id": "new-ref",
+                        "kind": "skill",
+                        "ref": "skill:skill-creator",
+                        "label": "Skill Creator",
+                        "activation": "inject_context",
+                    }
+                ]
+            },
+        ),
+    ]
+
+    result = await assembler.assemble(history, [])
+    user_messages = [msg for msg in result.messages if msg.role == "user"]
+    latest_user = user_messages[-1]
+
+    assert len(result.messages) == len(history)
+    assert latest_user.content is not None
+    assert latest_user.content.startswith("[$skill-creator](")
+    assert latest_user.content.endswith("\n\nnew")
+    assert "SKILL.md" in latest_user.content
+    assert "Create a new skill." not in latest_user.content
+    assert "Old Skill" not in latest_user.content
+    assert result.metadata["conversation_references"][0]["id"] == "new-ref"
 
 
 @pytest.mark.unit
@@ -197,3 +255,13 @@ async def test_memory_source_only_injects_when_content_present() -> None:
     assert len(system_msgs) == 0
     assert result.metadata["added_system"] is False
     _dump_assemble_result("memory-source-empty", result, sources)
+
+
+def _write_skill(tmp_path: Path, name: str, body: str) -> None:
+    """写入 home skill，输入为名称和正文，输出为 SKILL.md 文件。"""
+    skill_dir = tmp_path / "home" / "skills" / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: Test skill\n---\n\n{body}\n",
+        encoding="utf-8",
+    )

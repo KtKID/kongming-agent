@@ -32,7 +32,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hosts.web.app import create_app
-from scheduler.domain import TaskState, TriggerType
+from scheduler.domain import TaskLifecycleState, TriggerType
 from scheduler.timing import to_iso
 from tests.unit.test_web_app_lifespan import _seed_password
 from tests.unit.web.test_cron_router import (
@@ -78,8 +78,9 @@ def test_create_once_task_happy(tmp_path: Path) -> None:
         assert resp.status_code == 201, resp.text
         body = resp.json()
         assert body["name"] == "创建 scheduler-test-once.txt"
-        assert body["enabled"] is True
-        assert body["state"] == "scheduled"
+        assert body["lifecycle"] == "scheduled"
+        assert body["latest_run_status"] is None
+        assert body["live_runtime_status"] == "idle"
         assert body["trigger_type"] == "once"
         assert body["trigger_expr"] is not None  # ISO timestamp
         assert body["next_run_at"] is not None
@@ -89,7 +90,7 @@ def test_create_once_task_happy(tmp_path: Path) -> None:
         # store 侧确认
         task = store.get_task(body["task_id"])
         assert task is not None
-        assert task.state is TaskState.SCHEDULED
+        assert task.lifecycle is TaskLifecycleState.SCHEDULED
         assert task.trigger.trigger_type is TriggerType.ONCE
         assert task.thread_id == body["thread_id"]
         assert task.delivery is not None
@@ -230,7 +231,7 @@ def test_create_cron_task_happy_path(
         assert resp.status_code == 201, resp.text
         body = resp.json()
         assert body["name"] == payload["name"]
-        assert body["state"] == "scheduled"
+        assert body["lifecycle"] == "scheduled"
         assert body["trigger_type"] == "cron"
         assert body["trigger_expr"] == expected_expr
         assert body["next_run_at"] is not None
@@ -341,7 +342,9 @@ def test_create_task_invalid_schedule_type(tmp_path: Path) -> None:
             headers=CSRF_HEADERS,
         )
         assert resp.status_code == 422
-        assert "monthly" in resp.json()["detail"]
+        detail = resp.json()["detail"]
+        assert detail[0]["loc"] == ["body", "schedule_type"]
+        assert detail[0]["input"] == "monthly"
     finally:
         client.__exit__(None, None, None)
 
@@ -378,8 +381,7 @@ def test_get_task_after_create(tmp_path: Path) -> None:
         assert body["name"] == "每日构建"
         assert body["trigger_type"] == "cron"
         assert body["trigger_expr"] == "30 6 * * *"
-        assert body["enabled"] is True
-        assert body["state"] == "scheduled"
+        assert body["lifecycle"] == "scheduled"
         assert body["preset_id"] == ""
     finally:
         client.__exit__(None, None, None)

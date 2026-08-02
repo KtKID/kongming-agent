@@ -14,7 +14,10 @@ import { useThreadsStore } from "@/stores/threads";
 export function GenericEmptyThreadView({
   onCreated,
 }: {
-  onCreated: (thread: ThreadMetadataDTO) => void;
+  onCreated: (
+    thread: ThreadMetadataDTO,
+    reasoningEffort: ReasoningEffort | null,
+  ) => void;
 }) {
   const threads = useThreadsStore((s) => s.threads);
   const createGenericThreadFromFirstMessage = useThreadsStore(
@@ -70,7 +73,7 @@ export function GenericEmptyThreadView({
         cwd: project?.cwd ?? "",
         reasoning_effort: reasoningEffort,
       });
-      onCreated(thread);
+      onCreated(thread, reasoningEffort);
       return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -108,6 +111,9 @@ export function GenericEmptyThreadView({
                 onManageProviders={() => undefined}
               />
             }
+            reasoningOptions={selectedFamily?.supportedReasoningEfforts}
+            defaultReasoningEffort={selectedFamily?.defaultReasoningEffort}
+            reasoningSelectionKey={selectedFamily?.presetId ?? selectedPresetId}
           />
         </div>
       </div>

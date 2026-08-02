@@ -50,7 +50,7 @@ from pathlib import Path
 import pytest
 
 from infrastructure.config import load_config
-from runtime_assembly.native_runtime import NativeRuntime
+from runtime_assembly.session_engine import SessionEngine
 from tools import AutoAllowApproval, ReadFileTool
 
 _DUMP_ENV = "KONGMING_E2E_DEBUG_DUMP_RAW"
@@ -133,7 +133,7 @@ async def test_dump_plain_chat_hi(
     before = _raw_dump_snapshot(dump_dir)
 
     cfg = load_config()
-    runtime = NativeRuntime.build(
+    runtime = SessionEngine.build(
         cfg,
         approval=AutoAllowApproval(),
         tools={},
@@ -186,7 +186,7 @@ async def test_dump_tool_call_roundtrip(
 
     cfg = load_config()
     registry: dict[str, object] = {"read_file": ReadFileTool()}
-    runtime = NativeRuntime.build(
+    runtime = SessionEngine.build(
         cfg,
         approval=AutoAllowApproval(),
         tools=registry,  # type: ignore[arg-type]  # dict 结构上满足 ToolLookup

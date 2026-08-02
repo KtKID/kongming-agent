@@ -105,7 +105,7 @@ def _mapper_output_payload(
             "files_assigned": 2,
             "files_seen_count": 1,
             "symbols_seen_count": 3,
-            "skipped_files": ["src/executors/agent_runtime/native_runtime.py"],
+            "skipped_files": ["src/executors/agent_runtime/session_engine.py"],
             "skip_reasons": ["out_of_scope_for_contract_test"],
         },
         "errors": mapper_errors or [],
@@ -371,7 +371,7 @@ def test_mapper_output_validator_converts_code_findings_envelope_to_dataclasses(
             {
                 "error_type": "tool_error",
                 "message": "read_file failed for one assigned file",
-                "file_path": "src/executors/agent_runtime/native_runtime.py",
+                "file_path": "src/executors/agent_runtime/session_engine.py",
                 "retryable": True,
             }
         ],
@@ -397,7 +397,7 @@ def test_mapper_output_validator_converts_code_findings_envelope_to_dataclasses(
     assert location.line_start == 34
 
     assert is_dataclass(envelope.coverage)
-    assert envelope.coverage.skipped_files == ("src/executors/agent_runtime/native_runtime.py",)
+    assert envelope.coverage.skipped_files == ("src/executors/agent_runtime/session_engine.py",)
     assert envelope.coverage.skip_reasons == ("out_of_scope_for_contract_test",)
 
     mapper_error = envelope.errors[0]

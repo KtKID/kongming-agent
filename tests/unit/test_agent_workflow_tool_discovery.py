@@ -17,6 +17,7 @@ from application.agent_workflows.strategies.description import (
     WorkflowStrategyInputField,
 )
 from core.contracts import ToolContext
+from tests.support.tool_calls import execute_prepared_tool
 from tools import AgentWorkflowHandle, ToolRegistry, register_agent_workflow_tool
 from tools.agent_workflow_tool import build_run_agent_workflow_tool
 
@@ -98,7 +99,7 @@ async def test_register_agent_workflow_tool_exposes_describe_and_run() -> None:
     assert "describe_agent_workflow_strategy" in registry.names()
     assert "run_agent_workflow" in registry.names()
     describe_tool = registry["describe_agent_workflow_strategy"]
-    result = await describe_tool.execute({"mode": "task_flow"}, _ctx())
+    result = await execute_prepared_tool(describe_tool, {"mode": "task_flow"}, _ctx())
 
     assert result.ok is True
     assert result.data is not None
@@ -122,7 +123,8 @@ async def test_describe_agent_workflow_strategy_reports_non_json_example_context
     registry = ToolRegistry()
 
     register_agent_workflow_tool(registry, handle)
-    result = await registry["describe_agent_workflow_strategy"].execute(
+    result = await execute_prepared_tool(
+        registry["describe_agent_workflow_strategy"],
         {"mode": "task_flow"},
         _ctx(),
     )
@@ -141,7 +143,8 @@ async def test_describe_agent_workflow_strategy_reports_non_json_payload_example
     registry = ToolRegistry()
 
     register_agent_workflow_tool(registry, handle)
-    result = await registry["describe_agent_workflow_strategy"].execute(
+    result = await execute_prepared_tool(
+        registry["describe_agent_workflow_strategy"],
         {"mode": "task_flow"},
         _ctx(),
     )

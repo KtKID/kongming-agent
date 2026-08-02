@@ -7,46 +7,17 @@
 
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
 import type {
+  CronRunMessagesResponse,
+  CronRunDTO,
+  CronTaskDTO,
+  RunNowResponse,
+} from "@/protocol";
+import type {
   CreateSchedulerTaskRequest,
   SchedulerRunVM,
   SchedulerTaskVM,
   UpdateSchedulerTaskRequest,
 } from "./types";
-
-// ---------------------------------------------------------------------------
-// 后端原始 DTO（与 cron.py 的 CronTaskDTO / CronRunDTO 对齐）
-// ---------------------------------------------------------------------------
-
-type CronTaskDTO = {
-  task_id: string;
-  name: string;
-  enabled: boolean;
-  state: string;
-  trigger_type: string;
-  trigger_expr: string;
-  next_run_at: string | null;
-  last_run_at: string | null;
-  preset_id: string;
-  thread_id?: string;
-  created_by: string;
-  // v0.5.4: 后端把任务内容与 agent 名直接随 GET /tasks 返回，
-  // 供 edit / duplicate 模式预填表单（旧字段缺失时映射为空串兜底）。
-  input_text?: string;
-  agent_name?: string;
-};
-
-type CronRunDTO = {
-  run_id: string;
-  task_id: string;
-  task_name: string;
-  scheduled_for: string;
-  started_at: string | null;
-  finished_at: string | null;
-  status: string;
-  final_message_excerpt: string | null;
-  delivery_status: string;
-  delivery_error: string | null;
-};
 
 // ---------------------------------------------------------------------------
 // 公开 API 函数
@@ -94,8 +65,8 @@ export async function resumeTask(taskId: string): Promise<SchedulerTaskVM> {
   return taskFromDTO(dto);
 }
 
-export async function runTaskNow(taskId: string): Promise<void> {
-  await apiPost(`/api/cron/tasks/${taskId}/run_now`);
+export async function runTaskNow(taskId: string): Promise<RunNowResponse> {
+  return apiPost<RunNowResponse>(`/api/cron/tasks/${taskId}/run_now`);
 }
 
 export async function deleteTask(taskId: string): Promise<void> {
@@ -112,6 +83,15 @@ export async function listTaskRuns(
   return dtos.map(runFromDTO);
 }
 
+export async function loadRunMessages(
+  taskId: string,
+  runId: string,
+): Promise<CronRunMessagesResponse> {
+  return apiGet<CronRunMessagesResponse>(
+    `/api/cron/tasks/${taskId}/runs/${runId}/messages`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // DTO → VM 映射
 // ---------------------------------------------------------------------------
@@ -120,30 +100,34 @@ function taskFromDTO(dto: CronTaskDTO): SchedulerTaskVM {
   return {
     taskId: dto.task_id,
     name: dto.name,
-    enabled: dto.enabled,
-    state: dto.state as SchedulerTaskVM["state"],
-    triggerType: dto.trigger_type as SchedulerTaskVM["triggerType"],
+    lifecycle: dto.lifecycle,
+    latestRunStatus: dto.latest_run_status,
+    liveRuntimeStatus: dto.live_runtime_status,
+    triggerType: dto.trigger_type,
     triggerExpr: dto.trigger_expr,
     nextRunAt: dto.next_run_at,
     lastRunAt: dto.last_run_at,
-    timezone: null,
+    timezone: dto.timezone,
     presetId: dto.preset_id,
-    threadId: dto.thread_id ?? "",
+    threadId: dto.thread_id,
     createdBy: dto.created_by,
-    inputText: dto.input_text ?? "",
-    agentName: dto.agent_name ?? "",
+    inputText: dto.input_text,
+    agentName: dto.agent_name,
   };
 }
 
-function runFromDTO(dto: CronRunDTO): SchedulerRunVM {
+export function runFromDTO(dto: CronRunDTO): SchedulerRunVM {
   return {
     runId: dto.run_id,
     taskId: dto.task_id,
     taskName: dto.task_name,
+    sessionId: dto.session_id,
+    threadId: dto.thread_id,
     scheduledFor: dto.scheduled_for,
     startedAt: dto.started_at,
     finishedAt: dto.finished_at,
-    status: dto.status as SchedulerRunVM["status"],
+    status: dto.status,
+    failureReason: dto.failure_reason,
     finalMessageExcerpt: dto.final_message_excerpt,
     deliveryStatus: dto.delivery_status,
     deliveryError: dto.delivery_error,

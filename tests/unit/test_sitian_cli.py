@@ -6,18 +6,13 @@ from pathlib import Path
 from click.testing import CliRunner
 
 import sitian.cli as sitian_cli
-from infrastructure.config.models import Config, ModelConfig
+from infrastructure.config.models import Config, ModelSelectionConfig
 from sitian.config import SiTianConfig, SiTianSourceConfig
 
 
 def _build_cfg(project_dir: Path, *, output_subdir: str | None = None) -> Config:
     return Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="stub-model",
-            base_url="http://127.0.0.1:1234",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         sitian=SiTianConfig(
             default_scan_interval_sec=60,
             idle_sleep_sec=2,

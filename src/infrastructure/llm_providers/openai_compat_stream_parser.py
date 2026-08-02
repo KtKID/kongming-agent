@@ -26,8 +26,14 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
-from core.contracts import FinishReason, LLMStreamChunk
+from core.contracts import (
+    FinishReason,
+    LLMStreamChunk,
+    ProviderUsageFamily,
+    ProviderUsageSnapshot,
+)
 from core.message import Message, ToolCall
+from infrastructure.llm_providers.usage import ProviderUsageManager
 
 
 @dataclass
@@ -61,7 +67,8 @@ class OpenAICompatStreamParser:
     语义未定义——对每条流构造新实例。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, usage_manager: ProviderUsageManager | None = None) -> None:
+        """初始化单流 parser，输入为 usage 门户，输出为空。"""
         # 内容累积
         self._content_parts: list[str] = []
         self._reasoning_parts: list[str] = []
@@ -78,7 +85,8 @@ class OpenAICompatStreamParser:
 
         # 流级元数据
         self._finish_reason: str | None = None
-        self._usage_obj: dict[str, Any] | None = None
+        manager = usage_manager or ProviderUsageManager()
+        self._usage_stream = manager.start_stream(ProviderUsageFamily.OPENAI_CHAT_COMPLETIONS)
         self._model_name: str | None = None
         self._response_id: str | None = None
         self._system_fingerprint: str | None = None
@@ -123,7 +131,7 @@ class OpenAICompatStreamParser:
             self._system_fingerprint = chunk["system_fingerprint"]
         usage = chunk.get("usage")
         if isinstance(usage, dict):
-            self._usage_obj = usage
+            self._usage_stream.ingest(usage, terminal=True)
 
         choices = chunk.get("choices") or []
         if not choices:
@@ -292,11 +300,9 @@ class OpenAICompatStreamParser:
             truncated_args=truncated_args,
         )
 
-        # 5. 打包 provider_metadata
-        provider_metadata = self._build_provider_metadata()
-
-        # 6. 归一化 usage（只保留平铺后的 int 字段；复杂嵌套留给 provider_metadata）
+        # 5. 构造 canonical usage，再从其 raw_usage 提取 provider metadata
         normalized_usage = self._build_usage()
+        provider_metadata = self._build_provider_metadata(normalized_usage.raw_usage)
 
         yield LLMStreamChunk(
             kind="message.done",
@@ -328,7 +334,8 @@ class OpenAICompatStreamParser:
             out.append(ToolCall(call_id=call_id, tool_name=tool_name, arguments=arguments))
         return out
 
-    def _build_provider_metadata(self) -> dict[str, Any]:
+    def _build_provider_metadata(self, usage: dict[str, Any]) -> dict[str, Any]:
+        """构造 provider metadata，输入为 canonical raw usage，输出为扩展字段。"""
         provider_metadata: dict[str, Any] = {}
 
         # reasoning_content（累积拼接，截断到 500 字符；对齐现有非流式路径）
@@ -346,7 +353,6 @@ class OpenAICompatStreamParser:
         if self._system_fingerprint is not None:
             provider_metadata["system_fingerprint"] = self._system_fingerprint
 
-        usage = self._usage_obj or {}
         completion_details = usage.get("completion_tokens_details") or {}
         if isinstance(completion_details, dict) and "reasoning_tokens" in completion_details:
             provider_metadata["reasoning_tokens"] = completion_details["reasoning_tokens"]
@@ -356,28 +362,9 @@ class OpenAICompatStreamParser:
 
         return provider_metadata
 
-    def _build_usage(self) -> dict[str, Any]:
-        # task#3.1：透传 SDK 原生字段 + provider_kind，让 web.usage_token 按 channel 解析
-        usage = self._usage_obj or {}
-        normalized: dict[str, Any] = {
-            "provider_kind": "openai_compatible",
-        }
-        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-            if key in usage:
-                normalized[key] = usage[key]
-        # 派生 input_tokens / output_tokens 跟 web.usage_token._channel_openai 对齐
-        if "prompt_tokens" in usage:
-            normalized["input_tokens"] = usage["prompt_tokens"]
-        if "completion_tokens" in usage:
-            normalized["output_tokens"] = usage["completion_tokens"]
-        # cached_tokens / reasoning_tokens 从 details 提到 usage 主体
-        completion_details = usage.get("completion_tokens_details") or {}
-        if isinstance(completion_details, dict) and "reasoning_tokens" in completion_details:
-            normalized["reasoning_output_tokens"] = completion_details["reasoning_tokens"]
-        prompt_details = usage.get("prompt_tokens_details") or {}
-        if isinstance(prompt_details, dict) and "cached_tokens" in prompt_details:
-            normalized["cached_input_tokens"] = prompt_details["cached_tokens"]
-        return normalized
+    def _build_usage(self) -> ProviderUsageSnapshot:
+        """构造终态 usage，输入为已聚合 chunk，输出为 canonical snapshot。"""
+        return self._usage_stream.finalize(provider_response_id=self._response_id)
 
     @staticmethod
     def _normalize_finish_reason(

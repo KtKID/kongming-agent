@@ -4,7 +4,7 @@
 - :func:`make_authed_client`：登录态的 ``TestClient``，建联 ``/ws/thread-status``
   时自动带 session cookie
 - :func:`reset_singletons`：autouse — 每个 test 前后重置
-  ``ApprovalInboxBroadcaster`` + ``ThreadStatusBroadcaster`` 单例，避免污染
+  ``ApprovalInboxBroadcaster`` + ``ThreadStatusManager`` 单例，避免污染
 """
 
 from __future__ import annotations
@@ -39,11 +39,7 @@ def reset_singletons() -> Iterator[None]:
 def _make_cfg() -> Config:
     return Config.model_validate(
         {
-            "model": {
-                "name": "fake",
-                "base_url": "http://127.0.0.1:1234/v1",
-                "api_key": "",
-            },
+            "model": {"preset_id": "local-gemma-4-e4b-it"},
             "web": {"enabled": True, "dev_mode": True},
         }
     )

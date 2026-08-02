@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from core.contracts import ToolContext, ToolResult
+from tests.support.tool_calls import execute_prepared_tool
 from tools.runtime.base import BaseBuiltinTool
 
 
@@ -42,7 +43,7 @@ class _BoomTool(BaseBuiltinTool):
 @pytest.mark.asyncio
 async def test_happy_path_returns_ok_result():
     tool = _EchoTool()
-    result = await tool.execute({"msg": "hi"}, _ctx())
+    result = await execute_prepared_tool(tool, {"msg": "hi"}, _ctx())
     assert isinstance(result, ToolResult)
     assert result.ok is True
     assert result.content == "echo:hi"
@@ -52,7 +53,7 @@ async def test_happy_path_returns_ok_result():
 @pytest.mark.asyncio
 async def test_missing_required_arg_returns_fail_not_exception():
     tool = _EchoTool()
-    result = await tool.execute({}, _ctx())
+    result = await execute_prepared_tool(tool, {}, _ctx())
     assert result.ok is False
     assert "missing required args" in (result.error_message or "")
     assert "msg" in (result.error_message or "")
@@ -63,7 +64,7 @@ async def test_missing_required_arg_returns_fail_not_exception():
 @pytest.mark.asyncio
 async def test_non_dict_args_returns_fail():
     tool = _EchoTool()
-    result = await tool.execute("not-a-dict", _ctx())  # type: ignore[arg-type]
+    result = await execute_prepared_tool(tool, "not-a-dict", _ctx())  # type: ignore[arg-type]
     assert result.ok is False
     assert "tool args must be dict" in (result.error_message or "")
 
@@ -72,7 +73,7 @@ async def test_non_dict_args_returns_fail():
 async def test_run_exception_wrapped_to_fail_result():
     """子类裸异常必须被 execute 包成 ToolResult(ok=False)，绝不冒泡。"""
     tool = _BoomTool()
-    result = await tool.execute({}, _ctx())
+    result = await execute_prepared_tool(tool, {}, _ctx())
     assert result.ok is False
     assert "工具执行失败：boom" in result.content
     assert "后续处理要求" in result.content
@@ -88,7 +89,7 @@ async def test_validate_returns_original_args_when_valid():
             return str(args), None
 
     tool = _AllowExtra()
-    result = await tool.execute({"msg": "x", "extra": 42}, _ctx())
+    result = await execute_prepared_tool(tool, {"msg": "x", "extra": 42}, _ctx())
     assert result.ok is True
     assert "msg" in result.content
     assert "extra" in result.content
@@ -107,7 +108,7 @@ async def test_no_required_list_never_fails_validation():
             return "ok", None
 
     tool = _NoRequired()
-    result = await tool.execute({}, _ctx())
+    result = await execute_prepared_tool(tool, {}, _ctx())
     assert result.ok is True
 
 
@@ -116,5 +117,5 @@ async def test_validate_args_with_custom_exception_type():
     """_validate_args 抛 TypeError 也应被兜底（当前实现用 except Exception）。"""
     tool = _EchoTool()
     # 通过传非 dict 触发 TypeError → 仍落到 ToolResult(ok=False)
-    result = await tool.execute(None, _ctx())  # type: ignore[arg-type]
+    result = await execute_prepared_tool(tool, None, _ctx())  # type: ignore[arg-type]
     assert result.ok is False

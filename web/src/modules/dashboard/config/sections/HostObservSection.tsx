@@ -5,7 +5,7 @@
  * 渲染 host_observ 组所有字段（host / web / trace / logging / evolution 五块），
  * 按 `meta.path` 第一段前缀分子桶。逻辑同 RuntimeSection / ToolApprovalSection。
  *
- * `web.llm_presets` 是 list 字段，会被 FieldRenderer 自动走 ReadOnly 分支
+ * `web.cors_origins` 等 list 字段会被 FieldRenderer 自动走 ReadOnly 分支
  * （以 JSON 形式展示），符合一期 list 不可编辑约定。
  *
  * 不在本文件 fetch / 修改 store 全局状态（除调用 setField / clearField）。

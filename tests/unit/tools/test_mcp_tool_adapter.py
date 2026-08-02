@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from core.contracts import ToolContext
+from tests.support.tool_calls import execute_prepared_tool
 from tools.mcp import McpToolAdapterManager, McpToolAliasConfig, McpToolDescriptor
 
 
@@ -112,7 +113,7 @@ async def test_adapter_execute_calls_fake_client_and_returns_tool_result_data() 
     plan = manager.build_registration_plan([_descriptor()])
     tool = manager.build_tool(plan.registrations[0])
 
-    result = await tool.execute({"query": "kongming"}, _ctx())
+    result = await execute_prepared_tool(tool, {"query": "kongming"}, _ctx())
 
     assert client.calls == [("minimax", "web-search", {"query": "kongming"})]
     assert result.ok is True

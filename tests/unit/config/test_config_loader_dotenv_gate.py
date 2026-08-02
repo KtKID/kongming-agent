@@ -22,13 +22,13 @@ def test_kongming_skip_dotenv_ignores_project_env_file(
 
     config_path = tmp_path / "setting.yaml"
     config_path.write_text(
-        "model:\n  name: from-yaml\n  base_url: http://127.0.0.1:1234/v1\n  api_key: ''\n",
+        "config_schema_version: v0.6\nmodel:\n  preset_id: from-yaml\n",
         encoding="utf-8",
     )
-    (tmp_path / ".env").write_text("KONGMING_MODEL_NAME=from-dotenv\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("KONGMING_MODEL_PRESET_ID=from-dotenv\n", encoding="utf-8")
 
     monkeypatch.setenv("KONGMING_SKIP_DOTENV", "1")
-    monkeypatch.delenv("KONGMING_MODEL_NAME", raising=False)
+    monkeypatch.delenv("KONGMING_MODEL_PRESET_ID", raising=False)
     cfg = load_config(config_path)
 
-    assert cfg.model.name == "from-yaml"
+    assert cfg.model.preset_id == "from-yaml"

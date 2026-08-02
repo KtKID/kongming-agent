@@ -6,11 +6,12 @@ import { useNavigate } from "react-router-dom";
 import { Play, Pause, Trash2, Loader2, Pencil, Copy, History } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import type { SchedulerTaskVM } from "../types";
+import type { SchedulerTaskRuntimeStatus, SchedulerTaskVM } from "../types";
 import { SchedulerStatusBadge } from "./SchedulerStatusBadge";
 
 type Props = {
   task: SchedulerTaskVM;
+  runtimeStatus?: SchedulerTaskRuntimeStatus;
   isSelected: boolean;
   onSelect: () => void;
   onPause: () => void;
@@ -42,6 +43,7 @@ function formatRelative(iso: string | null): string {
 
 export function SchedulerTaskRow({
   task,
+  runtimeStatus,
   isSelected,
   onSelect,
   onPause,
@@ -52,28 +54,60 @@ export function SchedulerTaskRow({
   onDuplicate,
 }: Props) {
   const navigate = useNavigate();
-  const isRunning = task.state === "running";
-  const isPaused = task.state === "paused";
+  const effectiveRuntimeStatus = runtimeStatus ?? task.liveRuntimeStatus;
+  const recentRunStatus =
+    effectiveRuntimeStatus === "running" ? "running" : task.latestRunStatus;
+  const isRunning = effectiveRuntimeStatus === "running";
+  const isPaused =
+    task.lifecycle === "paused" || task.lifecycle === "disabled";
+  const actionButtonClass = isSelected
+    ? "text-primary-foreground/75 hover:border-primary-foreground/20 hover:bg-primary-foreground/10 hover:text-primary-foreground"
+    : undefined;
+  const deleteButtonClass = isSelected
+    ? "text-red-300 hover:border-red-200/20 hover:bg-red-400/15 hover:text-red-100"
+    : "text-destructive hover:text-destructive";
 
   return (
     <div
       className={cn(
         "flex flex-col gap-2 rounded-lg border p-3 cursor-pointer transition-colors",
         isSelected
-          ? "border-primary bg-accent"
+          ? "border-primary/70 bg-primary text-primary-foreground shadow-sm"
           : "border-border hover:bg-secondary/50",
       )}
       onClick={onSelect}
     >
       <div className="flex items-center justify-between gap-2">
-        <span className="truncate text-sm font-medium">{task.name}</span>
-        <SchedulerStatusBadge state={task.state} />
+        <span
+          className={cn(
+            "truncate text-sm font-medium",
+            isSelected ? "text-primary-foreground" : "text-foreground",
+          )}
+        >
+          {task.name}
+        </span>
+        <div className="flex items-center gap-1">
+          <SchedulerStatusBadge state={task.lifecycle} />
+          {recentRunStatus ? (
+            <SchedulerStatusBadge state={recentRunStatus} />
+          ) : null}
+        </div>
       </div>
-      <div className="flex items-center gap-3 text-xs text-muted-foreground">
+      <div
+        className={cn(
+          "flex items-center gap-3 text-xs",
+          isSelected ? "text-primary-foreground/75" : "text-muted-foreground",
+        )}
+      >
         <span>
           {task.triggerType === "cron" ? "Cron" : task.triggerType === "once" ? "一次性" : task.triggerType}
         </span>
-        <span className="truncate font-mono text-[11px]">
+        <span
+          className={cn(
+            "truncate font-mono text-[11px]",
+            isSelected && "text-primary-foreground/80",
+          )}
+        >
           {task.triggerExpr}
         </span>
         <span>下次: {formatRelative(task.nextRunAt)}</span>
@@ -83,27 +117,57 @@ export function SchedulerTaskRow({
         onClick={(e) => e.stopPropagation()}
       >
         {isRunning ? (
-          <Button variant="ghost" size="sm" disabled>
+          <Button variant="ghost" size="sm" disabled className={actionButtonClass}>
             <Loader2 className="h-3 w-3 animate-spin" />
           </Button>
         ) : isPaused ? (
-          <Button variant="ghost" size="sm" onClick={onResume} title="恢复">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onResume}
+            title="恢复"
+            className={actionButtonClass}
+          >
             <Play className="h-3 w-3" />
           </Button>
         ) : (
           <>
-            <Button variant="ghost" size="sm" onClick={onRunNow} title="立即执行">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onRunNow}
+              title="立即执行"
+              className={actionButtonClass}
+            >
               <Play className="h-3 w-3" />
             </Button>
-            <Button variant="ghost" size="sm" onClick={onPause} title="暂停">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onPause}
+              title="暂停"
+              className={actionButtonClass}
+            >
               <Pause className="h-3 w-3" />
             </Button>
           </>
         )}
-        <Button variant="ghost" size="sm" onClick={onEdit} title="编辑">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onEdit}
+          title="编辑"
+          className={actionButtonClass}
+        >
           <Pencil className="h-3 w-3" />
         </Button>
-        <Button variant="ghost" size="sm" onClick={onDuplicate} title="复制">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onDuplicate}
+          title="复制"
+          className={actionButtonClass}
+        >
           <Copy className="h-3 w-3" />
         </Button>
         {task.threadId ? (
@@ -113,6 +177,7 @@ export function SchedulerTaskRow({
             onClick={() => navigate(`/chat/${task.threadId}`)}
             title="打开历史"
             aria-label="打开历史"
+            className={actionButtonClass}
           >
             <History className="h-3 w-3" />
           </Button>
@@ -122,7 +187,7 @@ export function SchedulerTaskRow({
           size="sm"
           onClick={onDelete}
           title="删除"
-          className="text-destructive hover:text-destructive"
+          className={deleteButtonClass}
         >
           <Trash2 className="h-3 w-3" />
         </Button>

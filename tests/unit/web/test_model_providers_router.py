@@ -1,27 +1,24 @@
+"""模型 provider Web 路由的 catalog v2 合同测试。"""
+
 from __future__ import annotations
 
 import os
-from types import SimpleNamespace
 
-import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hosts.web.routers import model_providers as router_mod
 from hosts.web.routers.model_providers import router
-from infrastructure.config.models import LLMPresetConfig
+from infrastructure.config.model_catalog_manager import ModelCatalogManager
 
 
 @pytest.fixture(autouse=True)
-def _isolate_provider_env(monkeypatch) -> None:
-    """清理模型服务商相关环境变量，避免开发机真实 key 污染单测。"""
+def _isolate_provider_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """清理 credential 环境变量，保证连接状态由单测显式控制。"""
     for name in (
         "MINIMAX_API_KEY",
         "KONGMING_PROVIDER_MINIMAX_API_KEY",
-        "KONGMING_MODEL_API_KEY",
-        "KONGMING_MODEL_BASE_URL",
-        "KONGMING_MODEL_NAME",
         "GLM_API_KEY",
         "BIGMODEL_API_KEY",
         "ZHIPU_API_KEY",
@@ -31,749 +28,152 @@ def _isolate_provider_env(monkeypatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
-def _config(presets: list[LLMPresetConfig] | None = None) -> SimpleNamespace:
-    return SimpleNamespace(web=SimpleNamespace(llm_presets=presets or []))
-
-
-def _client(cfg: SimpleNamespace) -> TestClient:
-    app = FastAPI()
-    app.state.config = cfg
-    app.include_router(router)
-    return TestClient(app)
-
-
 class _FakeConfigManager:
-    """测试 config manager：记录写入并同步当前进程 env。"""
+    """记录 env 写入并同步进程环境。"""
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._monkeypatch = monkeypatch
+    def __init__(self) -> None:
         self.writes: list[dict[str, str]] = []
-        self.presets: list[LLMPresetConfig] = []
 
     def write_env_values(self, values: dict[str, str]) -> None:
+        """记录并应用 provider credential。"""
         self.writes.append(values)
-        for key, value in values.items():
-            self._monkeypatch.setenv(key, value)
-
-    def upsert_web_llm_preset(self, preset: LLMPresetConfig) -> None:
-        self.presets.append(preset)
+        os.environ.update(values)
 
 
-def _client_with_config_manager(
-    cfg: SimpleNamespace,
-    config_manager: _FakeConfigManager,
-) -> TestClient:
+def _client(*, config_manager: _FakeConfigManager | None = None) -> TestClient:
+    """创建注入真实 ModelCatalogManager 的最小 FastAPI client。"""
     app = FastAPI()
-    app.state.config = cfg
-    app.state.config_manager = config_manager
+    app.state.model_catalog_manager = ModelCatalogManager()
+    if config_manager is not None:
+        app.state.config_manager = config_manager
     app.include_router(router)
     return TestClient(app)
 
 
-def test_catalog_returns_supported_providers() -> None:
-    client = _client(_config())
+def test_catalog_projects_builtin_provider_dto() -> None:
+    """catalog endpoint 直接投影 v2 provider 静态字段。"""
+    response = _client().get("/api/model-providers/catalog")
 
-    resp = client.get("/api/model-providers/catalog")
-
-    assert resp.status_code == 200
-    assert resp.json() == [
-        {
-            "providerId": "minimax",
-            "displayName": "Minimax",
-            "regionLabel": "CN",
-            "description": "中国区 Minimax API Key，用于启用对应模型预设。",
-            "logoText": "M",
-        },
-        {
-            "providerId": "glm",
-            "displayName": "GLM",
-            "regionLabel": "CN",
-            "description": "智谱 GLM API Key，用于启用 GLM 模型预设。",
-            "logoText": "G",
-        },
-        {
-            "providerId": "deepseek",
-            "displayName": "DeepSeek",
-            "regionLabel": "CN",
-            "description": "DeepSeek API Key，用于启用 DeepSeek 模型预设。",
-            "logoText": "D",
-        },
-    ]
+    assert response.status_code == 200
+    providers = {item["providerId"]: item for item in response.json()}
+    assert providers["glm"] == {
+        "providerId": "glm",
+        "displayName": "GLM",
+        "regionLabel": "CN",
+        "description": "智谱 GLM API Key，用于启用 GLM 模型预设。",
+        "logoText": "G",
+    }
+    assert "local-baseline" in providers
 
 
-def test_connections_reads_stable_minimax_env(monkeypatch) -> None:
-    monkeypatch.setenv("KONGMING_PROVIDER_MINIMAX_API_KEY", "sk-live")
-    client = _client(_config())
-
-    resp = client.get("/api/model-providers/connections")
-
-    assert resp.status_code == 200
-    assert resp.json() == [
-        {
-            "providerId": "minimax",
-            "status": "connected",
-            "model": None,
-            "authLabel": "Bearer",
-        },
-        {
-            "providerId": "glm",
-            "status": "disconnected",
-            "model": None,
-            "authLabel": None,
-        },
-        {
-            "providerId": "deepseek",
-            "status": "disconnected",
-            "model": None,
-            "authLabel": None,
-        },
-    ]
-
-
-def test_connections_reads_minimax_preset_env(monkeypatch) -> None:
-    monkeypatch.setenv("MINIMAX_API_KEY", "sk-live")
-    preset = LLMPresetConfig(
-        id="minimax-cn",
-        display_name="Minimax（CN）",
-        provider="anthropic",
-        base_url="https://api.minimaxi.com/anthropic",
-        model="MiniMax-M3",
-        api_key_env="MINIMAX_API_KEY",
-    )
-    client = _client(_config([preset]))
-
-    resp = client.get("/api/model-providers/connections")
-
-    assert resp.status_code == 200
-    assert resp.json() == [
-        {
-            "providerId": "minimax",
-            "status": "connected",
-            "model": "MiniMax-M3",
-            "authLabel": "Bearer",
-        },
-        {
-            "providerId": "glm",
-            "status": "disconnected",
-            "model": None,
-            "authLabel": None,
-        },
-        {
-            "providerId": "deepseek",
-            "status": "disconnected",
-            "model": None,
-            "authLabel": None,
-        },
-    ]
-
-
-def test_connect_provider_writes_default_env_and_returns_connection(
+def test_connections_are_derived_from_catalog_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manager = _FakeConfigManager(monkeypatch)
-    preset = LLMPresetConfig(
-        id="minimax-cn",
-        display_name="Minimax（CN）",
-        provider="anthropic",
-        base_url="https://api.minimaxi.com/anthropic",
-        model="MiniMax-M3",
-        api_key_env="KONGMING_PROVIDER_MINIMAX_API_KEY",
-    )
-    client = _client_with_config_manager(_config([preset]), manager)
+    """远端连接状态来自 provider-specific env，本地 endpoint 自动可用。"""
+    monkeypatch.setenv("GLM_API_KEY", "glm-live")
 
-    resp = client.post(
-        "/api/model-providers/minimax/connect",
-        json={"apiKey": "sk-live"},
+    response = _client().get("/api/model-providers/connections")
+
+    assert response.status_code == 200
+    connections = {item["providerId"]: item for item in response.json()}
+    assert connections["glm"] == {
+        "providerId": "glm",
+        "status": "connected",
+        "model": "glm-5.2",
+        "authLabel": "Bearer",
+    }
+    assert connections["minimax"]["status"] == "disconnected"
+    assert connections["local-baseline"]["status"] == "connected"
+
+
+def test_connect_writes_catalog_credential_reference() -> None:
+    """connect 只写 catalog 声明的 credential env。"""
+    config_manager = _FakeConfigManager()
+
+    response = _client(config_manager=config_manager).post(
+        "/api/model-providers/glm/connect",
+        json={"apiKey": "glm-live"},
     )
 
-    assert resp.status_code == 200
-    assert manager.writes == [{"MINIMAX_API_KEY": "sk-live"}]
-    assert [item.api_key_env for item in manager.presets] == ["MINIMAX_API_KEY"]
-    assert resp.json() == {
-        "providerId": "minimax",
+    assert response.status_code == 200
+    assert config_manager.writes == [{"GLM_API_KEY": "glm-live"}]
+    assert response.json()["connection"] == {
+        "providerId": "glm",
+        "status": "connected",
+        "model": "glm-5.2",
+        "authLabel": "Bearer",
+    }
+
+
+def test_model_families_project_reasoning_and_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Composer 能力、默认 effort 与 context 来自同一 catalog model。"""
+    monkeypatch.setenv("GLM_API_KEY", "glm-live")
+
+    response = _client().get("/api/model-providers/model-families")
+
+    assert response.status_code == 200
+    families = {item["presetId"]: item for item in response.json()}
+    assert families["bigmodel-glm5-1m"]["supportedReasoningEfforts"] == [
+        "none",
+        "low",
+        "medium",
+        "high",
+    ]
+    assert families["bigmodel-glm5-1m"]["defaultReasoningEffort"] == "high"
+    assert families["bigmodel-glm5-1m"]["reasoningAdapter"] == "glm_thinking_toggle"
+    assert families["bigmodel-glm5-1m"]["contextWindowTokens"] == 1_000_000
+    assert families["local-gemma-4-e4b-it"]["supportedReasoningEfforts"] == []
+
+
+def test_probe_route_uses_catalog_default_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """test endpoint 用 provider 默认 model 发 probe，并返回共享 DTO。"""
+    seen: dict[str, str] = {}
+
+    async def fake_probe(*, definition, model, api_key):
+        """捕获路由解析出的 provider、model 和临时 credential。"""
+        seen.update(
+            provider_id=definition.provider_id,
+            model=model.model,
+            api_key=api_key,
+        )
+        return router_mod._ProbeResult(ok=True, message="连接测试通过。")
+
+    monkeypatch.setattr(router_mod, "_probe_provider", fake_probe)
+
+    response = _client().post(
+        "/api/model-providers/glm/test",
+        json={"apiKey": "temporary-key"},
+    )
+
+    assert response.status_code == 200
+    assert seen == {
+        "provider_id": "glm",
+        "model": "glm-5.2",
+        "api_key": "temporary-key",
+    }
+    assert response.json() == {
+        "providerId": "glm",
         "ok": True,
-        "message": "已保存，刚刚测试通过。",
-        "connection": {
-            "providerId": "minimax",
-            "status": "connected",
-            "model": "MiniMax-M3",
-            "authLabel": "Bearer",
-        },
+        "message": "连接测试通过。",
+        "connection": None,
     }
 
 
-def test_connect_provider_without_preset_creates_selectable_model_family(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    manager = _FakeConfigManager(monkeypatch)
-    cfg = _config()
-    client = _client_with_config_manager(cfg, manager)
-
-    resp = client.post(
-        "/api/model-providers/minimax/connect",
-        json={"apiKey": "sk-live"},
+def test_unknown_provider_has_stable_public_shape() -> None:
+    """未知 provider 返回确定的业务响应。"""
+    response = _client().post(
+        "/api/model-providers/missing/connect",
+        json={"apiKey": "any-key"},
     )
 
-    assert resp.status_code == 200
-    assert manager.writes == [{"MINIMAX_API_KEY": "sk-live"}]
-    assert [preset.id for preset in manager.presets] == ["minimax-m3"]
-
-    families_resp = client.get("/api/model-providers/model-families")
-
-    assert families_resp.status_code == 200
-    assert families_resp.json() == [
-        {
-            "providerId": "minimax",
-            "providerLabel": "Minimax（CN）",
-            "familyId": "minimax:MiniMax-M3",
-            "displayName": "MiniMax-M3",
-            "presetId": "minimax-m3",
-            "model": "MiniMax-M3",
-            "connected": True,
-        }
-    ]
-
-
-def test_connections_without_env_is_disconnected(monkeypatch) -> None:
-    monkeypatch.delenv("KONGMING_PROVIDER_MINIMAX_API_KEY", raising=False)
-    monkeypatch.delenv("KONGMING_MODEL_API_KEY", raising=False)
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    client = _client(_config())
-
-    resp = client.get("/api/model-providers/connections")
-
-    assert resp.status_code == 200
-    assert resp.json() == [
-        {
-            "providerId": "minimax",
-            "status": "disconnected",
-            "model": None,
-            "authLabel": None,
-        },
-        {
-            "providerId": "glm",
-            "status": "disconnected",
-            "model": None,
-            "authLabel": None,
-        },
-        {
-            "providerId": "deepseek",
-            "status": "disconnected",
-            "model": None,
-            "authLabel": None,
-        },
-    ]
-
-
-def test_connections_reads_glm_default_env(monkeypatch) -> None:
-    monkeypatch.setenv("GLM_API_KEY", "glm-live")
-    preset = LLMPresetConfig(
-        id="bigmodel-glm5",
-        display_name="智谱 GLM-5.1",
-        provider="openai_compatible",
-        base_url="https://open.bigmodel.cn/api/coding/paas/v4",
-        model="glm-5.1",
-        api_key_env="GLM_API_KEY",
-    )
-    client = _client(_config([preset]))
-
-    resp = client.get("/api/model-providers/connections")
-
-    assert resp.status_code == 200
-    assert resp.json() == [
-        {
-            "providerId": "minimax",
-            "status": "disconnected",
-            "model": None,
-            "authLabel": None,
-        },
-        {
-            "providerId": "glm",
-            "status": "connected",
-            "model": "glm-5.1",
-            "authLabel": "Bearer",
-        },
-        {
-            "providerId": "deepseek",
-            "status": "disconnected",
-            "model": None,
-            "authLabel": None,
-        },
-    ]
-
-
-def test_connections_ignore_generic_model_key_only(monkeypatch) -> None:
-    monkeypatch.setenv("KONGMING_MODEL_API_KEY", "minimax-live")
-    monkeypatch.setenv("KONGMING_MODEL_BASE_URL", "https://api.minimaxi.com/anthropic")
-    monkeypatch.setenv("KONGMING_MODEL_NAME", "MiniMax-M3")
-    client = _client(_config())
-
-    resp = client.get("/api/model-providers/connections")
-
-    assert resp.status_code == 200
-    assert [item["status"] for item in resp.json()] == [
-        "disconnected",
-        "disconnected",
-        "disconnected",
-    ]
-
-
-def test_connections_old_glm_preset_generic_model_key_stays_disconnected(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("KONGMING_MODEL_API_KEY", "glm-live")
-    preset = LLMPresetConfig(
-        id="bigmodel-glm5",
-        display_name="智谱 GLM-5.1",
-        provider="openai_compatible",
-        base_url="https://open.bigmodel.cn/api/coding/paas/v4",
-        model="glm-5.1",
-        api_key_env="KONGMING_MODEL_API_KEY",
-    )
-    client = _client(_config([preset]))
-
-    resp = client.get("/api/model-providers/connections")
-
-    assert resp.status_code == 200
-    glm = next(item for item in resp.json() if item["providerId"] == "glm")
-    assert glm == {
-        "providerId": "glm",
-        "status": "disconnected",
-        "model": "glm-5.1",
-        "authLabel": None,
+    assert response.status_code == 200
+    assert response.json() == {
+        "providerId": "missing",
+        "ok": False,
+        "message": "未知模型服务商。",
+        "connection": None,
     }
-
-
-def test_connections_old_glm_preset_waits_for_explicit_connect(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("KONGMING_MODEL_API_KEY", "minimax-live")
-    monkeypatch.setenv("GLM_API_KEY", "glm-live")
-    preset = LLMPresetConfig(
-        id="bigmodel-glm5",
-        display_name="智谱 GLM-5.1",
-        provider="openai_compatible",
-        base_url="https://open.bigmodel.cn/api/coding/paas/v4",
-        model="glm-5.1",
-        api_key_env="KONGMING_MODEL_API_KEY",
-    )
-    client = _client(_config([preset]))
-
-    resp = client.get("/api/model-providers/connections")
-
-    assert resp.status_code == 200
-    glm = next(item for item in resp.json() if item["providerId"] == "glm")
-    assert glm == {
-        "providerId": "glm",
-        "status": "disconnected",
-        "model": "glm-5.1",
-        "authLabel": None,
-    }
-
-
-def test_connections_reads_glm_fallback_env(monkeypatch) -> None:
-    monkeypatch.setenv("BIGMODEL_API_KEY", "glm-fallback")
-    client = _client(_config())
-
-    resp = client.get("/api/model-providers/connections")
-
-    assert resp.status_code == 200
-    glm = next(item for item in resp.json() if item["providerId"] == "glm")
-    assert glm == {
-        "providerId": "glm",
-        "status": "connected",
-        "model": None,
-        "authLabel": "Bearer",
-    }
-
-
-def test_connect_glm_writes_default_env_for_old_preset(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    manager = _FakeConfigManager(monkeypatch)
-    preset = LLMPresetConfig(
-        id="bigmodel-glm5",
-        display_name="智谱 GLM-5.1",
-        provider="openai_compatible",
-        base_url="https://open.bigmodel.cn/api/coding/paas/v4",
-        model="glm-5.1",
-        api_key_env="KONGMING_MODEL_API_KEY",
-    )
-    client = _client_with_config_manager(_config([preset]), manager)
-
-    resp = client.post("/api/model-providers/glm/connect", json={"apiKey": "glm-live"})
-
-    assert resp.status_code == 200
-    assert manager.writes == [{"GLM_API_KEY": "glm-live"}]
-    assert [item.api_key_env for item in manager.presets] == ["GLM_API_KEY"]
-    assert resp.json()["connection"] == {
-        "providerId": "glm",
-        "status": "connected",
-        "model": "glm-5.1",
-        "authLabel": "Bearer",
-    }
-
-
-def test_connections_reads_deepseek_preset_env(monkeypatch) -> None:
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-live")
-    preset = LLMPresetConfig(
-        id="deepseek",
-        display_name="deepseek-v4-flash",
-        provider="anthropic",
-        base_url="https://api.deepseek.com/anthropic",
-        model="deepseek-v4-flash",
-        api_key_env="DEEPSEEK_API_KEY",
-    )
-    client = _client(_config([preset]))
-
-    resp = client.get("/api/model-providers/connections")
-
-    assert resp.status_code == 200
-    assert resp.json() == [
-        {
-            "providerId": "minimax",
-            "status": "disconnected",
-            "model": None,
-            "authLabel": None,
-        },
-        {
-            "providerId": "glm",
-            "status": "disconnected",
-            "model": None,
-            "authLabel": None,
-        },
-        {
-            "providerId": "deepseek",
-            "status": "connected",
-            "model": "deepseek-v4-flash",
-            "authLabel": "Bearer",
-        },
-    ]
-
-
-def test_model_families_returns_only_connected_real_presets(monkeypatch) -> None:
-    monkeypatch.setenv("MINIMAX_API_KEY", "minimax-live")
-    monkeypatch.setenv("GLM_API_KEY", "glm-live")
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    presets = [
-        LLMPresetConfig(
-            id="minimax-cn",
-            display_name="Minimax（CN）",
-            provider="anthropic",
-            base_url="https://api.minimaxi.com/anthropic",
-            model="MiniMax-M3",
-            api_key_env="MINIMAX_API_KEY",
-        ),
-        LLMPresetConfig(
-            id="bigmodel-glm5",
-            display_name="智谱 GLM-5.1",
-            provider="openai_compatible",
-            base_url="https://open.bigmodel.cn/api/coding/paas/v4",
-            model="glm-5.1",
-            api_key_env="GLM_API_KEY",
-        ),
-        LLMPresetConfig(
-            id="deepseek",
-            display_name="deepseek-v4-flash",
-            provider="anthropic",
-            base_url="https://api.deepseek.com/anthropic",
-            model="deepseek-v4-flash",
-            api_key_env="DEEPSEEK_API_KEY",
-        ),
-    ]
-    client = _client(_config(presets))
-
-    resp = client.get("/api/model-providers/model-families")
-
-    assert resp.status_code == 200
-    assert resp.json() == [
-        {
-            "providerId": "minimax",
-            "providerLabel": "Minimax（CN）",
-            "familyId": "minimax:MiniMax-M3",
-            "displayName": "MiniMax-M3",
-            "presetId": "minimax-cn",
-            "model": "MiniMax-M3",
-            "connected": True,
-        },
-        {
-            "providerId": "glm",
-            "providerLabel": "GLM（CN）",
-            "familyId": "glm:glm-5.1",
-            "displayName": "glm-5.1",
-            "presetId": "bigmodel-glm5",
-            "model": "glm-5.1",
-            "connected": True,
-        },
-    ]
-
-
-def test_model_families_match_custom_proxy_preset_by_model(monkeypatch) -> None:
-    monkeypatch.setenv("MINIMAX_API_KEY", "minimax-live")
-    preset = LLMPresetConfig(
-        id="custom-proxy-a",
-        display_name="自定义代理",
-        provider="anthropic",
-        base_url="https://llm-proxy.example.test/anthropic",
-        model="MiniMax-M3",
-        api_key_env="MINIMAX_API_KEY",
-    )
-    client = _client(_config([preset]))
-
-    resp = client.get("/api/model-providers/model-families")
-
-    assert resp.status_code == 200
-    assert resp.json() == [
-        {
-            "providerId": "minimax",
-            "providerLabel": "Minimax（CN）",
-            "familyId": "minimax:MiniMax-M3",
-            "displayName": "MiniMax-M3",
-            "presetId": "custom-proxy-a",
-            "model": "MiniMax-M3",
-            "connected": True,
-        }
-    ]
-
-
-def test_model_families_without_preset_has_no_get_side_effects(monkeypatch) -> None:
-    monkeypatch.setenv("MINIMAX_API_KEY", "")
-    monkeypatch.setenv("KONGMING_PROVIDER_MINIMAX_API_KEY", "minimax-live")
-    cfg = _config()
-    manager = _FakeConfigManager(monkeypatch)
-    client = _client_with_config_manager(cfg, manager)
-
-    resp = client.get("/api/model-providers/model-families")
-
-    assert resp.status_code == 200
-    assert resp.json() == []
-    assert cfg.web.llm_presets == []
-    assert manager.writes == []
-    assert manager.presets == []
-    assert os.environ["MINIMAX_API_KEY"] == ""
-
-
-def test_model_families_with_fallback_only_keeps_get_read_only(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("MINIMAX_API_KEY", "")
-    monkeypatch.setenv("KONGMING_PROVIDER_MINIMAX_API_KEY", "minimax-live")
-    preset = LLMPresetConfig(
-        id="minimax-m3",
-        display_name="Minimax（CN）",
-        provider="anthropic",
-        base_url="https://api.minimaxi.com/anthropic",
-        model="MiniMax-M3",
-        api_key_env="MINIMAX_API_KEY",
-    )
-    client = _client(_config([preset]))
-
-    resp = client.get("/api/model-providers/model-families")
-
-    assert resp.status_code == 200
-    assert resp.json() == []
-    assert os.environ["MINIMAX_API_KEY"] == ""
-
-
-def test_model_families_keeps_old_generic_preset_read_only(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("GLM_API_KEY", "")
-    monkeypatch.setenv("BIGMODEL_API_KEY", "glm-fallback")
-    monkeypatch.setenv("KONGMING_MODEL_API_KEY", "generic-key")
-    preset = LLMPresetConfig(
-        id="bigmodel-glm5",
-        display_name="智谱 GLM-5.1",
-        provider="openai_compatible",
-        base_url="https://open.bigmodel.cn/api/coding/paas/v4",
-        model="glm-5.1",
-        api_key_env="KONGMING_MODEL_API_KEY",
-    )
-    cfg = _config([preset])
-    client = _client(cfg)
-
-    resp = client.get("/api/model-providers/model-families")
-
-    assert resp.status_code == 200
-    assert resp.json() == []
-    assert [preset.api_key_env for preset in cfg.web.llm_presets] == [
-        router_mod.GENERIC_MODEL_API_KEY_ENV
-    ]
-    assert os.environ["GLM_API_KEY"] == ""
-
-
-def test_current_probe_uses_one_token_anthropic_request(monkeypatch) -> None:
-    monkeypatch.setenv("KONGMING_PROVIDER_MINIMAX_API_KEY", "sk-live")
-    captured: dict[str, object] = {}
-    real_async_client = httpx.AsyncClient
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["headers"] = dict(request.headers)
-        captured["json"] = request.read().decode("utf-8")
-        return httpx.Response(200, json={"id": "msg_1"})
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout: float) -> None:
-            captured["timeout"] = timeout
-            self._client = real_async_client(transport=httpx.MockTransport(handler))
-
-        async def __aenter__(self) -> httpx.AsyncClient:
-            return self._client
-
-        async def __aexit__(self, exc_type, exc, tb) -> None:
-            await self._client.aclose()
-
-    monkeypatch.setattr(router_mod.httpx, "AsyncClient", FakeAsyncClient)
-    client = _client(_config())
-
-    resp = client.post("/api/model-providers/minimax/test-current")
-
-    assert resp.status_code == 200
-    assert resp.json()["ok"] is True
-    assert resp.json()["message"] == "连接测试通过。"
-    assert captured["url"] == "https://api.minimaxi.com/anthropic/v1/messages"
-    headers = captured["headers"]
-    assert isinstance(headers, dict)
-    assert headers["authorization"] == "Bearer sk-live"
-    assert headers["anthropic-version"] == "2023-06-01"
-    assert captured["timeout"] == 15.0
-    assert '"max_tokens":1' in str(captured["json"]).replace(" ", "")
-    assert '"content":"ping"' in str(captured["json"]).replace(" ", "")
-
-
-def test_current_probe_uses_one_token_openai_request(monkeypatch) -> None:
-    monkeypatch.setenv("GLM_API_KEY", "glm-live")
-    monkeypatch.setenv("KONGMING_MODEL_API_KEY", "generic-live")
-    captured: dict[str, object] = {}
-    real_async_client = httpx.AsyncClient
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["headers"] = dict(request.headers)
-        captured["json"] = request.read().decode("utf-8")
-        return httpx.Response(200, json={"id": "chatcmpl_1"})
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout: float) -> None:
-            captured["timeout"] = timeout
-            self._client = real_async_client(transport=httpx.MockTransport(handler))
-
-        async def __aenter__(self) -> httpx.AsyncClient:
-            return self._client
-
-        async def __aexit__(self, exc_type, exc, tb) -> None:
-            await self._client.aclose()
-
-    monkeypatch.setattr(router_mod.httpx, "AsyncClient", FakeAsyncClient)
-    preset = LLMPresetConfig(
-        id="bigmodel-glm5",
-        display_name="智谱 GLM-5.1",
-        provider="openai_compatible",
-        base_url="https://open.bigmodel.cn/api/coding/paas/v4",
-        model="glm-5.1",
-        api_key_env="GLM_API_KEY",
-    )
-    client = _client(_config([preset]))
-
-    resp = client.post("/api/model-providers/glm/test-current")
-
-    assert resp.status_code == 200
-    assert resp.json()["ok"] is True
-    assert captured["url"] == ("https://open.bigmodel.cn/api/coding/paas/v4/chat/completions")
-    headers = captured["headers"]
-    assert isinstance(headers, dict)
-    assert headers["authorization"] == "Bearer glm-live"
-    assert "anthropic-version" not in headers
-    assert captured["timeout"] == 15.0
-    assert '"max_tokens":1' in str(captured["json"]).replace(" ", "")
-    assert '"content":"ping"' in str(captured["json"]).replace(" ", "")
-
-
-def test_current_probe_uses_glm_fallback_key(monkeypatch) -> None:
-    monkeypatch.setenv("ZHIPU_API_KEY", "glm-fallback")
-    monkeypatch.setenv("KONGMING_MODEL_API_KEY", "generic-live")
-    captured: dict[str, object] = {}
-    real_async_client = httpx.AsyncClient
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        captured["headers"] = dict(request.headers)
-        return httpx.Response(200, json={"id": "chatcmpl_1"})
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout: float) -> None:
-            self._client = real_async_client(transport=httpx.MockTransport(handler))
-
-        async def __aenter__(self) -> httpx.AsyncClient:
-            return self._client
-
-        async def __aexit__(self, exc_type, exc, tb) -> None:
-            await self._client.aclose()
-
-    monkeypatch.setattr(router_mod.httpx, "AsyncClient", FakeAsyncClient)
-    client = _client(_config())
-
-    resp = client.post("/api/model-providers/glm/test-current")
-
-    assert resp.status_code == 200
-    assert resp.json()["ok"] is True
-    headers = captured["headers"]
-    assert isinstance(headers, dict)
-    assert headers["authorization"] == "Bearer glm-fallback"
-
-
-def test_current_probe_missing_key_message_lists_provider_envs(monkeypatch) -> None:
-    monkeypatch.setenv("KONGMING_MODEL_API_KEY", "generic-live")
-    preset = LLMPresetConfig(
-        id="bigmodel-glm5",
-        display_name="智谱 GLM-5.1",
-        provider="openai_compatible",
-        base_url="https://open.bigmodel.cn/api/coding/paas/v4",
-        model="glm-5.1",
-        api_key_env="KONGMING_MODEL_API_KEY",
-    )
-    client = _client(_config([preset]))
-
-    resp = client.post("/api/model-providers/glm/test-current")
-
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["ok"] is False
-    assert body["message"] == (
-        "未找到 GLM API Key；请配置 GLM_API_KEY / BIGMODEL_API_KEY / ZHIPU_API_KEY / ZAI_API_KEY。"
-    )
-    assert "KONGMING_MODEL_API_KEY" not in body["message"]
-
-
-def test_draft_probe_uses_request_api_key(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-    real_async_client = httpx.AsyncClient
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        captured["headers"] = dict(request.headers)
-        captured["json"] = request.read().decode("utf-8")
-        return httpx.Response(200, json={"id": "msg_1"})
-
-    class FakeAsyncClient:
-        def __init__(self, *, timeout: float) -> None:
-            captured["timeout"] = timeout
-            self._client = real_async_client(transport=httpx.MockTransport(handler))
-
-        async def __aenter__(self) -> httpx.AsyncClient:
-            return self._client
-
-        async def __aexit__(self, exc_type, exc, tb) -> None:
-            await self._client.aclose()
-
-    monkeypatch.setattr(router_mod.httpx, "AsyncClient", FakeAsyncClient)
-    client = _client(_config())
-
-    resp = client.post("/api/model-providers/minimax/test", json={"apiKey": "sk-draft"})
-
-    assert resp.status_code == 200
-    assert resp.json()["ok"] is True
-    headers = captured["headers"]
-    assert isinstance(headers, dict)
-    assert headers["authorization"] == "Bearer sk-draft"
-    assert captured["timeout"] == 15.0
-    assert '"max_tokens":1' in str(captured["json"]).replace(" ", "")
