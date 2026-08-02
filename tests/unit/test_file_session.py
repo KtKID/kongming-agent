@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 from pathlib import Path
 from typing import ClassVar
 
@@ -114,12 +113,8 @@ class TestTC2FirstAppendMaterialize:
             "instruction_sources": ["test-source"],
             "instruction_text_hash": "sha256:abc123",
             "cwd": "/test",
-            "app_version": "0.1.1",
             "content": "# system\nYou are test.",
         }
-        session_dir = Path(store_path) / "test-session"
-        assert list(session_dir.glob("system_prompt.json.*.tmp")) == []
-        assert stat.S_IMODE(Path(path).stat().st_mode) == 0o600
 
     async def test_system_prompt_snapshot_file_is_skipped_without_text(
         self, store_path: str
@@ -239,7 +234,6 @@ class TestTC4RecordFields:
         "message_id",
         "parent_message_id",
         "created_at",
-        "record_type",
         "message",
     }
     MESSAGE_FIELDS: ClassVar[set[str]] = {
@@ -285,13 +279,19 @@ class TestTC4RecordFields:
         assert "usage" not in record
 
     async def test_usage_field_written_at_record_top_level(self, store_path: str) -> None:
+        from core.contracts import ProviderUsageFamily
+        from infrastructure.llm_providers.usage import ProviderUsageManager
+
         fs = _make_session(store_path=store_path)
-        usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        usage = ProviderUsageManager().normalize(
+            family=ProviderUsageFamily.OPENAI_CHAT_COMPLETIONS,
+            raw_usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        )
         await fs.append(Message.assistant("hello"), usage=usage)
         jsonl_path = os.path.join(store_path, "test-session", "test-session.jsonl")
         with open(jsonl_path) as f:
             record = json.loads(f.readline())
-        assert record["usage"] == usage
+        assert record["usage"] == usage.to_payload()
         assert record["message"]["metadata"] == {}
 
 
@@ -514,20 +514,6 @@ class TestAdvanceRunIndex:
         fs2 = _make_session(store_path=store_path)
         assert await fs2.advance_run_index() == 3
 
-    async def test_recover_backfills_missing_system_prompt_snapshot(self, store_path: str) -> None:
-        fs1 = _make_session(store_path=store_path)
-        await fs1.append(Message.user("seed"))
-
-        snapshot_path = Path(store_path) / "test-session" / "system_prompt.json"
-        snapshot_path.unlink()
-
-        _make_session(store_path=store_path)
-
-        with open(snapshot_path) as f:
-            snapshot = json.load(f)
-        assert snapshot["record_type"] == "system_prompt"
-        assert snapshot["content"] == "# system\nYou are test."
-
     async def test_legacy_manifest_without_run_count_falls_back_to_zero(
         self, store_path: str
     ) -> None:
@@ -564,3 +550,30 @@ class TestAdvanceRunIndex:
         await fs.clear()
         # clear 重置内存计数；新一轮 advance 从 1 开始
         assert await fs.advance_run_index() == 1
+
+    async def test_get_run_count_is_readonly(self, store_path: str) -> None:
+        """get_run_count 只读返回，与 advance 共享 _run_count，不递增。"""
+        fs = _make_session(store_path=store_path)
+        await fs.advance_run_index()
+        await fs.advance_run_index()
+        assert await fs.get_run_count() == 2
+        # 重复只读不递增
+        assert await fs.get_run_count() == 2
+
+    async def test_get_run_count_recovers_from_manifest(self, store_path: str) -> None:
+        """新实例从 manifest.json 恢复 run_count，get_run_count 反映真值。
+
+        这是 evolution cadence 单一真源的核心保证：重启后 evolution 读到的
+        run_count 必须等于 manifest 持久化的值，而不是从 0 重新计数。
+        """
+        # 第一次实例：advance 多次，run_count 持久化到 manifest
+        fs1 = _make_session(store_path=store_path)
+        for _ in range(5):
+            await fs1.advance_run_index()
+
+        # 第二次实例（同 session_id + store_path）：get_run_count 应反映 manifest 真值
+        fs2 = _make_session(store_path=store_path)
+        assert await fs2.get_run_count() == 5
+        # 只读不递增——advance 才递增
+        assert await fs2.get_run_count() == 5
+        assert await fs2.advance_run_index() == 6

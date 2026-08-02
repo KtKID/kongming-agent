@@ -36,7 +36,7 @@ class _EventRecorder:
 def _cfg(tmp_path: Path) -> object:
     from infrastructure.config import load_config
 
-    cfg = load_config(None)
+    cfg = load_config(None, load_env_file=False)
     return cfg.model_copy(
         update={
             "evolution": cfg.evolution.model_copy(

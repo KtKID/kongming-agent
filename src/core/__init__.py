@@ -40,8 +40,14 @@ from core.errors import (
     PermissionDenied,
     ProviderError,
     ToolError,
+    ToolPreparationError,
 )
-from core.lifecycle import LifecycleHook
+from core.lifecycle import (
+    LIFECYCLE_HOOK_POINTS,
+    LifecycleHook,
+    LifecycleHookBase,
+    LifecycleHookPointSpec,
+)
 from core.message import Message, ToolCall
 from core.result import Result
 from core.run_state import RunState, RunStatus
@@ -74,8 +80,12 @@ __all__ = [
     "PermissionDenied",
     "ProviderError",
     "ToolError",
+    "ToolPreparationError",
     # lifecycle
+    "LIFECYCLE_HOOK_POINTS",
     "LifecycleHook",
+    "LifecycleHookBase",
+    "LifecycleHookPointSpec",
     # message
     "Message",
     "ToolCall",

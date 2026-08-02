@@ -79,6 +79,20 @@ def build_transcript_window(
             )
         )
 
+    final_text = None
+    if final_message is not None and isinstance(final_message.content, str):
+        final_text = final_message.content
+    if final_text and (
+        not transcript or transcript[-1].role != "assistant" or transcript[-1].content != final_text
+    ):
+        transcript.append(
+            TranscriptMessage(
+                turn=current_turn if current_turn > 0 else 0,
+                role="assistant",
+                content=final_text,
+            )
+        )
+
     included_turns = tuple(
         dict.fromkeys(message.turn for message in transcript if message.turn > 0).keys()
     )
@@ -86,9 +100,6 @@ def build_transcript_window(
         f"{len(transcript)} messages across {len(included_turns)} turns; "
         f"{tool_call_count} tool calls in window."
     )
-    final_text = None
-    if final_message is not None and isinstance(final_message.content, str):
-        final_text = final_message.content
 
     return TranscriptWindow(
         session_id=session_id,

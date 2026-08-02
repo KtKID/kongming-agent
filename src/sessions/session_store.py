@@ -43,7 +43,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from core.contracts import Session
+from core.contracts import ProviderUsageSnapshot, Session
 from core.message import Message, ToolCall
 from infrastructure.config.paths import resolve_kongming_path
 
@@ -362,19 +362,28 @@ class SQLiteSession:
 
     # -- Session 协议实现 ----------------------------------------------------
 
-    async def append(self, message: Message, *, usage: dict[str, Any] | None = None) -> None:
+    async def append(
+        self,
+        message: Message,
+        *,
+        usage: ProviderUsageSnapshot | None = None,
+    ) -> None:
         """追加一条消息到末尾。"""
         await self._ensure_init()
         await asyncio.to_thread(self._append_sync, message, usage)
 
-    def _append_sync(self, message: Message, usage: dict[str, Any] | None = None) -> None:
+    def _append_sync(
+        self,
+        message: Message,
+        usage: ProviderUsageSnapshot | None = None,
+    ) -> None:
         """同步 append：确保 session 行存在，查最大 seq + 1，再 insert。"""
         payload_obj = {
             "schema_version": _SCHEMA_VERSION,
             "message": _message_to_dict(message),
         }
         if usage is not None:
-            payload_obj["usage"] = dict(usage)
+            payload_obj["usage"] = usage.to_payload()
         payload = json.dumps(payload_obj, ensure_ascii=False)
 
         def operation(conn: sqlite3.Connection, now: float) -> None:
@@ -472,6 +481,29 @@ class SQLiteSession:
             return int(row[0])
 
         return self._write_transaction_sync(operation)
+
+    async def get_run_count(self) -> int:
+        """只读返回当前 run 编号，不递增。
+
+        与 :meth:`advance_run_index` 共享 sessions 表的 run_count 列；
+        冷启动时通过 _ensure_session_row_sync 保证行存在（未 advance 过的 session 返回 0）。
+        """
+        await self._ensure_init()
+        return await asyncio.to_thread(self._get_run_count_sync)
+
+    def _get_run_count_sync(self) -> int:
+        """同步只读查询 run_count；用独立连接读，不走写事务。"""
+
+        def read_operation(conn: sqlite3.Connection) -> int:
+            self._ensure_session_row_sync(conn, now=time.time())
+            row = conn.execute(
+                "SELECT run_count FROM sessions WHERE session_id = ?",
+                (self.session_id,),
+            ).fetchone()
+            return int(row[0]) if row is not None else 0
+
+        with sqlite3.connect(self._db_path) as conn:
+            return read_operation(conn)
 
     # -- 调试辅助 ------------------------------------------------------------
 

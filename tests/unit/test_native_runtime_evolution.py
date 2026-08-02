@@ -1,18 +1,20 @@
-"""unit：NativeRuntime 的 self-evolution hook。"""
+"""unit：SessionEngine 的 self-evolution hook。"""
 
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-import evolution
-from core.contracts import Event, LLMRequest, LLMResponse, ToolContext, ToolResult
+from core.contracts import Event, LLMRequest, LLMResponse, PreparedToolCall, ToolContext, ToolResult
 from core.errors import MaxTurnsExceededError
 from core.message import Message
 from core.result import Result
+from evolution.evolution_manager import EvolutionManager
+from evolution.lifecycle import register_evolution_lifecycle_hook
 from infrastructure.config.models import (
     ApprovalConfig,
     Config,
@@ -20,12 +22,12 @@ from infrastructure.config.models import (
     EvolutionLearningConfig,
     EvolutionMemoryConfig,
     FileToolConfig,
-    ModelConfig,
+    ModelSelectionConfig,
     RunnerConfig,
     ShellToolConfig,
     ToolConfig,
 )
-from runtime_assembly.native_runtime import NativeRuntime
+from runtime_assembly.session_engine import SessionEngine
 from tools import ToolRegistry
 
 
@@ -42,7 +44,8 @@ class _FakeEvolutionWriteTool:
     description = "fake"
     input_schema: dict[str, Any] = {"type": "object"}
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    async def execute(self, prepared: PreparedToolCall, ctx: ToolContext) -> ToolResult:
+        del prepared, ctx
         return ToolResult(ok=True, content="ok")
 
 
@@ -54,14 +57,15 @@ class _Sink:
         self.events.append(event)
 
 
-def _cfg(tmp_path: Path, *, drain_on_close_seconds: float = 0.2) -> Config:
+def _cfg(
+    tmp_path: Path,
+    *,
+    drain_on_close_seconds: float = 0.2,
+    every_n_runs: int = 1,
+    min_user_turns: int = 1,
+) -> Config:
     return Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="gemma-4-e4b-it",
-            base_url="http://127.0.0.1:1234/v1",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         runner=RunnerConfig(max_turns=3),
         approval=ApprovalConfig(mode="auto_allow"),
         tool=ToolConfig(
@@ -72,8 +76,8 @@ def _cfg(tmp_path: Path, *, drain_on_close_seconds: float = 0.2) -> Config:
             memory=EvolutionMemoryConfig(enabled=False),
             learning=EvolutionLearningConfig(
                 enabled=True,
-                every_n_runs=1,
-                min_user_turns=1,
+                every_n_runs=every_n_runs,
+                min_user_turns=min_user_turns,
                 max_history_messages=10,
                 max_nutrients=1,
                 nutrient_confidence_threshold=0.75,
@@ -83,6 +87,25 @@ def _cfg(tmp_path: Path, *, drain_on_close_seconds: float = 0.2) -> Config:
             ),
         ),
     )
+
+
+def _build_runtime_with_manager(
+    tmp_path: Path,
+    *,
+    sink: _Sink | None = None,
+    drain_on_close_seconds: float = 0.2,
+) -> tuple[EvolutionManager, SessionEngine]:
+    cfg = _cfg(tmp_path, drain_on_close_seconds=drain_on_close_seconds)
+    manager = EvolutionManager(config=cfg, kongming_home=tmp_path)
+    runtime = SessionEngine.build(
+        cfg,
+        tools=ToolRegistry([_FakeEvolutionWriteTool()]),
+        enabled_tool_names=[],
+        event_sinks=[sink] if sink is not None else [],
+    )
+    register_evolution_lifecycle_hook(runtime=runtime, manager=manager)
+    runtime._llm = _StubLLM()  # type: ignore[attr-defined]
+    return manager, runtime
 
 
 @pytest.mark.unit
@@ -111,18 +134,14 @@ async def test_native_runtime_schedules_child_review(
             timeout_seconds=1.0,
         )
 
-    monkeypatch.setattr(evolution, "run_child_review", _fake_child_review)
+    monkeypatch.setattr("evolution.reviewer_runtime.run_child_review", _fake_child_review)
 
-    runtime = NativeRuntime.build(
-        _cfg(tmp_path),
-        tools=ToolRegistry([_FakeEvolutionWriteTool()]),
-        enabled_tool_names=[],
-    )
-    runtime._llm = _StubLLM()  # type: ignore[attr-defined]
+    manager, runtime = _build_runtime_with_manager(tmp_path)
 
     result = await runtime.run("hello", session_id="s1")
     assert result.status == "completed"
 
+    await manager.aclose()
     await runtime.aclose()
     assert calls == [("cadence", result.run_id)]
 
@@ -152,17 +171,16 @@ async def test_native_runtime_aclose_emits_drain_timeout(
             write_error=None,
         )
 
-    monkeypatch.setattr(evolution, "run_child_review", _slow_child_review)
+    monkeypatch.setattr("evolution.reviewer_runtime.run_child_review", _slow_child_review)
 
-    runtime = NativeRuntime.build(
-        _cfg(tmp_path, drain_on_close_seconds=0.01),
-        tools=ToolRegistry([_FakeEvolutionWriteTool()]),
-        enabled_tool_names=[],
-        event_sinks=[sink],
+    manager, runtime = _build_runtime_with_manager(
+        tmp_path,
+        sink=sink,
+        drain_on_close_seconds=0.01,
     )
-    runtime._llm = _StubLLM()  # type: ignore[attr-defined]
 
     await runtime.run("hello", session_id="s1")
+    await manager.aclose()
     await runtime.aclose()
 
     assert any(event.kind == "evolution.review.drain_timeout" for event in sink.events)
@@ -191,17 +209,12 @@ async def test_native_runtime_marks_review_failed_when_write_did_not_succeed(
             write_error="run_id must be a non-empty string",
         )
 
-    monkeypatch.setattr(evolution, "run_child_review", _failed_child_review)
+    monkeypatch.setattr("evolution.reviewer_runtime.run_child_review", _failed_child_review)
 
-    runtime = NativeRuntime.build(
-        _cfg(tmp_path),
-        tools=ToolRegistry([_FakeEvolutionWriteTool()]),
-        enabled_tool_names=[],
-        event_sinks=[sink],
-    )
-    runtime._llm = _StubLLM()  # type: ignore[attr-defined]
+    manager, runtime = _build_runtime_with_manager(tmp_path, sink=sink)
 
     await runtime.run("hello", session_id="s1")
+    await manager.aclose()
     await runtime.aclose()
 
     assert any(event.kind == "evolution.review.failed" for event in sink.events)
@@ -209,7 +222,7 @@ async def test_native_runtime_marks_review_failed_when_write_did_not_succeed(
 
 
 @pytest.mark.unit
-async def test_native_runtime_replays_child_tool_events_to_parent_sinks(
+async def test_native_runtime_does_not_replay_child_tool_events_to_parent_sinks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -250,26 +263,23 @@ async def test_native_runtime_replays_child_tool_events_to_parent_sinks(
             ),
         )
 
-    monkeypatch.setattr(evolution, "run_child_review", _child_review_with_tool_events)
-
-    runtime = NativeRuntime.build(
-        _cfg(tmp_path),
-        tools=ToolRegistry([_FakeEvolutionWriteTool()]),
-        enabled_tool_names=[],
-        event_sinks=[sink],
+    monkeypatch.setattr(
+        "evolution.reviewer_runtime.run_child_review", _child_review_with_tool_events
     )
-    runtime._llm = _StubLLM()  # type: ignore[attr-defined]
+
+    manager, runtime = _build_runtime_with_manager(tmp_path, sink=sink)
 
     await runtime.run("hello", session_id="s1")
+    await manager.aclose()
     await runtime.aclose()
 
+    # reviewer 的 tool.call.start/end 不应转发到父 thread 的 sinks（phase 踩踏修复）：
+    # 这些事件的 run_id 属于 reviewer 子 agent，转发会覆盖主 run 的 complete 终态。
     tool_events = [event for event in sink.events if event.kind.startswith("tool.call.")]
-    assert [event.kind for event in tool_events] == [
-        "tool.call.start",
-        "tool.call.end",
-    ]
-    assert tool_events[0].run_id == "review-run-4"
-    assert tool_events[1].payload["content"] == "stored"
+    assert tool_events == []
+    # evolution.review.completed 仍应到达父 thread 的 sinks（前端弹窗依赖）
+    review_events = [event for event in sink.events if event.kind == "evolution.review.completed"]
+    assert len(review_events) == 1
 
 
 @pytest.mark.unit
@@ -298,17 +308,12 @@ async def test_native_runtime_surfaces_child_reviewer_error_details(
             write_error=None,
         )
 
-    monkeypatch.setattr(evolution, "run_child_review", _failed_child_review)
+    monkeypatch.setattr("evolution.reviewer_runtime.run_child_review", _failed_child_review)
 
-    runtime = NativeRuntime.build(
-        _cfg(tmp_path),
-        tools=ToolRegistry([_FakeEvolutionWriteTool()]),
-        enabled_tool_names=[],
-        event_sinks=[sink],
-    )
-    runtime._llm = _StubLLM()  # type: ignore[attr-defined]
+    manager, runtime = _build_runtime_with_manager(tmp_path, sink=sink)
 
     await runtime.run("hello", session_id="s1")
+    await manager.aclose()
     await runtime.aclose()
 
     failed = next(event for event in sink.events if event.kind == "evolution.review.failed")
@@ -341,17 +346,12 @@ async def test_native_runtime_keeps_written_status_when_child_times_out_after_wr
             timed_out=True,
         )
 
-    monkeypatch.setattr(evolution, "run_child_review", _timeout_after_write)
+    monkeypatch.setattr("evolution.reviewer_runtime.run_child_review", _timeout_after_write)
 
-    runtime = NativeRuntime.build(
-        _cfg(tmp_path),
-        tools=ToolRegistry([_FakeEvolutionWriteTool()]),
-        enabled_tool_names=[],
-        event_sinks=[sink],
-    )
-    runtime._llm = _StubLLM()  # type: ignore[attr-defined]
+    manager, runtime = _build_runtime_with_manager(tmp_path, sink=sink)
 
     await runtime.run("hello", session_id="s1")
+    await manager.aclose()
     await runtime.aclose()
 
     completed = next(event for event in sink.events if event.kind == "evolution.review.completed")
@@ -387,17 +387,12 @@ async def test_native_runtime_emits_review_duration_and_timeout_metadata(
             timeout_seconds=12.5,
         )
 
-    monkeypatch.setattr(evolution, "run_child_review", _timed_child_review)
+    monkeypatch.setattr("evolution.reviewer_runtime.run_child_review", _timed_child_review)
 
-    runtime = NativeRuntime.build(
-        _cfg(tmp_path),
-        tools=ToolRegistry([_FakeEvolutionWriteTool()]),
-        enabled_tool_names=[],
-        event_sinks=[sink],
-    )
-    runtime._llm = _StubLLM()  # type: ignore[attr-defined]
+    manager, runtime = _build_runtime_with_manager(tmp_path, sink=sink)
 
     await runtime.run("hello", session_id="s1")
+    await manager.aclose()
     await runtime.aclose()
 
     started = next(event for event in sink.events if event.kind == "evolution.review.started")
@@ -406,3 +401,69 @@ async def test_native_runtime_emits_review_duration_and_timeout_metadata(
     assert completed.payload["duration_ms"] == 3456
     assert completed.payload["timeout_hit"] is False
     assert completed.payload["timeout_seconds"] == 12.5
+
+
+@pytest.mark.unit
+async def test_runtime_channel_cadence_uses_session_manifest_single_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """runtime channel cadence 读 session manifest run_count（单一真源），不依赖 state.json。
+
+    改造前 claude/runtime 两通道共享 EvolutionStateStore.run_count；改造后 runtime
+    通道直接读 session manifest，与 claude 通道（仍用 state 自维护计数器）独立。
+
+    本测试构造 every_n=2，连续两次 runtime.run()：第 1 次 manifest=1（不命中），
+    第 2 次 manifest=2（2%2==0 命中）。验证 runtime cadence 完全由 session manifest 驱动。
+    """
+    calls: list[str] = []
+
+    async def _fake_child_review(**kwargs: Any):  # type: ignore[no-untyped-def]
+        from evolution.reviewer_runtime import ChildReviewOutcome
+
+        window = kwargs["window"]
+        calls.append(window.run_id)
+        return ChildReviewOutcome(
+            result=Result(
+                run_id="review-run-shared",
+                session_id="review-session",
+                status="completed",
+                final_message=Message.assistant("stored"),
+                turn_count=1,
+            ),
+            write_ok=True,
+            write_status="written",
+            write_error=None,
+        )
+
+    monkeypatch.setattr("evolution.reviewer_runtime.run_child_review", _fake_child_review)
+
+    cfg = _cfg(tmp_path, every_n_runs=2, min_user_turns=1)
+    manager = EvolutionManager(config=cfg, kongming_home=tmp_path)
+    thread_id = "thread-aabbccddeeff"
+
+    runtime = SessionEngine.build(
+        cfg,
+        tools=ToolRegistry([_FakeEvolutionWriteTool()]),
+        enabled_tool_names=[],
+    )
+    register_evolution_lifecycle_hook(runtime=runtime, manager=manager)
+    runtime._llm = _StubLLM()  # type: ignore[attr-defined]
+
+    # 第 1 次 run：advance_run_index 后 manifest run_count=1，1%2!=0 不命中
+    await runtime.run("hello-1", session_id=thread_id)
+    await asyncio.sleep(0.05)
+    assert calls == []
+
+    # 第 2 次 run：manifest run_count=2，2%2==0 命中
+    result2 = await runtime.run("hello-2", session_id=thread_id)
+    await asyncio.sleep(0.05)
+    assert calls == [result2.run_id]
+
+    await manager.aclose()
+    await runtime.aclose()
+
+    # state.json 的 run_count 不被 runtime channel 递增（保持 0）——单一真源在 manifest
+    state_path = tmp_path / ".kongming" / "evolution" / "evolution.state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["sessions"][thread_id]["run_count"] == 0

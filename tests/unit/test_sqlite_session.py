@@ -24,7 +24,7 @@ import pytest
 
 from core.message import Message, ToolCall
 from core.session import InMemorySession
-from infrastructure.config.models import Config, ModelConfig, SessionConfig
+from infrastructure.config.models import Config, ModelSelectionConfig, SessionConfig
 from sessions.session_bootstrap import SessionBootstrap
 from sessions.session_store import (
     SQLiteSession,
@@ -42,7 +42,7 @@ def _cfg(tmp_path: Path, backend: str = "memory", **extra) -> Config:
         session_cfg["file_store_path"] = str(tmp_path / "sessions")
     session_cfg.update(extra)
     return Config(
-        model=ModelConfig(name="m", base_url="http://localhost:1234"),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         session=SessionConfig(**session_cfg),
     )
 
@@ -333,6 +333,32 @@ async def test_sqlite_session_advance_run_index_isolated_per_session(tmp_path):
     assert await b.advance_run_index() == 1
     assert await a.advance_run_index() == 2
     assert await b.advance_run_index() == 2
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_get_run_count_is_readonly(tmp_path):
+    """get_run_count 只读返回 advance 后的值，不递增。"""
+    db = tmp_path / "x.db"
+    session = SQLiteSession("sid", db)
+    assert await session.get_run_count() == 0
+    await session.advance_run_index()
+    await session.advance_run_index()
+    assert await session.get_run_count() == 2
+    # 重复只读不递增
+    assert await session.get_run_count() == 2
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_get_run_count_persists_across_instances(tmp_path):
+    """get_run_count 跨实例反映 sessions 表持久化的真值。"""
+    db = tmp_path / "x.db"
+    first = SQLiteSession("sid", db)
+    for _ in range(3):
+        await first.advance_run_index()
+
+    second = SQLiteSession("sid", db)
+    assert await second.get_run_count() == 3
+    assert await second.advance_run_index() == 4
 
 
 @pytest.mark.asyncio

@@ -2,9 +2,14 @@
 
 from evolution.apply_executor import build_apply_job, execute_apply_job, recover_pending_apply_jobs
 from evolution.evidence_selector import build_transcript_window, count_user_turns
+from evolution.lifecycle import register_evolution_lifecycle_hook
 from evolution.models import (
     ApplyJob,
     EvolutionNutrient,
+    EvolutionReviewPlan,
+    EvolutionReviewTrigger,
+    ManualReviewQueueStatus,
+    ManualReviewRequest,
     ReviewResult,
     ReviewWritePayload,
     SessionLearningState,
@@ -17,10 +22,15 @@ from evolution.store import EvolutionStore, resolve_evolution_root
 
 __all__ = [
     "EvolutionNutrient",
+    "EvolutionReviewPlan",
+    "EvolutionReviewTrigger",
     "EvolutionStateStore",
     "EvolutionStore",
+    "register_evolution_lifecycle_hook",
     "ChildReviewOutcome",
     "ApplyJob",
+    "ManualReviewQueueStatus",
+    "ManualReviewRequest",
     "REVIEWER_TOOL_NAME",
     "ReviewResult",
     "ReviewWritePayload",

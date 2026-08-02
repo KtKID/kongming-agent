@@ -4,6 +4,7 @@
 
 - ``GET    /api/threads``                              — 列出所有 thread metadata
 - ``POST   /api/threads``                              — 创建 thread；返回 metadata（201）
+- ``POST   /api/threads/{thread_id}/fork``             — 从 assistant 回复边界分叉 generic chat thread（201）
 - ``POST   /api/threads/import-claude-session``         — 导入已有 Claude SDK session（v0.2.0）
 - ``PATCH  /api/threads/{thread_id}``                   — 重命名（不改 preset）
 - ``DELETE /api/threads/{thread_id}``                   — 删除（204）
@@ -31,24 +32,17 @@ import asyncio
 import contextlib
 import logging
 import re
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from evolution.apply_executor import build_apply_job, execute_apply_job
 from evolution.models import (
-    DecisionItem,
     DecisionRecord,
     DecisionSummary,
-    DecisionTarget,
-    EvolutionNutrient,
 )
-from evolution.state_store import EvolutionStateStore
-from evolution.store import EvolutionStore, resolve_evolution_root
 from hosts.web.app_support.path_utils import is_absolute_workspace_path
-from hosts.web.errors import InvalidThreadIdError, ThreadNotFoundError
+from hosts.web.errors import InvalidThreadIdError, ModelCatalogWebError, ThreadNotFoundError
 from hosts.web.integrations.claude_code.jsonl_history import jsonl_path_for, parse_jsonl_history
 from hosts.web.protocol import (
     CreateGenericThreadFromFirstMessageRequest,
@@ -60,12 +54,15 @@ from hosts.web.protocol import (
     EvolutionDecisionSummaryDTO,
     EvolutionNutrientDTO,
     EvolutionReviewDTO,
+    ForkThreadRequest,
     ImportClaudeSessionRequest,
     ImportClaudeSessionResponse,
     ImportCodexSessionRequest,
     ImportCodexSessionResponse,
     RenameThreadRequest,
     ThreadMetadataDTO,
+    ThreadPermissionsDTO,
+    UpdateThreadPermissionsRequest,
     UpdateThreadPresetRequest,
     UpdateWorkspaceFileRequest,
     WorkspaceContextDTO,
@@ -73,7 +70,13 @@ from hosts.web.protocol import (
     WorkspaceTreeDTO,
     WorkspaceTreeNodeDTO,
 )
-from hosts.web.threads.errors import ThreadPresetRefreshError
+from hosts.web.threads.errors import (
+    ThreadForkConflictError,
+    ThreadPermissionsRevisionConflictError,
+    ThreadPermissionsStorageError,
+    ThreadPermissionsValidationError,
+    ThreadPresetRefreshError,
+)
 from hosts.web.workspace.model import (
     WorkspaceError,
     get_thread_meta,
@@ -83,10 +86,14 @@ from hosts.web.workspace.model import (
     resolve_workspace_cwd,
     write_workspace_text_file,
 )
+from infrastructure.config.model_provider_catalog import ModelProviderCatalogError
 
 if TYPE_CHECKING:
     from hosts.web.threads.metadata import ThreadMetadata
-    from hosts.web.threads.types import ThreadManagerProtocol
+    from hosts.web.threads.types import (
+        ThreadManagerProtocol,
+        ThreadPermissionsManagerProtocol,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +134,8 @@ async def _to_dto(meta: ThreadMetadata, tm: ThreadManagerProtocol) -> ThreadMeta
         message_count=meta.message_count,
         is_pinned=meta.is_pinned,
         is_archived=meta.is_archived,
+        forked_from_id=meta.forked_from_id,
+        forked_from_history_index=meta.forked_from_history_index,
         schema_version=meta.schema_version,
     )
 
@@ -170,60 +179,24 @@ def _to_workspace_context(
     )
 
 
-def _evolution_store(request: Request) -> EvolutionStore:
-    cfg = request.app.state.config
-    root_dir = resolve_evolution_root(cfg.evolution.learning.root_path)
-    return EvolutionStore(
-        root_dir=root_dir,
-        state_store=EvolutionStateStore(root_dir),
-    )
-
-
 def _review_id_for_run(run_id: str) -> str:
     return f"evo-review:{run_id}"
 
 
-def _decision_target_for_value(value: str) -> DecisionTarget | None:
-    if value == "accept_memory":
-        return "memory"
-    if value == "accept_skill":
-        return "skill"
-    return None
+def _evolution_manager(request: Request) -> Any:
+    manager = getattr(request.app.state, "evolution_manager", None)
+    if manager is None:
+        raise HTTPException(status_code=503, detail="evolution manager not available")
+    return manager
 
 
-async def _apply_decision_item(
-    *,
-    request: Request,
-    store: EvolutionStore,
-    meta: ThreadMetadata,
-    review_id: str,
-    run_id: str,
-    nutrient: EvolutionNutrient,
-    decision: DecisionItem,
-) -> DecisionRecord:
+def _workspace_root_for_meta(request: Request, meta: ThreadMetadata) -> Path:
     workspace_root = (
         meta.cwd.strip()
         if isinstance(meta.cwd, str) and meta.cwd.strip()
         else str(getattr(request.app.state, "workspace_root", ""))
     )
-    job = build_apply_job(
-        review_id=review_id,
-        session_id=meta.id,
-        run_id=run_id,
-        nutrient_id=decision.nutrient_id,
-        decision=decision,
-        workspace_root=Path(workspace_root).expanduser().resolve(),
-        created_at_ms=int(time.time() * 1000),
-    )
-    await store.write_apply_job(job)
-    outcome = await execute_apply_job(
-        cfg=request.app.state.config,
-        store=store,
-        job=job,
-        nutrient=nutrient,
-        kongming_home=request.app.state.kongming_home,
-    )
-    return outcome.decision_record
+    return Path(workspace_root).expanduser().resolve()
 
 
 def _to_evolution_review_dto(
@@ -309,12 +282,15 @@ async def create_thread(
             detail="cwd must be an absolute path",
         )
     tm: ThreadManagerProtocol = request.app.state.thread_manager
-    meta = await tm.create_thread(
-        body.name,
-        body.preset_id,
-        backend_kind=body.backend_kind,
-        cwd=normalized_cwd,
-    )
+    try:
+        meta = await tm.create_thread(
+            body.name,
+            body.preset_id,
+            backend_kind=body.backend_kind,
+            cwd=normalized_cwd,
+        )
+    except ModelProviderCatalogError as exc:
+        raise ModelCatalogWebError(exc) from exc
     return await _to_dto(meta, tm)
 
 
@@ -336,11 +312,39 @@ async def create_generic_thread_from_first_message(
             cwd=body.cwd,
             reasoning_effort=body.reasoning_effort,
         )
+    except ModelProviderCatalogError as exc:
+        raise ModelCatalogWebError(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return CreateGenericThreadFromFirstMessageResponse(thread=await _to_dto(meta, tm))
+
+
+@router.post("/{thread_id}/fork", status_code=201)
+async def fork_thread(
+    thread_id: str,
+    request: Request,
+    body: ForkThreadRequest | None = None,
+) -> ThreadMetadataDTO:
+    """从 assistant 回复边界 fork generic chat thread，并返回新 thread。
+
+    409 表示源 thread 仍在运行或有排队输入；调用方可在 thread 进入 idle 后重试。
+    """
+    _validate_thread_id(thread_id)
+    tm: ThreadManagerProtocol = request.app.state.thread_manager
+    try:
+        meta = await tm.fork_thread(
+            thread_id,
+            history_index=body.history_index if body is not None else None,
+        )
+    except KeyError as exc:
+        raise ThreadNotFoundError(f"thread not found: {thread_id}") from exc
+    except ThreadForkConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return await _to_dto(meta, tm)
 
 
 @router.post("/import-claude-session")
@@ -464,15 +468,19 @@ async def update_thread_preset(
     确保 cell runtime 已按新 preset 重建。
     """
     _validate_thread_id(thread_id)
-    cfg = request.app.state.config
     preset_id = body.preset_id.strip()
-    if not any(p.id == preset_id for p in cfg.web.llm_presets):
-        raise HTTPException(status_code=400, detail=f"unknown preset_id: {preset_id!r}")
+    manager = request.app.state.model_catalog_manager
+    try:
+        manager.get_preset(preset_id)
+    except ModelProviderCatalogError as exc:
+        raise ModelCatalogWebError(exc) from exc
     tm: ThreadManagerProtocol = request.app.state.thread_manager
     try:
         meta = await tm.update_thread_preset(thread_id, preset_id)
     except KeyError as exc:
         raise ThreadNotFoundError(f"thread not found: {thread_id}") from exc
+    except ModelProviderCatalogError as exc:
+        raise ModelCatalogWebError(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ThreadPresetRefreshError as exc:
@@ -516,6 +524,101 @@ async def delete_thread(thread_id: str, request: Request) -> None:
     if not any(m.id == thread_id for m in metas):
         raise ThreadNotFoundError(f"thread not found: {thread_id}")
     await tm.delete_thread(thread_id)
+
+
+def _permissions_manager(request: Request) -> ThreadPermissionsManagerProtocol:
+    """返回 Web 装配层共享的 REST permissions 门户。"""
+    manager: ThreadPermissionsManagerProtocol | None = getattr(
+        request.app.state,
+        "thread_permissions_manager",
+        None,
+    )
+    if manager is None:
+        raise HTTPException(status_code=503, detail="permissions manager not available")
+    return manager
+
+
+async def _require_thread(thread_id: str, request: Request) -> None:
+    """验证路径 thread 存在并具有稳定生命周期身份。"""
+    _validate_thread_id(thread_id)
+    tm: ThreadManagerProtocol = request.app.state.thread_manager
+    metadata = await asyncio.to_thread(tm.list_threads)
+    if not any(item.id == thread_id for item in metadata):
+        raise ThreadNotFoundError(f"thread not found: {thread_id}")
+
+
+@router.get("/{thread_id}/permissions", response_model=ThreadPermissionsDTO)
+async def get_thread_permissions(
+    thread_id: str,
+    request: Request,
+) -> ThreadPermissionsDTO:
+    """读取当前 thread 的独立 permissions 本子。"""
+    await _require_thread(thread_id, request)
+    try:
+        return await _permissions_manager(request).get(thread_id)
+    except ThreadPermissionsStorageError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "permissions_storage_unavailable",
+                "thread_id": thread_id,
+                "message": exc.message,
+            },
+        ) from exc
+
+
+@router.put("/{thread_id}/permissions", response_model=ThreadPermissionsDTO)
+async def update_thread_permissions(
+    thread_id: str,
+    body: UpdateThreadPermissionsRequest,
+    request: Request,
+) -> ThreadPermissionsDTO:
+    """按 revision CAS 整本替换当前 thread 的 allow/deny。"""
+    await _require_thread(thread_id, request)
+    if body.thread_id != thread_id:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "thread_id_mismatch",
+                "path_thread_id": thread_id,
+                "body_thread_id": body.thread_id,
+            },
+        )
+    try:
+        return await _permissions_manager(request).replace(
+            thread_id,
+            allow=body.allow,
+            deny=body.deny,
+            expected_revision=body.revision,
+        )
+    except ThreadPermissionsRevisionConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "permissions_revision_conflict",
+                "thread_id": thread_id,
+                "expected_revision": exc.expected_revision,
+                "actual_revision": exc.actual_revision,
+            },
+        ) from exc
+    except ThreadPermissionsValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_permission_expression",
+                "thread_id": thread_id,
+                "message": exc.message,
+            },
+        ) from exc
+    except ThreadPermissionsStorageError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "permissions_storage_unavailable",
+                "thread_id": thread_id,
+                "message": exc.message,
+            },
+        ) from exc
 
 
 @router.get("/{thread_id}/claude_history")
@@ -598,12 +701,11 @@ async def get_evolution_reviews(
 ) -> list[EvolutionReviewDTO]:
     _validate_thread_id(thread_id)
     await asyncio.to_thread(_require_thread_meta, request, thread_id)
-    store = _evolution_store(request)
-    reviews = await store.list_reviews_for_session(thread_id)
+    manager = _evolution_manager(request)
+    reviews = await manager.list_review_records_for_session(thread_id)
     out: list[EvolutionReviewDTO] = []
-    for review in reviews:
+    for review, decision in reviews:
         review_id = _review_id_for_run(review.run_id)
-        decision = await store.read_decision(review_id)
         out.append(
             _to_evolution_review_dto(
                 review_id=review_id,
@@ -623,71 +725,19 @@ async def post_evolution_review_decision(
 ) -> EvolutionDecisionResponse:
     _validate_thread_id(thread_id)
     meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
-    store = _evolution_store(request)
-    reviews = await store.list_reviews_for_session(thread_id)
-    review = next((item for item in reviews if _review_id_for_run(item.run_id) == review_id), None)
-    if review is None:
-        raise HTTPException(status_code=404, detail=f"review not found: {review_id}")
-    nutrient_ids = {nutrient.nutrient_id for nutrient in review.nutrients}
-    if body.nutrient_id not in nutrient_ids:
-        raise HTTPException(
-            status_code=404,
-            detail=f"nutrient not found in review: {body.nutrient_id}",
-        )
-    existing = await store.read_decision(review_id)
-    items = list(existing.items if existing is not None else ())
-    now_ms = int(time.time() * 1000)
-    new_item = DecisionItem(
-        nutrient_id=body.nutrient_id,
-        decision=body.decision,
-        target=_decision_target_for_value(body.decision),
-        decided_at_ms=now_ms,
-    )
-    replaced = False
-    for index, item in enumerate(items):
-        if item.nutrient_id == body.nutrient_id:
-            items[index] = new_item
-            replaced = True
-            break
-    if not replaced:
-        items.append(new_item)
-    record = await store.write_decision(
-        DecisionRecord(
+    manager = _evolution_manager(request)
+    try:
+        review, record = await manager.apply_review_decision(
+            thread_id=thread_id,
             review_id=review_id,
-            session_id=thread_id,
-            run_id=review.run_id,
-            summary=DecisionSummary(
-                total=len(review.nutrients),
-                accepted_memory=0,
-                accepted_skill=0,
-                ignored=0,
-                pending=len(review.nutrients),
-            ),
-            items=tuple(items),
+            nutrient_id=body.nutrient_id,
+            decision=body.decision,
+            workspace_root=_workspace_root_for_meta(request, meta),
         )
-    )
-    decision_item = next(
-        (item for item in record.items if item.nutrient_id == body.nutrient_id), None
-    )
-    nutrient = next(
-        (item for item in review.nutrients if item.nutrient_id == body.nutrient_id), None
-    )
-    if nutrient is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"nutrient not found in review: {body.nutrient_id}",
-        )
-    if decision_item is None:
-        raise HTTPException(status_code=500, detail=f"decision item missing: {body.nutrient_id}")
-    record = await _apply_decision_item(
-        request=request,
-        store=store,
-        meta=meta,
-        review_id=review_id,
-        run_id=review.run_id,
-        nutrient=nutrient,
-        decision=decision_item,
-    )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     return EvolutionDecisionResponse(
         review=_to_evolution_review_dto(
             review_id=review_id,
@@ -708,35 +758,15 @@ async def post_evolution_review_reapply(
 ) -> EvolutionDecisionResponse:
     _validate_thread_id(thread_id)
     meta = await asyncio.to_thread(_require_thread_meta, request, thread_id)
-    store = _evolution_store(request)
-    reviews = await store.list_reviews_for_session(thread_id)
-    review = next((item for item in reviews if _review_id_for_run(item.run_id) == review_id), None)
-    if review is None:
-        raise HTTPException(status_code=404, detail=f"review not found: {review_id}")
-    record = await store.read_decision(review_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"decision record not found: {review_id}")
-
-    actionable = [
-        item
-        for item in record.items
-        if item.decision in {"accept_memory", "accept_skill"}
-        and item.applied_status in {"pending", "failed"}
-    ]
-    nutrient_map = {nutrient.nutrient_id: nutrient for nutrient in review.nutrients}
-    for item in actionable:
-        nutrient = nutrient_map.get(item.nutrient_id)
-        if nutrient is None:
-            continue
-        record = await _apply_decision_item(
-            request=request,
-            store=store,
-            meta=meta,
+    manager = _evolution_manager(request)
+    try:
+        review, record = await manager.reapply_review_decisions(
+            thread_id=thread_id,
             review_id=review_id,
-            run_id=review.run_id,
-            nutrient=nutrient,
-            decision=item,
+            workspace_root=_workspace_root_for_meta(request, meta),
         )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     return EvolutionDecisionResponse(
         review=_to_evolution_review_dto(

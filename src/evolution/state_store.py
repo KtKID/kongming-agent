@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from pathlib import Path
 from typing import Any
 
+from core.clock import now_epoch_ms
 from evolution.models import SessionLearningState
 
 
 def _now_ms() -> int:
-    return int(time.time() * 1000)
+    return now_epoch_ms()
 
 
 class EvolutionStateStore:
@@ -38,6 +38,29 @@ class EvolutionStateStore:
             sessions = data.setdefault("sessions", {})
             current = SessionLearningState.from_dict(sessions.get(session_id, {}))
             current.run_count += 1
+            current.user_turn_count = user_turn_count
+            sessions[session_id] = current.to_dict()
+            await asyncio.to_thread(self._write_raw, data)
+            return current
+
+    async def update_session_meta(
+        self,
+        *,
+        session_id: str,
+        user_turn_count: int,
+    ) -> SessionLearningState:
+        """runtime channel 用：只刷新 user_turn_count 等旁路字段，不递增 run_count。
+
+        run_count 真源已迁移到 session manifest（``Session.get_run_count``）；
+        runtime channel（web/CLI Runner）调用本方法记录旁路元数据，**不得**用
+        :meth:`record_parent_run` 自行递增——否则会与 manifest 真值产生双源误差。
+
+        claude_code 频道无 session 对象，仍用 :meth:`record_parent_run` 自维护。
+        """
+        async with self._lock:
+            data = await asyncio.to_thread(self._read_raw)
+            sessions = data.setdefault("sessions", {})
+            current = SessionLearningState.from_dict(sessions.get(session_id, {}))
             current.user_turn_count = user_turn_count
             sessions[session_id] = current.to_dict()
             await asyncio.to_thread(self._write_raw, data)

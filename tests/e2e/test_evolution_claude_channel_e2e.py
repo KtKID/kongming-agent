@@ -185,7 +185,7 @@ async def test_evolution_log_file_captures_all_stages(tmp_path: Path) -> None:
     assert "evolution cadence: thread=" in log_content, "缺 cadence 计数日志"
     assert "run_count=1" in log_content, "缺第 1 次计数"
     assert "run_count=2" in log_content, "缺第 2 次计数"
-    assert "evolution skip:" in log_content or "evolution triggered:" in log_content, (
+    assert "trigger blocked:" in log_content or "evolution triggered:" in log_content, (
         "缺跳过/触发日志"
     )
 

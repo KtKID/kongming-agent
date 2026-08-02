@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+from core.clock import now_epoch_ms
 from evolution.memory_materializer import MemoryMaterializer
 from evolution.models import (
     ApplyJob,
@@ -16,8 +16,7 @@ from evolution.models import (
     EvolutionNutrient,
 )
 from evolution.skill_materializer import materialize_skill
-from evolution.state_store import EvolutionStateStore
-from evolution.store import EvolutionStore, resolve_evolution_root
+from evolution.store import EvolutionStore
 from infrastructure.config.models import Config
 from infrastructure.config.paths import resolve_kongming_path
 from memory import MemoryStore
@@ -163,13 +162,9 @@ async def execute_apply_job(
 async def recover_pending_apply_jobs(
     cfg: Config,
     *,
+    store: EvolutionStore,
     kongming_home: Path | None = None,
 ) -> tuple[ApplyJob, ...]:
-    root_dir = resolve_evolution_root(
-        cfg.evolution.learning.root_path,
-        kongming_home=kongming_home,
-    )
-    store = EvolutionStore(root_dir=root_dir, state_store=EvolutionStateStore(root_dir))
     jobs = await store.list_recoverable_apply_jobs()
     recovered: list[ApplyJob] = []
     for job in jobs:
@@ -235,4 +230,4 @@ def _resolve_memory_dir(
 
 
 def _now_ms() -> int:
-    return int(time.time() * 1000)
+    return now_epoch_ms()

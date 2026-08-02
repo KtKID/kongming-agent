@@ -1,18 +1,22 @@
 """e2e：self-evolution v0.1.9 主链。
 
-覆盖 `NativeRuntime.run() -> child reviewer -> evolution_write -> evo 落盘`
+覆盖 `SessionEngine.run() -> child reviewer -> evolution_write -> evo 落盘`
 这条完整链路，同时验证 child reviewer 可配置独立模型名。
 """
 
 from __future__ import annotations
 
 import json
+import socket
 from pathlib import Path
 
 import pytest
 
 from core.contracts import LLMRequest, LLMResponse
 from core.message import Message, ToolCall
+from core.session import InMemorySession
+from evolution.evolution_manager import EvolutionManager
+from evolution.lifecycle import register_evolution_lifecycle_hook
 from infrastructure.config.models import (
     ApprovalConfig,
     Config,
@@ -20,19 +24,30 @@ from infrastructure.config.models import (
     EvolutionLearningConfig,
     EvolutionMemoryConfig,
     FileToolConfig,
-    ModelConfig,
+    ModelSelectionConfig,
     RunnerConfig,
     ShellToolConfig,
     ToolConfig,
 )
-from runtime_assembly.native_runtime import NativeRuntime
-from tests.e2e.conftest import MemoryEventSink
-from tools import ToolRegistry, register_evolution_write_tool_if_enabled
+from runtime_assembly.session_engine import SessionEngine
+from tests.e2e.conftest import MemoryEventSink, RecordingApproval
+from tools import ToolRegistry
+
+
+def _block_external_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """阻断测试进程的外部 socket 连接，确保进化 e2e 只使用 fake provider。"""
+
+    def _deny_network(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("self-evolution e2e attempted an external network call")
+
+    monkeypatch.setattr(socket.socket, "connect", _deny_network)
+    monkeypatch.setattr(socket.socket, "connect_ex", _deny_network)
 
 
 class _ScriptedOpenAIProvider:
     responses: list[tuple[str | None, list[ToolCall] | None]] = []
     seen_models: list[str] = []
+    seen_requests: list[LLMRequest] = []
 
     def __init__(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
         pass
@@ -41,6 +56,7 @@ class _ScriptedOpenAIProvider:
     def reset(cls) -> None:
         cls.responses = []
         cls.seen_models = []
+        cls.seen_requests = []
 
     @classmethod
     def script(
@@ -50,6 +66,7 @@ class _ScriptedOpenAIProvider:
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         type(self).seen_models.append(request.model)
+        type(self).seen_requests.append(request)
         if not type(self).responses:
             return LLMResponse(message=Message.assistant(""), finish_reason="stop")
         content, tool_calls = type(self).responses.pop(0)
@@ -62,14 +79,9 @@ class _ScriptedOpenAIProvider:
         return None
 
 
-def _cfg(tmp_path: Path) -> Config:
+def _cfg(tmp_path: Path, *, auto_trigger_enabled: bool = True) -> Config:
     return Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="parent-model",
-            base_url="http://127.0.0.1:1234/v1",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         runner=RunnerConfig(max_turns=4),
         approval=ApprovalConfig(mode="auto_allow"),
         tool=ToolConfig(
@@ -80,7 +92,8 @@ def _cfg(tmp_path: Path) -> Config:
             memory=EvolutionMemoryConfig(enabled=False),
             learning=EvolutionLearningConfig(
                 enabled=True,
-                model_name="review-model",
+                auto_trigger_enabled=auto_trigger_enabled,
+                preset_id="bigmodel-glm5-1m",
                 reasoning_effort="low",
                 every_n_runs=1,
                 min_user_turns=1,
@@ -100,9 +113,10 @@ async def test_self_evolution_run_child_reviewer_and_write_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    _block_external_network(monkeypatch)
     monkeypatch.setattr(
-        "runtime_assembly.native_runtime.OpenAIResponsesProvider",
-        _ScriptedOpenAIProvider,
+        "runtime_assembly.session_engine.build_provider",
+        lambda *_args, **_kwargs: _ScriptedOpenAIProvider(),
     )
     _ScriptedOpenAIProvider.reset()
 
@@ -155,26 +169,33 @@ async def test_self_evolution_run_child_reviewer_and_write_files(
             )
         ]
     )
-    _ScriptedOpenAIProvider.script(content="review stored")
-
     cfg = _cfg(tmp_path)
     sink = MemoryEventSink()
     registry = ToolRegistry()
-    register_evolution_write_tool_if_enabled(registry, cfg, event_sinks=[sink])
-    runtime = NativeRuntime.build(
+    manager = EvolutionManager(config=cfg, kongming_home=tmp_path)
+    manager.register_runtime_tools(
+        registry,
+        event_sinks=[sink],
+    )
+    runtime = SessionEngine.build(
         cfg,
         tools=registry,
         enabled_tool_names=[],
         event_sinks=[sink],
     )
+    register_evolution_lifecycle_hook(runtime=runtime, manager=manager)
 
     result = await runtime.run("please solve this", session_id=session_id)
+    await manager.aclose()
     await runtime.aclose()
 
     assert result.status == "completed"
     assert result.final_message is not None
     assert result.final_message.content == "parent done"
-    assert _ScriptedOpenAIProvider.seen_models == ["parent-model", "review-model", "review-model"]
+    assert _ScriptedOpenAIProvider.seen_models == [
+        "gemma-4-e4b-it",
+        "glm-5.2",
+    ]
 
     evo_root = tmp_path / ".kongming" / "evolution"
     review_path = evo_root / "reviews" / f"{parent_run_id}.json"
@@ -196,7 +217,9 @@ async def test_self_evolution_run_child_reviewer_and_write_files(
 
     state_data = json.loads(state_path.read_text(encoding="utf-8"))
     session_state = state_data["sessions"][session_id]
-    assert session_state["run_count"] == 1
+    # run_count 真源已迁到 session manifest；evolution state 只保留旁路元数据。
+    assert session_state["run_count"] == 0
+    assert session_state["user_turn_count"] == 1
     assert session_state["last_reviewed_run_id"] == parent_run_id
     assert session_state["last_nutrient_id"] == "nutrient-e2e-1"
     assert session_state["last_review_status"] == "written"
@@ -205,3 +228,153 @@ async def test_self_evolution_run_child_reviewer_and_write_files(
     assert "evolution.review.started" in event_kinds
     assert "evolution.review.completed" in event_kinds
     assert "evolution.nutrient_written" in event_kinds
+
+
+@pytest.mark.e2e
+async def test_explicit_review_tool_runs_after_final_answer_in_manual_only_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """公开 Tool 经主 Runner 登记，最终回答后仅启动一次 child review。"""
+    _block_external_network(monkeypatch)
+    monkeypatch.setattr(
+        "runtime_assembly.session_engine.build_provider",
+        lambda *_args, **_kwargs: _ScriptedOpenAIProvider(),
+    )
+    _ScriptedOpenAIProvider.reset()
+
+    session_id = "e2e-explicit-evolution"
+    parent_run_id = f"run-{session_id}-1"
+    focus = "重点提炼工具失败后的恢复流程"
+    _ScriptedOpenAIProvider.script(
+        tool_calls=[
+            ToolCall(
+                call_id="request-review-1",
+                tool_name="request_evolution_review",
+                arguments={"focus": focus},
+            )
+        ]
+    )
+    _ScriptedOpenAIProvider.script(content="parent final answer")
+    _ScriptedOpenAIProvider.script(
+        tool_calls=[
+            ToolCall(
+                call_id="evo-write-manual-1",
+                tool_name="evolution_write",
+                arguments={
+                    "review_result": {
+                        "run_id": parent_run_id,
+                        "session_id": session_id,
+                        "reviewed_at_ms": 1234567891,
+                        "review_summary": "captured explicit recovery workflow",
+                        "nutrients": [
+                            {
+                                "nutrient_id": "nutrient-manual-1",
+                                "kind": "workflow",
+                                "title": "recover after tool failure",
+                                "content": "Inspect the structured tool error, correct inputs, and retry once.",
+                                "summary": "tool failure recovery workflow",
+                                "confidence": 0.93,
+                                "evidence_turns": [1],
+                                "source_run_id": parent_run_id,
+                                "source_session_id": session_id,
+                                "suggested_target": "skill",
+                                "tags": ["workflow", "recovery"],
+                            }
+                        ],
+                        "skip_reasons": [],
+                    },
+                    "trigger_reason": "manual_tool",
+                    "transcript_window": {
+                        "session_id": session_id,
+                        "run_id": parent_run_id,
+                        "user_turn_count": 1,
+                        "included_turns": [1],
+                        "messages": [
+                            {
+                                "turn": 1,
+                                "role": "user",
+                                "content": "review this run",
+                            },
+                            {
+                                "turn": 2,
+                                "role": "assistant",
+                                "content": "parent final answer",
+                            },
+                        ],
+                        "final_message": "parent final answer",
+                        "tool_call_count": 1,
+                        "summary": "explicit review request and final answer",
+                    },
+                },
+            )
+        ]
+    )
+    cfg = _cfg(tmp_path, auto_trigger_enabled=False)
+    sink = MemoryEventSink()
+    approval = RecordingApproval()
+    session = InMemorySession(session_id=session_id)
+    registry = ToolRegistry()
+    manager = EvolutionManager(config=cfg, kongming_home=tmp_path)
+    manager.register_runtime_tools(registry, event_sinks=[sink])
+    runtime = SessionEngine.build(
+        cfg,
+        tools=registry,
+        enabled_tool_names=["request_evolution_review"],
+        event_sinks=[sink],
+        approval=approval,
+        session_factory=lambda _session_id: session,
+    )
+    register_evolution_lifecycle_hook(runtime=runtime, manager=manager)
+
+    result = await runtime.run("review this run", session_id=session_id)
+    await manager.aclose()
+    history = await session.history()
+    await runtime.aclose()
+
+    assert result.status == "completed"
+    assert result.final_message is not None
+    assert result.final_message.content == "parent final answer"
+    request_results = [
+        message
+        for message in history
+        if message.role == "tool" and message.name == "request_evolution_review"
+    ]
+    assert len(request_results) == 1
+    assert request_results[0].metadata["ok"] is True, request_results[0].metadata
+    assert request_results[0].metadata["data"]["status"] == "queued"
+    assert [request.tool_name for request in approval.requests] == ["request_evolution_review"]
+    assert _ScriptedOpenAIProvider.seen_models == [
+        "gemma-4-e4b-it",
+        "gemma-4-e4b-it",
+        "glm-5.2",
+    ]
+    reviewer_prompt = _ScriptedOpenAIProvider.seen_requests[2].messages[-1].content
+    assert reviewer_prompt is not None
+    assert focus in reviewer_prompt
+    assert "触发原因: manual_tool" in reviewer_prompt
+    assert any(
+        message.content is not None and "[turn 1][assistant] parent final answer" in message.content
+        for message in _ScriptedOpenAIProvider.seen_requests[2].messages
+    )
+
+    review_path = tmp_path / ".kongming" / "evolution" / "reviews" / f"{parent_run_id}.json"
+    review_data = json.loads(review_path.read_text(encoding="utf-8"))
+    assert review_data["trigger_reason"] == "manual_tool"
+    assert review_data["transcript_window"]["included_turns"] == [1]
+    assert len(list((tmp_path / ".kongming" / "evolution" / "reviews").glob("*.json"))) == 1
+
+    request_start_events = [
+        event
+        for event in sink.events
+        if event.kind == "tool.call.start"
+        and event.payload.get("tool_name") == "request_evolution_review"
+    ]
+    request_end_events = [
+        event
+        for event in sink.events
+        if event.kind == "tool.call.end"
+        and event.payload.get("tool_name") == "request_evolution_review"
+    ]
+    assert len(request_start_events) == 1
+    assert len(request_end_events) == 1
