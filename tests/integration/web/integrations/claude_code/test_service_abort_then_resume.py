@@ -29,10 +29,12 @@ from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from hosts.web.integrations.claude_code.approval import ApprovalBridge
 from hosts.web.integrations.claude_code.normalizer import ClaudeNormalizer
 from hosts.web.integrations.claude_code.service import ClaudeCodeService
 from hosts.web.shared.session_manager import SessionManager
+from tests.unit.web.integrations.claude_code._approval_test_support import (
+    build_test_approval_bridge,
+)
 
 
 class _FakeWriter:
@@ -91,7 +93,7 @@ def _make_service(
     """
     sessions = SessionManager()
     normalizer = ClaudeNormalizer()
-    approval = ApprovalBridge(normalizer, sessions)
+    approval = build_test_approval_bridge(normalizer, sessions)
 
     created_clients: list[MagicMock] = []
 

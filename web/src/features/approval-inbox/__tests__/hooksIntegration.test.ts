@@ -6,7 +6,7 @@ import {
 import type {
   ApprovalInboxAddFrame,
   ApprovalInboxItem,
-} from "../types";
+} from "@/protocol";
 
 /**
  * store + selectSorted 集成 smoke：覆盖 add / remove / snapshot 全量替换路径
@@ -23,20 +23,21 @@ function makeAddFrame(
     threadId: `t-${requestId}`,
     toolName: "Bash",
     toolInput: {},
-    autoApproveAtMs: null,
-    autoRejectAtMs: null,
     blockedByRule: null,
     isElevated: false,
+    danger: false,
+    rememberAllowed: false,
     channel: "claude_code",
     cwd: "/p",
     arrivedAtMs: 0,
     timeoutMs: null,
+    rememberRule: null,
     ...overrides,
   };
 }
 
 beforeEach(() => {
-  useApprovalInboxStore.setState({ byRequestId: {} });
+  useApprovalInboxStore.getState().clear();
 });
 
 describe("inbox + selectSorted 集成", () => {
@@ -86,6 +87,7 @@ describe("inbox + selectSorted 集成", () => {
     store.applyAddFrame(makeAddFrame("safe2", { arrivedAtMs: 5 }));
     store.applyAddFrame(
       makeAddFrame("danger", {
+        danger: true,
         blockedByRule: "rm-rf",
         arrivedAtMs: 100,
       }),

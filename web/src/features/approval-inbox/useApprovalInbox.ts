@@ -1,12 +1,14 @@
 import { create } from "zustand";
-import { getSender } from "./senderRef";
 import type {
   ApprovalInboxAddFrame,
   ApprovalInboxItem,
   ApprovalInboxRemoveFrame,
   ApprovalInboxResolveFrame,
+  ApprovalInboxResolveResultFrame,
   ApprovalInboxSnapshotFrame,
-} from "./types";
+  RememberRule,
+} from "@/protocol";
+import { getSender } from "./senderRef";
 
 /**
  * smart-approval-v2-inbox 前端 store。
@@ -21,44 +23,67 @@ import type {
  * - **byRequestId 索引**：增删 O(1)；排序由 ``selectSorted`` 在读侧算。
  * - **resolve 不抛**：sender = null 时 console.warn 但不抛，避免按钮卡死。
  *
- * 与 useAutoApprovalStore 的关系：完全独立 store（两者都是 cross-thread 全局，
- * 但 v1 是 per-cwd 开关状态、v2 是 per-request 队列）。
+ * inbox 是 cross-thread 全局展示队列，每条决议仍按 threadId 路由。
  */
 
 interface ApprovalInboxState {
   /** key = requestId */
   byRequestId: Record<string, ApprovalInboxItem>;
+  resolveResultByRequestId: Record<string, ApprovalInboxResolveResultFrame>;
+  submissionByRequestId: Record<string, ApprovalSubmissionState>;
 
   // ---- 协议帧 reducer ----
   applyAddFrame: (frame: ApprovalInboxAddFrame) => void;
   applyRemoveFrame: (frame: ApprovalInboxRemoveFrame) => void;
   applySnapshotFrame: (frame: ApprovalInboxSnapshotFrame) => void;
+  applyResolveResultFrame: (frame: ApprovalInboxResolveResultFrame) => void;
 
   // ---- 用户操作 ----
-  /** 发 resolve 帧到后端；不本地删除（等后端回 remove 帧统一清） */
+  /** 发 resolve 帧到后端；卡片保留到 authoritative remove，失败进入可重试 error */
   resolve: (
     threadId: string,
     requestId: string,
     allow: boolean,
     opts?: {
       message?: string;
-      rememberEntry?: string;
-      rememberScope?: "session" | "persistent";
+      remember?: boolean;
+      rememberRule?: RememberRule | null;
     },
-  ) => void;
+  ) => boolean | Promise<boolean>;
 
   // ---- 测试用 ----
   clear: () => void;
 }
 
-export const useApprovalInboxStore = create<ApprovalInboxState>((set) => ({
+export interface ApprovalSubmissionState {
+  status: "submitting" | "error";
+  message?: string;
+}
+
+function hasValidIdentity(
+  item:
+    | Partial<Pick<ApprovalInboxItem, "requestId" | "threadId">>
+    | null
+    | undefined,
+): boolean {
+  return (
+    typeof item?.requestId === "string" &&
+    item.requestId.length > 0 &&
+    typeof item?.threadId === "string" &&
+    item.threadId.length > 0
+  );
+}
+
+export const useApprovalInboxStore = create<ApprovalInboxState>((set, get) => ({
   byRequestId: {},
+  resolveResultByRequestId: {},
+  submissionByRequestId: {},
 
   applyAddFrame: (frame) => {
-    // hardening：入口 guard —— requestId 必须是非空 string
-    if (typeof frame?.requestId !== "string" || !frame.requestId) {
+    // hardening：入口 guard —— requestId/threadId 必须是非空 string
+    if (!hasValidIdentity(frame)) {
       console.warn(
-        "[approval-inbox] applyAddFrame: invalid requestId, skip",
+        "[approval-inbox] applyAddFrame: invalid identity, skip",
         frame,
       );
       return;
@@ -80,6 +105,16 @@ export const useApprovalInboxStore = create<ApprovalInboxState>((set) => ({
         ...s.byRequestId,
         [normalized.requestId]: normalized,
       },
+      resolveResultByRequestId: Object.fromEntries(
+        Object.entries(s.resolveResultByRequestId).filter(
+          ([requestId]) => requestId !== normalized.requestId,
+        ),
+      ),
+      submissionByRequestId: Object.fromEntries(
+        Object.entries(s.submissionByRequestId).filter(
+          ([requestId]) => requestId !== normalized.requestId,
+        ),
+      ),
     }));
   },
 
@@ -92,7 +127,15 @@ export const useApprovalInboxStore = create<ApprovalInboxState>((set) => ({
       if (!(frame.requestId in s.byRequestId)) return s;
       const next = { ...s.byRequestId };
       delete next[frame.requestId];
-      return { byRequestId: next };
+      const nextResults = { ...s.resolveResultByRequestId };
+      delete nextResults[frame.requestId];
+      const nextSubmissions = { ...s.submissionByRequestId };
+      delete nextSubmissions[frame.requestId];
+      return {
+        byRequestId: next,
+        resolveResultByRequestId: nextResults,
+        submissionByRequestId: nextSubmissions,
+      };
     });
   },
 
@@ -108,7 +151,7 @@ export const useApprovalInboxStore = create<ApprovalInboxState>((set) => ({
     // 全量替换 —— snapshot 是真源
     const next: Record<string, ApprovalInboxItem> = {};
     for (const item of frame.items) {
-      if (typeof item?.requestId !== "string" || !item.requestId) continue;
+      if (!hasValidIdentity(item)) continue;
       // v0.5 兼容：snapshot 老条目可能也没有 timeoutMs，统一 normalize 成 null
       next[item.requestId] = {
         ...item,
@@ -118,40 +161,138 @@ export const useApprovalInboxStore = create<ApprovalInboxState>((set) => ({
             : null,
       };
     }
-    set({ byRequestId: next });
+    set({
+      byRequestId: next,
+      resolveResultByRequestId: {},
+      submissionByRequestId: {},
+    });
+  },
+
+  applyResolveResultFrame: (frame) => {
+    if (
+      typeof frame?.requestId !== "string" ||
+      !frame.requestId ||
+      typeof frame.accepted !== "boolean"
+    ) {
+      return;
+    }
+    set((s) => {
+      if (!(frame.requestId in s.byRequestId)) return s;
+      return {
+        resolveResultByRequestId: {
+          ...s.resolveResultByRequestId,
+          [frame.requestId]: frame,
+        },
+        submissionByRequestId: {
+          ...s.submissionByRequestId,
+          [frame.requestId]: frame.accepted
+            ? { status: "submitting" }
+            : {
+                status: "error",
+                message: frame.message ?? "审批提交失败，请重试",
+              },
+        },
+      };
+    });
   },
 
   resolve: (threadId, requestId, allow, opts) => {
+    if (
+      typeof threadId !== "string" ||
+      !threadId ||
+      typeof requestId !== "string" ||
+      !requestId
+    ) {
+      console.warn(
+        "[approval-inbox] resolve called with invalid identity; frame dropped",
+        { threadId, requestId, allow },
+      );
+      return false;
+    }
     const sender = getSender();
+    const pendingItem = get().byRequestId[requestId];
+    if (get().submissionByRequestId[requestId]?.status === "submitting") {
+      return false;
+    }
+    const remember = opts?.remember === true;
     const frame: ApprovalInboxResolveFrame = {
       frame_type: "approval.inbox.resolve",
       threadId,
       requestId,
       allow,
+      remember,
+      ...(remember
+        ? { rememberRule: opts?.rememberRule ?? pendingItem?.rememberRule ?? null }
+        : {}),
       ...(opts?.message !== undefined ? { message: opts.message } : {}),
-      ...(opts?.rememberEntry !== undefined
-        ? { rememberEntry: opts.rememberEntry }
-        : {}),
-      ...(opts?.rememberScope !== undefined
-        ? { rememberScope: opts.rememberScope }
-        : {}),
     };
     if (sender === null) {
       console.warn(
         "[approval-inbox] resolve called but sender not set; frame dropped",
         frame,
       );
-      return;
+      set((state) => ({
+        submissionByRequestId: {
+          ...state.submissionByRequestId,
+          [requestId]: {
+            status: "error",
+            message: "审批连接尚未就绪，请重试",
+          },
+        },
+      }));
+      return false;
     }
+    const markError = (message: string): void =>
+      set((state) => {
+        if (!(requestId in state.byRequestId)) return state;
+        return {
+          submissionByRequestId: {
+            ...state.submissionByRequestId,
+            [requestId]: { status: "error", message },
+          },
+        };
+      });
+    set((state) => ({
+      submissionByRequestId: {
+        ...state.submissionByRequestId,
+        [requestId]: { status: "submitting" },
+      },
+    }));
     try {
-      sender(frame);
+      const sent = sender(frame);
+      if (sent instanceof Promise) {
+        return sent
+          .then((result) => {
+            if (result === false) {
+              markError("审批发送失败，请重试");
+              return false;
+            }
+            return true;
+          })
+          .catch((err: unknown) => {
+            console.warn("[approval-inbox] async sender threw:", err);
+            markError(err instanceof Error ? err.message : String(err));
+            return false;
+          });
+      }
+      if (sent === false) {
+        markError("审批发送失败，请重试");
+        return false;
+      }
+      return true;
     } catch (err) {
-      // 发送失败：warn 不抛 —— 用户应可重试
       console.warn("[approval-inbox] sender threw:", err);
+      markError(err instanceof Error ? err.message : String(err));
+      return false;
     }
   },
 
-  clear: () => set({ byRequestId: {} }),
+  clear: () =>
+    set({
+      byRequestId: {},
+      resolveResultByRequestId: {},
+      submissionByRequestId: {},
+    }),
 }));
 
 // smart-approval-manager-stage1 e2e（task #8）：把 store 暴露到 window，
@@ -170,7 +311,7 @@ if (typeof window !== "undefined" && import.meta.env.DEV) {
 
 /**
  * 排序 selector（不写进 state）：
- * - 危险卡（``blockedByRule !== null``）置顶
+ * - danger 卡置顶
  * - 每组内部按 ``arrivedAtMs`` 递增（旧 → 新）
  *
  * 用法：``useApprovalInboxStore(selectSorted)``
@@ -178,10 +319,10 @@ if (typeof window !== "undefined" && import.meta.env.DEV) {
 export function selectSorted(state: ApprovalInboxState): ApprovalInboxItem[] {
   const all = Object.values(state.byRequestId);
   const danger = all
-    .filter((i) => i.blockedByRule !== null)
+    .filter((i) => i.danger)
     .sort((a, b) => a.arrivedAtMs - b.arrivedAtMs);
   const safe = all
-    .filter((i) => i.blockedByRule === null)
+    .filter((i) => !i.danger)
     .sort((a, b) => a.arrivedAtMs - b.arrivedAtMs);
   return [...danger, ...safe];
 }

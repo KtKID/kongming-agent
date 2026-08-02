@@ -1,8 +1,7 @@
 """共享 LLM 协议定义（v0.1）。
 
-跨 ``src/hosts/web/integrations/claude_code/`` 与未来的 ``src/hosts/web/integrations/codex/`` / ``src/hosts/web/gemini/``
-模块共享的 wire 协议——前端 → 后端 4 类入站命令 + 后端 → 前端
-:class:`NormalizedMessage` 字典。
+跨 Claude/Codex 归一化器共享的内部 ``NormalizedMessage`` 字典。Web 入站与
+出站帧真源统一位于 ``hosts.web.protocol``。
 
 设计要点：
 
@@ -16,7 +15,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, NotRequired
+from typing import Any, Literal, NotRequired, Required
 
 from typing_extensions import TypedDict
 
@@ -64,7 +63,7 @@ LLMProvider = Literal["claude", "codex", "gemini", "cursor", "generic_chat"]
 class NormalizedMessage(TypedDict, total=False):
     """归一化的后端 → 前端消息字典。
 
-    `total=False` 让所有字段都可选；运行期消费方按 ``frame_type`` 决定读哪些字段。
+    ``frame_type`` 是必填判别字段，其余字段可选；运行期消费方按该字段决定读取内容。
 
     Base 字段（所有 ``frame_type`` 都应该带）：
 
@@ -80,11 +79,13 @@ class NormalizedMessage(TypedDict, total=False):
     sessionId: str | None
     timestamp: str
     provider: LLMProvider
-    frame_type: MessageKind
+    frame_type: Required[MessageKind]
 
     # text / thinking / stream_delta
     role: NotRequired[Literal["user", "assistant"]]
     content: NotRequired[Any]
+    metadata: NotRequired[dict[str, Any]]
+    historyIndex: NotRequired[int]
 
     # stream_status / stream_delta（流式进度元信息）
     # phase: 当前阶段（responding=生成文本 / thinking=思考 / tool_calling=调用工具）
@@ -106,6 +107,10 @@ class NormalizedMessage(TypedDict, total=False):
     requestId: NotRequired[str]
     input: NotRequired[Any]
     reason: NotRequired[str]
+    autoApproveAtMs: NotRequired[int | None]
+    autoRejectAtMs: NotRequired[int | None]
+    blockedByRule: NotRequired[str | None]
+    channel: NotRequired[str]
 
     # session_created
     newSessionId: NotRequired[str]
@@ -120,60 +125,7 @@ class NormalizedMessage(TypedDict, total=False):
     error: NotRequired[str]
 
 
-# ---------------------------------------------------------------------------
-# 入站命令（前端 → 后端）
-# ---------------------------------------------------------------------------
-
-
-class ClaudeCommand(TypedDict, total=False):
-    """前端发起的"调起 Claude run"命令。"""
-
-    frame_type: Literal["claude-command"]
-    command: str
-    options: NotRequired[dict[str, Any]]
-
-
-class CodexCommand(TypedDict, total=False):
-    """前端发起的"调起 Codex run"命令（frame_type 字段区分 provider）。"""
-
-    frame_type: Literal["codex-command"]
-    command: str
-    options: NotRequired[dict[str, Any]]
-
-
-class ClaudePermissionResponse(TypedDict, total=False):
-    """前端响应 ``permission_request`` 的决策。"""
-
-    frame_type: Literal["claude-permission-response"]
-    requestId: str
-    allow: bool
-    updatedInput: NotRequired[Any]
-    message: NotRequired[str]
-    rememberEntry: NotRequired[str]
-
-
-class AbortSession(TypedDict, total=False):
-    """前端要求中止指定 session 的当前 run。"""
-
-    frame_type: Literal["abort-session"]
-    sessionId: str
-    provider: NotRequired[LLMProvider]
-
-
-class CheckSessionStatus(TypedDict, total=False):
-    """前端查询某 session 是否仍在跑（重连场景）。"""
-
-    frame_type: Literal["check-session-status"]
-    sessionId: str
-    provider: NotRequired[LLMProvider]
-
-
 __all__ = [
-    "AbortSession",
-    "CheckSessionStatus",
-    "ClaudeCommand",
-    "ClaudePermissionResponse",
-    "CodexCommand",
     "LLMProvider",
     "MessageKind",
     "NormalizedMessage",

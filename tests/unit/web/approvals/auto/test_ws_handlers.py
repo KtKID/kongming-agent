@@ -24,8 +24,9 @@ import pytest
 from hosts.web.approvals.auto.ws_handlers import (
     build_auto_approval_state_msg,
     handle_auto_approval_query,
-    handle_auto_approval_toggle,
+    handle_auto_approval_set_mode,
 )
+from safety.auto_approval.disposition import ApprovalDispositionMode
 
 # ---------------------------------------------------------------------------
 # 测试替身
@@ -40,7 +41,7 @@ class _StubRuleSet:
 @dataclass
 class _StubProjectConfig:
     cwd: str = ""
-    enabled: bool = False
+    mode: ApprovalDispositionMode = ApprovalDispositionMode.USER
     timeout_ms: int = 0
     rule_overrides: dict[str, bool] = field(default_factory=dict)
 
@@ -51,17 +52,34 @@ class _StubPolicy:
     def __init__(self, default_timeout_ms: int = 10000) -> None:
         self.rule_set = _StubRuleSet(default_timeout_ms=default_timeout_ms)
         self._cfgs: dict[str, _StubProjectConfig] = {}
-        self.set_enabled_calls: list[tuple[str, bool]] = []
+        self.set_mode_calls: list[tuple[str, ApprovalDispositionMode]] = []
 
     def get_config(self, cwd: str) -> _StubProjectConfig:
         return self._cfgs.get(cwd, _StubProjectConfig(cwd=cwd))
 
-    def set_enabled(self, cwd: str, enabled: bool) -> _StubProjectConfig:
-        self.set_enabled_calls.append((cwd, enabled))
+    def set_mode(
+        self,
+        cwd: str,
+        mode: ApprovalDispositionMode,
+    ) -> _StubProjectConfig:
+        self.set_mode_calls.append((cwd, mode))
         cfg = self._cfgs.setdefault(cwd, _StubProjectConfig(cwd=cwd))
         cfg.cwd = cwd
-        cfg.enabled = enabled
+        cfg.mode = mode
         return cfg
+
+    def set_mode_from_wire(self, cwd: str, raw_mode: str) -> _StubProjectConfig:
+        """模拟 Web wire 枚举到 safety 枚举的转换。"""
+        return self.set_mode(cwd, ApprovalDispositionMode(raw_mode))
+
+    def state_for_wire(self, cwd: str) -> tuple[str, int, dict[str, bool]]:
+        """返回 WS state 的扁平字段。"""
+        cfg = self.get_config(cwd)
+        return (
+            cfg.mode.value,
+            cfg.timeout_ms or self.rule_set.default_timeout_ms,
+            cfg.rule_overrides,
+        )
 
 
 class _FakeWebSocket:
@@ -75,7 +93,7 @@ class _FakeWebSocket:
 
 
 # ---------------------------------------------------------------------------
-# handle_auto_approval_toggle
+# handle_auto_approval_set_mode
 # ---------------------------------------------------------------------------
 
 
@@ -84,19 +102,18 @@ class TestHandleToggle:
     async def test_toggle_on_success_calls_policy_and_sends_state(self) -> None:
         ws = _FakeWebSocket()
         policy = _StubPolicy()
-        data = {"frame_type": "auto-approval-toggle", "cwd": "/proj/test", "enabled": True}
+        data = {"frame_type": "auto-approval-set-mode", "cwd": "/proj/test", "mode": "llm"}
 
-        await handle_auto_approval_toggle(ws, data, policy)  # type: ignore[arg-type]
+        await handle_auto_approval_set_mode(ws, data, policy)  # type: ignore[arg-type]
 
-        # 1. policy.set_enabled 真的被调
-        assert policy.set_enabled_calls == [("/proj/test", True)]
+        assert policy.set_mode_calls == [("/proj/test", ApprovalDispositionMode.LLM)]
         # 2. 回了 1 帧 state，且字段对齐
         assert len(ws.sent) == 1
         msg = ws.sent[0]
         assert msg["frame_type"] == "auto_approval_state"
         assert msg["channel"] == "claude_code"
         assert msg["cwd"] == "/proj/test"
-        assert msg["enabled"] is True
+        assert msg["mode"] == "llm"
         assert msg["timeoutMs"] == 10000
         assert msg["ruleOverrides"] == {}
 
@@ -105,57 +122,60 @@ class TestHandleToggle:
         ws = _FakeWebSocket()
         policy = _StubPolicy()
 
-        await handle_auto_approval_toggle(
+        await handle_auto_approval_set_mode(
             ws,
-            {"cwd": "/p", "enabled": True},
+            {"cwd": "/p", "mode": "full_trust"},
             policy,  # type: ignore[arg-type]
         )
-        await handle_auto_approval_toggle(
+        await handle_auto_approval_set_mode(
             ws,
-            {"cwd": "/p", "enabled": False},
+            {"cwd": "/p", "mode": "user"},
             policy,  # type: ignore[arg-type]
         )
 
-        assert policy.set_enabled_calls == [("/p", True), ("/p", False)]
-        assert ws.sent[-1]["enabled"] is False
+        assert policy.set_mode_calls == [
+            ("/p", ApprovalDispositionMode.FULL_TRUST),
+            ("/p", ApprovalDispositionMode.USER),
+        ]
+        assert ws.sent[-1]["mode"] == "user"
 
     @pytest.mark.asyncio
     async def test_toggle_missing_cwd_returns_error(self) -> None:
         ws = _FakeWebSocket()
         policy = _StubPolicy()
 
-        await handle_auto_approval_toggle(ws, {"enabled": True}, policy)  # type: ignore[arg-type]
+        await handle_auto_approval_set_mode(ws, {"mode": "llm"}, policy)  # type: ignore[arg-type]
 
-        assert policy.set_enabled_calls == []
+        assert policy.set_mode_calls == []
         assert len(ws.sent) == 1
         msg = ws.sent[0]
         assert msg["frame_type"] == "error"
         assert msg["provider"] == "claude"
         # error 字面值与 claude_code/route.py 原版 100% 对齐
-        assert msg["error"] == "auto-approval-toggle.cwd required"
+        assert msg["error"] == "auto-approval-set-mode.cwd required"
 
     @pytest.mark.asyncio
     async def test_toggle_empty_cwd_returns_error(self) -> None:
         ws = _FakeWebSocket()
         policy = _StubPolicy()
 
-        await handle_auto_approval_toggle(
+        await handle_auto_approval_set_mode(
             ws,
-            {"cwd": "", "enabled": True},
+            {"cwd": "", "mode": "llm"},
             policy,  # type: ignore[arg-type]
         )
 
         assert ws.sent[0]["frame_type"] == "error"
-        assert ws.sent[0]["error"] == "auto-approval-toggle.cwd required"
+        assert ws.sent[0]["error"] == "auto-approval-set-mode.cwd required"
 
     @pytest.mark.asyncio
     async def test_toggle_non_str_cwd_returns_error(self) -> None:
         ws = _FakeWebSocket()
         policy = _StubPolicy()
 
-        await handle_auto_approval_toggle(
+        await handle_auto_approval_set_mode(
             ws,
-            {"cwd": 123, "enabled": True},
+            {"cwd": 123, "mode": "llm"},
             policy,  # type: ignore[arg-type]
         )
 
@@ -165,7 +185,7 @@ class TestHandleToggle:
     async def test_toggle_policy_none_returns_error(self) -> None:
         ws = _FakeWebSocket()
 
-        await handle_auto_approval_toggle(ws, {"cwd": "/p", "enabled": True}, None)  # type: ignore[arg-type]
+        await handle_auto_approval_set_mode(ws, {"cwd": "/p", "mode": "llm"}, None)  # type: ignore[arg-type]
 
         assert len(ws.sent) == 1
         msg = ws.sent[0]
@@ -174,14 +194,15 @@ class TestHandleToggle:
         assert msg["error"] == "auto_approval_policy not configured"
 
     @pytest.mark.asyncio
-    async def test_toggle_default_enabled_falsy(self) -> None:
-        """enabled 缺省 → 视为 False（与原版 bool(data.get("enabled", False)) 对齐）。"""
+    async def test_toggle_missing_mode_returns_error(self) -> None:
+        """mode 缺省时拒绝请求，避免静默降级为错误处置模式。"""
         ws = _FakeWebSocket()
         policy = _StubPolicy()
 
-        await handle_auto_approval_toggle(ws, {"cwd": "/p"}, policy)  # type: ignore[arg-type]
+        await handle_auto_approval_set_mode(ws, {"cwd": "/p"}, policy)  # type: ignore[arg-type]
 
-        assert policy.set_enabled_calls == [("/p", False)]
+        assert policy.set_mode_calls == []
+        assert ws.sent[0]["frame_type"] == "error"
 
 
 # ---------------------------------------------------------------------------
@@ -197,29 +218,28 @@ class TestHandleQuery:
 
         await handle_auto_approval_query(ws, {"cwd": "/new"}, policy)  # type: ignore[arg-type]
 
-        # 不调 set_enabled
-        assert policy.set_enabled_calls == []
+        assert policy.set_mode_calls == []
         assert len(ws.sent) == 1
         msg = ws.sent[0]
         assert msg["frame_type"] == "auto_approval_state"
         assert msg["cwd"] == "/new"
-        assert msg["enabled"] is False
+        assert msg["mode"] == "user"
         assert msg["timeoutMs"] == 10000
 
     @pytest.mark.asyncio
     async def test_query_after_toggle_reflects_state(self) -> None:
         ws = _FakeWebSocket()
         policy = _StubPolicy()
-        await handle_auto_approval_toggle(
+        await handle_auto_approval_set_mode(
             ws,
-            {"cwd": "/p", "enabled": True},
+            {"cwd": "/p", "mode": "llm"},
             policy,  # type: ignore[arg-type]
         )
         ws.sent.clear()
 
         await handle_auto_approval_query(ws, {"cwd": "/p"}, policy)  # type: ignore[arg-type]
 
-        assert ws.sent[0]["enabled"] is True
+        assert ws.sent[0]["mode"] == "llm"
 
     @pytest.mark.asyncio
     async def test_query_missing_cwd_returns_error(self) -> None:
@@ -257,7 +277,7 @@ class TestBuildStateMsg:
             "frame_type": "auto_approval_state",
             "channel": "claude_code",
             "cwd": "/proj",
-            "enabled": False,
+            "mode": "user",
             "timeoutMs": 12345,
             "ruleOverrides": {},
         }
@@ -266,7 +286,7 @@ class TestBuildStateMsg:
         policy = _StubPolicy(default_timeout_ms=10000)
         policy._cfgs["/p"] = _StubProjectConfig(
             cwd="/p",
-            enabled=True,
+            mode=ApprovalDispositionMode.LLM,
             timeout_ms=8000,
             rule_overrides={"rule_x": False},
         )
@@ -274,13 +294,16 @@ class TestBuildStateMsg:
         msg = build_auto_approval_state_msg(policy, "/p")
 
         assert msg["timeoutMs"] == 8000
-        assert msg["enabled"] is True
+        assert msg["mode"] == "llm"
         assert msg["ruleOverrides"] == {"rule_x": False}
 
     def test_fallback_cwd_when_cfg_cwd_empty(self) -> None:
         """cfg.cwd 为空 → 用传入的 cwd 作 fallback（原版 ``cfg.cwd or cwd``）。"""
         policy = _StubPolicy()
-        policy._cfgs["/lookup"] = _StubProjectConfig(cwd="", enabled=True)
+        policy._cfgs["/lookup"] = _StubProjectConfig(
+            cwd="",
+            mode=ApprovalDispositionMode.LLM,
+        )
 
         msg = build_auto_approval_state_msg(policy, "/lookup")
 
@@ -325,7 +348,7 @@ class TestGenericChatChannel:
             "frame_type": "auto_approval_state",
             "channel": "generic_chat",
             "cwd": "/p",
-            "enabled": False,
+            "mode": "user",
             "timeoutMs": 10000,
             "ruleOverrides": {},
         }
@@ -336,19 +359,19 @@ class TestGenericChatChannel:
         ws = _FakeWebSocket()
         policy = _StubPolicy()
 
-        await handle_auto_approval_toggle(
+        await handle_auto_approval_set_mode(
             ws,
-            {"cwd": "/proj/test", "enabled": True},
+            {"cwd": "/proj/test", "mode": "llm"},
             policy,  # type: ignore[arg-type]
             channel="generic_chat",
         )
 
-        assert policy.set_enabled_calls == [("/proj/test", True)]
+        assert policy.set_mode_calls == [("/proj/test", ApprovalDispositionMode.LLM)]
         assert len(ws.sent) == 1
         msg = ws.sent[0]
         assert msg["frame_type"] == "auto_approval_state"
         assert msg["channel"] == "generic_chat"
-        assert msg["enabled"] is True
+        assert msg["mode"] == "llm"
 
     @pytest.mark.asyncio
     async def test_toggle_generic_chat_error_carries_channel_and_provider(
@@ -357,9 +380,9 @@ class TestGenericChatChannel:
         """generic_chat toggle policy=None → error 帧 provider/channel 字段。"""
         ws = _FakeWebSocket()
 
-        await handle_auto_approval_toggle(
+        await handle_auto_approval_set_mode(
             ws,
-            {"cwd": "/p", "enabled": True},
+            {"cwd": "/p", "mode": "llm"},
             None,  # type: ignore[arg-type]
             channel="generic_chat",
         )
@@ -397,9 +420,9 @@ class TestGenericChatChannel:
         """generic_chat query 成功 → state 帧 channel == "generic_chat"。"""
         ws = _FakeWebSocket()
         policy = _StubPolicy()
-        await handle_auto_approval_toggle(
+        await handle_auto_approval_set_mode(
             ws,
-            {"cwd": "/p", "enabled": True},
+            {"cwd": "/p", "mode": "llm"},
             policy,  # type: ignore[arg-type]
             channel="generic_chat",
         )
@@ -414,4 +437,4 @@ class TestGenericChatChannel:
 
         assert ws.sent[0]["frame_type"] == "auto_approval_state"
         assert ws.sent[0]["channel"] == "generic_chat"
-        assert ws.sent[0]["enabled"] is True
+        assert ws.sent[0]["mode"] == "llm"

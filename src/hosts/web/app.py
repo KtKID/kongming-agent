@@ -54,6 +54,7 @@ if TYPE_CHECKING:
 
     from hosts.web.rate_limit import LoginRateLimiter
     from hosts.web.threads.types import ThreadManagerProtocol
+    from infrastructure.config.model_catalog_manager import ModelCatalogManager
     from infrastructure.config.models import Config
     from scheduler.store import Store
 
@@ -66,10 +67,10 @@ DEFAULT_LIFESPAN_SHUTDOWN_TIMEOUT = 5.0
 """shutdown 时调 ``thread_manager.aclose_all()`` 的超时（秒）。"""
 
 
-# src/hosts/web/app.py → parents[2] 指向项目根 (kongming-agent/)，
-# 与 ``web.ctl._REPO_ROOT`` (parents[2]) 同源。这里独立计算以避免引入
+# src/hosts/web/app.py → parents[3] 指向项目根 (kongming-agent/)，
+# 与 ``web.ctl._REPO_ROOT`` 同源。这里独立计算以避免引入
 # ``ctl.py`` 的 ``load_dotenv`` 启动副作用（同 server_info 模式）。
-_REPO_ROOT: Path = Path(__file__).resolve().parents[2]
+_REPO_ROOT: Path = Path(__file__).resolve().parents[3]
 
 
 def _bootstrap_projects_registry(home: Path, repo_root: str) -> None:
@@ -133,6 +134,8 @@ def create_app(
     rate_limiter: LoginRateLimiter | None = None,
     scheduler_runtime_factory: SchedulerRuntimeFactory | None = None,
     task_progress_manager: object | None = None,
+    asset_storage: object | None = None,
+    model_catalog_manager: ModelCatalogManager | None = None,
     lifespan_shutdown_timeout: float = DEFAULT_LIFESPAN_SHUTDOWN_TIMEOUT,
 ) -> FastAPI:
     """装配 FastAPI app。
@@ -147,6 +150,7 @@ def create_app(
         rate_limiter: 自定义限流器；为 None 时构造默认实例。
         task_progress_manager: 当前 thread 任务进度服务；生产入口由 run.py 注入，
             测试可传 fake 或真实 Manager。
+        asset_storage: Web 上传资产存储；生产入口传入与 runtime factory 共用的实例。
         lifespan_shutdown_timeout: shutdown 调 aclose_all 的超时秒。
 
     Returns:
@@ -213,18 +217,6 @@ def create_app(
                 logger.exception("FullLogger init failed; continuing without full_log")
 
             await thread_manager.start()
-            try:
-                from evolution.apply_executor import recover_pending_apply_jobs
-
-                recovered_jobs = await recover_pending_apply_jobs(
-                    cfg,
-                    kongming_home=home,
-                )
-                if recovered_jobs:
-                    logger.info("Recovered %d evolution apply jobs", len(recovered_jobs))
-            except Exception:
-                logger.exception("evolution apply job recovery failed; continuing startup")
-
             # EvolutionManager 单例（频道无关）
             try:
                 from evolution.evolution_manager import EvolutionManager
@@ -236,18 +228,17 @@ def create_app(
                 _evolution_manager = None
                 app.state.evolution_manager = None
 
+            try:
+                if _evolution_manager is not None:
+                    recovered_jobs = await _evolution_manager.recover_pending_apply_jobs()
+                    if recovered_jobs:
+                        logger.info("Recovered %d evolution apply jobs", len(recovered_jobs))
+            except Exception:
+                logger.exception("evolution apply job recovery failed; continuing startup")
+
             progress.done()
             progress.cleanup()
             logger.info("ThreadManager started")
-
-            try:
-                from hosts.web.app_support.slash_candidates_loader import load_slash_candidates
-
-                app.state.slash_candidates = await load_slash_candidates()
-                logger.info("slash candidates loaded: %d items", len(app.state.slash_candidates))
-            except Exception:
-                logger.exception("slash candidates loading failed; continuing with empty list")
-                app.state.slash_candidates = []
 
             # web-projects-registry-v0.1 #8：把当前 worktree 登记进 claude_code /
             # codex 两个 registry，并迁移既有 thread metadata。文件 IO 用
@@ -274,12 +265,17 @@ def create_app(
         ticker_task: asyncio.Task[None] | None = None
         ticker_stop: asyncio.Event | None = None
         ticker_runtime = None
+        ticker_scheduled_run_manager = None
         if cfg.scheduler.enabled:
             try:
+                from hosts.shared.host_dispatcher import (
+                    build_scheduled_run_dispatcher_factory,
+                )
                 from hosts.web.app_support.cron_delivery import WebDeliverySink
                 from hosts.web.websocket.cron import get_broker
                 from scheduler.delivery import DeliveryDispatcher
-                from scheduler.runtime_factory import build_cron_execution_bridge
+                from scheduler.manager import SchedulerManager
+                from scheduler.runtime_factory import build_scheduled_run_manager
                 from scheduler.store import Store
                 from scheduler.ticker import run_ticker_loop
 
@@ -288,7 +284,20 @@ def create_app(
                     if cfg.scheduler.home is not None
                     else (home / "cron")
                 )
-                scheduler_store = Store(cron_home)
+                scheduler_store = Store(
+                    cron_home,
+                    display_timezone=cfg.scheduler.default_timezone,
+                )
+                scheduler_manager = SchedulerManager(
+                    scheduler_store,
+                    thread_provisioner=thread_manager,
+                )
+                recovered_runs = scheduler_manager.recover_stale_runs_on_startup()
+                if recovered_runs:
+                    logger.info(
+                        "scheduler startup recovered %d stale running run(s)",
+                        recovered_runs,
+                    )
                 # v0.3 cron-delivery M4：lifespan ticker 主路径必须传 dispatcher，
                 # 否则到点触发的 cron run 不走 WebDeliverySink → broker.broadcast，
                 # 用户侧没有任何感知（修复 R2 round 1 P0-1）。
@@ -296,37 +305,41 @@ def create_app(
                 # WebDeliverySink 共享同一个实例）。
                 from hosts.web.app_support.cron_delivery import ThreadTargetSink
 
+                lifespan_web_sink = WebDeliverySink(get_broker())
                 lifespan_cron_dispatcher = DeliveryDispatcher(
-                    web_sink=WebDeliverySink(get_broker()),
+                    web_sink=lifespan_web_sink,
                     target_sink=ThreadTargetSink(thread_manager),
                 )
-                preset_map = {p.id: p for p in cfg.web.llm_presets}
                 if scheduler_runtime_factory is None:
-                    ticker_runtime, ticker_bridge = build_cron_execution_bridge(
+                    ticker_runtime, ticker_scheduled_run_manager = build_scheduled_run_manager(
                         cfg,
                         scheduler_store,
+                        dispatcher_factory_builder=build_scheduled_run_dispatcher_factory,
                         event_sinks=[],
                         dispatcher=lifespan_cron_dispatcher,
-                        preset_map=preset_map,
+                        lifecycle_sink=lifespan_web_sink,
+                        model_catalog_manager=app.state.model_catalog_manager,
                         trace_dir=cron_home / "traces",
+                        tool_context_metadata={"cwd": str(home)},
                     )
                 else:
-                    ticker_runtime, ticker_bridge = scheduler_runtime_factory(scheduler_store)
-                    ticker_bridge._dispatcher = lifespan_cron_dispatcher
-                    ticker_bridge._preset_map = dict(preset_map)
-                    ticker_bridge._trace_dir = cron_home / "traces"
+                    ticker_runtime, ticker_scheduled_run_manager = scheduler_runtime_factory(
+                        scheduler_store
+                    )
+                scheduler_manager.bind_live_reader(ticker_scheduled_run_manager)
                 ticker_stop = asyncio.Event()
                 ticker_task = asyncio.create_task(
                     run_ticker_loop(
                         scheduler_store,
-                        ticker_bridge,
+                        ticker_scheduled_run_manager,
                         ticker_stop,
                         interval=cfg.scheduler.interval,
-                        max_inflight=cfg.scheduler.max_inflight,
                     )
                 )
                 # 让 schedule_tool / 路由层能拿到同一份 store。
                 app.state.scheduler_store = scheduler_store
+                app.state.scheduler_manager = scheduler_manager
+                app.state.scheduled_run_manager = ticker_scheduled_run_manager
                 logger.info("scheduler ticker started (home=%s)", cron_home)
             except Exception:
                 logger.exception("scheduler ticker startup failed; continuing without cron")
@@ -410,6 +423,13 @@ def create_app(
                 except Exception:
                     logger.exception("scheduler ticker raised during shutdown; ignoring")
                 if ticker_runtime is not None:
+                    if ticker_scheduled_run_manager is not None:
+                        try:
+                            await ticker_scheduled_run_manager.aclose()
+                        except Exception:
+                            logger.exception(
+                                "ScheduledRunManager.aclose failed; ignoring during shutdown"
+                            )
                     aclose_fn = getattr(ticker_runtime, "aclose", None)
                     if aclose_fn is not None:
                         try:
@@ -423,6 +443,15 @@ def create_app(
                     await _evolution_manager.aclose()
                 except Exception:
                     logger.exception("EvolutionManager.aclose failed; ignoring during shutdown")
+
+            approval_runtime = getattr(app.state, "approval_runtime_manager", None)
+            if approval_runtime is not None:
+                try:
+                    await approval_runtime.aclose()
+                except Exception:
+                    logger.exception(
+                        "ApprovalRuntimeManager.aclose failed; ignoring during shutdown"
+                    )
 
             # shutdown：5s 内强制 aclose_all
             try:
@@ -478,11 +507,16 @@ def create_app(
     )
 
     # 5. app.state 注入
+    from hosts.web.app_support.slash_catalog_loader import build_default_slash_catalog_manager
     from hosts.web.integrations.codex import CodexService
     from hosts.web.shared.session_manager import SessionManager as _SharedSessionManager
     from hosts.web.whiteboard.manager import WhiteboardManager
+    from infrastructure.config.model_catalog_manager import ModelCatalogManager
 
     app.state.config = cfg
+    app.state.model_catalog_manager = model_catalog_manager or ModelCatalogManager(
+        user_path=home / "model-providers.yaml"
+    )
     app.state.serializer = serializer
     app.state.password_hash = password_hash
     app.state.rate_limiter = rate_limiter
@@ -490,7 +524,8 @@ def create_app(
     app.state.task_progress_manager = task_progress_manager
     app.state.kongming_home = home
     app.state.claude_home = Path.home() / ".claude"
-    app.state.workspace_root = Path.cwd()
+    app.state.workspace_root = home
+    app.state.slash_catalog_manager = build_default_slash_catalog_manager()
     app.state.whiteboard_manager = WhiteboardManager(whiteboard_root=home / "whiteboard")
     app.state.claude_session_manager = _SharedSessionManager()
 
@@ -523,11 +558,10 @@ def create_app(
     app.state.log_source_registry = LogSourceRegistry(cfg, home)
     app.state.log_read_service = LogReadService(app.state.log_source_registry)
 
-    # smart-approval-v1：Web 只调用装配 Manager，真实 policy/config/rules 由
-    # safety.auto_approval.AutoApprovalManager 维护。
-    from hosts.web.app_support.auto_approval_manager import WebAutoApprovalManager
+    # 插件工具开关：只保存 per-tool enabled bool，真实 Tool 生命周期由 runtime factory 管理。
+    from hosts.web.plugin_management import PluginManagementManager
 
-    WebAutoApprovalManager.build(home).attach_to_app_state(app)
+    app.state.plugin_management_manager = PluginManagementManager.from_home(home)
 
     # smart-approval-v2-inbox：全局审批 inbox broadcaster（per-process 单例）
     # 复用 /ws/thread-status 端点 fan-out approval.inbox.* 帧；
@@ -547,7 +581,9 @@ def create_app(
     from hosts.web.uploads.storage import AssetStorage
     from hosts.web.uploads.validation import MediaUploadValidator
 
-    app.state.asset_storage = AssetStorage(base_dir=home / "web" / "uploads")
+    app.state.asset_storage = asset_storage or AssetStorage(
+        base_dir=home / "web" / "uploads",
+    )
     app.state.asset_registry = AssetRegistry()
     app.state.upload_validator = MediaUploadValidator(thread_manager)
 
@@ -618,6 +654,17 @@ def create_app(
         AvatarAssistantManager(thread_manager),
     )
 
+    # 统一审批运行时门户：集中装配规则、pending 队列、事件 sink 与通道 bridge。
+    from hosts.web.app_support.approval_runtime_manager import ApprovalRuntimeManager
+
+    ApprovalRuntimeManager.build(
+        config=cfg,
+        kongming_home=home,
+        broadcaster=app.state.approval_inbox_broadcaster,
+        avatar_manager=app.state.avatar_manager,
+        thread_manager=thread_manager,
+    ).attach_to_app_state(app)
+
     # codex 通道（与 claude_code 平级，独立 SessionManager 单例）
     # codex-channel-image-paste §3：service 构造时注入 asset_storage，让
     # CodexImageCliArgsBuilder 能反推 asset 物理路径生成 --image flag
@@ -656,6 +703,7 @@ def create_app(
     from hosts.web.routers.server_info import router as server_info_router
     from hosts.web.routers.sitian import router as sitian_router
     from hosts.web.routers.slash_candidates import router as slash_candidates_router
+    from hosts.web.routers.slash_catalog import router as slash_catalog_router
     from hosts.web.routers.thread_artifacts import router as thread_artifacts_router
     from hosts.web.routers.thread_subagents import router as thread_subagents_router
     from hosts.web.routers.thread_task_progress import router as thread_task_progress_router
@@ -671,8 +719,8 @@ def create_app(
     app.include_router(avatar_router)
     app.include_router(threads_router)
     app.include_router(thread_task_progress_router)
-    app.include_router(thread_subagents_router)
     app.include_router(thread_artifacts_router)
+    app.include_router(thread_subagents_router)
     app.include_router(agent_workflows_router)
     app.include_router(presets_router)
     app.include_router(model_providers_router)
@@ -690,6 +738,7 @@ def create_app(
     app.include_router(claude_router)
     app.include_router(workspace_git_router)
     app.include_router(workspace_shell_router)
+    app.include_router(slash_catalog_router)
     app.include_router(slash_candidates_router)
     app.include_router(cron_router)
     app.include_router(sitian_router)

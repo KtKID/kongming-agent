@@ -1,569 +1,408 @@
-"""ApprovalManager 单元测试。
+"""验证 v0.6 ApprovalManager 的 pending、记忆写回与生命周期。
 
-覆盖：
-
-- request → resolve 正常路径（allow / deny）
-- request → cancel 路径
-- request → timeout 路径（fail-closed）
-- cancel_by_thread 批量取消
-- _PendingApproval 12 字段对齐 spec 20-data-model#1
-- make_manager_prompt_fn 二态映射
-- _decision_to_action remember_for_session 三态分支
-- 单例工厂 + reset
-- R9 lock 安全（lock 内不 await）
-- R10 timeout 清理（resolve / cancel / timeout 三退出路径都清）
-- ApprovalRules classify 集成 + 多 EventSink fan-out
+测试使用真实 PermissionsManager 和 JSON Store，覆盖 allow/deny 记住、thread 身份、
+danger 限制、revision 冲突、超时取消、事件 fan-out 以及 prompt bridge。
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 
-from core.contracts import ApprovalDecision, ApprovalRequest
-from safety.approval import PendingApprovalView
+from core.contracts import ApprovalAction, ApprovalDecision, ApprovalRequest
+from safety.approval.events import PendingApprovalView
 from safety.approval.manager import (
-    ApprovalEventSink,
     ApprovalManager,
     _decision_to_action,
-    _PendingApproval,
     get_approval_manager,
     make_manager_prompt_fn,
     reset_for_testing,
 )
-from safety.approval.rules import ApprovalRules
-from tools.runtime.approval import ApprovalAction
+from safety.approval.permissions_manager import PermissionsManager
+from safety.approval.rule_models import PermissionRuleRecord
+from safety.approval.types import ApprovalMetadataKeys
 
-# ============ Fixtures ============
 
+@dataclass
+class _Sink:
+    """记录 required/removed 事件并提供等待信号。"""
 
-@pytest.fixture
-def manager() -> ApprovalManager:
-    """裸 manager 实例（不走单例工厂，避免跨测污染）。"""
-    return ApprovalManager(rules=ApprovalRules(), default_timeout_ms=10_000)
+    pending: list[PendingApprovalView] = field(default_factory=list)
+    removed: list[tuple[str, str]] = field(default_factory=list)
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def emit_approval_required(self, *, pending: PendingApprovalView) -> None:
+        """保存新 pending 并唤醒测试。"""
+        self.pending.append(pending)
+        self.ready.set()
+
+    async def emit_approval_removed(self, *, request_id: str, reason: str) -> None:
+        """保存移除事件。"""
+        self.removed.append((request_id, reason))
 
 
 @pytest.fixture(autouse=True)
 def _reset_singleton() -> Iterator[None]:
-    """每测前后重置全局单例。"""
+    """隔离进程级 ApprovalManager 单例。"""
     reset_for_testing()
     yield
     reset_for_testing()
 
 
-def _make_request(call_id: str = "call-1", **overrides: Any) -> ApprovalRequest:
-    """构造测试用 ApprovalRequest（必填字段一次性补齐）。"""
-    defaults: dict[str, Any] = {
-        "run_id": "run-1",
-        "session_id": "sess-1",
-        "turn": 0,
-        "call_id": call_id,
-        "tool_name": "Bash",
-        "arguments": {"cmd": "ls"},
-        "metadata": {"cwd": "/tmp"},
+def _manager(tmp_path: Path, sink: _Sink, *, timeout_ms: int = 10_000) -> ApprovalManager:
+    """构造绑定真实本子门户的 Manager。"""
+    return ApprovalManager(
+        permissions_manager=PermissionsManager(tmp_path),
+        event_sinks=[sink],
+        default_timeout_ms=timeout_ms,
+    )
+
+
+def _remember_metadata(
+    *,
+    thread_id: str,
+    revision: int = 0,
+    danger: bool = False,
+) -> dict[str, object]:
+    """构造引擎冻结后的 remember 元数据。"""
+    return {
+        ApprovalMetadataKeys.DANGER: danger,
+        ApprovalMetadataKeys.REMEMBER_ALLOWED: not danger,
+        ApprovalMetadataKeys.REMEMBER_THREAD_ID: thread_id,
+        ApprovalMetadataKeys.REMEMBER_REVISION: revision,
+        ApprovalMetadataKeys.REMEMBER_RULE: {
+            "expression": "read_file",
+            "displayText": "记住 read_file 的选择",
+            "scopeCwd": None,
+        },
+        ApprovalMetadataKeys.MATCHED_RULE: ("danger:test" if danger else "permissions:unmatched"),
     }
-    defaults.update(overrides)
-    return ApprovalRequest(**defaults)
 
 
-# ============ _PendingApproval 字段对齐（spec 20-data-model#1）============
+def _remember_decision(allow: bool) -> dict[str, object]:
+    """构造与服务端冻结候选完全一致的 remember 决策。"""
+    return {
+        "allow": allow,
+        "remember": True,
+        "rememberRule": {
+            "expression": "read_file",
+            "displayText": "记住 read_file 的选择",
+            "scopeCwd": None,
+        },
+    }
 
 
-def test_pending_approval_has_all_12_fields() -> None:
-    """spec 20-data-model#1 12 字段必须有（阶段 2 接入不再改 dataclass）。
-
-    用 MagicMock(spec=asyncio.Future) 替代真 Future（避免 new_event_loop + close
-    污染下游 test_instruction_loader 的 get_event_loop()）。
-    """
-    fut: MagicMock = MagicMock(spec=asyncio.Future)
-    p = _PendingApproval(
-        request_id="r1",
-        channel="generic_chat",
-        thread_id="t1",
-        cwd="/tmp",
-        tool_name="Bash",
-        tool_input={},
-        metadata={},
-        severity="standard",
-        matched_rule=None,
-        auto_approve_at_ms=None,
-        auto_reject_at_ms=None,
-        future=fut,
-    )
-    # 12 字段：核心 11 + arrived_at_ms（默认）+ timeout_ms（默认 None）
-    for fld in (
-        "request_id",
-        "channel",
-        "thread_id",
-        "cwd",
-        "tool_name",
-        "tool_input",
-        "metadata",
-        "severity",
-        "matched_rule",
-        "auto_approve_at_ms",
-        "auto_reject_at_ms",
-        "future",
-        "arrived_at_ms",
-        "timeout_ms",
-    ):
-        assert hasattr(p, fld), f"missing field: {fld}"
-    # arrived_at_ms 默认填充（毫秒级时间戳）
-    assert isinstance(p.arrived_at_ms, int)
-    assert p.arrived_at_ms > 0
-
-
-# ============ request → resolve 正常路径 ============
-
-
-async def test_request_then_resolve_allow_returns_approved(
+async def _start_request(
     manager: ApprovalManager,
-) -> None:
-    """request 阻塞等 resolve；resolve(allow=True) 返回 outcome='approved'。"""
-    sink: Any = AsyncMock(spec=ApprovalEventSink)
-    manager.register_event_sink(sink)
-
-    async def resolve_later() -> None:
-        await asyncio.sleep(0.05)
-        req_id = next(iter(manager._pending.keys()))
-        assert manager.resolve(req_id, {"allow": True})
-
-    _ = asyncio.create_task(resolve_later())  # noqa: RUF006
-    decision = await manager.request(
-        channel="generic_chat",
-        thread_id="t1",
-        cwd="/",
-        tool_name="Bash",
-        tool_input={"cmd": "ls"},
+    sink: _Sink,
+    *,
+    thread_id: str = "thread-a",
+    metadata: dict[str, object] | None = None,
+    agent_id: str = "",
+) -> tuple[asyncio.Task[ApprovalDecision], PendingApprovalView]:
+    """启动一次请求并等待 pending 已发布。"""
+    task = asyncio.create_task(
+        manager.request(
+            channel="generic_chat",
+            thread_id=thread_id,
+            cwd="/workspace",
+            tool_name="read_file",
+            tool_input={"path": "/workspace/a.md"},
+            metadata=dict(metadata or {}),
+            agent_id=agent_id,
+        )
     )
-    # contract Literal 用 "approved"（spec 文档漂移用 "allowed"）
+    await asyncio.wait_for(sink.ready.wait(), timeout=1)
+    return task, sink.pending[-1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("allow", "bucket"), [(True, "allow"), (False, "deny")])
+async def test_remember_writes_allow_or_deny_to_frozen_thread(
+    tmp_path: Path,
+    allow: bool,
+    bucket: str,
+) -> None:
+    """remember=true 将用户二态决定写入 pending 所属 thread。"""
+    sink = _Sink()
+    manager = _manager(tmp_path, sink)
+    task, pending = await _start_request(
+        manager,
+        sink,
+        metadata=_remember_metadata(thread_id="thread-a"),
+    )
+
+    accepted = await manager.resolve(
+        "thread-a",
+        pending.request_id,
+        _remember_decision(allow),
+    )
+    decision = await task
+    snapshot = await manager.permissions_manager.snapshot("thread-a")
+    other = await manager.permissions_manager.snapshot("thread-b")
+
+    assert accepted is True
+    assert decision.outcome == ("approved" if allow else "rejected")
+    assert getattr(snapshot, bucket) == (
+        PermissionRuleRecord(expression="read_file", scope_cwd=None),
+    )
+    assert other.revision == 0
+    assert sink.removed == [(pending.request_id, "user_decided")]
+
+
+@pytest.mark.asyncio
+async def test_once_decision_does_not_materialize_permissions_file(tmp_path: Path) -> None:
+    """remember=false 只完成当前决定，snapshot 保持 revision 0。"""
+    sink = _Sink()
+    manager = _manager(tmp_path, sink)
+    task, pending = await _start_request(
+        manager,
+        sink,
+        metadata=_remember_metadata(thread_id="thread-a"),
+    )
+
+    assert await manager.resolve(
+        "thread-a",
+        pending.request_id,
+        {"allow": True, "remember": False},
+    )
+    decision = await task
+
     assert decision.outcome == "approved"
-    assert decision.metadata.get("source") == "user"
-    # R10：pending + timeout task 都清空
+    assert (await manager.permissions_manager.snapshot("thread-a")).revision == 0
+
+
+@pytest.mark.asyncio
+async def test_danger_pending_rejects_remember_and_allows_explicit_once(
+    tmp_path: Path,
+) -> None:
+    """danger 卡关闭 remember，同时保留显式一次性 allow/deny。"""
+    sink = _Sink()
+    manager = _manager(tmp_path, sink)
+    task, pending = await _start_request(
+        manager,
+        sink,
+        metadata=_remember_metadata(thread_id="thread-a", danger=True),
+    )
+
+    assert pending.danger is True
+    assert pending.remember_allowed is False
+    assert (
+        await manager.resolve(
+            "thread-a",
+            pending.request_id,
+            _remember_decision(True),
+        )
+        is False
+    )
+    assert (
+        await manager.resolve(
+            "thread-a",
+            pending.request_id,
+            {"allow": False, "remember": False},
+        )
+        is True
+    )
+    assert (await task).outcome == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_resolve_rejects_wrong_thread_and_duplicate(tmp_path: Path) -> None:
+    """路径 thread 与 pending 身份必须一致，已完成请求不可重复 resolve。"""
+    sink = _Sink()
+    manager = _manager(tmp_path, sink)
+    task, pending = await _start_request(manager, sink)
+
+    assert (
+        await manager.resolve(
+            "thread-b",
+            pending.request_id,
+            {"allow": True, "remember": False},
+        )
+        is False
+    )
+    assert (
+        await manager.resolve(
+            "thread-a",
+            pending.request_id,
+            {"allow": True, "remember": False},
+        )
+        is True
+    )
+    await task
+    assert (
+        await manager.resolve(
+            "thread-a",
+            pending.request_id,
+            {"allow": True, "remember": False},
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_revision_conflict_keeps_pending_retryable(tmp_path: Path) -> None:
+    """stale revision 保存失败返回 false，卡片保持 pending 并可再次决策。"""
+    sink = _Sink()
+    manager = _manager(tmp_path, sink)
+    task, pending = await _start_request(
+        manager,
+        sink,
+        metadata=_remember_metadata(thread_id="thread-a", revision=0),
+    )
+    await manager.permissions_manager.replace(
+        "thread-a",
+        allow=[PermissionRuleRecord(expression="list_dir", scope_cwd=None)],
+        deny=[],
+        expected_revision=0,
+    )
+
+    assert (
+        await manager.resolve(
+            "thread-a",
+            pending.request_id,
+            _remember_decision(True),
+        )
+        is False
+    )
+    assert manager.pending_count == 1
+    assert task.done() is False
+    assert (
+        await manager.resolve(
+            "thread-a",
+            pending.request_id,
+            {"allow": False, "remember": False},
+        )
+        is True
+    )
+    assert (await task).outcome == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_remember_rejects_client_scope_tampering(tmp_path: Path) -> None:
+    """客户端回传另一 cwd 时保持 snapshot 不变并让 pending 可重试。"""
+    sink = _Sink()
+    manager = _manager(tmp_path, sink)
+    metadata = {
+        ApprovalMetadataKeys.DANGER: False,
+        ApprovalMetadataKeys.REMEMBER_ALLOWED: True,
+        ApprovalMetadataKeys.REMEMBER_THREAD_ID: "thread-a",
+        ApprovalMetadataKeys.REMEMBER_REVISION: 0,
+        ApprovalMetadataKeys.REMEMBER_RULE: {
+            "expression": "run_shell(git status:*)",
+            "displayText": "记住 /repo/a 中的 git status",
+            "scopeCwd": "/repo/a",
+        },
+    }
+    task, pending = await _start_request(manager, sink, metadata=metadata)
+
+    accepted = await manager.resolve(
+        "thread-a",
+        pending.request_id,
+        {
+            "allow": True,
+            "remember": True,
+            "rememberRule": {
+                "expression": "run_shell(git status:*)",
+                "displayText": "记住 /repo/a 中的 git status",
+                "scopeCwd": "/repo/b",
+            },
+        },
+    )
+
+    assert accepted is False
+    assert (await manager.permissions_manager.snapshot("thread-a")).revision == 0
+    assert manager.pending_count == 1
+    assert await manager.resolve(
+        "thread-a",
+        pending.request_id,
+        {"allow": False, "remember": False},
+    )
+    assert (await task).outcome == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_timeout_fails_closed_and_cleans_task(tmp_path: Path) -> None:
+    """无人处理时超时拒绝，并统一清理 pending 与 timeout task。"""
+    sink = _Sink()
+    manager = _manager(tmp_path, sink, timeout_ms=10)
+    task, pending = await _start_request(manager, sink)
+
+    decision = await task
+
+    assert decision.outcome == "rejected"
+    assert decision.metadata["source"] == "manager_timeout"
     assert manager.pending_count == 0
     assert manager.timeout_task_count == 0
-    # EventSink 收到了 required + removed
-    sink.emit_approval_required.assert_called_once()
-    sink.emit_approval_removed.assert_called_once()
-    # removed reason
-    args = sink.emit_approval_removed.call_args
-    assert args.kwargs["reason"] == "user_decided"
+    assert sink.removed == [(pending.request_id, "timeout")]
 
 
-async def test_request_then_resolve_deny_returns_rejected(
-    manager: ApprovalManager,
-) -> None:
-    """resolve(allow=False) 返回 rejected + 透传 message。"""
+@pytest.mark.asyncio
+async def test_cancel_by_agent_releases_matching_pending(tmp_path: Path) -> None:
+    """子树取消按 agent_id 释放对应 pending。"""
+    sink = _Sink()
+    manager = _manager(tmp_path, sink)
+    task, _pending = await _start_request(manager, sink, agent_id="child-1")
 
-    async def resolve_later() -> None:
-        await asyncio.sleep(0.05)
-        req_id = next(iter(manager._pending.keys()))
-        manager.resolve(req_id, {"allow": False, "message": "user denied"})
+    assert manager.cancel_by_agent("child-1", reason="subtree_cancelled") == 1
+    decision = await task
 
-    _ = asyncio.create_task(resolve_later())  # noqa: RUF006
-    decision = await manager.request(
-        channel="generic_chat",
-        thread_id="t1",
-        cwd="/",
-        tool_name="Bash",
-        tool_input={},
-    )
     assert decision.outcome == "rejected"
-    assert decision.metadata.get("message") == "user denied"
-    assert decision.metadata.get("source") == "user"
+    assert decision.metadata["reason"] == "subtree_cancelled"
 
 
-# ============ timeout 路径（fail-closed，reviewer 必修 #3）============
-
-
-async def test_request_timeout_returns_rejected_with_manager_timeout_source() -> None:
-    """timeout 触发 → outcome='rejected', source='manager_timeout', reason='timeout'。"""
-    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=100)
-    decision = await m.request(
-        channel="generic_chat",
-        thread_id="t1",
-        cwd="/",
-        tool_name="X",
-        tool_input={},
-    )
-    assert decision.outcome == "rejected"
-    assert decision.metadata.get("source") == "manager_timeout"
-    assert decision.metadata.get("reason") == "timeout"
-    # R10：timeout 退出后清理
-    assert m.pending_count == 0
-    assert m.timeout_task_count == 0
-
-
-# ============ cancel 路径 ============
-
-
-async def test_cancel_returns_rejected_with_reason() -> None:
-    """cancel(request_id) 让 pending future set_result(rejected, source='manager_cancel')。"""
-    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=10_000)
-
-    async def cancel_later() -> None:
-        await asyncio.sleep(0.05)
-        req_id = next(iter(m._pending.keys()))
-        assert m.cancel(req_id, reason="ws_disconnect")
-
-    _ = asyncio.create_task(cancel_later())  # noqa: RUF006
-    decision = await m.request(
-        channel="generic_chat",
-        thread_id="t1",
-        cwd="/",
-        tool_name="X",
-        tool_input={},
-    )
-    assert decision.outcome == "rejected"
-    assert decision.metadata.get("source") == "manager_cancel"
-    assert decision.metadata.get("reason") == "ws_disconnect"
-    assert m.pending_count == 0
-    assert m.timeout_task_count == 0
-
-
-def test_cancel_returns_false_on_unknown_request_id(
-    manager: ApprovalManager,
+@pytest.mark.asyncio
+async def test_make_manager_prompt_fn_preserves_root_thread_and_agent(
+    tmp_path: Path,
 ) -> None:
-    """cancel 未知 request_id → False。"""
-    assert manager.cancel("non-existent") is False
-
-
-def test_resolve_returns_false_on_unknown_request_id(
-    manager: ApprovalManager,
-) -> None:
-    """resolve 未知 request_id → False。"""
-    assert manager.resolve("non-existent", {"allow": True}) is False
-
-
-# ============ cancel_by_thread（reviewer 必修 #4）============
-
-
-async def test_cancel_by_thread_cancels_all_pending_under_that_thread() -> None:
-    """cancel_by_thread(thread_id) 取消该 thread 名下所有 pending（不影响其他 thread）。"""
-    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=10_000)
-
-    async def make_request(tid: str) -> ApprovalDecision:
-        return await m.request(
-            channel="generic_chat",
-            thread_id=tid,
-            cwd="/",
-            tool_name="X",
-            tool_input={},
-        )
-
-    t1_a = asyncio.create_task(make_request("thread-A"))
-    t1_b = asyncio.create_task(make_request("thread-A"))
-    t2 = asyncio.create_task(make_request("thread-B"))
-
-    await asyncio.sleep(0.05)
-    assert m.pending_count == 3
-
-    cancelled = m.cancel_by_thread("thread-A", reason="cell_evict")
-    assert cancelled == 2  # A 的两条
-
-    d1 = await t1_a
-    d2 = await t1_b
-    assert d1.outcome == "rejected"
-    assert d2.outcome == "rejected"
-    assert d1.metadata.get("reason") == "cell_evict"
-
-    # thread-B 仍 pending：用 cancel 收尾以免 leak
-    remaining = next(iter(m._pending.keys()))
-    m.cancel(remaining, reason="test_cleanup")
-    d3 = await t2
-    assert d3.outcome == "rejected"
-    assert m.pending_count == 0
-    assert m.timeout_task_count == 0
-
-
-def test_cancel_by_thread_returns_zero_when_no_match(
-    manager: ApprovalManager,
-) -> None:
-    """cancel_by_thread 找不到匹配 thread → 0。"""
-    assert manager.cancel_by_thread("non-existent-thread") == 0
-
-
-# ============ make_manager_prompt_fn 二态映射（reviewer 必修 #2）============
-
-
-async def test_make_manager_prompt_fn_returns_accept_once_on_allow() -> None:
-    """make_manager_prompt_fn 映射 approved → ACCEPT_ONCE。"""
-    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=10_000)
-    prompt_fn = make_manager_prompt_fn(m, thread_id="t1")
-
-    async def resolve_later() -> None:
-        await asyncio.sleep(0.05)
-        req_id = next(iter(m._pending.keys()))
-        m.resolve(req_id, {"allow": True})
-
-    _ = asyncio.create_task(resolve_later())  # noqa: RUF006
-    action = await prompt_fn(_make_request())
-    assert action == ApprovalAction.ACCEPT_ONCE
-
-
-async def test_make_manager_prompt_fn_returns_reject_on_deny() -> None:
-    """make_manager_prompt_fn 映射 rejected → REJECT。"""
-    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=10_000)
-    prompt_fn = make_manager_prompt_fn(m, thread_id="t1")
-
-    async def resolve_later() -> None:
-        await asyncio.sleep(0.05)
-        req_id = next(iter(m._pending.keys()))
-        m.resolve(req_id, {"allow": False})
-
-    _ = asyncio.create_task(resolve_later())  # noqa: RUF006
-    action = await prompt_fn(_make_request())
-    assert action == ApprovalAction.REJECT
-
-
-def test_make_manager_prompt_fn_marked_action_aware() -> None:
-    """prompt_fn 必须打 __action_aware__ 标记，被 InteractiveApproval 识别。"""
-    m = ApprovalManager(rules=ApprovalRules())
-    prompt_fn = make_manager_prompt_fn(m, thread_id="t1")
-    assert getattr(prompt_fn, "__action_aware__", False) is True
-
-
-# ============ default_cwd fallback（thread-cwd-fallback 任务 #3）============
-
-
-async def test_make_manager_prompt_fn_uses_default_cwd_when_req_cwd_empty() -> None:
-    """req.metadata.cwd 为空 → 落到 default_cwd（装配点传入的 thread.cwd 解析值）。"""
-    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=10_000)
-    spy = AsyncMock(return_value=ApprovalDecision(outcome="approved", metadata={}))
-    m.request = spy  # type: ignore[method-assign]
-
-    prompt_fn = make_manager_prompt_fn(m, thread_id="tid-1", default_cwd="/proj/server-root")
-    req = _make_request(metadata={"cwd": ""})
-    action = await prompt_fn(req)
-
-    assert action == ApprovalAction.ACCEPT_ONCE
-    spy.assert_awaited_once()
-    assert spy.await_args is not None
-    assert spy.await_args.kwargs["cwd"] == "/proj/server-root"
-    assert spy.await_args.kwargs["thread_id"] == "tid-1"
-
-
-async def test_make_manager_prompt_fn_req_cwd_overrides_default() -> None:
-    """req.metadata.cwd 非空 → 优先级最高，覆盖 default_cwd。"""
-    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=10_000)
-    spy = AsyncMock(return_value=ApprovalDecision(outcome="approved", metadata={}))
-    m.request = spy  # type: ignore[method-assign]
-
-    prompt_fn = make_manager_prompt_fn(m, thread_id="tid-2", default_cwd="/proj/server-root")
-    req = _make_request(metadata={"cwd": "/explicit/cwd"})
-    _ = await prompt_fn(req)
-
-    spy.assert_awaited_once()
-    assert spy.await_args is not None
-    assert spy.await_args.kwargs["cwd"] == "/explicit/cwd"
-
-
-async def test_make_manager_prompt_fn_no_default_cwd_keeps_empty() -> None:
-    """default_cwd 不传 + req.cwd 空 → 落到空字符串（兼容老调用方）。"""
-    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=10_000)
-    spy = AsyncMock(return_value=ApprovalDecision(outcome="approved", metadata={}))
-    m.request = spy  # type: ignore[method-assign]
-
-    prompt_fn = make_manager_prompt_fn(m, thread_id="tid-3")
-    req = _make_request(metadata={"cwd": ""})
-    _ = await prompt_fn(req)
-
-    spy.assert_awaited_once()
-    assert spy.await_args is not None
-    assert spy.await_args.kwargs["cwd"] == ""
-
-
-def test_decision_to_action_remember_for_session_maps_correctly() -> None:
-    """_decision_to_action 的 remember_for_session 分支 → ACCEPT_FOR_SESSION。"""
-    d = ApprovalDecision(outcome="approved", metadata={"remember_for_session": True})
-    assert _decision_to_action(d) == ApprovalAction.ACCEPT_FOR_SESSION
-
-
-def test_decision_to_action_remember_persistent_maps_correctly() -> None:
-    """_decision_to_action 的 remember_persistent 分支 → ACCEPT_PERSIST。"""
-    d = ApprovalDecision(outcome="approved", metadata={"remember_persistent": True})
-    assert _decision_to_action(d) == ApprovalAction.ACCEPT_PERSIST
-
-
-def test_decision_to_action_plain_approved_maps_to_accept_once() -> None:
-    """普通 approved 无 remember 标记 → ACCEPT_ONCE。"""
-    d = ApprovalDecision(outcome="approved", metadata={})
-    assert _decision_to_action(d) == ApprovalAction.ACCEPT_ONCE
-
-
-def test_decision_to_action_rejected_maps_to_reject() -> None:
-    """rejected → REJECT。"""
-    d = ApprovalDecision(outcome="rejected", metadata={"reason": "timeout"})
-    assert _decision_to_action(d) == ApprovalAction.REJECT
-
-
-# ============ 单例工厂 ============
-
-
-def test_get_approval_manager_singleton_idempotent() -> None:
-    """get_approval_manager 首次调用构造；之后返回同实例。"""
-    m1 = get_approval_manager()
-    m2 = get_approval_manager()
-    assert m1 is m2
-
-
-def test_reset_for_testing_clears_singleton() -> None:
-    """reset_for_testing 后再 get → 新实例。"""
-    m1 = get_approval_manager()
-    reset_for_testing()
-    m2 = get_approval_manager()
-    assert m1 is not m2
-
-
-def test_get_approval_manager_accepts_custom_rules() -> None:
-    """首次调用传入的 rules / timeout 生效。"""
-    custom_rules = ApprovalRules()
-    m = get_approval_manager(rules=custom_rules, default_timeout_ms=5_000)
-    assert m._rules is custom_rules
-    assert m._default_timeout_ms == 5_000
-
-
-# ============ R10 timeout 清理 ============
-
-
-async def test_no_leaked_timeout_tasks_after_resolve() -> None:
-    """resolve 后 timeout task 应被 cancel + pop（R10）。"""
-    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=10_000)
-
-    async def resolve_later() -> None:
-        await asyncio.sleep(0.05)
-        req_id = next(iter(m._pending.keys()))
-        m.resolve(req_id, {"allow": True})
-
-    _ = asyncio.create_task(resolve_later())  # noqa: RUF006
-    await m.request(
-        channel="generic_chat",
-        thread_id="t",
-        cwd="/",
-        tool_name="X",
-        tool_input={},
+    """prompt bridge 使用绑定的 root thread，并保留 child agent 审计身份。"""
+    sink = _Sink()
+    manager = _manager(tmp_path, sink)
+    prompt = make_manager_prompt_fn(
+        manager,
+        "root-thread",
+        default_cwd="/workspace",
     )
-
-    # R10 监控：pending + timeout_tasks 都清空
-    assert m.pending_count == 0
-    assert m.timeout_task_count == 0
-
-
-async def test_no_leaked_timeout_tasks_after_cancel() -> None:
-    """cancel 后 timeout task 应被 cancel + pop（R10）。"""
-    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=10_000)
-
-    async def cancel_later() -> None:
-        await asyncio.sleep(0.05)
-        req_id = next(iter(m._pending.keys()))
-        m.cancel(req_id, reason="test")
-
-    _ = asyncio.create_task(cancel_later())  # noqa: RUF006
-    await m.request(
-        channel="generic_chat",
-        thread_id="t",
-        cwd="/",
-        tool_name="X",
-        tool_input={},
+    request = ApprovalRequest(
+        run_id="run-1",
+        session_id="child-session",
+        turn=1,
+        call_id="call-1",
+        tool_name="list_dir",
+        arguments={"path": "/workspace"},
+        metadata={"agent_id": "child-agent"},
     )
+    task = asyncio.create_task(prompt(request))
+    await asyncio.wait_for(sink.ready.wait(), timeout=1)
+    pending = sink.pending[0]
 
-    assert m.pending_count == 0
-    assert m.timeout_task_count == 0
-
-
-# ============ 多 EventSink fan-out + sink 失败容错 ============
-
-
-async def test_multiple_event_sinks_all_fan_out() -> None:
-    """多 sink 全部收到 required / removed 通知。"""
-    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=10_000)
-    sink1: Any = AsyncMock(spec=ApprovalEventSink)
-    sink2: Any = AsyncMock(spec=ApprovalEventSink)
-    m.register_event_sink(sink1)
-    m.register_event_sink(sink2)
-
-    async def resolve_later() -> None:
-        await asyncio.sleep(0.05)
-        req_id = next(iter(m._pending.keys()))
-        m.resolve(req_id, {"allow": True})
-
-    _ = asyncio.create_task(resolve_later())  # noqa: RUF006
-    await m.request(
-        channel="generic_chat",
-        thread_id="t",
-        cwd="/",
-        tool_name="X",
-        tool_input={},
+    assert pending.thread_id == "root-thread"
+    assert pending.agent_id == "child-agent"
+    assert pending.cwd == "/workspace"
+    assert await manager.resolve(
+        "root-thread",
+        pending.request_id,
+        {"allow": True, "remember": False},
     )
-
-    sink1.emit_approval_required.assert_called_once()
-    sink2.emit_approval_required.assert_called_once()
-    sink1.emit_approval_removed.assert_called_once()
-    sink2.emit_approval_removed.assert_called_once()
+    assert await task is ApprovalAction.ACCEPT_ONCE
+    assert getattr(prompt, "__action_aware__") is True
 
 
-async def test_sink_emit_failure_does_not_break_main_flow() -> None:
-    """sink 抛异常不影响审批主流程（R9 安全设计）。"""
-    m = ApprovalManager(rules=ApprovalRules(), default_timeout_ms=10_000)
-    bad_sink: Any = AsyncMock(spec=ApprovalEventSink)
-    bad_sink.emit_approval_required.side_effect = RuntimeError("sink broken")
-    bad_sink.emit_approval_removed.side_effect = RuntimeError("sink broken")
-    m.register_event_sink(bad_sink)
+def test_singleton_uses_explicit_permissions_manager(tmp_path: Path) -> None:
+    """单例首次装配复用调用方提供的 PermissionsManager。"""
+    permissions = PermissionsManager(tmp_path)
 
-    async def resolve_later() -> None:
-        await asyncio.sleep(0.05)
-        req_id = next(iter(m._pending.keys()))
-        m.resolve(req_id, {"allow": True})
+    manager = get_approval_manager(permissions_manager=permissions)
 
-    _ = asyncio.create_task(resolve_later())  # noqa: RUF006
-    decision = await m.request(
-        channel="generic_chat",
-        thread_id="t",
-        cwd="/",
-        tool_name="X",
-        tool_input={},
-    )
-    # 主流程仍能拿到 decision，未被 sink 异常打断
-    assert decision.outcome == "approved"
-    assert m.pending_count == 0
-    assert m.timeout_task_count == 0
+    assert manager.permissions_manager is permissions
+    assert manager.auto_approve_task_count == 0
 
 
-# ============ rules.classify 集成 ============
-
-
-async def test_pending_inherits_classify_severity_and_rule_info(
-    manager: ApprovalManager,
-) -> None:
-    """fan-out 的 PendingApprovalView 字段由 rules.classify 填充。"""
-    sink: Any = AsyncMock(spec=ApprovalEventSink)
-    manager.register_event_sink(sink)
-    internal_pending: list[_PendingApproval] = []
-
-    async def resolve_later() -> None:
-        await asyncio.sleep(0.05)
-        req_id = next(iter(manager._pending.keys()))
-        internal_pending.append(manager._pending[req_id])
-        manager.resolve(req_id, {"allow": True})
-
-    _ = asyncio.create_task(resolve_later())  # noqa: RUF006
-    await manager.request(
-        channel="generic_chat",
-        thread_id="t",
-        cwd="/",
-        tool_name="X",
-        tool_input={},
-    )
-    # 阶段 1 ApprovalRules 默认：standard severity / 无规则命中 / 无自动倒计时
-    pending: PendingApprovalView = sink.emit_approval_required.call_args.kwargs["pending"]
-    assert isinstance(pending, PendingApprovalView)
-    assert not hasattr(pending, "future")
-    assert internal_pending[0].future is not None
-    assert pending.severity == "standard"
-    assert pending.matched_rule is None
-    assert pending.auto_approve_at_ms is None
-    assert pending.auto_reject_at_ms is None
+def test_decision_to_action_is_once_only() -> None:
+    """记忆已在 Manager 内完成，运行时 action 只表达当前调用。"""
+    assert _decision_to_action(ApprovalDecision(outcome="approved")) is ApprovalAction.ACCEPT_ONCE
+    assert _decision_to_action(ApprovalDecision(outcome="rejected")) is ApprovalAction.REJECT

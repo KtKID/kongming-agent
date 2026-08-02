@@ -31,9 +31,9 @@ from core.contracts import Session, ToolContext
 from core.errors import MaxTurnsExceededError
 from core.session import InMemorySession
 from infrastructure.config import load_config
+from infrastructure.config.model_catalog_manager import ModelCatalogManager
 from infrastructure.config.paths import get_kongming_home
-from runtime_assembly.native_runtime import NativeRuntime
-from safety.policies.capability import CapabilityPolicy, CapabilitySet
+from runtime_assembly.session_engine import SessionEngine
 from tools.runtime.approval import AutoAllowApproval
 from tools.runtime.base import BaseBuiltinTool
 from tools.runtime.registry import ToolRegistry
@@ -123,10 +123,8 @@ async def test_real_llm_max_turns_physically_caps_counter_tool(
     步骤：
       1. 加载 ``config/setting.yaml`` → 取 ``cfg.runner.max_turns``，硬卡到
          ``_MAX_TURNS_CAP`` 以下（防生产配置写得过大跑爆时间）
-      2. 用自定义 :class:`_CounterTool` + 全开 :class:`CapabilityPolicy` +
-         :class:`AutoAllowApproval` 装配 NativeRuntime（默认安全链会按
-         tool_name="counter_increment" 走 fallback capability，非 file_read 会被
-         deny；测试场景需要全开）
+      2. 用自定义 :class:`_CounterTool` + :class:`AutoAllowApproval` 装配
+         SessionEngine，让测试只观察 max_turns 物理上限
       3. instruction 指示 LLM 反复调 tool 把 counter 加到 ``max_turns + 1``
          （目标必须 > max_turns 才能保证不会因 LLM 主动 stop 而走 completed
          路径，那样就不触发上限了）
@@ -146,10 +144,11 @@ async def test_real_llm_max_turns_physically_caps_counter_tool(
         f"and so on, until value={target}."
     )
 
+    resolved_model = ModelCatalogManager().resolve_runtime(cfg.model)
     agent_spec = AgentSpec(
         name="counter-runner",
         instructions=instructions,
-        default_model=cfg.model.name,
+        default_model=resolved_model.name,
         tool_names=("set_counter",),
         max_turns=capped,
         reasoning_effort=cfg.model.reasoning_effort,
@@ -160,14 +159,12 @@ async def test_real_llm_max_turns_physically_caps_counter_tool(
     def _in_memory_session_factory(sid: str) -> Session:
         return InMemorySession(session_id=sid)
 
-    runtime = NativeRuntime.build(
+    runtime = SessionEngine.build(
         cfg,
         tools=registry,
         enabled_tool_names=["set_counter"],
         agent_spec=agent_spec,
-        # 全开 capability：set_counter 不在默认白名单，会被 fallback deny
-        capability_policy=CapabilityPolicy(CapabilitySet()),
-        # auto_allow：跳过 interactive 审批
+        # 测试 Provider 显式允许普通 counter 调用
         approval=AutoAllowApproval(),
         session_factory=_in_memory_session_factory,
     )

@@ -10,7 +10,7 @@ import type {
   ApprovalInboxRemoveFrame,
   ApprovalInboxResolveFrame,
   ApprovalInboxSnapshotFrame,
-} from "../types";
+} from "@/protocol";
 
 /**
  * smart-approval-v2-inbox store 单测：reducer / selector / sender + 入口 guard。
@@ -27,14 +27,15 @@ function makeItem(overrides: Partial<ApprovalInboxItem> = {}): ApprovalInboxItem
     threadId: "thread-1",
     toolName: "Bash",
     toolInput: { cmd: "ls" },
-    autoApproveAtMs: null,
-    autoRejectAtMs: null,
     blockedByRule: null,
     isElevated: false,
+    danger: false,
+    rememberAllowed: false,
     channel: "claude_code",
     cwd: "/proj/x",
     arrivedAtMs: 1_000_000,
     timeoutMs: null,
+    rememberRule: null,
     ...overrides,
   };
 }
@@ -58,7 +59,7 @@ function makeSnapshotFrame(items: ApprovalInboxItem[]): ApprovalInboxSnapshotFra
 
 beforeEach(() => {
   // 跨用例隔离：清 byRequestId + 解绑 sender
-  useApprovalInboxStore.setState({ byRequestId: {} });
+  useApprovalInboxStore.getState().clear();
   resetSender();
 });
 
@@ -118,6 +119,14 @@ describe("applyAddFrame", () => {
       // @ts-expect-error 测试入口 guard：非 string requestId
       requestId: 123,
     });
+    expect(useApprovalInboxStore.getState().byRequestId).toEqual({});
+  });
+
+  it("threadId='' → 不写入", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    useApprovalInboxStore
+      .getState()
+      .applyAddFrame(makeAddFrame({ requestId: "r1", threadId: "" }));
     expect(useApprovalInboxStore.getState().byRequestId).toEqual({});
   });
 });
@@ -207,6 +216,18 @@ describe("applySnapshotFrame", () => {
     const map = useApprovalInboxStore.getState().byRequestId;
     expect(Object.keys(map)).toEqual(["valid"]);
   });
+
+  it("items 内单条 threadId='' → 跳过该 item", () => {
+    useApprovalInboxStore.getState().applySnapshotFrame({
+      frame_type: "approval.inbox.snapshot",
+      items: [
+        makeItem({ requestId: "invalid", threadId: "" }),
+        makeItem({ requestId: "valid", threadId: "thread-valid" }),
+      ],
+    });
+    const map = useApprovalInboxStore.getState().byRequestId;
+    expect(Object.keys(map)).toEqual(["valid"]);
+  });
 });
 
 // =============================================================
@@ -218,53 +239,175 @@ describe("setSender + resolve", () => {
     setSender(send);
     useApprovalInboxStore
       .getState()
-      .resolve("thread-1", "req-1", true, { rememberEntry: "Bash" });
+      .resolve("thread-1", "req-1", true, {
+        remember: true,
+      });
     expect(send).toHaveBeenCalledTimes(1);
     const frame = send.mock.calls[0][0] as ApprovalInboxResolveFrame;
     expect(frame.frame_type).toBe("approval.inbox.resolve");
     expect(frame.threadId).toBe("thread-1");
     expect(frame.requestId).toBe("req-1");
     expect(frame.allow).toBe(true);
-    expect(frame.rememberEntry).toBe("Bash");
+    expect(frame.remember).toBe(true);
     expect(frame.message).toBeUndefined();
   });
 
-  it("resolve 不传 opts → frame 不带 message / rememberEntry / rememberScope", () => {
+  it("resolve 发送成功后保留 item 到 authoritative remove", () => {
+    const send = vi.fn();
+    const store = useApprovalInboxStore.getState();
+    store.applyAddFrame(makeAddFrame({ requestId: "req-1" }));
+    setSender(send);
+
+    store.resolve("thread-1", "req-1", true);
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(useApprovalInboxStore.getState().byRequestId["req-1"]).toBeDefined();
+    expect(
+      useApprovalInboxStore.getState().submissionByRequestId["req-1"],
+    ).toEqual({ status: "submitting" });
+  });
+
+  it("sender 返回 false 时保留 item", () => {
+    const send = vi.fn(() => false);
+    const store = useApprovalInboxStore.getState();
+    store.applyAddFrame(makeAddFrame({ requestId: "req-1" }));
+    setSender(send);
+
+    store.resolve("thread-1", "req-1", true);
+
+    expect(useApprovalInboxStore.getState().byRequestId["req-1"]).toBeDefined();
+  });
+
+  it("resolve threadId='' 时不发送 frame 且保留 item", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const send = vi.fn();
+    const store = useApprovalInboxStore.getState();
+    store.applyAddFrame(makeAddFrame({ requestId: "req-1" }));
+    setSender(send);
+
+    store.resolve("", "req-1", true);
+
+    expect(send).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalled();
+    expect(useApprovalInboxStore.getState().byRequestId["req-1"]).toBeDefined();
+  });
+
+  it("resolve requestId='' 时不发送 frame", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const send = vi.fn();
+    setSender(send);
+
+    useApprovalInboxStore.getState().resolve("thread-1", "", true);
+
+    expect(send).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it("snapshot 保留 pending item 并清除旧 submitting", () => {
+    const send = vi.fn();
+    const item = makeItem({ requestId: "req-1" });
+    const store = useApprovalInboxStore.getState();
+    store.applyAddFrame({ frame_type: "approval.inbox.add", ...item });
+    setSender(send);
+
+    store.resolve("thread-1", "req-1", true);
+    expect(useApprovalInboxStore.getState().byRequestId["req-1"]).toBeDefined();
+    expect(
+      useApprovalInboxStore.getState().submissionByRequestId["req-1"],
+    ).toEqual({ status: "submitting" });
+
+    useApprovalInboxStore
+      .getState()
+      .applySnapshotFrame(makeSnapshotFrame([item]));
+
+    expect(useApprovalInboxStore.getState().byRequestId["req-1"]).toBeDefined();
+    expect(
+      useApprovalInboxStore.getState().submissionByRequestId["req-1"],
+    ).toBeUndefined();
+  });
+
+  it("resolve 不传 opts → frame 固定 remember=false 且不带 message", () => {
     const send = vi.fn();
     setSender(send);
     useApprovalInboxStore.getState().resolve("t", "r", false);
     const frame = send.mock.calls[0][0] as ApprovalInboxResolveFrame;
     expect(frame.allow).toBe(false);
+    expect(frame.remember).toBe(false);
     expect("message" in frame).toBe(false);
-    expect("rememberEntry" in frame).toBe(false);
-    expect("rememberScope" in frame).toBe(false);
   });
 
-  it("resolve 传 rememberScope=session → frame 带此字段（generic-chat-session-grant）", () => {
+  it("resolve 传 remember=true → frame 只携带记忆布尔值", () => {
     const send = vi.fn();
     setSender(send);
     useApprovalInboxStore
       .getState()
       .resolve("thread-1", "req-1", true, {
-        rememberEntry: "Bash",
-        rememberScope: "session",
+        remember: true,
       });
     const frame = send.mock.calls[0][0] as ApprovalInboxResolveFrame;
-    expect(frame.rememberEntry).toBe("Bash");
-    expect(frame.rememberScope).toBe("session");
+    expect(frame.remember).toBe(true);
   });
 
-  it("setSender(null) 后 resolve → console.warn 不抛", () => {
+  it("remember resolve 等待服务端结果并记录失败语义", () => {
+    const send = vi.fn(() => true);
+    const store = useApprovalInboxStore.getState();
+    store.applyAddFrame(makeAddFrame({ requestId: "req-1" }));
+    setSender(send);
+
+    store.resolve("thread-1", "req-1", true, {
+      remember: true,
+    });
+
+    expect(useApprovalInboxStore.getState().byRequestId["req-1"]).toBeDefined();
+    useApprovalInboxStore.getState().applyResolveResultFrame({
+      frame_type: "approval.inbox.resolve_result",
+      requestId: "req-1",
+      accepted: false,
+      message: "规则保存失败，请重试",
+    });
+    expect(
+      useApprovalInboxStore.getState().resolveResultByRequestId["req-1"],
+    ).toMatchObject({ accepted: false, message: "规则保存失败，请重试" });
+    expect(
+      useApprovalInboxStore.getState().submissionByRequestId["req-1"],
+    ).toEqual({ status: "error", message: "规则保存失败，请重试" });
+  });
+
+  it("authoritative remove 后忽略 late resolve_result", () => {
+    const store = useApprovalInboxStore.getState();
+    store.applyAddFrame(makeAddFrame({ requestId: "req-1" }));
+    store.applyRemoveFrame(makeRemoveFrame("req-1"));
+    store.applyResolveResultFrame({
+      frame_type: "approval.inbox.resolve_result",
+      requestId: "req-1",
+      accepted: false,
+      message: "late conflict",
+    });
+
+    expect(useApprovalInboxStore.getState().byRequestId["req-1"]).toBeUndefined();
+    expect(
+      useApprovalInboxStore.getState().submissionByRequestId["req-1"],
+    ).toBeUndefined();
+  });
+
+  it("sender 为空时 resolve → console.warn 不抛", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    setSender(null);
+    useApprovalInboxStore
+      .getState()
+      .applyAddFrame(makeAddFrame({ requestId: "r" }));
+    resetSender();
     expect(() =>
       useApprovalInboxStore.getState().resolve("t", "r", true),
     ).not.toThrow();
     expect(warn).toHaveBeenCalled();
+    expect(useApprovalInboxStore.getState().byRequestId["r"]).toBeDefined();
   });
 
   it("sender 抛 → resolve try/catch + warn 不抛", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    useApprovalInboxStore
+      .getState()
+      .applyAddFrame(makeAddFrame({ requestId: "r" }));
     setSender(() => {
       throw new Error("ws closed");
     });
@@ -272,6 +415,7 @@ describe("setSender + resolve", () => {
       useApprovalInboxStore.getState().resolve("t", "r", true),
     ).not.toThrow();
     expect(warn).toHaveBeenCalled();
+    expect(useApprovalInboxStore.getState().byRequestId["r"]).toBeDefined();
   });
 });
 
@@ -299,11 +443,12 @@ describe("selectSorted smoke", () => {
   it("混合：danger 在前", () => {
     const store = useApprovalInboxStore.getState();
     store.applyAddFrame(
-      makeAddFrame({ requestId: "safe", blockedByRule: null, arrivedAtMs: 1 }),
+      makeAddFrame({ requestId: "safe", danger: false, blockedByRule: null, arrivedAtMs: 1 }),
     );
     store.applyAddFrame(
       makeAddFrame({
         requestId: "danger",
+        danger: true,
         blockedByRule: "rm-rf",
         arrivedAtMs: 2,
       }),

@@ -33,7 +33,7 @@ class FakeInner:
     decision_class: str
     decision_source: str = ""
     outcome: str = "approved"
-    matched_rule: str = "test.rule"
+    matched_rule: str = "default:ask"
     reason: str = "test reason"
 
     async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
@@ -144,6 +144,28 @@ async def test_u4_fail_closed_consent_rejected() -> None:
     assert decision.metadata["cron_task_id"] == "t4"
     assert decision.metadata["original_decision_class"] == "explicit_consent"
     assert decision.metadata["original_outcome"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_consent_passthrough_keeps_user_decision() -> None:
+    """绑定通用审批的 cron 任务透传用户审批结果。"""
+    inner = FakeInner(
+        decision_class="explicit_consent",
+        decision_source="standard",
+        outcome="approved",
+    )
+    wrapper = ScheduleApprovalProvider(
+        inner=inner,
+        task_id="t4-thread",
+        mode=ApprovalMode.FAIL_CLOSED,
+        consent_passthrough=True,
+    )
+
+    decision = await wrapper.decide(_make_request())
+
+    assert decision.outcome == "approved"
+    assert decision.metadata["decision_class"] == "explicit_consent"
+    assert "cron_fail_closed" not in decision.metadata
 
 
 @pytest.mark.asyncio
@@ -272,8 +294,8 @@ async def test_u11_trust_consent_emits_audit_event() -> None:
         decision_class="explicit_consent",
         decision_source="standard",
         outcome="approved",
-        matched_rule="shell.execute_script",
-        reason="shell command requires consent",
+        matched_rule="default:ask",
+        reason="no approval rule matched",
     )
     sink = RecordingSink()
     wrapper = ScheduleApprovalProvider(
@@ -294,7 +316,7 @@ async def test_u11_trust_consent_emits_audit_event() -> None:
     assert payload["tool_name"] == "run_shell"
     assert payload["original_decision_class"] == "explicit_consent"
     assert payload["original_decision_source"] == "standard"
-    assert payload["matched_rule"] == "shell.execute_script"
-    assert payload["reason"] == "shell command requires consent"
+    assert payload["matched_rule"] == "default:ask"
+    assert payload["reason"] == "no approval rule matched"
     assert isinstance(payload["arguments_digest"], str)
     assert payload["arguments_digest"].startswith("sha256:")

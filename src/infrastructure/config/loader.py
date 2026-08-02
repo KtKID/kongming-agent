@@ -9,8 +9,8 @@
 读完 YAML 之后，用 ``KONGMING_<SECTION>_<FIELD>``（全大写）格式的环境变量覆
 盖单字段。例如：
 
-- ``KONGMING_MODEL_API_KEY`` → ``model.api_key``
-- ``KONGMING_MODEL_BASE_URL`` → ``model.base_url``
+- ``KONGMING_MODEL_PRESET_ID`` → ``model.preset_id``
+- ``KONGMING_MODEL_REASONING_EFFORT`` → ``model.reasoning_effort``
 - ``KONGMING_RUNNER_MAX_TURNS`` → ``runner.max_turns``
 - ``KONGMING_TOOL_SHELL_ENABLED`` → ``tool.shell.enabled``
 
@@ -45,19 +45,12 @@ _DEFAULT_CONFIG_PATH: Path = _REPO_ROOT / "config" / "setting.yaml"
 # path 的变量都会参与覆盖。
 _ENV_PREFIX = "KONGMING_"
 
-# 已知的配置字段路径（tuple of section parts）。用于把 ``KONGMING_MODEL_API_KEY``
-# 这种变量名匹配回 ``("model", "api_key")``。
+# 已知的配置字段路径（tuple of section parts）。
 #
 # 这里不做反射扫描 pydantic 模型，而是显式列出——因为字段名里本身可能含下划线
 # （如 ``api_key`` / ``base_url`` / ``max_turns``），反射解析歧义难排除。
 _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
-    ("model", "provider"),
-    ("model", "name"),
-    ("model", "base_url"),
-    ("model", "api_key"),
-    ("model", "timeout"),
-    ("model", "max_tokens"),
-    ("model", "temperature"),
+    ("model", "preset_id"),
     ("model", "reasoning_effort"),
     ("runner", "max_turns"),
     ("session", "backend"),
@@ -75,7 +68,6 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("tool", "shell", "terminate_grace_seconds"),
     ("tool", "file", "enabled"),
     ("tool", "file", "read_max_bytes"),
-    ("mcp", "enabled"),
     ("web_search", "enabled"),
     ("web_search", "provider_name"),
     ("web_search", "search_tool_name"),
@@ -96,10 +88,8 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("evolution", "learning", "enabled"),
     ("evolution", "learning", "mode"),
     ("evolution", "learning", "background"),
-    ("evolution", "learning", "model_name"),
-    ("evolution", "learning", "base_url"),
-    ("evolution", "learning", "api_key_env"),
-    ("evolution", "learning", "provider"),
+    ("evolution", "learning", "auto_trigger_enabled"),
+    ("evolution", "learning", "preset_id"),
     ("evolution", "learning", "reasoning_effort"),
     ("evolution", "learning", "every_n_runs"),
     ("evolution", "learning", "min_user_turns"),
@@ -114,11 +104,14 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("stream", "suppress_content_after_tool_call"),
     ("stream", "delta_sampling"),
     ("stream", "periodic_batch_size"),
-    # safety v0.1.4
-    ("safety", "trusted_workdirs"),
-    ("safety", "allow_writes"),
-    ("safety", "allow_tools_silent"),
-    ("safety", "log_silent_reads"),
+    # safety approval reviewer
+    ("safety", "approval", "llm", "provider"),
+    ("safety", "approval", "llm", "model"),
+    ("safety", "approval", "llm", "base_url"),
+    ("safety", "approval", "llm", "api_key"),
+    ("safety", "approval", "llm", "api_key_header"),
+    ("safety", "approval", "llm", "timeout_seconds"),
+    ("safety", "approval", "llm", "prompt_template_path"),
     # web v0.1.5
     ("web", "enabled"),
     ("web", "host"),
@@ -130,7 +123,6 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("web", "idle_timeout_seconds"),
     ("web", "idle_check_interval_seconds"),
     ("web", "dashboard_poll_interval_seconds"),
-    ("web", "pending_approval_timeout_seconds"),
     # web.full_log (full-log-v0.1)
     ("web", "full_log", "enabled"),
     ("web", "full_log", "path"),
@@ -153,17 +145,49 @@ _ENV_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
     ("sitian", "scanner", "session_message_max_chars"),
     # sitian.analyzer
     ("sitian", "analyzer", "enabled"),
-    ("sitian", "analyzer", "model_name"),
-    ("sitian", "analyzer", "base_url"),
-    ("sitian", "analyzer", "api_key_env"),
-    ("sitian", "analyzer", "max_tokens"),
-    ("sitian", "analyzer", "temperature"),
-    ("sitian", "analyzer", "timeout"),
+    ("sitian", "analyzer", "preset_id"),
+    ("sitian", "analyzer", "reasoning_effort"),
     ("sitian", "analyzer", "max_context_chars"),
     ("sitian", "analyzer", "skip_if_unchanged"),
     ("sitian", "analyzer", "full_log_enabled"),
     # sitian.interests
     ("sitian", "interests", "focus"),
+)
+
+_NONE_WHEN_EMPTY_ENV_PATHS: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("safety", "approval", "llm", "api_key_header"),
+    }
+)
+
+_RETIRED_MODEL_ENV_NAMES: tuple[str, ...] = (
+    "KONGMING_MODEL_PROVIDER",
+    "KONGMING_MODEL_NAME",
+    "KONGMING_MODEL_BASE_URL",
+    "KONGMING_MODEL_API_KEY",
+    "KONGMING_MODEL_API_KEY_HEADER",
+    "KONGMING_MODEL_TIMEOUT",
+    "KONGMING_MODEL_MAX_TOKENS",
+    "KONGMING_MODEL_TEMPERATURE",
+)
+
+_LEGACY_SAFETY_FIELDS: frozenset[str] = frozenset(
+    {
+        "allow_tools_silent",
+        "allow_writes",
+        "approval_required_commands",
+        "approval_rules",
+        "hard_deny_commands",
+        "log_silent_reads",
+        "permissions",
+        "sensitive_paths",
+        "skill_call_rules",
+        "trusted_workdirs",
+    }
+)
+_LEGACY_GLOBAL_APPROVAL_FIELDS: frozenset[str] = frozenset({"approval_mode", "auto_judge"})
+_PERMISSIONS_MIGRATION_COMMAND = (
+    "uv run python scripts/migrate_permissions_v06.py --thread-id <thread-id> --dry-run"
 )
 
 _SCHEDULER_EXTRA_ENV_NAMES: tuple[str, ...] = (
@@ -187,6 +211,11 @@ def _resolve_config_path(explicit: str | Path | None) -> Path:
         env_path = os.environ.get("KONGMING_CONFIG")
         path = Path(env_path) if env_path else _DEFAULT_CONFIG_PATH
     return path
+
+
+def resolve_config_path(explicit: str | Path | None = None) -> Path:
+    """返回与 :func:`load_config` 完全一致的实际配置路径。"""
+    return _resolve_config_path(explicit).expanduser().resolve(strict=False)
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -240,6 +269,48 @@ def _set_nested(data: dict[str, Any], path: tuple[str, ...], value: Any) -> None
     cursor[path[-1]] = value
 
 
+def _normalize_env_override_value(field_path: tuple[str, ...], raw: str) -> Any:
+    """按字段语义归一化 env 覆盖值。"""
+    if field_path in _NONE_WHEN_EMPTY_ENV_PATHS and raw.strip() == "":
+        return None
+    return raw
+
+
+def _reject_legacy_safety_fields(data: dict[str, Any], *, path: Path) -> None:
+    """拒绝 v0.6 已退出全局配置的 safety 字段并给出定向迁移命令。"""
+    safety = data.get("safety")
+    if not isinstance(safety, dict):
+        return
+    global_approval_fields = sorted(set(safety).intersection(_LEGACY_GLOBAL_APPROVAL_FIELDS))
+    if global_approval_fields:
+        field_paths = [f"safety.{name}" for name in global_approval_fields]
+        raise ConfigValidationError(
+            "approval disposition is configured per cwd through the Web approval selector; "
+            f"remove legacy global fields {', '.join(field_paths)} and configure "
+            "safety.approval.llm only for the LLM reviewer.",
+            details={
+                "path": str(path),
+                "code": "legacy_global_approval_disposition",
+                "fields": field_paths,
+            },
+        )
+    legacy_fields = sorted(set(safety).intersection(_LEGACY_SAFETY_FIELDS))
+    if not legacy_fields:
+        return
+    field_paths = [f"safety.{name}" for name in legacy_fields]
+    raise ConfigValidationError(
+        "safety v0.6 stores permissions per thread; legacy fields "
+        f"{', '.join(field_paths)} require an explicit target thread. "
+        f"Run `{_PERMISSIONS_MIGRATION_COMMAND}` and then remove the legacy fields.",
+        details={
+            "path": str(path),
+            "code": "legacy_safety_permissions_require_migration",
+            "fields": field_paths,
+            "migration_command": _PERMISSIONS_MIGRATION_COMMAND,
+        },
+    )
+
+
 def _config_env_names() -> tuple[str, ...]:
     """返回 Config 字段消费的 env 名。"""
     return tuple(_env_var_name(field_path) for field_path in _ENV_FIELD_PATHS) + tuple(
@@ -256,9 +327,33 @@ def _apply_env_overrides(
     for field_path in _ENV_FIELD_PATHS:
         env_name = _env_var_name(field_path)
         if env_name in env_map:
-            _set_nested(data, field_path, env_map[env_name])
+            _set_nested(
+                data, field_path, _normalize_env_override_value(field_path, env_map[env_name])
+            )
     _apply_scheduler_env_overrides(data, env=env_map)
     return data
+
+
+def _reject_retired_model_envs(env: Mapping[str, str], *, path: Path) -> None:
+    """拒绝已退出的静态 model env，并指向 catalog 与新选择字段。"""
+    present = tuple(name for name in _RETIRED_MODEL_ENV_NAMES if name in env)
+    if not present:
+        return
+    raise ConfigValidationError(
+        "static model environment variables have retired; move provider/model/endpoint "
+        "definitions to model-providers.yaml, use provider-specific credential envs, "
+        "and select the runtime model with KONGMING_MODEL_PRESET_ID",
+        details={
+            "path": str(path),
+            "code": "retired_model_environment",
+            "environment_variables": present,
+            "replacement": (
+                "KONGMING_MODEL_PROVIDER_CATALOG",
+                "KONGMING_MODEL_PRESET_ID",
+                "KONGMING_MODEL_REASONING_EFFORT",
+            ),
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -413,55 +508,65 @@ def _load_module_yamls(config_dir: Path, data: dict[str, Any]) -> dict[str, Any]
     return merged
 
 
+def _dotenv_paths(config_path: Path | None = None) -> tuple[Path, ...]:
+    """返回本次配置加载需要读取的 ``.env`` 路径。
+
+    本地可写密钥统一以 ``KONGMING_HOME/.env`` 为单一文件来源；配置文件路径
+    只决定 YAML，不再决定密钥文件。
+    """
+    _ = config_path
+    try:
+        from infrastructure.config.paths import get_kongming_home
+
+        home_env = get_kongming_home() / ".env"
+    except Exception:
+        return ()
+    return (home_env,) if home_env.exists() else ()
+
+
 def _maybe_load_env_file(config_path: Path | None = None) -> dict[str, str]:
-    """尝试加载项目根的 ``.env`` 文件到 ``os.environ``。
+    """尝试加载 ``KONGMING_HOME/.env`` 文件。
 
     这一层的存在是为了把敏感配置（如 API key）从 YAML 代码库剥离——开发者把
-    真实值写进本地 ``.env``（gitignored），运行时由 :mod:`python-dotenv` 注入
+    真实值写进本地 ``.env``（gitignored），运行时由 :mod:`python-dotenv` 解析
     进程环境变量，再走已有的 ``KONGMING_*`` env 覆盖链接入 Config。
 
     语义：
 
     - ``.env`` 不存在 → 静默跳过
     - ``python-dotenv`` 未安装 → 静默跳过（不应发生；它是 runtime dep）
-    - **不覆盖**已设置的 env 变量（``override=False``）—— 真实 env 优先于 .env，
-      让 CI / 容器部署可以用 env 覆盖 .env 而无需删文件
+    - 真实进程 env 优先于 ``KONGMING_HOME/.env``，CI / 容器部署可直接用 env 覆盖本地文件
 
-    .env 搜索路径优先从配置文件目录向上查找；未传配置文件时从 cwd 向上查找。
-    这样 Web 写回临时 YAML 时也能加载同一套项目级 `.env`。
+    Web 管理页写回同一个 ``KONGMING_HOME/.env``，启动读取也固定使用该文件。
     """
     if os.environ.get("KONGMING_SKIP_DOTENV", "").lower() in {"1", "true", "yes", "on"}:
         return {}
 
     config_env_names = _config_env_names()
-    before = {name: os.environ.get(name) for name in config_env_names}
+    before = dict(os.environ)
 
     try:
-        from dotenv import dotenv_values, load_dotenv
+        from dotenv import dotenv_values
     except ImportError:
         return {}
 
-    start = config_path.parent if config_path is not None else Path.cwd()
-    dotenv_path: Path | None = None
-    for candidate_dir in (start, *start.parents):
-        candidate = candidate_dir / ".env"
-        if candidate.exists():
-            dotenv_path = candidate
-            break
+    parsed: dict[str, str] = {}
+    for dotenv_path in _dotenv_paths(config_path):
+        values = dotenv_values(dotenv_path)
+        for key, value in values.items():
+            if isinstance(value, str):
+                parsed[key] = value
 
-    try:
-        if dotenv_path is not None:
-            load_dotenv(dotenv_path=dotenv_path, override=False)
-            parsed = dotenv_values(dotenv_path)
+    for key, value in parsed.items():
+        if key not in before:
+            os.environ[key] = value
+
+    for name in config_env_names:
+        old_value = before.get(name)
+        if old_value is None:
+            os.environ.pop(name, None)
         else:
-            load_dotenv(override=False)
-            parsed = {}
-    finally:
-        for name, old_value in before.items():
-            if old_value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = old_value
+            os.environ[name] = old_value
 
     return {
         key: value
@@ -481,7 +586,7 @@ def load_config(
     Args:
         path: 显式配置文件路径；为 ``None`` 时走 ``KONGMING_CONFIG`` 环境变量，
             再 fallback 到仓库内 ``config/setting.yaml``。
-        load_env_file: 是否在加载配置前先把项目根 ``.env`` 注入进程环境变量。
+        load_env_file: 是否在加载配置前先把 ``KONGMING_HOME/.env`` 注入进程环境变量。
             默认 ``True``——生产体验优先。测试想断言"纯 yaml 默认值"行为时
             显式传 ``False`` 可关闭。
         migrate: 是否在校验前迁移配置文件。正式入口保持默认 ``True``；writer
@@ -504,10 +609,13 @@ def load_config(
 
         migrate_config_if_needed(resolved)
     raw_data = _load_yaml(resolved)
+    _reject_legacy_safety_fields(raw_data, path=resolved)
     # 加载 per-module YAML 文件（context yaml / tools yaml / llm yaml / infrastructure.tracing yaml）
     config_dir = resolved.parent
     with_modules = _load_module_yamls(config_dir, raw_data)
-    merged = _apply_env_overrides(with_modules, env={**dotenv_env, **os.environ})
+    effective_env = {**dotenv_env, **os.environ}
+    _reject_retired_model_envs(effective_env, path=resolved)
+    merged = _apply_env_overrides(with_modules, env=effective_env)
 
     try:
         return Config.model_validate(merged)
@@ -518,4 +626,4 @@ def load_config(
         ) from exc
 
 
-__all__ = ["load_config"]
+__all__ = ["load_config", "resolve_config_path"]

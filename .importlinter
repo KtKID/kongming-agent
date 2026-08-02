@@ -24,6 +24,9 @@ root_packages =
     evolution
     scheduler
     network
+    commands
+    sitian
+    devtools
 source_paths = src
 include_external_packages = True
 
@@ -46,6 +49,13 @@ forbidden_modules =
     hosts
     safety
     prompts
+    memory
+    evolution
+    scheduler
+    network
+    commands
+    sitian
+    devtools
 
 ; Contract 2（"sessions 不允许重定义 Session Protocol"）由 pytest 架构合约测试
 ; 实现，见 tests/unit/test_arch_contracts.py::test_sessions_do_not_define_session_protocol
@@ -63,32 +73,33 @@ type = layers
 layers =
     hosts.cli | hosts.web
     hosts.shared
+    commands
     application
     runtime_assembly
     safety
     tools
-    scheduler
+    scheduler | sitian
     sessions | prompting
-    infrastructure.llm_providers | infrastructure.tracing
+    infrastructure.llm_providers | infrastructure.tracing | devtools
     memory
     infrastructure.config
     core
     prompts
 containers =
-; Exception: 运行时装配层 ``runtime_assembly/native_runtime.py`` 跨层
+; Exception: 运行时装配层 ``runtime_assembly/session_engine.py`` 跨层
 ; 引用 ``safety`` / ``prompting`` 是 v1-mini 的刻意设计——Safety Baseline 和
 ; HistoryCompactor 默认装配都由它承担（详见 docs/kongming-agent-v1-minimal/
 ; 10-contracts.md "Native Runtime 边界"）。仅放行真实存在的这两条 import；
 ; 其他任何跨层 import 仍被合约阻止。
 ignore_imports =
-    runtime_assembly.native_runtime -> safety
-    runtime_assembly.native_runtime -> prompting
-    runtime_assembly.native_runtime -> prompting.compaction.history_compactor
-    runtime_assembly.native_runtime -> prompting.assembly.input_assembler
-    runtime_assembly.native_runtime -> prompting.instructions.instruction_loader
-    scheduler.runtime_factory -> runtime_assembly.native_runtime
+    runtime_assembly.session_engine -> safety
+    runtime_assembly.session_engine -> prompting
+    runtime_assembly.session_engine -> prompting.compaction.history_compactor
+    runtime_assembly.session_engine -> prompting.assembly.input_assembler
+    runtime_assembly.session_engine -> prompting.instructions.instruction_loader
+    scheduler.runtime_factory -> runtime_assembly.session_engine
     scheduler.runtime_factory -> application.scheduled_runs.execution_bridge
-    scheduler.ticker -> application.scheduled_runs.execution_bridge
+    scheduler.runtime_factory -> application.scheduled_runs.manager
     scheduler.runtime_factory -> sessions
     tools -> scheduler.store
     tools.builtin.schedule_tool -> scheduler.domain
@@ -97,21 +108,27 @@ ignore_imports =
     tools.builtin.schedule_tool -> scheduler.timing
     scheduler.runtime_factory -> sessions.session_bootstrap
     evolution.claude_evidence_selector -> hosts.web.integrations.claude_code.jsonl_history
-    runtime_assembly.native_runtime -> evolution
-; claude-image-paste-e2e §4/§5：MediaPart Protocol + ImageMediaPart 需要
-; 引用 ``hosts.web.uploads.storage::AssetStorage`` (IO 抽象) 与
-; ``hosts.web.uploads.registry::EXT_BY_MIME`` (MIME→ext 白名单)。这两个符号是
-; domain logic（无 framework 耦合），技术上可以提到 core / prompting 层，
-; 但本任务范围不做搬移。spec-media-input §5 设计文档明确：MediaPart 是
-; assembly → provider 路径上的中间表示，引用 hosts.web.uploads 是单点白名单。
-    infrastructure.llm_providers.media_adapter -> hosts.web.uploads.storage
-    infrastructure.llm_providers.media_adapter -> hosts.web.uploads.registry
+    infrastructure.config.models -> sitian.config
+
+; ---------------------------------------------------------------------------
+; Contract 3b: LLM provider 不允许依赖宿主层
+;             provider 只消费 core.contracts 与 infrastructure 配置/网络能力；
+;             Web 上传、CLI 参数、桌面侧资源都由宿主装配层通过 Protocol 注入。
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:llm-providers-no-hosts]
+name = LLM providers must not import hosts
+type = forbidden
+source_modules =
+    infrastructure.llm_providers
+forbidden_modules =
+    hosts
 
 ; ---------------------------------------------------------------------------
 ; Contract 4: tools 不允许直接 import safety 内部 policy / guards / decision_engine
 ;             Tool Runtime 只消费装配层串好的高层判定结果
-; v0.1.4 扩展：把 safety.guards.* / boundary_resolver / _path_trie /
-;            grant_store / _grant_persister / decision_engine 全部加入禁止
+; v0.6：Tool Runtime 不能绕过 SafetyGatedApproval 直连 DangerGuard、
+;       ConsentResolver 或三模式决策引擎。
 ; ---------------------------------------------------------------------------
 
 [importlinter:contract:tools-no-direct-safety-policy]
@@ -120,19 +137,9 @@ type = forbidden
 source_modules =
     tools
 forbidden_modules =
-    safety.policies
-    safety.policies.capability
-    safety.policies.permission
     safety.guards
-    safety.guards.hard_block
+    safety.guards.danger
     safety.guards.consent
-    safety.guards.trust
-    safety.boundaries
-    safety.boundaries.resolver
-    safety.boundaries.path_trie
-    safety.grants
-    safety.grants.store
-    safety.grants.persister
     safety.approval.decision_engine
 
 ; ---------------------------------------------------------------------------
@@ -158,6 +165,12 @@ forbidden_modules =
     safety
     memory
     prompts
+    evolution
+    scheduler
+    network
+    commands
+    sitian
+    devtools
 
 ; ---------------------------------------------------------------------------
 ; Contract 6: web 应用层（app shell）不可 import 跨支柱模块
@@ -209,20 +222,15 @@ forbidden_modules =
 ; hosts.web.app_support.slash_candidates_loader 是装配期 loader（同 hosts.web.run），
 ; 仅在 lifespan startup 懒 import，允许触达 prompting / commands。
 ignore_imports =
-    hosts.web.app -> hosts.web.app_support.slash_candidates_loader
+    hosts.web.app -> hosts.web.app_support.slash_catalog_loader
+    hosts.web.app -> hosts.shared.host_dispatcher
     hosts.web.app -> scheduler.runtime_factory
     hosts.web.app -> scheduler.store
     hosts.web.app -> scheduler.ticker
     hosts.web.app -> scheduler.delivery
-    hosts.web.app -> evolution.apply_executor
     hosts.web.app -> evolution.evolution_manager
     hosts.web.app -> infrastructure.config
-    hosts.web.routers.threads -> evolution.apply_executor
     hosts.web.routers.threads -> evolution.models
-    hosts.web.routers.threads -> evolution.state_store
-    hosts.web.routers.threads -> evolution.store
-    hosts.web.websocket.routes -> evolution.state_store
-    hosts.web.websocket.routes -> evolution.store
     hosts.web.integrations.claude_code.route -> hosts.web.websocket.event_sink
     hosts.web.integrations.claude_code.route -> evolution.claude_transcript_provider
     hosts.web.integrations.claude_code.route -> core.contracts
@@ -232,7 +240,7 @@ ignore_imports =
 ; （storage 默认 base_dir 走 ``get_kongming_home()``）和 hosts.web.threads.manager
 ; （validator 校验 thread 存在）——这些都是合理的领域内依赖，但通过
 ; ``infrastructure.config.errors -> core.errors`` 与 ``thread_manager -> thread_cell
-; -> native_runtime -> host/safety/...`` 的传递链会被 Contract 6 误判为
+; -> session_engine -> host/safety/...`` 的传递链会被 Contract 6 误判为
 ; routers 跨支柱依赖。单点白名单放行（已在 spec-media-input §5 注明）。
     hosts.web.routers.uploads -> hosts.web.uploads.storage
     hosts.web.routers.uploads -> hosts.web.uploads.registry
@@ -258,11 +266,9 @@ ignore_imports =
     hosts.web.app -> hosts.web.uploads.storage
     hosts.web.app -> hosts.web.uploads.registry
     hosts.web.app -> hosts.web.uploads.validation
-; auto-approval-manager-boundary：app.py 只调用 Web 侧 Manager，真实
-; safety.auto_approval 装配由 app_support.auto_approval_manager 内部承担。
-; 这是唯一 Web app shell 自动审批装配边，禁止回退到
-; hosts.web.approvals.auto -> safety 包级放行。
-    hosts.web.app -> hosts.web.app_support.auto_approval_manager
+; approval-rule-unification：app shell 通过单一 Web Manager 装配共享安全链，
+; 具体 safety/tools 依赖保持在该 composition portal 内。
+    hosts.web.app -> hosts.web.app_support.approval_runtime_manager
 ; cli-approval-manager-v0.1：hosts.web.approvals.auto 仅保留 Web WS/audit 边界和
 ; compatibility exports，policy/config/rules 真源迁到 safety.auto_approval。
 ; 放行这三条精确 re-export 边，app/routers 继续只通过 hosts.web.approvals.auto 入口触达。
@@ -274,6 +280,12 @@ ignore_imports =
 ; 与 hosts.web.uploads 同模式单点白名单放行。
     hosts.web.app -> hosts.web.dashboard.config.router
     hosts.web.dashboard.config.router -> hosts.web.dashboard.config.restart
+; run-end-reason-fix：thread_status 把 run.end 的 RunEndReason bitmask 映射成
+; thread-status phase（max_turns→complete 而非 error），需直接读 core.result 单一
+; 真源。dashboard.network import thread_status 的传递链触发 Contract 6 forbidden，
+; 放行这条直接边（thread_status 只读 RunEndReason 常量，不触达 runner / session
+; 等运行时语义，属合理的 wire 映射消费）。
+    hosts.web.websocket.thread_status -> core.result
 
 ; ---------------------------------------------------------------------------
 ; Contract 7: scheduler 不允许 import web 模块
@@ -288,13 +300,6 @@ source_modules =
     scheduler
 forbidden_modules =
     hosts.web
-; claude-image-paste-e2e §5：scheduler.runtime_factory → native_runtime
-; → infrastructure.llm_providers.anthropic_messages → infrastructure.llm_providers.media_adapter
-; → hosts.web.uploads.storage 是传递链(media_adapter 的 hosts.web.uploads 白名单已在
-; Contract 3 上方注明)。scheduler 本身不直接 import web,这里单点放行透传。
-ignore_imports =
-    infrastructure.llm_providers.media_adapter -> hosts.web.uploads.storage
-    infrastructure.llm_providers.media_adapter -> hosts.web.uploads.registry
 
 ; ---------------------------------------------------------------------------
 ; Contract 8: evolution 不允许 import web 模块
@@ -312,12 +317,6 @@ forbidden_modules =
     hosts.web
 ignore_imports =
     evolution.claude_evidence_selector -> hosts.web.integrations.claude_code.jsonl_history
-; claude-image-paste-e2e §5：evolution.evolution_manager → native_runtime
-; → infrastructure.llm_providers.anthropic_messages → infrastructure.llm_providers.media_adapter
-; → hosts.web.uploads.{storage,registry} 是传递链(已在 Contract 3 白名单)。
-; evolution 自身不直接 import web,这里单点放行透传。
-    infrastructure.llm_providers.media_adapter -> hosts.web.uploads.storage
-    infrastructure.llm_providers.media_adapter -> hosts.web.uploads.registry
 
 ; ---------------------------------------------------------------------------
 ; Contract 9: usage-token 封装边界
@@ -412,6 +411,7 @@ type = forbidden
 allow_indirect_imports = True
 source_modules =
     core
+    commands
     tools
     sessions
     prompting
@@ -425,6 +425,158 @@ source_modules =
     prompts
     evolution
     scheduler
+    sitian
+    devtools
     hosts.web
 forbidden_modules =
     network.tools
+
+; ---------------------------------------------------------------------------
+; Contract 13: commands 是宿主无关命令服务层
+;              hosts.shared 可以装配 CommandService；commands 自身只消费命令模型、
+;              parser / registry 和 core.result，不反向依赖 host/runtime/application。
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:commands-host-agnostic]
+name = commands must stay host agnostic
+type = forbidden
+allow_indirect_imports = True
+source_modules =
+    commands
+forbidden_modules =
+    hosts
+    runtime_assembly
+    application
+    tools
+    scheduler
+    safety
+
+; ---------------------------------------------------------------------------
+; Contract 14: subagents 不依赖 workflow 和宿主
+;              subagent 是可复用子 agent 生命周期能力，workflow 负责调用它；
+;              subagent 包内不得反向 import workflow strategy / host / tool / scheduler。
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:application-subagents-independent]
+name = application.subagents must not depend on workflows or hosts
+type = forbidden
+allow_indirect_imports = True
+source_modules =
+    application.subagents
+forbidden_modules =
+    application.agent_workflows
+    hosts
+    tools
+    scheduler
+    evolution
+    commands
+
+; ---------------------------------------------------------------------------
+; Contract 15: workflow strategy 不回跳 manager
+;              strategy 通过 models/context/base 等公共合同表达输入输出；
+;              AgentWorkflowManager 负责编排和注册，strategy 不直接消费 manager。
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:workflow-strategies-no-manager-import]
+name = workflow strategies must not import AgentWorkflowManager
+type = forbidden
+allow_indirect_imports = True
+source_modules =
+    application.agent_workflows.strategies
+forbidden_modules =
+    application.agent_workflows.manager
+
+; ---------------------------------------------------------------------------
+; Contract 16: agent_workflows 不直连宿主和运行时装配
+;              workflow 编排层消费 subagents / core contract / config / sessions，
+;              宿主入口、工具 runtime、安全策略和定时触发由外层装配。
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:application-workflows-no-host-runtime-direct]
+name = application.agent_workflows must not import host/runtime/tool/safety/scheduler directly
+type = forbidden
+allow_indirect_imports = True
+source_modules =
+    application.agent_workflows
+forbidden_modules =
+    hosts
+    tools
+    runtime_assembly
+    safety
+    scheduler
+    commands
+
+; ---------------------------------------------------------------------------
+; Contract 17: workflow viewer 是只读投影
+;              Web viewer 读取 workflow 物化产物并投影给前端，不触发应用编排。
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:workflow-viewer-read-only]
+name = workflow viewer must stay read-only
+type = forbidden
+allow_indirect_imports = True
+source_modules =
+    hosts.web.workflow_viewer
+forbidden_modules =
+    application
+    runtime_assembly
+    tools
+    safety
+    scheduler
+
+; ---------------------------------------------------------------------------
+; Contract 18: workflow router 只走 viewer manager
+;              agent_workflows router 是 HTTP 控制器，读取能力通过
+;              hosts.web.workflow_viewer.WorkflowRunViewerManager 进入。
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:agent-workflow-router-through-viewer-manager]
+name = agent workflow router must go through workflow viewer manager
+type = forbidden
+allow_indirect_imports = True
+source_modules =
+    hosts.web.routers.agent_workflows
+forbidden_modules =
+    application
+    runtime_assembly
+    tools
+    safety
+    scheduler
+
+; ---------------------------------------------------------------------------
+; Contract 19: sitian 保持观察者系统边界
+;              sitian 可以消费 core / config / provider factory；它不装配宿主、
+;              不调 agent runtime，也不回写 scheduler / workflow。
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:sitian-no-host-runtime]
+name = sitian must not depend on host runtime or application workflow
+type = forbidden
+allow_indirect_imports = True
+source_modules =
+    sitian
+forbidden_modules =
+    hosts
+    runtime_assembly
+    tools
+    scheduler
+    application
+    safety
+
+; ---------------------------------------------------------------------------
+; Contract 20: devtools 保持基础设施调试边界
+;              devtools 只提供开发期日志/诊断辅助，不消费业务编排层。
+; ---------------------------------------------------------------------------
+
+[importlinter:contract:devtools-no-business-deps]
+name = devtools must not depend on business modules
+type = forbidden
+allow_indirect_imports = True
+source_modules =
+    devtools
+forbidden_modules =
+    hosts.web
+    application
+    tools
+    scheduler
+    evolution

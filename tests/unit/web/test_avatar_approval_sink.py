@@ -38,11 +38,11 @@ def _make_pending(
         cwd="/workspace",
         tool_name="Bash",
         tool_input={"command": "rm -rf /tmp/demo"},
-        metadata={"run_id": "run-1"},
+        metadata={"call_id": "tool-call-1", "run_id": "run-1"},
         severity=severity,
         matched_rule="dangerous-command" if severity == "elevated" else None,
-        auto_approve_at_ms=None,
-        auto_reject_at_ms=12345 if severity == "elevated" else None,
+        danger=severity == "elevated",
+        remember_allowed=severity != "elevated",
         arrived_at_ms=1000,
         timeout_ms=60_000,
     )
@@ -77,6 +77,13 @@ async def test_emit_approval_required_registers_avatar_message(tmp_path: Path) -
     }
     assert message.input.metadata["toolName"] == "Bash"
     assert message.input.metadata["isElevated"] is False
+    assert message.input.metadata["callId"] == "req-avatar-1"
+    assert message.input.metadata["requestId"] == "req-avatar-1"
+    assert message.input.metadata["runId"] == "run-1"
+    assert message.input.metadata["toolCallId"] == "tool-call-1"
+    assert message.input.metadata["danger"] is False
+    assert message.input.metadata["rememberAllowed"] is True
+    assert message.input.metadata["xspaceEventType"] == "approval_requested"
     assert "rm -rf" in message.input.metadata["toolInputPreview"]
 
 
@@ -92,7 +99,8 @@ async def test_elevated_approval_registers_error_priority_message(tmp_path: Path
     assert message.input.priority == 95
     assert message.input.metadata["isElevated"] is True
     assert message.input.metadata["matchedRule"] == "dangerous-command"
-    assert message.input.metadata["autoRejectAtMs"] == 12345
+    assert message.input.metadata["danger"] is True
+    assert message.input.metadata["rememberAllowed"] is False
 
 
 async def test_register_sink_is_idempotent_in_web_approval_manager(tmp_path: Path) -> None:
@@ -100,7 +108,6 @@ async def test_register_sink_is_idempotent_in_web_approval_manager(tmp_path: Pat
     reset_for_testing()
     app = SimpleNamespace(
         state=SimpleNamespace(
-            auto_approval_policy=None,
             avatar_manager=_make_avatar_manager(tmp_path),
         )
     )
@@ -108,6 +115,7 @@ async def test_register_sink_is_idempotent_in_web_approval_manager(tmp_path: Pat
         manager = _build_manager_and_inbox_sink(app=app)
         same_manager = _build_manager_and_inbox_sink(app=app)
         assert same_manager is manager
+        assert app.state.approval_manager is manager
         assert sum(isinstance(s, InboxEventSink) for s in manager._event_sinks) == 1
         assert sum(isinstance(s, AvatarApprovalSink) for s in manager._event_sinks) == 1
     finally:

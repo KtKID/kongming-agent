@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "kongming-agent"
 version = "0.1.0"
-description = "宿主无关、最小可运行、可继续扩展成通用 agent 的基础内核"
+description = "A general agent that proactively observes the workspace, ships built-in workflows, and coordinates multiple agents."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -49,6 +49,8 @@ dependencies = [
     # 调度循环走 Hermes 风格的 60s tick（src/scheduler/ticker.py），
     # 不再依赖 APScheduler。
     "croniter>=2.0",
+    # web_fetch：HTML 正文抽取为 markdown，工具层负责安全、预算和分页。
+    "trafilatura>=1.9",
 ]
 
 [project.optional-dependencies]
@@ -104,6 +106,8 @@ packages = [
 "src/prompts/templates" = "prompts/templates"
 "src/safety/auto_approval/default_rules.yaml" = "safety/auto_approval/default_rules.yaml"
 "config/xspace/setting.yaml" = "config/setting.yaml"
+"config/model-providers.yaml" = "config/model-providers.yaml"
+"config/xspace/agent.toml" = "config/agent.toml"
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -178,7 +182,7 @@ ignore = [
 "src/safety/approval/chain.py" = ["SIM103"]
 "src/infrastructure/config/models.py" = ["SIM103"]
 "src/sessions/session_store.py" = ["SIM108"]
-"src/runtime_assembly/native_runtime.py" = ["SIM108"]
+"src/runtime_assembly/session_engine.py" = ["SIM108"]
 
 [tool.ruff.lint.isort]
 known-first-party = [
@@ -239,6 +243,15 @@ warn_unreachable = true
 module = ["tests.*"]
 ignore_errors = true
 
+# hosts 模块(HostAdapter 子类聚集地)开启 explicit-override 检查:
+# 子类覆盖父类方法必须显式标 @override,漏标 mypy 报错。
+# 这是「Python override 强制对称」的工具层落地(见 AGENTS.md 已知工程陷阱第 1 条):
+# 基类 ABC + @abstractmethod 抓「漏覆盖」,mypy explicit-override 抓「漏标 @override」。
+# 先在 hosts 开,验证稳定后可推广到其他模块。
+[[tool.mypy.overrides]]
+module = ["hosts.*"]
+enable_error_code = ["explicit-override"]
+
 # 第三方包类型
 [[tool.mypy.overrides]]
 module = [
@@ -247,6 +260,7 @@ module = [
     "yaml.*",
     "click.*",
     "prompt_toolkit.*",
+    "trafilatura.*",
 ]
 ignore_missing_imports = true
 

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from hosts.web.approvals.auto.config_store import ConfigStore, ProjectConfig, cwd_hash
+from safety.auto_approval.disposition import ApprovalDispositionMode
 
 # ---------- cwd_hash ----------
 
@@ -38,14 +39,14 @@ class TestCwdHash:
 class TestProjectConfig:
     def test_defaults(self) -> None:
         cfg = ProjectConfig(cwd="/tmp")
-        assert cfg.enabled is False
+        assert cfg.mode is ApprovalDispositionMode.USER
         assert cfg.rule_overrides == {}
         assert cfg.timeout_ms == 0
 
     def test_to_from_json_roundtrip(self) -> None:
         cfg = ProjectConfig(
             cwd="/tmp",
-            enabled=True,
+            mode=ApprovalDispositionMode.LLM,
             rule_overrides={"bash_sudo": False},
             timeout_ms=5000,
         )
@@ -57,12 +58,12 @@ class TestProjectConfig:
         cfg = ProjectConfig.from_json(
             {
                 "cwd": "/x",
-                "enabled": 1,
+                "mode": "full_trust",
                 "rule_overrides": {"a": 0, "b": 1},
                 "timeout_ms": "3000",
             },
         )
-        assert cfg.enabled is True
+        assert cfg.mode is ApprovalDispositionMode.FULL_TRUST
         assert cfg.rule_overrides == {"a": False, "b": True}
         assert cfg.timeout_ms == 3000
 
@@ -82,7 +83,7 @@ class TestConfigStoreCrud:
     def test_get_or_default_returns_default(self, store: ConfigStore) -> None:
         cfg = store.get_or_default("/new/cwd")
         assert cfg.cwd == "/new/cwd"
-        assert cfg.enabled is False  # 新 cwd 默认关
+        assert cfg.mode is ApprovalDispositionMode.USER
         assert cfg.rule_overrides == {}
 
     def test_get_or_default_does_not_persist(self, store: ConfigStore) -> None:
@@ -90,25 +91,25 @@ class TestConfigStoreCrud:
         assert store.get("/new/cwd") is None
 
     def test_set_persists(self, store: ConfigStore) -> None:
-        cfg = ProjectConfig(cwd="/x", enabled=True)
+        cfg = ProjectConfig(cwd="/x", mode=ApprovalDispositionMode.LLM)
         store.set(cfg)
         loaded = store.get("/x")
         assert loaded is not None
-        assert loaded.enabled is True
+        assert loaded.mode is ApprovalDispositionMode.LLM
 
     def test_set_empty_cwd_raises(self, store: ConfigStore) -> None:
         with pytest.raises(ValueError, match="cwd must be non-empty"):
             store.set(ProjectConfig(cwd=""))
 
     def test_set_overwrites(self, store: ConfigStore) -> None:
-        store.set(ProjectConfig(cwd="/x", enabled=True))
-        store.set(ProjectConfig(cwd="/x", enabled=False))
+        store.set(ProjectConfig(cwd="/x", mode=ApprovalDispositionMode.LLM))
+        store.set(ProjectConfig(cwd="/x", mode=ApprovalDispositionMode.USER))
         loaded = store.get("/x")
         assert loaded is not None
-        assert loaded.enabled is False
+        assert loaded.mode is ApprovalDispositionMode.USER
 
     def test_delete_existing(self, store: ConfigStore) -> None:
-        store.set(ProjectConfig(cwd="/x", enabled=True))
+        store.set(ProjectConfig(cwd="/x", mode=ApprovalDispositionMode.LLM))
         assert store.delete("/x") is True
         assert store.get("/x") is None
 
@@ -126,7 +127,7 @@ class TestConfigStoreCrud:
         store.set(
             ProjectConfig(
                 cwd="/x",
-                enabled=True,
+                mode=ApprovalDispositionMode.LLM,
                 rule_overrides={"bash_sudo": False, "bash_dd": False},
             ),
         )
@@ -140,7 +141,7 @@ class TestConfigStoreCrud:
 
 class TestAtomicWrite:
     def test_no_tmp_files_left_after_success(self, store: ConfigStore) -> None:
-        store.set(ProjectConfig(cwd="/x", enabled=True))
+        store.set(ProjectConfig(cwd="/x", mode=ApprovalDispositionMode.LLM))
         # 不应留下 .tmp 文件
         tmps = list(Path(store._root).glob("*.tmp"))
         assert tmps == []
@@ -160,7 +161,7 @@ class TestAtomicWrite:
         assert len(values) == 51
 
         def writer(v: int) -> None:
-            store.set(ProjectConfig(cwd=cwd, enabled=True, timeout_ms=v))
+            store.set(ProjectConfig(cwd=cwd, mode=ApprovalDispositionMode.LLM, timeout_ms=v))
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
             list(pool.map(writer, values))
@@ -174,7 +175,7 @@ class TestAtomicWrite:
     def test_concurrent_read_during_write(self, store: ConfigStore) -> None:
         """边写边读：读到的必须是 valid JSON（旧版或新版完整内容，不会是 half-written）。"""
         cwd = "/proj/rw"
-        store.set(ProjectConfig(cwd=cwd, enabled=True, timeout_ms=1000))
+        store.set(ProjectConfig(cwd=cwd, mode=ApprovalDispositionMode.LLM, timeout_ms=1000))
 
         stop = threading.Event()
         errors: list[Exception] = []
@@ -190,7 +191,15 @@ class TestAtomicWrite:
 
         def writer() -> None:
             for i in range(50):
-                store.set(ProjectConfig(cwd=cwd, enabled=bool(i % 2), timeout_ms=1000 + i))
+                store.set(
+                    ProjectConfig(
+                        cwd=cwd,
+                        mode=(
+                            ApprovalDispositionMode.LLM if i % 2 else ApprovalDispositionMode.USER
+                        ),
+                        timeout_ms=1000 + i,
+                    )
+                )
 
         readers = [threading.Thread(target=reader) for _ in range(4)]
         for t in readers:

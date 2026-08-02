@@ -11,14 +11,16 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from core.contracts import (
-    ApprovalDecision,
-    ApprovalProvider,
-    ApprovalRequest,
+    PreparedToolCall,
+    Session,
     Tool,
+    ToolCallPreparer,
     ToolContext,
     ToolResult,
 )
+from core.errors import ToolPreparationError
 from core.message import Message, ToolCall
+from core.result import Result
 from core.run_state import RunState
 
 SCOPED_WORKDIR_MODE = "scoped_workdir"
@@ -85,6 +87,8 @@ class SubAgentCreationRecord:
     tool_names: tuple[str, ...]
     # 主 agent 选择的 skill 名。
     skill_names: tuple[str, ...]
+    # 子 agent 解析后的运行参数快照。
+    resolved_runtime: dict[str, Any]
     # 权限输入结构。
     permission: SubAgentPermissionSpec
     # 子 agent 最终授权单。
@@ -180,18 +184,21 @@ class ScopedFileTool:
         self.description = inner_tool.description
         self.input_schema = inner_tool.input_schema
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    def prepare(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> PreparedToolCall:
+        """审批前冻结 scoped path，并继续调用内部工具唯一 prepare。"""
         path_decision = _resolve_scoped_path(
             tool_name=self.name,
-            args=args,
+            args=arguments,
             working_dir=self._grant.working_dir,
         )
         if not path_decision.allowed or path_decision.resolved_path is None:
-            return ToolResult(
-                ok=False,
-                content="",
-                error_message=path_decision.reason,
-                data={
+            raise ToolPreparationError(
+                path_decision.reason,
+                details={
                     "decision_source": path_decision.decision_source,
                     "working_dir": str(self._grant.working_dir),
                     "target_path": path_decision.target_path,
@@ -202,106 +209,19 @@ class ScopedFileTool:
                     ),
                 },
             )
-        scoped_args = dict(args)
+        scoped_args = dict(arguments)
         scoped_args[_FILE_TOOL_PATH_FIELD[self.name]] = str(path_decision.resolved_path)
-        return await self._inner_tool.execute(scoped_args, ctx)
+        if isinstance(self._inner_tool, ToolCallPreparer):
+            return self._inner_tool.prepare(scoped_args, context)
+        return PreparedToolCall(arguments=scoped_args)
 
-
-class SubAgentApprovalProvider:
-    """Approval provider that enforces one sub-agent grant before tool execution."""
-
-    def __init__(
+    async def execute(
         self,
-        *,
-        grant: SubAgentGrant,
-        audit_writer: WorkflowAuditWriter,
-        upstream: ApprovalProvider,
-    ) -> None:
-        self._grant = grant
-        self._audit_writer = audit_writer
-        self._upstream = upstream
-
-    async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
-        if request.tool_name not in self._grant.allowed_tools:
-            self._write_audit(
-                request=request,
-                decision="rejected",
-                decision_source="tool_deny",
-                reason=f"tool {request.tool_name!r} is not allowed for this subagent",
-            )
-            return ApprovalDecision(
-                outcome="rejected",
-                reason=f"tool {request.tool_name!r} is not allowed for this subagent",
-                metadata=_decision_metadata(self._grant, "tool_deny"),
-            )
-
-        if request.tool_name not in ALLOWED_SCOPED_FILE_TOOLS:
-            self._write_audit(
-                request=request,
-                decision="rejected",
-                decision_source="tool_deny",
-                reason=f"tool {request.tool_name!r} is outside scoped_workdir v1",
-            )
-            return ApprovalDecision(
-                outcome="rejected",
-                reason=f"tool {request.tool_name!r} is outside scoped_workdir v1",
-                metadata=_decision_metadata(self._grant, "tool_deny"),
-            )
-
-        path_decision = _resolve_scoped_path(
-            tool_name=request.tool_name,
-            args=request.arguments,
-            working_dir=self._grant.working_dir,
-        )
-        if not path_decision.allowed:
-            self._write_audit(
-                request=request,
-                decision="rejected",
-                decision_source=path_decision.decision_source,
-                reason=path_decision.reason,
-                path_decision=path_decision,
-            )
-            return ApprovalDecision(
-                outcome="rejected",
-                reason=path_decision.reason,
-                metadata=_decision_metadata(self._grant, path_decision.decision_source),
-            )
-
-        self._write_audit(
-            request=request,
-            decision="approved",
-            decision_source="grant_allow",
-            reason="target path is inside subagent working_dir",
-            path_decision=path_decision,
-        )
-        return ApprovalDecision(
-            outcome="approved",
-            reason="target path is inside subagent working_dir",
-            metadata=_decision_metadata(self._grant, "grant_allow"),
-        )
-
-    def _write_audit(
-        self,
-        *,
-        request: ApprovalRequest,
-        decision: Literal["approved", "rejected"],
-        decision_source: str,
-        reason: str,
-        path_decision: _ScopedPathDecision | None = None,
-    ) -> None:
-        payload = build_approval_audit_payload(
-            grant=self._grant,
-            run_id=request.run_id,
-            turn=request.turn,
-            call_id=request.call_id,
-            tool_name=request.tool_name,
-            raw_args=request.arguments,
-            decision=decision,
-            decision_source=decision_source,
-            reason=reason,
-            path_decision=path_decision,
-        )
-        write_approval_audit(self._audit_writer, payload)
+        prepared: PreparedToolCall,
+        ctx: ToolContext,
+    ) -> ToolResult:
+        """把同一 prepared 快照交给内部工具执行。"""
+        return await self._inner_tool.execute(prepared, ctx)
 
 
 class SubAgentToolAuditHook:
@@ -340,6 +260,9 @@ class SubAgentToolAuditHook:
             reason=error_message,
         )
         write_approval_audit(self._audit_writer, payload)
+
+    async def after_run(self, state: RunState, session: Session, result: Result) -> None:
+        return None
 
 
 def parse_permission_spec(raw: object) -> SubAgentPermissionSpec:
@@ -498,18 +421,6 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
-def _decision_metadata(grant: SubAgentGrant, decision_source: str) -> dict[str, Any]:
-    return {
-        "decision_class": "silent_allow" if decision_source == "grant_allow" else "hard_block",
-        "decision_source": decision_source,
-        "subagent": True,
-        "workflow_id": grant.workflow_id,
-        "task_run_id": grant.task_run_id,
-        "grant_id": grant.grant_id,
-        "working_dir": str(grant.working_dir),
-    }
-
-
 def _raw_path(args: Mapping[str, Any]) -> str | None:
     value = args.get("path")
     return value if isinstance(value, str) else None
@@ -530,7 +441,6 @@ __all__ = [
     "SUBAGENT_APPROVAL_ACTION",
     "ScopedFileTool",
     "SubAgentApprovalAuditPayload",
-    "SubAgentApprovalProvider",
     "SubAgentCreationRecord",
     "SubAgentGrant",
     "SubAgentPermissionSpec",

@@ -7,7 +7,7 @@ async 主链路。
 安全边界（重要）：
 
 - 本模块**不**维护任何 command 黑名单 / 白名单。命令是否允许执行，全部
-  由上层 :mod:`safety.policies.capability` + :mod:`safety.policies.permission` +
+  由上层 Safety v0.6 三模式决策链 +
   :class:`core.contracts.ApprovalProvider` 串联决定。
 - 本模块**不 import** ``safety/`` 下任何内部 policy 组件（硬约束，
   import-linter 会红）。
@@ -18,22 +18,82 @@ async 主链路。
 - 默认超时 30 秒，可由参数 ``timeout`` 覆盖。超时后先 ``terminate``，仍不退出
   再 ``kill``，并抛 :class:`TimeoutError`（被基类包成结构化失败）。
 - stdout 和 stderr 各自最多保留 8000 字节，超过时截断并标注 ``truncated=True``。
-- 默认工作目录来自当前进程；参数 ``cwd`` 可覆盖。
+- 默认工作目录来自 ``ToolContext``；参数 ``cwd`` 可覆盖。
 """
 
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from core.contracts import Tool, ToolContext
+from core.contracts import PreparedToolCall, Tool, ToolContext, ToolExecutionScope
+from core.errors import ToolPreparationError
 from tools.runtime.base import BaseBuiltinTool
 
 # 默认参数统一收到这里，便于测试/调试时一眼看清。
 _DEFAULT_TIMEOUT_SECONDS = 30.0
 _MAX_STREAM_BYTES = 8000
 _TERMINATE_GRACE_SECONDS = 2.0
+
+
+def _context_cwd(ctx: ToolContext) -> Path:
+    """从 ToolContext 读取绝对 cwd；缺失或非法时失败关闭。"""
+    raw = ctx.metadata.get("cwd")
+    if isinstance(raw, Path):
+        path = raw.expanduser()
+    elif isinstance(raw, str) and raw.strip():
+        path = Path(raw).expanduser()
+    else:
+        raise ToolPreparationError(
+            "shell execution requires ToolContext.metadata['cwd']",
+            details={"code": "cwd_unavailable"},
+        )
+    if not path.is_absolute():
+        raise ToolPreparationError(
+            "ToolContext cwd must be absolute",
+            details={"code": "cwd_unavailable"},
+        )
+    return _canonical_existing_directory(path)
+
+
+def _resolve_cwd(raw_cwd: object, ctx: ToolContext) -> Path:
+    """按 ToolContext cwd 解析 shell cwd，返回唯一 canonical existing directory。"""
+    if raw_cwd is None:
+        return _context_cwd(ctx)
+    if not isinstance(raw_cwd, str) or not raw_cwd.strip():
+        raise ToolPreparationError(
+            "'cwd' must be a non-empty string if provided",
+            details={"code": "cwd_invalid"},
+        )
+    cwd_path = Path(raw_cwd).expanduser()
+    if cwd_path.is_absolute():
+        return _canonical_existing_directory(cwd_path)
+    base = _context_cwd(ctx)
+    return _canonical_existing_directory(base / cwd_path)
+
+
+def _canonical_existing_directory(path: Path) -> Path:
+    """把路径解析为真实目录；缺失和文件路径均在 subprocess 启动前失败。"""
+    try:
+        canonical = path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ToolPreparationError(
+            f"cwd not found: {path}",
+            details={"code": "cwd_not_found"},
+        ) from exc
+    except OSError as exc:
+        raise ToolPreparationError(
+            f"cwd could not be resolved: {path}",
+            details={"code": "cwd_invalid"},
+        ) from exc
+    if not canonical.is_dir():
+        raise ToolPreparationError(
+            f"cwd is not a directory: {canonical}",
+            details={"code": "cwd_not_directory"},
+        )
+    return canonical
 
 
 class ShellTool(BaseBuiltinTool):
@@ -53,28 +113,27 @@ class ShellTool(BaseBuiltinTool):
     - ``return_code``: int
     - ``truncated``: bool
     - ``command``: 原始 command 字符串
-    - ``cwd``: 实际使用的工作目录；未指定时为 ``None``
+    - ``cwd``: 实际使用的工作目录；未指定时使用调用方 cwd
     """
 
     name = "run_shell"
     description = (
-        "Execute a shell command via /bin/sh -c (or platform equivalent) "
-        "and return stdout/stderr/exit code."
+        "通过 /bin/sh -c（或平台等价实现）执行 shell 命令，并返回标准输出、标准错误和退出码。"
     )
     input_schema: dict[str, Any] = {
         "type": "object",
         "properties": {
             "command": {
                 "type": "string",
-                "description": "Shell command string to execute.",
+                "description": "要执行的 shell 命令字符串。",
             },
             "timeout": {
                 "type": "number",
-                "description": "Timeout in seconds. Defaults to 30.",
+                "description": "超时时间，单位为秒；默认值为 30 秒。",
             },
             "cwd": {
                 "type": "string",
-                "description": "Working directory for the command. Defaults to the caller's cwd.",
+                "description": "命令的工作目录；默认使用调用方的 cwd。",
             },
         },
         "required": ["command"],
@@ -91,30 +150,36 @@ class ShellTool(BaseBuiltinTool):
         self._max_stream_bytes = max_stream_bytes
         self._terminate_grace_seconds = terminate_grace_seconds
 
+    def prepare(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,
+    ) -> PreparedToolCall:
+        """审批前校验参数、填充 timeout 并冻结唯一 canonical cwd。"""
+        prepared_arguments = self._validate_args(deepcopy(arguments))
+        command = prepared_arguments["command"]
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError("'command' must be a non-empty string")
+        timeout = prepared_arguments.get("timeout", self._default_timeout)
+        if not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise ValueError("'timeout' must be a positive number")
+        prepared_arguments["timeout"] = float(timeout)
+        effective_cwd = _resolve_cwd(prepared_arguments.get("cwd"), context).as_posix()
+        prepared_arguments["cwd"] = effective_cwd
+        return PreparedToolCall(
+            arguments=prepared_arguments,
+            execution_scope=ToolExecutionScope(cwd=effective_cwd),
+        )
+
     async def _run(
         self,
         args: dict[str, Any],
         ctx: ToolContext,
     ) -> tuple[str, dict[str, Any] | None]:
-        command = args["command"]
-        if not isinstance(command, str) or not command.strip():
-            raise ValueError("'command' must be a non-empty string")
-
-        timeout = args.get("timeout", self._default_timeout)
-        if not isinstance(timeout, (int, float)) or timeout <= 0:
-            raise ValueError("'timeout' must be a positive number")
-
-        raw_cwd = args.get("cwd")
-        cwd_str: str | None = None
-        if raw_cwd is not None:
-            if not isinstance(raw_cwd, str) or not raw_cwd:
-                raise ValueError("'cwd' must be a non-empty string if provided")
-            cwd_path = Path(raw_cwd).expanduser().resolve()
-            if not cwd_path.exists():
-                raise FileNotFoundError(f"cwd not found: {cwd_path}")
-            if not cwd_path.is_dir():
-                raise NotADirectoryError(f"cwd is not a directory: {cwd_path}")
-            cwd_str = str(cwd_path)
+        del ctx
+        command = str(args["command"])
+        timeout = float(args["timeout"])
+        cwd_str = str(args["cwd"])
 
         process = await asyncio.create_subprocess_shell(
             command,

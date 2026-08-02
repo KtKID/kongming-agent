@@ -132,6 +132,8 @@ class TestCodexCommand:
         fake_service.query.assert_called_once()
         kwargs = fake_service.query.call_args.kwargs
         assert kwargs["kongming_thread_id"] == "thread-aaaaaaaaaaaa"
+        assert kwargs["session_id"].startswith("pending-")
+        assert kwargs["session_id"] != kwargs["kongming_thread_id"]
 
     def test_resume_without_session_id_returns_error(
         self,

@@ -2,18 +2,18 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   queryAutoApproval,
   selectCwdState,
-  toggleAutoApproval,
+  setAutoApprovalMode,
   useAutoApprovalStore,
   type AutoApprovalSocket,
 } from "../useAutoApproval";
-import type { AutoApprovalStateFrame } from "../types";
+import type { AutoApprovalStateFrame } from "@/protocol";
 
 function makeStateFrame(overrides: Partial<AutoApprovalStateFrame> = {}): AutoApprovalStateFrame {
   return {
     frame_type: "auto_approval_state",
     channel: "claude_code",
     cwd: "/proj/x",
-    enabled: false,
+    mode: "user",
     timeoutMs: 10000,
     ruleOverrides: {},
     ...overrides,
@@ -27,25 +27,25 @@ beforeEach(() => {
 describe("useAutoApprovalStore.applyStateFrame", () => {
   it("写入新 cwd 状态", () => {
     useAutoApprovalStore.getState().applyStateFrame(
-      makeStateFrame({ cwd: "/p1", enabled: true, timeoutMs: 5000 }),
+      makeStateFrame({ cwd: "/p1", mode: "llm", timeoutMs: 5000 }),
     );
     const got = useAutoApprovalStore.getState().byCwd["/p1"];
-    expect(got).toEqual({ enabled: true, timeoutMs: 5000, ruleOverrides: {} });
+    expect(got).toEqual({ mode: "llm", timeoutMs: 5000, ruleOverrides: {} });
   });
 
   it("覆盖同 cwd 旧状态", () => {
     const store = useAutoApprovalStore.getState();
-    store.applyStateFrame(makeStateFrame({ cwd: "/p", enabled: true }));
-    store.applyStateFrame(makeStateFrame({ cwd: "/p", enabled: false }));
-    expect(useAutoApprovalStore.getState().byCwd["/p"].enabled).toBe(false);
+    store.applyStateFrame(makeStateFrame({ cwd: "/p", mode: "llm" }));
+    store.applyStateFrame(makeStateFrame({ cwd: "/p", mode: "user" }));
+    expect(useAutoApprovalStore.getState().byCwd["/p"].mode).toBe("user");
   });
 
   it("多 cwd 独立存", () => {
     const store = useAutoApprovalStore.getState();
-    store.applyStateFrame(makeStateFrame({ cwd: "/a", enabled: true }));
-    store.applyStateFrame(makeStateFrame({ cwd: "/b", enabled: false }));
-    expect(useAutoApprovalStore.getState().byCwd["/a"].enabled).toBe(true);
-    expect(useAutoApprovalStore.getState().byCwd["/b"].enabled).toBe(false);
+    store.applyStateFrame(makeStateFrame({ cwd: "/a", mode: "full_trust" }));
+    store.applyStateFrame(makeStateFrame({ cwd: "/b", mode: "user" }));
+    expect(useAutoApprovalStore.getState().byCwd["/a"].mode).toBe("full_trust");
+    expect(useAutoApprovalStore.getState().byCwd["/b"].mode).toBe("user");
   });
 
   it("ruleOverrides 被独立拷贝（不共享引用）", () => {
@@ -63,11 +63,11 @@ describe("useAutoApprovalStore.applyStateFrame", () => {
 describe("selectCwdState", () => {
   it("拿到对应 cwd 状态", () => {
     useAutoApprovalStore.getState().applyStateFrame(
-      makeStateFrame({ cwd: "/x", enabled: true }),
+      makeStateFrame({ cwd: "/x", mode: "llm" }),
     );
     const sel = selectCwdState("/x");
     const got = sel(useAutoApprovalStore.getState());
-    expect(got?.enabled).toBe(true);
+    expect(got?.mode).toBe("llm");
   });
 
   it("空 cwd 返回 null", () => {
@@ -103,30 +103,30 @@ describe("queryAutoApproval", () => {
   });
 });
 
-describe("toggleAutoApproval", () => {
-  it("发 toggle 帧 + optimistic 更新 store", () => {
+describe("setAutoApprovalMode", () => {
+  it("发送 set-mode 帧并乐观更新 store", () => {
     const send = vi.fn();
-    toggleAutoApproval({ send }, "/p", true);
+    setAutoApprovalMode({ send }, "/p", "llm");
     expect(send).toHaveBeenCalledWith({
-      frame_type: "auto-approval-toggle",
+      frame_type: "auto-approval-set-mode",
       cwd: "/p",
-      enabled: true,
+      mode: "llm",
     });
-    expect(useAutoApprovalStore.getState().byCwd["/p"].enabled).toBe(true);
+    expect(useAutoApprovalStore.getState().byCwd["/p"].mode).toBe("llm");
   });
 
   it("保留 timeoutMs / ruleOverrides 既有值（optimistic 不覆盖未知字段）", () => {
     useAutoApprovalStore.getState().applyStateFrame(
       makeStateFrame({
         cwd: "/p",
-        enabled: false,
+        mode: "user",
         timeoutMs: 5000,
         ruleOverrides: { bash_sudo: false },
       }),
     );
-    toggleAutoApproval({ send: vi.fn() }, "/p", true);
+    setAutoApprovalMode({ send: vi.fn() }, "/p", "full_trust");
     const s = useAutoApprovalStore.getState().byCwd["/p"];
-    expect(s.enabled).toBe(true);
+    expect(s.mode).toBe("full_trust");
     expect(s.timeoutMs).toBe(5000);
     expect(s.ruleOverrides).toEqual({ bash_sudo: false });
   });
@@ -135,13 +135,13 @@ describe("toggleAutoApproval", () => {
     const send = vi.fn(() => {
       throw new Error("socket closed");
     });
-    toggleAutoApproval({ send }, "/p", true);
+    setAutoApprovalMode({ send }, "/p", "llm");
     expect(useAutoApprovalStore.getState().byCwd["/p"]).toBeUndefined();
   });
 
   it("空 cwd 不发送", () => {
     const send = vi.fn();
-    toggleAutoApproval({ send }, "", true);
+    setAutoApprovalMode({ send }, "", "llm");
     expect(send).not.toHaveBeenCalled();
   });
 });

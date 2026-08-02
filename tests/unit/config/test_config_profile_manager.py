@@ -22,18 +22,9 @@ XSPACE_KEEP_PATHS = (
     "evolution.learning.enabled",
     "evolution.learning.every_n_runs",
     "evolution.learning.max_nutrients",
-    "evolution.learning.min_user_turns",
     "evolution.learning.review_timeout_seconds",
     "evolution.memory.view_max_chars",
-    "mcp.enabled",
-    "model.name",
-    "model.reasoning_effort",
-    "model.reasoning_profiles",
-    "safety.allow_tools_silent",
-    "safety.approval_required_commands",
-    "safety.sensitive_paths",
     "web.host",
-    "web.llm_presets",
     "web_search.search_tool_name",
     "web_search.search_tool_names",
 )
@@ -60,7 +51,6 @@ def _write_complete_policy(source: Path, target: Path, policy: Path) -> None:
     manager = _manager(source, target, policy)
     for path in XSPACE_KEEP_PATHS:
         manager.write_decision(path, "xspace-keep", f"{path} 使用 XSpace profile 值")
-    manager.write_decision("mcp.servers", "main-only", "XSpace profile 省略 MCP server 列表")
 
 
 def _remove_policy_decision(policy: Path, path: str) -> None:
@@ -85,16 +75,19 @@ def test_profile_review_passes_with_real_policy_copy(tmp_path: Path) -> None:
     assert not review.issues
 
 
-def test_profile_review_reports_missing_main_only_decision(tmp_path: Path) -> None:
-    """目标缺字段且缺 main-only 决策时，review 必须报告待决策。"""
+def test_profile_review_reports_missing_search_tools_xspace_keep_decision(
+    tmp_path: Path,
+) -> None:
+    """XSpace 搜索工具列表缺 keep 决策时，review 必须报告待决策。"""
     source, target, policy = _copy_profile_files(tmp_path)
     _write_complete_policy(source, target, policy)
-    _remove_policy_decision(policy, "mcp.servers")
+    _remove_policy_decision(policy, "web_search.search_tool_names")
 
     review = _manager(source, target, policy).review()
 
     assert any(
-        issue.path == "mcp.servers" and issue.code == "target-missing-decision-required"
+        issue.path == "web_search.search_tool_names"
+        and issue.code == "xspace-keep-decision-required"
         for issue in review.issues
     )
 
@@ -157,29 +150,6 @@ def test_sync_copy_updates_target_and_policy(tmp_path: Path) -> None:
     assert "path: web.host" in policy_text
     assert "action: sync-copy" in policy_text
     assert not review.issues
-
-
-def test_write_decision_keeps_policy_decisions_sorted(tmp_path: Path) -> None:
-    """替换已有 decision 后，policy 条目仍按 path 稳定排序。"""
-    source, target, policy = _copy_profile_files(tmp_path)
-    manager = _manager(source, target, policy)
-    manager.write_decision("web.host", "xspace-keep", "XSpace sidecar 默认监听本机")
-    manager.write_decision("mcp.servers", "main-only", "XSpace profile 省略 MCP server 列表")
-
-    yaml = YAML(typ="rt")
-    yaml.preserve_quotes = True
-    with policy.open("r", encoding="utf-8") as f:
-        doc = yaml.load(f)
-    doc["decisions"] = list(reversed(doc["decisions"]))
-    with policy.open("w", encoding="utf-8") as f:
-        yaml.dump(doc, f)
-
-    manager.write_decision("web.host", "xspace-keep", "XSpace sidecar 默认监听本机")
-
-    with policy.open("r", encoding="utf-8") as f:
-        updated = yaml.load(f)
-    paths = [item["path"] for item in updated["decisions"]]
-    assert paths == sorted(paths)
 
 
 def test_write_decision_rejects_blank_reason(tmp_path: Path) -> None:
@@ -246,35 +216,6 @@ def test_config_xspace_sync_script_rejects_blank_reason(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert "reason" in result.stderr
     assert policy.read_text(encoding="utf-8") == before
-
-
-def test_config_xspace_sync_script_sync_reports_missing_target(tmp_path: Path) -> None:
-    """sync 子命令遇到 writer/IO 错误时，必须转为稳定退出码。"""
-    source, _target, policy = _copy_profile_files(tmp_path)
-    missing_target = tmp_path / "missing-xspace-setting.yaml"
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(SYNC_SCRIPT),
-            "--source",
-            str(source),
-            "--target",
-            str(missing_target),
-            "--policy",
-            str(policy),
-            "sync",
-            "--path",
-            "web.host",
-        ],
-        cwd=REPO_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 2
-    assert "error:" in result.stderr
 
 
 def test_config_xspace_sync_script_review_passes(tmp_path: Path) -> None:

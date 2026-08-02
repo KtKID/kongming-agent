@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from hosts.web.integrations.codex.approval import map_permission_mode
 
 
@@ -13,8 +15,10 @@ class TestPermissionModeMapping:
     def test_bypass_permissions(self) -> None:
         assert map_permission_mode("bypassPermissions") == ("danger-full-access", "never")
 
-    def test_unknown_mode_falls_back(self) -> None:
-        assert map_permission_mode("unknown") == ("workspace-write", "untrusted")
+    def test_unknown_mode_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="unsupported Codex permission mode"):
+            map_permission_mode("unknown")
 
-    def test_empty_string_falls_back(self) -> None:
-        assert map_permission_mode("") == ("workspace-write", "untrusted")
+    def test_empty_string_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="unsupported Codex permission mode"):
+            map_permission_mode("")

@@ -28,8 +28,8 @@ def _make_pending(
     tool_input: dict | None = None,
     severity: str = "standard",
     matched_rule: str | None = None,
-    auto_approve_at_ms: int | None = None,
-    auto_reject_at_ms: int | None = None,
+    danger: bool = False,
+    remember_allowed: bool = False,
     arrived_at_ms: int = 1234,
     timeout_ms: int | None = 60_000,
 ) -> PendingApprovalView:
@@ -48,8 +48,8 @@ def _make_pending(
         metadata={},
         severity=severity,
         matched_rule=matched_rule,
-        auto_approve_at_ms=auto_approve_at_ms,
-        auto_reject_at_ms=auto_reject_at_ms,
+        danger=danger,
+        remember_allowed=remember_allowed,
         arrived_at_ms=arrived_at_ms,
         timeout_ms=timeout_ms if timeout_ms is not None else 60_000,
     )
@@ -91,8 +91,8 @@ class TestEmitApprovalRequired:
         assert payload["cwd"] == "/work"
         assert payload["arrivedAtMs"] == 5000
         assert payload["isElevated"] is False  # standard severity
-        assert payload["autoApproveAtMs"] is None
-        assert payload["autoRejectAtMs"] is None
+        assert payload["danger"] is False
+        assert payload["rememberAllowed"] is False
         assert payload["blockedByRule"] is None
         assert "kind" not in payload  # kind 由 broadcaster 自动补
 
@@ -106,7 +106,7 @@ class TestEmitApprovalRequired:
         pending = _make_pending(
             severity="elevated",
             matched_rule="Bash(rm:*)",
-            auto_reject_at_ms=30_000,
+            danger=True,
         )
 
         await sink.emit_approval_required(pending=pending)
@@ -114,7 +114,7 @@ class TestEmitApprovalRequired:
         payload = broadcaster.emit_add.call_args.args[0]
         assert payload["isElevated"] is True
         assert payload["blockedByRule"] == "Bash(rm:*)"
-        assert payload["autoRejectAtMs"] == 30_000
+        assert payload["danger"] is True
 
     async def test_payload_timeout_ms_from_pending(self) -> None:
         """pending view 的 timeout_ms 透传到 broadcaster.emit_add 的 payload.timeoutMs。
@@ -152,8 +152,9 @@ class TestEmitApprovalRequired:
             tool_input={"command": "ls"},
             severity="standard",
             matched_rule=None,
-            auto_approve_at_ms=None,
-            auto_reject_at_ms=None,
+            danger=False,
+            remember_allowed=False,
+            remember_rule=None,
             arrived_at_ms=1234,
             timeout_ms=None,
         )

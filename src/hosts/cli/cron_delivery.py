@@ -24,6 +24,8 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 
+from typing_extensions import override
+
 from scheduler.delivery import DeliveryResult, DeliverySink
 from scheduler.domain import ScheduledRun, ScheduledTask
 
@@ -34,7 +36,7 @@ class CliDeliverySink(DeliverySink):
     使用方式（cli/main.py REPL 主循环）::
 
         cli_sink = CliDeliverySink()
-        # 装配进 DeliveryDispatcher → build_cron_execution_bridge
+        # 装配进 DeliveryDispatcher → build_scheduled_run_manager
         ...
         while True:
             pending = await cli_sink.drain_pending()
@@ -51,6 +53,7 @@ class CliDeliverySink(DeliverySink):
         self._buffer: deque[str] = deque(maxlen=self.MAX_BUFFER_LINES)
         self._lock = asyncio.Lock()
 
+    @override
     async def deliver(
         self,
         task: ScheduledTask,

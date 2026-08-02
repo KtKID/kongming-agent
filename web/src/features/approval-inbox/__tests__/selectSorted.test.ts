@@ -3,13 +3,13 @@ import {
   selectSorted,
   useApprovalInboxStore,
 } from "../useApprovalInbox";
-import type { ApprovalInboxItem } from "../types";
+import type { ApprovalInboxItem } from "@/protocol";
 
 /**
  * selectSorted 排序选择器单测。
  *
  * 规则（与 useApprovalInbox.ts L120-135 注释对齐）：
- * - 危险卡（blockedByRule !== null）置顶
+ * - danger 卡置顶
  * - 每组内按 arrivedAtMs 递增（旧 → 新）
  * - 同 arrivedAtMs 应保持稳定（Array.sort 不保证 stable 在老引擎；现代 V8 稳定）
  */
@@ -20,20 +20,21 @@ function makeItem(overrides: Partial<ApprovalInboxItem> = {}): ApprovalInboxItem
     threadId: "t",
     toolName: "Bash",
     toolInput: {},
-    autoApproveAtMs: null,
-    autoRejectAtMs: null,
     blockedByRule: null,
     isElevated: false,
+    danger: false,
+    rememberAllowed: false,
     channel: "claude_code",
     cwd: "/p",
     arrivedAtMs: 0,
     timeoutMs: null,
+    rememberRule: null,
     ...overrides,
   };
 }
 
 beforeEach(() => {
-  useApprovalInboxStore.setState({ byRequestId: {} });
+  useApprovalInboxStore.getState().clear();
 });
 
 function seed(items: ApprovalInboxItem[]) {
@@ -61,10 +62,11 @@ describe("selectSorted", () => {
     seed([
       makeItem({
         requestId: "x",
+        danger: true,
         blockedByRule: "rm-rf",
         arrivedAtMs: 200,
       }),
-      makeItem({ requestId: "y", blockedByRule: "sudo", arrivedAtMs: 100 }),
+      makeItem({ requestId: "y", danger: true, blockedByRule: "sudo", arrivedAtMs: 100 }),
     ]);
     const out = selectSorted(useApprovalInboxStore.getState());
     expect(out.map((i) => i.requestId)).toEqual(["y", "x"]);
@@ -75,12 +77,14 @@ describe("selectSorted", () => {
       makeItem({ requestId: "safe-late", arrivedAtMs: 50 }),
       makeItem({
         requestId: "danger-late",
+        danger: true,
         blockedByRule: "r1",
         arrivedAtMs: 40,
       }),
       makeItem({ requestId: "safe-early", arrivedAtMs: 10 }),
       makeItem({
         requestId: "danger-early",
+        danger: true,
         blockedByRule: "r2",
         arrivedAtMs: 20,
       }),

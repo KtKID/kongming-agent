@@ -2,14 +2,14 @@ import { create } from "zustand";
 import type {
   AutoApprovalQueryFrame,
   AutoApprovalStateFrame,
-  AutoApprovalToggleFrame,
-} from "./types";
+  AutoApprovalSetModeFrame,
+} from "@/protocol";
 
 /**
  * smart-approval-v1 per-cwd 状态 store。
  *
- * 状态来源：后端 `auto_approval_state` 帧（连接建立时主动 push / toggle 回执 / query 应答）。
- * UI 操作：toggle 切换走 `auto-approval-toggle` 帧，回执后端会再发一次 state 自动刷新。
+ * 状态来源：后端 `auto_approval_state` 帧（连接建立时主动 push / set-mode 回执 / query 应答）。
+ * UI 操作：模式选择走 `auto-approval-set-mode` 帧，回执后端会再发一次 state 自动刷新。
  *
  * 不缓存计算结果，每次 toggle/query 都走 WS round-trip → 后端是真源。
  *
@@ -18,7 +18,7 @@ import type {
 
 /** 单 cwd 的状态快照（与后端 AutoApprovalStateFrame 对齐，去掉 kind/channel） */
 export interface AutoApprovalCwdState {
-  enabled: boolean;
+  mode: "user" | "llm" | "full_trust";
   timeoutMs: number;
   ruleOverrides: Record<string, boolean>;
 }
@@ -34,7 +34,7 @@ interface AutoApprovalStore {
 
 /** 极简的"能发送指定帧"的 socket 接口（避免引入完整 ClaudeCodeSocket 类型） */
 export interface AutoApprovalSocket {
-  send: (frame: AutoApprovalToggleFrame | AutoApprovalQueryFrame) => boolean | void;
+  send: (frame: AutoApprovalSetModeFrame | AutoApprovalQueryFrame) => boolean | void;
 }
 
 export const useAutoApprovalStore = create<AutoApprovalStore>((set) => ({
@@ -44,7 +44,7 @@ export const useAutoApprovalStore = create<AutoApprovalStore>((set) => ({
       byCwd: {
         ...s.byCwd,
         [frame.cwd]: {
-          enabled: frame.enabled,
+          mode: frame.mode,
           timeoutMs: frame.timeoutMs,
           ruleOverrides: { ...frame.ruleOverrides },
         },
@@ -75,19 +75,19 @@ export function queryAutoApproval(socket: AutoApprovalSocket, cwd: string): void
 }
 
 /**
- * Toggle 开关：发 toggle 帧；后端会回 state 帧自动刷新 store。
+ * 设置处置模式：发送 set-mode 帧；后端会回 state 帧自动刷新 store。
  *
  * 同时 optimistic 更新本地 store（避免按下后立刻收到 state 之间的 UI 闪烁）。
  * 若 send 抛错（socket 断），不 optimistic、调用方应感知失败。
  */
-export function toggleAutoApproval(
+export function setAutoApprovalMode(
   socket: AutoApprovalSocket,
   cwd: string,
-  enabled: boolean,
+  mode: "user" | "llm" | "full_trust",
 ): void {
   if (!cwd) return;
   try {
-    const sent = socket.send({ frame_type: "auto-approval-toggle", cwd, enabled });
+    const sent = socket.send({ frame_type: "auto-approval-set-mode", cwd, mode });
     if (sent === false) return;
   } catch {
     // socket 不可用：交给上层 UI 反馈；不 optimistic
@@ -100,7 +100,7 @@ export function toggleAutoApproval(
     byCwd: {
       ...s.byCwd,
       [cwd]: {
-        enabled,
+        mode,
         timeoutMs: prev?.timeoutMs ?? 10000,
         ruleOverrides: prev?.ruleOverrides ?? {},
       },

@@ -30,6 +30,7 @@ class FakeInner:
 def _make_request(
     tool_name: str = "shell",
     arguments: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> ApprovalRequest:
     return ApprovalRequest(
         run_id="run-1",
@@ -39,7 +40,7 @@ def _make_request(
         tool_name=tool_name,
         arguments=arguments or {"command": "rm -rf /tmp/x"},
         reason="test",
-        metadata={},
+        metadata=dict(metadata or {}),
     )
 
 
@@ -50,7 +51,9 @@ def _consent_decision(outcome: str = "approved") -> ApprovalDecision:
         metadata={
             "decision_class": "explicit_consent",
             "decision_source": "standard",
-            "matched_rule": "approval:write",
+            "matched_rule": "default:ask",
+            "source": "builtin",
+            "bypass_immune": False,
         },
     )
 
@@ -69,7 +72,7 @@ async def test_fail_closed_when_consent_required_for_non_whitelisted_tool() -> N
     assert decision.metadata["original_outcome"] == "approved"
     assert decision.metadata["cron_task_id"] == "cron-task-42"
     assert decision.metadata["decision_class"] == "explicit_consent"
-    assert decision.metadata["matched_rule"] == "approval:write"
+    assert decision.metadata["matched_rule"] == "default:ask"
 
 
 @pytest.mark.asyncio
@@ -96,6 +99,24 @@ async def test_auto_allows_new_file_create_inside_cwd(
     assert decision.metadata["original_decision_class"] == "explicit_consent"
     assert decision.metadata["original_outcome"] == "approved"
     assert decision.metadata["cron_task_id"] == "cron-task-create"
+
+
+@pytest.mark.asyncio
+async def test_auto_allows_new_file_create_inside_request_cwd(tmp_path: Path) -> None:
+    inner = FakeInner(decision=_consent_decision())
+    wrapped = ScheduleApprovalProvider(inner=inner, task_id="cron-task-create")
+
+    decision = await wrapped.decide(
+        _make_request(
+            tool_name="write_file",
+            arguments={"path": "scheduled/output.txt", "content": "hello"},
+            metadata={"cwd": str(tmp_path)},
+        )
+    )
+
+    assert decision.outcome == "approved"
+    assert decision.metadata["decision_class"] == "silent_allow"
+    assert decision.metadata["cron_auto_allow"] == "write_file_create"
 
 
 @pytest.mark.asyncio
@@ -322,13 +343,19 @@ async def test_request_is_passed_through_untouched() -> None:
 
 @pytest.mark.asyncio
 async def test_fail_closed_does_not_mutate_inner_metadata() -> None:
-    inner_meta: dict[str, Any] = {"decision_class": "explicit_consent"}
+    inner_meta: dict[str, Any] = {
+        "decision_class": "explicit_consent",
+        "matched_rule": "default:ask",
+    }
     inner_decision = ApprovalDecision(outcome="approved", metadata=inner_meta)
     inner = FakeInner(decision=inner_decision)
     wrapped = ScheduleApprovalProvider(inner=inner, task_id="cron-task-iso")
 
     decision = await wrapped.decide(_make_request())
 
-    assert inner_meta == {"decision_class": "explicit_consent"}
+    assert inner_meta == {
+        "decision_class": "explicit_consent",
+        "matched_rule": "default:ask",
+    }
     assert decision.metadata is not inner_meta
     assert decision.metadata["cron_fail_closed"] is True

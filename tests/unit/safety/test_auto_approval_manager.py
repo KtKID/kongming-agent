@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from safety.auto_approval import AutoApprovalManager
+from safety.auto_approval import ApprovalDispositionMode, AutoApprovalManager
 
 
 def test_build_materializes_rules_and_exposes_policy(tmp_path: Path) -> None:
@@ -17,19 +17,12 @@ def test_build_materializes_rules_and_exposes_policy(tmp_path: Path) -> None:
     assert manager.policy.rule_set is manager.rule_set
 
 
-def test_manager_delegates_config_and_classify(tmp_path: Path) -> None:
+def test_manager_delegates_mode_config(tmp_path: Path) -> None:
     manager = AutoApprovalManager.build(tmp_path)
 
-    cfg = manager.set_enabled("/proj", True)
-    assert cfg.enabled is True
-    assert manager.is_enabled_for("/proj") is True
-    assert manager.get_config("/proj").enabled is True
+    cfg = manager.set_mode("/proj", ApprovalDispositionMode.LLM)
+    assert cfg.mode is ApprovalDispositionMode.LLM
+    assert manager.mode_for("/proj") is ApprovalDispositionMode.LLM
+    assert manager.get_config("/proj").mode is ApprovalDispositionMode.LLM
 
-    decision = manager.classify(
-        tool_name="Bash",
-        tool_input={"command": "ls"},
-        cwd="/proj",
-        is_elevated=False,
-    )
-    assert decision.auto_eligible is True
-    assert decision.blocked_by_rule is None
+    assert not hasattr(manager, "classify")

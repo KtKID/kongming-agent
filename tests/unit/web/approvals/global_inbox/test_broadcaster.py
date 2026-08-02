@@ -5,7 +5,7 @@
 - emit_add 写入 snapshot + fan-out
 - emit_remove 清 snapshot + fan-out
 - push_snapshot 给单个 ws
-- bridge_registry register/unregister/get/resolve
+- resolve target register/unregister/resolve
 - 并发 emit / detach 不死锁
 - 失败连接自动 detach（不影响其他订阅者）
 """
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -38,6 +37,22 @@ class _FakeWS:
         self.sent.append(frame)
 
 
+class _BlockingWS(_FakeWS):
+    """首帧发送可控阻塞，用于证明 snapshot 与增量共享同一排队边界。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def send_json(self, frame: dict[str, Any]) -> None:
+        """首个 send 停在闸门，后续 send 按调用顺序直接记录。"""
+        if not self.sent:
+            self.entered.set()
+            await self.release.wait()
+        self.sent.append(frame)
+
+
 def _make_payload(
     request_id: str = "toolu_x",
     thread_id: str = "thread-aaa",
@@ -47,10 +62,10 @@ def _make_payload(
         "threadId": thread_id,
         "toolName": "Bash",
         "toolInput": {"command": "ls"},
-        "autoApproveAtMs": None,
-        "autoRejectAtMs": None,
         "blockedByRule": None,
         "isElevated": False,
+        "danger": False,
+        "rememberAllowed": False,
         "channel": "claude_code",
         "cwd": "/proj/x",
         "arrivedAtMs": 1_000_000_000,
@@ -211,58 +226,6 @@ class TestBrokenConnection:
         assert broadcaster.subscriber_count == 0
 
 
-# ---------- bridge_registry ----------
-
-
-class TestBridgeRegistry:
-    def test_register_and_get(self, broadcaster: ApprovalInboxBroadcaster) -> None:
-        bridge = MagicMock()
-        broadcaster.register_bridge("thread-aaa", bridge)
-        assert broadcaster.get_bridge("thread-aaa") is bridge
-
-    def test_register_empty_thread_id_silent(self, broadcaster: ApprovalInboxBroadcaster) -> None:
-        broadcaster.register_bridge("", MagicMock())
-        assert broadcaster.get_bridge("") is None
-
-    def test_register_overwrites_on_same_thread_id(
-        self, broadcaster: ApprovalInboxBroadcaster
-    ) -> None:
-        old = MagicMock()
-        new = MagicMock()
-        broadcaster.register_bridge("thread-aaa", old)
-        broadcaster.register_bridge("thread-aaa", new)
-        assert broadcaster.get_bridge("thread-aaa") is new
-
-    def test_unregister_only_if_match(self, broadcaster: ApprovalInboxBroadcaster) -> None:
-        """旧 bridge 的 unregister 不能误删被新 bridge 覆盖后的 registry。"""
-        old = MagicMock()
-        new = MagicMock()
-        broadcaster.register_bridge("thread-aaa", old)
-        broadcaster.register_bridge("thread-aaa", new)
-        # 老连接断开时调 unregister(old)，不应误删 new
-        broadcaster.unregister_bridge("thread-aaa", old)
-        assert broadcaster.get_bridge("thread-aaa") is new
-
-    def test_unregister_matching_removes(self, broadcaster: ApprovalInboxBroadcaster) -> None:
-        bridge = MagicMock()
-        broadcaster.register_bridge("thread-aaa", bridge)
-        broadcaster.unregister_bridge("thread-aaa", bridge)
-        assert broadcaster.get_bridge("thread-aaa") is None
-
-    def test_resolve_routes_to_bridge(self, broadcaster: ApprovalInboxBroadcaster) -> None:
-        bridge = MagicMock()
-        bridge.resolve = MagicMock(return_value=True)
-        broadcaster.register_bridge("thread-aaa", bridge)
-
-        ok = broadcaster.resolve("thread-aaa", "toolu_x", {"allow": True})
-        assert ok is True
-        bridge.resolve.assert_called_once_with("toolu_x", {"allow": True})
-
-    def test_resolve_no_bridge_returns_false(self, broadcaster: ApprovalInboxBroadcaster) -> None:
-        ok = broadcaster.resolve("thread-never", "toolu_x", {"allow": False})
-        assert ok is False
-
-
 # ---------- 并发 ----------
 
 
@@ -294,6 +257,53 @@ class TestConcurrency:
         )
         assert broadcaster.pending_count == 0
 
+    async def test_snapshot_enqueue_precedes_concurrent_add(
+        self,
+        broadcaster: ApprovalInboxBroadcaster,
+    ) -> None:
+        """旧空 snapshot 必须先于并发 add，避免前端清掉刚到的新卡。"""
+        ws = _BlockingWS()
+        await broadcaster.attach(ws)
+        snapshot_task = asyncio.create_task(broadcaster.push_snapshot(ws))
+        await ws.entered.wait()
+
+        add_task = asyncio.create_task(
+            broadcaster.emit_add(_make_payload(request_id="new-request"))
+        )
+        await asyncio.sleep(0)
+        assert add_task.done() is False
+
+        ws.release.set()
+        await asyncio.gather(snapshot_task, add_task)
+        assert [frame["frame_type"] for frame in ws.sent] == [
+            "approval.inbox.snapshot",
+            "approval.inbox.add",
+        ]
+
+    async def test_snapshot_enqueue_precedes_concurrent_remove(
+        self,
+        broadcaster: ApprovalInboxBroadcaster,
+    ) -> None:
+        """含旧卡 snapshot 必须先于并发 remove，避免前端复活已结束卡片。"""
+        await broadcaster.emit_add(_make_payload(request_id="old-request"))
+        ws = _BlockingWS()
+        await broadcaster.attach(ws)
+        snapshot_task = asyncio.create_task(broadcaster.push_snapshot(ws))
+        await ws.entered.wait()
+
+        remove_task = asyncio.create_task(
+            broadcaster.emit_remove("old-request", reason="user_decided")
+        )
+        await asyncio.sleep(0)
+        assert remove_task.done() is False
+
+        ws.release.set()
+        await asyncio.gather(snapshot_task, remove_task)
+        assert [frame["frame_type"] for frame in ws.sent] == [
+            "approval.inbox.snapshot",
+            "approval.inbox.remove",
+        ]
+
 
 # ---------- 单例 ----------
 
@@ -319,27 +329,27 @@ class TestSingleton:
 class TestRegisterResolveTarget:
     """阶段 1 新增：register_resolve_target / unregister_resolve_target API。"""
 
-    def test_register_then_resolve_routes_to_callback(self) -> None:
+    async def test_register_then_resolve_routes_to_callback(self) -> None:
         """register 后 resolve(thread_id, req_id, ...) 调用对应 callback。"""
         bc = ApprovalInboxBroadcaster()
-        called: list[tuple[str, dict[str, Any]]] = []
+        called: list[tuple[str, str, dict[str, Any]]] = []
 
-        def cb(req_id: str, dec: dict[str, Any]) -> bool:
-            called.append((req_id, dec))
+        async def cb(thread_id: str, req_id: str, dec: dict[str, Any]) -> bool:
+            called.append((thread_id, req_id, dec))
             return True
 
         bc.register_resolve_target("t1", cb)
-        assert bc.resolve("t1", "r1", {"allow": True}) is True
-        assert called == [("r1", {"allow": True})]
+        assert await bc.resolve("t1", "r1", {"allow": True}) is True
+        assert called == [("t1", "r1", {"allow": True})]
 
     def test_unregister_with_is_check_does_not_delete_overridden(self) -> None:
         """老 callback unregister 不能删新 callback（is 比较防覆盖误删）。"""
         bc = ApprovalInboxBroadcaster()
 
-        def cb_old(req_id: str, dec: dict[str, Any]) -> bool:
+        async def cb_old(thread_id: str, req_id: str, dec: dict[str, Any]) -> bool:
             return True
 
-        def cb_new(req_id: str, dec: dict[str, Any]) -> bool:
+        async def cb_new(thread_id: str, req_id: str, dec: dict[str, Any]) -> bool:
             return True
 
         bc.register_resolve_target("t1", cb_old)
@@ -349,35 +359,26 @@ class TestRegisterResolveTarget:
         assert "t1" in bc._resolve_targets
         assert bc._resolve_targets["t1"] is cb_new
 
-    def test_resolve_target_priority_over_bridge_registry(self) -> None:
-        """阶段 1 双轨：_resolve_targets 优先于 _bridge_registry。"""
+    async def test_resolve_uses_registered_target(self) -> None:
+        """resolve 始终路由到统一 ApprovalManager callback。"""
         bc = ApprovalInboxBroadcaster()
+        target_called: list[tuple[str, str, dict[str, Any]]] = []
 
-        # 假装注册了一个 bridge
-        mock_bridge = MagicMock()
-        mock_bridge.resolve.return_value = False  # 故意返回 False，区分两路径
-        bc._bridge_registry["t1"] = mock_bridge
-
-        # 同时注册 resolve_target
-        target_called: list[tuple[str, dict[str, Any]]] = []
-
-        def cb(req_id: str, dec: dict[str, Any]) -> bool:
-            target_called.append((req_id, dec))
-            return True  # 区分两路径
+        async def cb(thread_id: str, req_id: str, dec: dict[str, Any]) -> bool:
+            target_called.append((thread_id, req_id, dec))
+            return True
 
         bc.register_resolve_target("t1", cb)
 
-        # 应走 _resolve_targets（True）不走 bridge（False）
-        result = bc.resolve("t1", "r1", {"allow": True})
+        result = await bc.resolve("t1", "r1", {"allow": True})
         assert result is True
-        assert target_called == [("r1", {"allow": True})]
-        mock_bridge.resolve.assert_not_called()
+        assert target_called == [("t1", "r1", {"allow": True})]
 
     def test_register_empty_thread_id_silent(self) -> None:
         """空 thread_id 静默忽略（与 register_bridge 一致）。"""
         bc = ApprovalInboxBroadcaster()
 
-        def cb(req_id: str, dec: dict[str, Any]) -> bool:
+        async def cb(thread_id: str, req_id: str, dec: dict[str, Any]) -> bool:
             return True
 
         bc.register_resolve_target("", cb)
@@ -387,7 +388,7 @@ class TestRegisterResolveTarget:
         """没注册过 unregister 不抛。"""
         bc = ApprovalInboxBroadcaster()
 
-        def cb(req_id: str, dec: dict[str, Any]) -> bool:
+        async def cb(thread_id: str, req_id: str, dec: dict[str, Any]) -> bool:
             return True
 
         bc.unregister_resolve_target("t-never", cb)  # 不抛

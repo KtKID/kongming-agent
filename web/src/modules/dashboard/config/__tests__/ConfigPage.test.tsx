@@ -25,7 +25,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { useConfigStore } from "../store";
@@ -63,8 +63,10 @@ vi.mock("../sections/ToolApprovalSection", () => ({
 }));
 
 vi.mock("../sections/SafetySection", () => ({
-  SafetySection: () => (
-    <div data-testid="safety-section">SafetySection(no-fields)</div>
+  SafetySection: ({ fields }: { fields: FieldMeta[] }) => (
+    <div data-testid="safety-section" data-field-count={fields.length}>
+      SafetySection({fields.length})
+    </div>
   ),
 }));
 
@@ -169,6 +171,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  cleanup();
   useConfigStore.getState().reset();
   vi.restoreAllMocks();
 });
@@ -237,7 +240,7 @@ describe("ConfigPage", () => {
     expect(stub.getAttribute("data-field-count")).toBe("2");
   });
 
-  it("loaded + section=safety 时渲染 SafetySection（不传 fields）", () => {
+  it("loaded + section=safety 时渲染 SafetySection 并传入 safety fields", () => {
     useConfigStore.setState({
       loadStatus: "loaded",
       schema: makeSchema(),
@@ -245,7 +248,7 @@ describe("ConfigPage", () => {
       raw: makeRaw(),
     });
     renderAt("/manage/config/safety");
-    expect(screen.getByTestId("safety-section")).toBeInTheDocument();
+    expect(screen.getByTestId("safety-section")).toHaveAttribute("data-field-count", "1");
     // 其他 section 不应渲染
     expect(screen.queryByTestId("model-section")).toBeNull();
   });

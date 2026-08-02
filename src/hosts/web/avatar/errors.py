@@ -9,8 +9,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from typing_extensions import override
+
 HTTP_STATUS_BY_AVATAR_ERROR_CODE: dict[str, int] = {
     "avatar_forbidden": 403,
+    "avatar_approval_not_found": 404,
     "avatar_message_not_found": 404,
     "avatar_invalid_cursor": 400,
     "avatar_invalid_filter": 400,
@@ -37,6 +40,7 @@ class AvatarMessageError(Exception):
     message: str
     status_code: int | None = None
 
+    @override
     def __str__(self) -> str:
         """返回开发者可读错误字符串。"""
         return f"{self.code}: {self.message}"
@@ -59,6 +63,14 @@ def avatar_error_body(error: AvatarMessageError) -> dict[str, dict[str, str]]:
 def forbidden(message: str = "avatar scope required") -> AvatarMessageError:
     """构造权限不足错误。"""
     return AvatarMessageError("avatar_forbidden", message)
+
+
+def approval_not_found(request_id: str) -> AvatarMessageError:
+    """构造审批 pending 缺失错误。"""
+    return AvatarMessageError(
+        "avatar_approval_not_found",
+        f"avatar approval not found: {request_id}",
+    )
 
 
 def message_not_found(message_id: str) -> AvatarMessageError:
@@ -126,6 +138,7 @@ def run_failed(message: str) -> AvatarMessageError:
 __all__ = [
     "HTTP_STATUS_BY_AVATAR_ERROR_CODE",
     "AvatarMessageError",
+    "approval_not_found",
     "avatar_error_body",
     "capability_disabled",
     "forbidden",

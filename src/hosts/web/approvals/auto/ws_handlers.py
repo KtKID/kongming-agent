@@ -1,6 +1,6 @@
-"""智能审批 WS 共用 handler（toggle / query / state-msg）。
+"""智能审批 WS 共用 handler（set-mode / query / state-msg）。
 
-claude_code 与 generic_chat 两条通道都需要 ``auto-approval-toggle`` /
+claude_code 与 generic_chat 两条通道都需要 ``auto-approval-set-mode`` /
 ``auto-approval-query`` 入站命令以及连接建立时主动 push 一次 state 帧。
 把三段逻辑抽到本模块，让调用方（``web.integrations.claude_code.route`` /
 ``web.websocket.routes._dispatch_frame`` 等）只负责把 ``policy`` 从 ``app.state`` 取出后透传。
@@ -14,7 +14,7 @@ claude_code 与 generic_chat 两条通道都需要 ``auto-approval-toggle`` /
   "auto_approval_policy", None)`` 并做 None 判断。
 - ``error`` / ``state`` 字面值与原 ``web.integrations.claude_code.route`` 完全对齐：
   ``"auto_approval_policy not configured"``、
-  ``"auto-approval-toggle.cwd required"`` / ``"auto-approval-query.cwd required"``、
+  ``"auto-approval-set-mode.cwd required"`` / ``"auto-approval-query.cwd required"``、
   ``frame_type="auto_approval_state"``（protocol-frame-type-unify-v0.2 后从
   ``kind`` 切到 ``frame_type``，与全局 wire 协议对齐）。
 - **通道参数化（v0.5 task #5 引入）**：``channel: str = "claude_code"``
@@ -33,11 +33,29 @@ claude_code 与 generic_chat 两条通道都需要 ``auto-approval-toggle`` /
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, Literal, Protocol
 
 from fastapi import WebSocket
 
+from hosts.web.protocol import AutoApprovalStateFrame
 from network.network_log import log_network_exception
+
+
+class AutoApprovalModePortal(Protocol):
+    """Web handler 所需的每 cwd 处置模式门户。"""
+
+    def set_mode_from_wire(self, cwd: str, raw_mode: str) -> object:
+        """持久化经 wire 校验的处置模式。"""
+        ...
+
+    def state_for_wire(
+        self,
+        cwd: str,
+    ) -> tuple[Literal["user", "llm", "full_trust"], int, Mapping[str, bool]]:
+        """返回 wire state 所需的模式、倒计时与规则覆盖。"""
+        ...
+
 
 # channel → error 帧 provider 字段的映射。保持 claude_code 走 "claude"
 # 字面值（与老前端 100% 兼容），generic_chat 走 "generic"，与后端日志惯例
@@ -48,25 +66,27 @@ _PROVIDER_BY_CHANNEL: dict[str, str] = {
     "generic_chat": "generic",
 }
 
+AutoApprovalChannel = Literal["claude_code", "generic_chat"]
 
-async def handle_auto_approval_toggle(
+
+async def handle_auto_approval_set_mode(
     websocket: WebSocket,
     data: dict[str, Any],
-    policy: Any,
+    policy: AutoApprovalModePortal | None,
     *,
-    channel: str = "claude_code",
+    channel: AutoApprovalChannel = "claude_code",
 ) -> None:
-    """处理 ``auto-approval-toggle`` 入站命令。
+    """处理 ``auto-approval-set-mode`` 入站命令。
 
     流程：
     1. ``policy`` 为 ``None`` → 回 ``error("auto_approval_policy not configured")``
-    2. ``data["cwd"]`` 缺失 / 非字符串 / 空串 → 回 ``error("auto-approval-toggle.cwd required")``
-    3. 调 ``policy.set_enabled(cwd, enabled)`` 写盘
+    2. ``data["cwd"]`` 缺失 / 非字符串 / 空串 → 回 ``error("auto-approval-set-mode.cwd required")``
+    3. 调 ``policy.set_mode(cwd, mode)`` 写盘
     4. 通过 ``websocket.send_json`` 回执 ``auto_approval_state`` 帧
 
     Args:
         websocket: 当前 WS 连接，用于回执 state / error。
-        data: 入站消息原始 dict（含 ``cwd`` / ``enabled``）。
+        data: 入站消息原始 dict（含 ``cwd`` / ``mode``）。
         policy: ``AutoApprovalPolicy`` 实例；可为 ``None`` 表示未装配。
         channel: 通道标识，默认 ``"claude_code"`` 兼容原 route。
             ``generic_chat`` 走 ``/ws/threads`` 时显式传 ``"generic_chat"``。
@@ -82,12 +102,26 @@ async def handle_auto_approval_toggle(
     if not isinstance(cwd, str) or not cwd:
         await _send_error(
             websocket,
-            "auto-approval-toggle.cwd required",
+            "auto-approval-set-mode.cwd required",
             channel=channel,
         )
         return
-    enabled = bool(data.get("enabled", False))
-    policy.set_enabled(cwd, enabled)
+    raw_mode = data.get("mode")
+    if not isinstance(raw_mode, str):
+        await _send_error(
+            websocket,
+            "auto-approval-set-mode.mode must be user, llm, or full_trust",
+            channel=channel,
+        )
+        return
+    if raw_mode not in {"user", "llm", "full_trust"}:
+        await _send_error(
+            websocket,
+            "auto-approval-set-mode.mode must be user, llm, or full_trust",
+            channel=channel,
+        )
+        return
+    policy.set_mode_from_wire(cwd, raw_mode)
     try:
         await websocket.send_json(
             build_auto_approval_state_msg(policy, cwd, channel=channel),
@@ -95,7 +129,7 @@ async def handle_auto_approval_toggle(
     except Exception as exc:
         log_network_exception(
             "hosts.web.approvals.auto.ws_handlers",
-            "toggle_state_send_failed",
+            "set_mode_state_send_failed",
             exc,
             channel=channel,
             cwd=cwd,
@@ -105,9 +139,9 @@ async def handle_auto_approval_toggle(
 async def handle_auto_approval_query(
     websocket: WebSocket,
     data: dict[str, Any],
-    policy: Any,
+    policy: AutoApprovalModePortal | None,
     *,
-    channel: str = "claude_code",
+    channel: AutoApprovalChannel = "claude_code",
 ) -> None:
     """处理 ``auto-approval-query`` 入站命令。
 
@@ -151,10 +185,10 @@ async def handle_auto_approval_query(
 
 
 def build_auto_approval_state_msg(
-    policy: Any,
+    policy: AutoApprovalModePortal,
     cwd: str,
     *,
-    channel: str = "claude_code",
+    channel: AutoApprovalChannel = "claude_code",
 ) -> dict[str, Any]:
     """构造 ``auto_approval_state`` S2C 帧。
 
@@ -173,16 +207,14 @@ def build_auto_approval_state_msg(
         ``frame_type="auto_approval_state"`` 帧 dict，与 claude_code v1 schema 对齐
         （仅 ``channel`` 字段会跟随调用方切换）。
     """
-    cfg = policy.get_config(cwd)
-    effective_timeout = cfg.timeout_ms or policy.rule_set.default_timeout_ms
-    return {
-        "frame_type": "auto_approval_state",
-        "channel": channel,
-        "cwd": cfg.cwd or cwd,
-        "enabled": cfg.enabled,
-        "timeoutMs": effective_timeout,
-        "ruleOverrides": dict(cfg.rule_overrides),
-    }
+    mode, effective_timeout, rule_overrides = policy.state_for_wire(cwd)
+    return AutoApprovalStateFrame(
+        channel=channel,
+        cwd=cwd,
+        mode=mode,
+        timeoutMs=effective_timeout,
+        ruleOverrides=dict(rule_overrides),
+    ).model_dump()
 
 
 async def _send_error(
@@ -230,5 +262,5 @@ async def _send_error(
 __all__ = [
     "build_auto_approval_state_msg",
     "handle_auto_approval_query",
-    "handle_auto_approval_toggle",
+    "handle_auto_approval_set_mode",
 ]

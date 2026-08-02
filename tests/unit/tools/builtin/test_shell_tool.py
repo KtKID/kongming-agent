@@ -19,23 +19,49 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from core.contracts import ToolContext
+from core.errors import ToolPreparationError
+from tests.support.tool_calls import execute_prepared_tool
 from tools import ShellTool
 
 
-def _ctx() -> ToolContext:
-    return ToolContext(run_id="r", session_id="s", turn=1, call_id="c")
+def _ctx(cwd: Path | None = None) -> ToolContext:
+    metadata = {"cwd": str(cwd or Path.cwd())}
+    return ToolContext(run_id="r", session_id="s", turn=1, call_id="c", metadata=metadata)
+
+
+@pytest.mark.unit
+def test_shell_tool_model_descriptions_are_chinese() -> None:
+    """模型收到的工具和参数说明均使用中文。"""
+    tool = ShellTool()
+
+    assert (
+        tool.description
+        == "通过 /bin/sh -c（或平台等价实现）执行 shell 命令，并返回标准输出、标准错误和退出码。"
+    )
+    assert (
+        tool.input_schema["properties"]["command"]["description"] == "要执行的 shell 命令字符串。"
+    )
+    assert (
+        tool.input_schema["properties"]["timeout"]["description"]
+        == "超时时间，单位为秒；默认值为 30 秒。"
+    )
+    assert (
+        tool.input_schema["properties"]["cwd"]["description"]
+        == "命令的工作目录；默认使用调用方的 cwd。"
+    )
 
 
 @pytest.mark.unit
 @pytest.mark.skipif(sys.platform == "win32", reason="shell semantics differ on Windows")
 async def test_shell_echo_captures_stdout() -> None:
     tool = ShellTool()
-    result = await tool.execute({"command": "echo hello_world"}, _ctx())
+    result = await execute_prepared_tool(tool, {"command": "echo hello_world"}, _ctx())
     assert result.ok is True
     assert result.data is not None
     assert "hello_world" in result.data["stdout"]
@@ -47,7 +73,7 @@ async def test_shell_echo_captures_stdout() -> None:
 async def test_shell_nonzero_exit_is_captured() -> None:
     tool = ShellTool()
     # `false` 命令返回 1（POSIX 标准）
-    result = await tool.execute({"command": "false"}, _ctx())
+    result = await execute_prepared_tool(tool, {"command": "false"}, _ctx())
     assert result.ok is True  # tool 自身执行成功；command 返回码由 data 承载
     assert result.data is not None
     assert result.data["return_code"] != 0
@@ -58,7 +84,8 @@ async def test_shell_nonzero_exit_is_captured() -> None:
 async def test_shell_timeout_returns_structured_failure() -> None:
     tool = ShellTool()
     # 3 秒 sleep + 0.5 秒超时 → 基类吃掉 TimeoutError 包成 ok=False
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {"command": "sleep 3", "timeout": 0.5},
         _ctx(),
     )
@@ -70,7 +97,7 @@ async def test_shell_timeout_returns_structured_failure() -> None:
 @pytest.mark.unit
 async def test_shell_empty_command_is_rejected() -> None:
     tool = ShellTool()
-    result = await tool.execute({"command": "   "}, _ctx())
+    result = await execute_prepared_tool(tool, {"command": "   "}, _ctx())
     assert result.ok is False
     assert "command" in (result.error_message or "").lower()
 
@@ -78,14 +105,14 @@ async def test_shell_empty_command_is_rejected() -> None:
 @pytest.mark.unit
 async def test_shell_missing_command_arg_is_rejected() -> None:
     tool = ShellTool()
-    result = await tool.execute({}, _ctx())
+    result = await execute_prepared_tool(tool, {}, _ctx())
     assert result.ok is False
 
 
 @pytest.mark.unit
 async def test_shell_invalid_timeout_is_rejected() -> None:
     tool = ShellTool()
-    result = await tool.execute({"command": "echo x", "timeout": 0}, _ctx())
+    result = await execute_prepared_tool(tool, {"command": "echo x", "timeout": 0}, _ctx())
     assert result.ok is False
     assert "timeout" in (result.error_message or "").lower()
 
@@ -94,7 +121,8 @@ async def test_shell_invalid_timeout_is_rejected() -> None:
 @pytest.mark.skipif(sys.platform == "win32", reason="shell semantics differ on Windows")
 async def test_shell_cwd_override_uses_provided_directory(tmp_path) -> None:
     tool = ShellTool()
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {"command": "pwd", "cwd": str(tmp_path)},
         _ctx(),
     )
@@ -102,6 +130,98 @@ async def test_shell_cwd_override_uses_provided_directory(tmp_path) -> None:
     assert result.data is not None
     # macOS 下 tmp_path 有时会经过 /private 软链；只断言尾段包含一致子串
     assert tmp_path.name in result.data["stdout"]
+
+
+@pytest.mark.unit
+async def test_shell_default_cwd_uses_context_cwd(tmp_path: Path) -> None:
+    tool = ShellTool()
+    command = f'"{sys.executable}" -c "import os; print(os.getcwd())"'
+
+    result = await execute_prepared_tool(tool, {"command": command}, _ctx(tmp_path))
+
+    assert result.ok is True
+    assert result.data is not None
+    assert Path(result.data["stdout"].strip()).resolve() == tmp_path.resolve()
+    assert Path(result.data["cwd"]).resolve() == tmp_path.resolve()
+
+
+@pytest.mark.unit
+async def test_shell_relative_cwd_resolves_against_context_cwd(tmp_path: Path) -> None:
+    child = tmp_path / "child"
+    child.mkdir()
+    tool = ShellTool()
+    command = f'"{sys.executable}" -c "import os; print(os.getcwd())"'
+
+    result = await execute_prepared_tool(tool, {"command": command, "cwd": "child"}, _ctx(tmp_path))
+
+    assert result.ok is True
+    assert result.data is not None
+    assert Path(result.data["stdout"].strip()).resolve() == child.resolve()
+    assert Path(result.data["cwd"]).resolve() == child.resolve()
+
+
+@pytest.mark.unit
+def test_shell_prepare_freezes_canonical_cwd_and_is_idempotent(tmp_path: Path) -> None:
+    """relative cwd、父目录与软链接最终都冻结为同一真实目录。"""
+    target = tmp_path / "target"
+    target.mkdir()
+    nested = target / "nested"
+    nested.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+    tool = ShellTool()
+    context = _ctx(tmp_path)
+
+    prepared = tool.prepare({"command": "pwd", "cwd": "link/nested/.."}, context)
+    repeated = tool.prepare(dict(prepared.arguments), context)
+
+    assert prepared.execution_scope.cwd == target.resolve().as_posix()
+    assert prepared.arguments["cwd"] == target.resolve().as_posix()
+    assert repeated == prepared
+
+
+@pytest.mark.unit
+def test_shell_prepare_preserves_canonical_absolute_cwd(tmp_path: Path) -> None:
+    """绝对 cwd 直接规范化，并保持模型输入映射不变。"""
+    tool = ShellTool()
+    arguments = {"command": "pwd", "cwd": tmp_path.as_posix()}
+
+    prepared = tool.prepare(arguments, _ctx(tmp_path))
+
+    assert prepared.arguments == {
+        "command": "pwd",
+        "cwd": tmp_path.resolve().as_posix(),
+        "timeout": 30.0,
+    }
+    assert prepared.execution_scope.cwd == tmp_path.resolve().as_posix()
+    assert arguments == {"command": "pwd", "cwd": tmp_path.as_posix()}
+
+
+@pytest.mark.unit
+def test_shell_prepare_rejects_missing_context_cwd() -> None:
+    """完整缺失 cwd 时 preparation 失败关闭。"""
+    tool = ShellTool()
+    context = ToolContext(run_id="r", session_id="s", turn=1, call_id="c")
+
+    with pytest.raises(ToolPreparationError, match="requires ToolContext") as exc_info:
+        tool.prepare({"command": "pwd"}, context)
+    assert exc_info.value.details["code"] == "cwd_unavailable"
+
+
+@pytest.mark.unit
+def test_shell_prepare_rejects_missing_and_non_directory_cwd(tmp_path: Path) -> None:
+    """不存在路径和文件路径都在审批前失败。"""
+    tool = ShellTool()
+    context = _ctx(tmp_path)
+    plain_file = tmp_path / "file.txt"
+    plain_file.write_text("x", encoding="utf-8")
+
+    with pytest.raises(ToolPreparationError, match="cwd not found") as missing:
+        tool.prepare({"command": "pwd", "cwd": "missing"}, context)
+    assert missing.value.details["code"] == "cwd_not_found"
+    with pytest.raises(ToolPreparationError, match="not a directory") as non_directory:
+        tool.prepare({"command": "pwd", "cwd": str(plain_file)}, context)
+    assert non_directory.value.details["code"] == "cwd_not_directory"
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +267,9 @@ async def test_shell_cancel_kills_subprocess_and_raises(
     )
 
     # 跑一个不会自然退出的 sleep；timeout 给大值，确保不被超时机制兜底
-    task = asyncio.create_task(tool.execute({"command": "sleep 60", "timeout": 120.0}, _ctx()))
+    task = asyncio.create_task(
+        execute_prepared_tool(tool, {"command": "sleep 60", "timeout": 120.0}, _ctx())
+    )
 
     # 等子进程起来（最多等 1s）
     for _ in range(50):

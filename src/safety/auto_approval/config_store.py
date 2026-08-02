@@ -21,16 +21,20 @@ import hashlib
 import json
 import os
 import tempfile
-from dataclasses import asdict, dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
+
+from safety.auto_approval.disposition import ApprovalDispositionMode
 
 # ---------------------------------------------------------------------------
 # 数据结构
 # ---------------------------------------------------------------------------
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class ProjectConfig:
     """per-cwd 智能审批配置。
 
@@ -42,19 +46,38 @@ class ProjectConfig:
     """
 
     cwd: str
-    enabled: bool = False
-    rule_overrides: dict[str, bool] = field(default_factory=dict)
+    mode: ApprovalDispositionMode = ApprovalDispositionMode.USER
+    rule_overrides: Mapping[str, bool] = field(
+        default_factory=lambda: MappingProxyType({}),
+    )
     timeout_ms: int = 0  # 0 = 使用全局默认（来自 RuleSet.default_timeout_ms）
 
     def to_json(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "cwd": self.cwd,
+            "mode": self.mode.value,
+            "rule_overrides": dict(self.rule_overrides),
+            "timeout_ms": self.timeout_ms,
+        }
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> ProjectConfig:
+        raw_mode = data.get("mode", ApprovalDispositionMode.USER.value)
+        try:
+            mode = (
+                ApprovalDispositionMode(raw_mode)
+                if isinstance(raw_mode, str)
+                else ApprovalDispositionMode.USER
+            )
+        except ValueError:
+            mode = ApprovalDispositionMode.USER
+        raw_overrides = data.get("rule_overrides") or {}
+        if not isinstance(raw_overrides, dict):
+            raise ValueError("ProjectConfig.rule_overrides must be an object")
         return cls(
             cwd=str(data.get("cwd", "")),
-            enabled=bool(data.get("enabled", False)),
-            rule_overrides={str(k): bool(v) for k, v in (data.get("rule_overrides") or {}).items()},
+            mode=mode,
+            rule_overrides=MappingProxyType({str(k): bool(v) for k, v in raw_overrides.items()}),
             timeout_ms=int(data.get("timeout_ms", 0)),
         )
 
@@ -114,7 +137,7 @@ class ConfigStore:
         existing = self.get(cwd)
         if existing is not None:
             return existing
-        return ProjectConfig(cwd=cwd, enabled=False)
+        return ProjectConfig(cwd=cwd)
 
     def set(self, config: ProjectConfig) -> None:
         """原子写入。"""

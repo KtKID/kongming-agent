@@ -31,7 +31,31 @@ from core.contracts import (
 )
 from scheduler.domain import ApprovalMode
 from scheduler.store import Store
-from tools.builtin.schedule_tool import build_schedule_tool
+from tests.support.tool_calls import execute_prepared_tool
+from tools.builtin.schedule_tool import ScheduleTool, build_schedule_tool
+
+
+class _FakeThreadProvisioner:
+    """为 schedule create 提供确定性的专属 thread。"""
+
+    async def create_scheduled_task_thread(
+        self,
+        *,
+        task_id: str,
+        name: str,
+        preset_id: str,
+        cwd: str = "",
+    ) -> str:
+        del task_id, name, preset_id, cwd
+        return "thread-aaaaaaaaaaaa"
+
+    async def delete_thread(self, thread_id: str, *, keep_history: bool = False) -> None:
+        del thread_id, keep_history
+
+
+def _build_schedule_tool(store: Store) -> ScheduleTool:
+    """构造带 scheduled-thread provisioner 的真实 schedule tool。"""
+    return build_schedule_tool(store, thread_provisioner=_FakeThreadProvisioner())
 
 
 @dataclass
@@ -81,7 +105,7 @@ def _build_real_bridge(
     base_config: object | None = None,
 ) -> ExecutionBridge:
     return ExecutionBridge(
-        runner=MagicMock(),
+        runtime=MagicMock(),
         llm=MagicMock(),
         tools={},
         enabled_tool_names=(),
@@ -98,13 +122,13 @@ def _config_with_global_mode(mode: str) -> object:
     """构造最小 Config，把 scheduler.approval.mode 设为 mode。供需要显式覆盖兜底的测试用。"""
     from infrastructure.config.models import (
         Config,
-        ModelConfig,
+        ModelSelectionConfig,
         SchedulerApprovalConfig,
         SchedulerConfig,
     )
 
     return Config(
-        model=ModelConfig(name="t", base_url="http://127.0.0.1:1234/v1"),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         scheduler=SchedulerConfig(
             approval=SchedulerApprovalConfig(mode=mode),  # type: ignore[arg-type]
         ),
@@ -122,8 +146,9 @@ async def test_hard_block_in_trust_still_rejected_no_audit(tmp_path: Path) -> No
     4. audits.jsonl 物理文件不含 ``run_approval_auto_allow`` 行
     """
     store = Store(home_dir=tmp_path / "cron")
-    tool = build_schedule_tool(store)
-    result = await tool.execute(
+    tool = _build_schedule_tool(store)
+    result = await execute_prepared_tool(
+        tool,
         {
             "action": "create",
             "name": "trust hardblock e2e",
@@ -184,8 +209,9 @@ async def test_fail_closed_opt_in_via_global_config_still_works(
     缺省 approval_mode 的任务仍走 fail_closed 路径（consent → rejected）。
     """
     store = Store(home_dir=tmp_path / "cron")
-    tool = build_schedule_tool(store)
-    result = await tool.execute(
+    tool = _build_schedule_tool(store)
+    result = await execute_prepared_tool(
+        tool,
         {
             "action": "create",
             "name": "no mode task",
@@ -205,6 +231,7 @@ async def test_fail_closed_opt_in_via_global_config_still_works(
         decision_class="explicit_consent",
         decision_source="standard",
         outcome="rejected",
+        matched_rule="default:ask",
     )
     # 显式构造 base_config 设 fail_closed（opt-in 严格模式）
     bridge = _build_real_bridge(
@@ -245,8 +272,9 @@ async def test_default_trust_consent_auto_allowed_when_no_config(
     HardBlock 仍兜底真高危（见同文件 test_hard_block_in_trust_still_rejected_no_audit）。
     """
     store = Store(home_dir=tmp_path / "cron")
-    tool = build_schedule_tool(store)
-    result = await tool.execute(
+    tool = _build_schedule_tool(store)
+    result = await execute_prepared_tool(
+        tool,
         {
             "action": "create",
             "name": "no mode task",
@@ -265,6 +293,7 @@ async def test_default_trust_consent_auto_allowed_when_no_config(
         decision_class="explicit_consent",
         decision_source="standard",
         outcome="rejected",
+        matched_rule="default:ask",
     )
     bridge = _build_real_bridge(store=store, inner=inner, base_config=None)
     wrapper = bridge._build_approval_wrapper(task)
