@@ -13,8 +13,8 @@
   不反向 import ``cli/``，也不 import ``safety/`` / ``infrastructure.tracing/``。
 - ``prompt_approval``（v0.1.6）返回 :class:`core.contracts.ApprovalAction`
   的 3 档结构化决策（``ACCEPT_ONCE`` / ``ACCEPT_FOR_SESSION`` / ``REJECT``），
-  与 web `ApprovalDialog` 三按钮 UX 对齐；由 ``InteractiveApproval`` 通过
-  ``__action_aware__`` 标记自动识别并翻成 ``ApprovalDecision``。
+  由 ``InteractiveApproval`` 通过 ``__action_aware__`` 标记自动识别并翻成
+  ``ApprovalDecision``。
   ``ACCEPT_PERSIST`` 当前未在 CLI / web 暴露（后端 dead path），等前端"永久
   同意"按钮设计稳定后再加。
 """
@@ -27,8 +27,10 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 import click
+from typing_extensions import override
 
-from core.contracts import ApprovalAction, ApprovalRequest, Event
+from core.contracts import ApprovalAction, ApprovalRequest, Event, ProviderUsageSnapshot
+from core.result import Result
 from hosts.shared.base import HostAdapter
 
 if TYPE_CHECKING:  # pragma: no cover - import-time only
@@ -54,21 +56,38 @@ class CLIAdapter(HostAdapter):
         prompt: str = "kongming > ",
         verbose: bool = False,
         pre_prompt_hook: Callable[[], Awaitable[None]] | None = None,
+        streaming: bool = True,
     ) -> None:
-        """v0.3 cron-delivery M5：``pre_prompt_hook`` 在每次 prompt **之前**
-        调用，给 cron-delivery sink 等需要"在 prompt 间隙 flush"的组件用。
-        hook 内部抛异常会被静默捕获（不影响主 prompt 流程）。
+        """初始化 CLIAdapter。
+
+        Args:
+            prompt: 输入提示符。
+            verbose: 是否在 stderr 打单行进度。
+            pre_prompt_hook: v0.3 cron-delivery M5——在每次 prompt **之前**
+                调用,给 cron-delivery sink 等需要"在 prompt 间隙 flush"的组件用。
+                hook 内部抛异常会被静默捕获(不影响主 prompt 流程)。
+            streaming: 是否处于流式输出模式。``True``(默认)时
+                :meth:`render_result` 跳过 final.content 的二次打印
+                (``CLIStreamSink`` 已实时打字打过);``False`` 时完整打印 content
+                (非流式 fallback 路径)。由 cli/main.py 根据
+                ``cfg.stream.enabled`` + provider 是否实现 ``SupportsLLMStream``
+                算好传入(``stream_active``),取代历史的 bridge ``echo_final_content``
+                开关(决策点下沉到 adapter 内部)。默认 True 因为 CLI 主路径默认开流式
+                (``cfg.stream.enabled`` 默认 True);裸构造 ``CLIAdapter()`` 的测试
+                若要验证非流式 content 打印,需显式传 ``streaming=False``。
         """
         self._prompt = prompt
         self._verbose = verbose
         self._session: _PromptSession[Any] | None = None
         self._closed = False
         self._pre_prompt_hook = pre_prompt_hook
+        self._streaming = streaming
 
     # ------------------------------------------------------------------
     # HostAdapter 实现
     # ------------------------------------------------------------------
 
+    @override
     async def read_input(self) -> str | None:
         # v0.3 M5：pre_prompt_hook 在 prompt_async 之前调；典型场景是
         # CliDeliverySink.drain_pending → click.echo flush cron 投递 buffer。
@@ -93,15 +112,50 @@ class CLIAdapter(HostAdapter):
             return None
         except KeyboardInterrupt:
             # 空行位置 Ctrl-C：当一次"取消本次输入"处理，返回空串，
-            # 由 bridge 的 strip() 过滤掉；若用户反复 Ctrl-C，SessionBridge
-            # 在 run_loop 里有更外层的捕获。
+            # 由 CLIInteractiveLoop 的 strip() 过滤掉；若用户反复 Ctrl-C，
+            # run_loop 在更外层捕获并调用 HostDispatcher interrupt。
             return ""
         return text
 
+    @override
     async def write_output(self, text: str) -> None:
         # click.echo 会处理 encoding & flush，比裸 print 稳。
         click.echo(text)
 
+    @override
+    async def render_result(self, result: Result) -> None:
+        """把一次 run 的最终结果渲染到终端(接管原 bridge 的 _write_runtime_result)。
+
+        三段渲染:
+
+        1. **final content**:``streaming=False`` 时打(``streaming=True`` 已由
+           ``CLIStreamSink`` 实时打字打过,跳过避免视觉双重输出)。
+        2. **error 行**:``[error] {type}: {msg}``——result.error 非空时打
+           (无论 streaming 与否,error 不走流式通道)。
+        3. **token 汇总行**:``[tokens ↑X ↓Y =Z]``——metadata.usage 非空时打。
+           token 是 run 收尾的汇总信息,流式期没打过,所以 streaming 不门控它
+           (与 Web 不同——Web 有自己的 ``UsageFrame`` 推 StatusLine,在
+           ``WebHostAdapter.render_result`` 里跳过)。
+
+        决策点全在 adapter 内部:bridge 不再知道这些格式化字符串。
+        """
+        final = result.final_message
+        if not self._streaming and final is not None and final.content:
+            click.echo(final.content)
+        if result.error is not None:
+            click.echo(f"[error] {type(result.error).__name__}: {result.error.message}")
+        usage = result.metadata.get("usage")
+        if isinstance(usage, dict) and usage:
+            try:
+                snapshot = ProviderUsageSnapshot.from_payload(usage)
+            except ValueError:
+                return
+            prompt_t = _render_token_metric(snapshot.input_total_tokens.value)
+            completion_t = _render_token_metric(snapshot.output_total_tokens.value)
+            total_t = _render_token_metric(snapshot.total_tokens.value)
+            click.echo(f"[tokens ↑{prompt_t} ↓{completion_t} ={total_t}]")
+
+    @override
     async def notify_event(self, event: Event) -> None:
         if not self._verbose:
             return
@@ -109,23 +163,24 @@ class CLIAdapter(HostAdapter):
         if line is not None:
             click.echo(line, err=True)
 
+    @override
     async def prompt_approval(  # type: ignore[override]
         self, request: ApprovalRequest
     ) -> ApprovalAction:
-        """v0.1.6 三档审批：与 web ``ApprovalDialog`` 三按钮 UX 对齐。
+        """v0.1.6 三档 CLI 审批。
 
         输入映射：
 
         - ``y`` / ``yes`` → :attr:`ApprovalAction.ACCEPT_ONCE`（仅本次）
         - ``s`` / ``session`` → :attr:`ApprovalAction.ACCEPT_FOR_SESSION`
-          （本 session 内同类工具调用静默放行；GrantStore 内存级，重启失效）
+          （当前 thread 内写入 permissions，后续同类调用按规则判定）
         - 其他（含空回车 / ``n`` / ``no`` / EOF / Ctrl-C / 任意其他字符）→
           :attr:`ApprovalAction.REJECT`
 
         默认 reject 而非 once，是安全约定：误按回车不应该意外放行。
 
         ``ACCEPT_PERSIST`` 当前未提供 CLI 入口；后端写盘 wiring 也未接通
-        （`_grant_persister.persist_grants` 0 处调用），等前端"永久同意"
+        （统一规则持久化由 `PermissionsManager` 负责），等前端“允许并记住”
         按钮设计稳定后再统一打开。
         """
         args_preview = _format_arguments(request.arguments)
@@ -160,6 +215,7 @@ class CLIAdapter(HostAdapter):
     # 与 ``web.app_support.host_adapter.WebHostAdapter`` 同模式。
     prompt_approval.__action_aware__ = True  # type: ignore[attr-defined]
 
+    @override
     async def close(self) -> None:
         if self._closed:
             return
@@ -301,6 +357,11 @@ def _format_arguments(arguments: dict[str, object]) -> str:
             text = text[:77] + "..."
         preview.append(f"{key}={text}")
     return "{" + ", ".join(preview) + "}"
+
+
+def _render_token_metric(value: int | None) -> str:
+    """渲染 canonical token 指标，输入为可选数值，输出为数字或未知占位。"""
+    return str(value) if value is not None else "?"
 
 
 def _blocking_readline(prompt_text: str) -> str:

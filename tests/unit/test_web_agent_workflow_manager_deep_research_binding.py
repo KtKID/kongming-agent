@@ -11,20 +11,20 @@ test_make_runtime_factory_binds_deep_research_provider_from_tool_registry 覆盖
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from application.agent_workflows.strategies.deep_research.contracts import ResearchSourceQuery
-from core.contracts import ToolContext, ToolResult
+from core.contracts import PreparedToolCall, ToolContext, ToolResult
 from hosts.web import research_source_provider as provider_module
 from hosts.web import run as web_run
+from infrastructure.config.model_catalog_manager import ModelCatalogManager
 from infrastructure.config.models import (
     ApprovalConfig,
     Config,
-    LLMPresetConfig,
-    ModelConfig,
-    WebConfig,
+    ModelSelectionConfig,
 )
 from tools import ToolRegistry
 from tools.agent_workflow_tool import AgentWorkflowHandle
@@ -48,6 +48,18 @@ class _ProviderSentinel:
     """测试用 provider 哨兵，标识 Web factory 的注入结果。"""
 
     name = "web_user_source"
+
+
+def test_attach_runtime_factory_to_app_state_exposes_runtime_factory_only() -> None:
+    """验证 app.state 绑定只暴露 runtime factory。"""
+    runtime_factory = SimpleNamespace()
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    web_run._attach_runtime_factory_to_app_state(app, runtime_factory)
+
+    assert app.state.runtime_factory is runtime_factory
+    assert hasattr(app.state, "subagent_lifecycle_registry") is False
+    assert runtime_factory._app is app
 
 
 def test_bind_agent_workflow_manager_injects_deep_research_source_provider(
@@ -75,11 +87,12 @@ def test_bind_agent_workflow_manager_injects_deep_research_source_provider(
     tool_registry = object()
     config = _config(tmp_path)
     role_manager = object()
+    runtime = SimpleNamespace(model_catalog_manager=ModelCatalogManager())
 
     web_run._bind_agent_workflow_manager(
         handle=handle,
         thread_id="thread-web-deep-research",
-        runtime=object(),
+        runtime=runtime,
         config=config,
         workspace_root=tmp_path,
         role_manager=role_manager,
@@ -88,10 +101,63 @@ def test_bind_agent_workflow_manager_injects_deep_research_source_provider(
 
     assert handle.session_id == "thread-web-deep-research"
     assert handle.manager is not None
+    assert getattr(handle.manager, "_runtime") is runtime
     assert handle.manager.deep_research_source_provider is provider
     assert handle.manager.deep_research_source_diagnostics is not None
     assert handle.manager.deep_research_source_diagnostics.reason == "ok"
     assert build_calls == [config, tool_registry]
+
+
+def test_bind_agent_workflow_manager_resolves_agent_manager_lazily(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """验证 Web workflow 延迟读取 AgentManager，输入为后注册 cell，输出为当前 manager。"""
+    provider = _ProviderSentinel()
+
+    class _Factory:
+        """测试用 factory，返回稳定 provider 哨兵。"""
+
+        def __init__(self, _config: Any) -> None:
+            """初始化 factory，输入为 config，输出为空。"""
+
+        def build(self, _tool_registry: Any) -> Any:
+            """构造 provider，输入为 tool_registry，输出为 build result。"""
+            return SimpleResult(provider=provider)
+
+    class _ThreadManager:
+        """测试用 thread manager，模拟 cell 在 workflow 绑定后注册。"""
+
+        def __init__(self) -> None:
+            """初始化 manager，输入为空，输出为可变 cell 容器。"""
+            self.cell: Any | None = None
+
+        def get_cell(self, thread_id: str) -> Any | None:
+            """读取 cell，输入为 thread_id，输出为当前 cell。"""
+            assert thread_id == "thread-lazy-agent-manager"
+            return self.cell
+
+    monkeypatch.setattr(provider_module, "WebResearchSourceProviderFactory", _Factory)
+    handle = _CaptureHandle()
+    thread_manager = _ThreadManager()
+    agent_manager = object()
+    host_dispatcher = SimpleNamespace(agent_manager=agent_manager)
+
+    web_run._bind_agent_workflow_manager(
+        handle=handle,
+        thread_id="thread-lazy-agent-manager",
+        runtime=SimpleNamespace(model_catalog_manager=ModelCatalogManager()),
+        config=_config(tmp_path),
+        workspace_root=tmp_path,
+        role_manager=object(),
+        tool_registry=object(),
+        thread_manager=thread_manager,
+    )
+
+    assert handle.manager is not None
+    assert handle.manager._current_agent_manager() is None
+    thread_manager.cell = SimpleNamespace(host_dispatcher=host_dispatcher)
+    assert handle.manager._current_agent_manager() is agent_manager
 
 
 @pytest.mark.asyncio
@@ -115,7 +181,7 @@ async def test_make_runtime_factory_binds_deep_research_provider_from_tool_regis
         return []
 
     def fake_native_runtime_build(*_args: Any, **_kwargs: Any) -> _FakeRuntime:
-        """构造 fake runtime，输入为 NativeRuntime.build 参数，输出为轻量 runtime。"""
+        """构造 fake runtime，输入为 SessionEngine.build 参数，输出为轻量 runtime。"""
         assert _kwargs["tools"] is registry
         assert "web_search" in _kwargs["enabled_tool_names"]
         return _FakeRuntime()
@@ -147,26 +213,29 @@ async def test_make_runtime_factory_binds_deep_research_provider_from_tool_regis
     )
     monkeypatch.setattr("tools.build_default_registry", lambda **_kwargs: registry)
     monkeypatch.setattr("tools.register_schedule_tool_if_enabled", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        "tools.register_evolution_write_tool_if_enabled",
-        lambda *_args, **_kwargs: None,
-    )
     monkeypatch.setattr("tools.register_task_progress_tool", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        "runtime_assembly.native_runtime.NativeRuntime.build",
+        "runtime_assembly.session_engine.SessionEngine.build",
         staticmethod(fake_native_runtime_build),
     )
-    monkeypatch.setattr("hosts.shared.session_bridge.SessionBridge", _FakeBridge)
+    monkeypatch.setattr("hosts.shared.host_dispatcher.HostDispatcher", _FakeHostDispatcher)
     monkeypatch.setattr(AgentWorkflowHandle, "bind", capture_bind)
 
     factory = web_run._make_runtime_factory(_web_runtime_config(tmp_path))
-    runtime, bridge = await factory("thread-runtime-factory", "local", object(), ())
+    adapter_stub = SimpleNamespace(render_result=lambda _result: None)
+    runtime, host_dispatcher = await factory(
+        "thread-runtime-factory",
+        "local-gemma-4-e4b-it",
+        adapter_stub,
+        (),
+    )
 
     assert isinstance(runtime, _FakeRuntime)
-    assert isinstance(bridge, _FakeBridge)
+    assert isinstance(host_dispatcher, _FakeHostDispatcher)
     assert bind_calls
     manager, session_id = bind_calls[-1]
     assert session_id == "thread-runtime-factory"
+    assert getattr(manager, "_runtime") is runtime
     provider = manager.deep_research_source_provider
     assert provider is not None
     assert manager.deep_research_source_diagnostics.reason == "ok"
@@ -206,13 +275,7 @@ class SimpleDiagnostics:
 
 def _config(tmp_path: Path) -> Config:
     """构造测试配置，输入为临时目录，输出为 Config。"""
-    cfg = Config(
-        model=ModelConfig(
-            name="fake-model",
-            base_url="http://127.0.0.1:1234/v1",
-            api_key="",
-        )
-    )
+    cfg = Config(model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"))
     cfg.session.file_store_path = str(tmp_path / "sessions")
     return cfg
 
@@ -220,22 +283,8 @@ def _config(tmp_path: Path) -> Config:
 def _web_runtime_config(tmp_path: Path) -> Config:
     """构造 Web runtime factory 配置，输入为临时目录，输出含本地 preset 的 Config。"""
     cfg = Config(
-        model=ModelConfig(
-            name="base-model",
-            base_url="http://127.0.0.1:1234/v1",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         approval=ApprovalConfig(mode="auto_allow"),
-        web=WebConfig(
-            llm_presets=[
-                LLMPresetConfig(
-                    id="local",
-                    display_name="Local",
-                    base_url="http://127.0.0.1:1234/v1",
-                    model="preset-model",
-                )
-            ]
-        ),
     )
     cfg.session.file_store_path = str(tmp_path / "sessions")
     return cfg
@@ -248,7 +297,8 @@ class _RuntimeSearchTool:
     description = "fake web search for deep research"
     input_schema = {"type": "object", "properties": {"query": {"type": "string"}}}
 
-    async def execute(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    async def execute(self, prepared: PreparedToolCall, ctx: ToolContext) -> ToolResult:
+        args = prepared.arguments
         """返回稳定搜索结果，输入为查询参数和上下文，输出为 ToolResult。"""
         return ToolResult(
             ok=True,
@@ -268,20 +318,26 @@ class _RuntimeSearchTool:
 class _FakeRuntime:
     """runtime factory 测试用 runtime。"""
 
+    def __init__(self) -> None:
+        """提供 workflow manager 所需的 catalog 门户。"""
+        self.model_catalog_manager = ModelCatalogManager()
 
-class _FakeBridge:
-    """runtime factory 测试用 SessionBridge。"""
+
+class _FakeHostDispatcher:
+    """runtime factory 测试用 HostDispatcher 替身。"""
 
     def __init__(
         self,
         *,
         runtime: Any,
-        adapter: Any,
         session_id: str,
-        echo_final_content: bool,
+        queued_result_handler: Any = None,
+        agent_tree_runtime_router: Any | None = None,
+        approval_canceller: Any | None = None,
     ) -> None:
-        """记录桥接参数，输入为 runtime、adapter、session_id，输出为实例属性。"""
+        """记录 runtime、会话、handler、Agent 路由和审批取消器，输出为替身属性。"""
         self.runtime = runtime
-        self.adapter = adapter
         self.session_id = session_id
-        self.echo_final_content = echo_final_content
+        self.queued_result_handler = queued_result_handler
+        self.agent_tree_runtime_router = agent_tree_runtime_router
+        self.approval_canceller = approval_canceller

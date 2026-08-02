@@ -82,9 +82,9 @@ def test_cli_manager_readline_repaints_prompt_with_typed_buffer(monkeypatch: Any
     )
 
     monkeypatch.setattr(
-        cli_approval.time,
-        "time",
-        iter([1_000.0, 1_001.001]).__next__,
+        cli_approval,
+        "now_epoch_ms",
+        iter([1_000_000, 1_001_001]).__next__,
     )
     monkeypatch.setattr(cli_approval.termios, "tcgetattr", lambda _fd: ["old"])
     monkeypatch.setattr(cli_approval.termios, "tcsetattr", lambda _fd, _when, _attrs: None)
@@ -120,7 +120,7 @@ def test_cli_manager_readline_printable_input_does_not_rerender_prompt(
         default_action=ApprovalAction.ACCEPT_ONCE,
     )
 
-    monkeypatch.setattr(cli_approval.time, "time", lambda: 1_000.0)
+    monkeypatch.setattr(cli_approval, "now_epoch_ms", lambda: 1_000_000)
     monkeypatch.setattr(cli_approval.termios, "tcgetattr", lambda _fd: ["old"])
     monkeypatch.setattr(cli_approval.termios, "tcsetattr", lambda _fd, _when, _attrs: None)
     monkeypatch.setattr(cli_approval.tty, "setcbreak", lambda _fd: None)

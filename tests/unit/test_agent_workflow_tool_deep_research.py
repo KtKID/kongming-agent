@@ -15,6 +15,7 @@ import pytest
 
 from application.agent_workflows.manager import AgentWorkflowResult
 from core.contracts import ToolContext
+from tests.support.tool_calls import execute_prepared_tool
 from tools.agent_workflow_tool import (
     AgentWorkflowHandle,
     _normalize_workflow_payload,
@@ -42,7 +43,9 @@ def test_normalize_deep_research_payload_fills_defaults() -> None:
     """验证 payload 默认值，输入为最小 topic，输出为 limits/source_policy/output_contract。"""
     normalized = _normalize_workflow_payload(
         "deep_research",
-        {"topic": "  Kongming agent workflow research  "},
+        {
+            "topic": "  Kongming agent workflow research  ",
+        },
         workspace_root=Path("/tmp/workspace"),
     )
 
@@ -63,7 +66,6 @@ def test_normalize_deep_research_payload_fills_defaults() -> None:
         "workflow_timeout_seconds": 2400,
     }
     assert normalized["source_policy"] == {
-        "provider": "internal",
         "language": "zh-CN",
         "freshness_days": None,
         "allowed_domains": [],
@@ -80,7 +82,8 @@ async def test_run_agent_workflow_tool_passes_normalized_deep_research_payload()
     handle.bind(manager)
     tool = build_run_agent_workflow_tool(handle)
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {
             "mode": "deep_research",
             "payload": _minimal_payload(),
@@ -106,7 +109,8 @@ async def test_run_agent_workflow_tool_formats_deep_research_payload_errors() ->
     handle.bind(_CapturingManager())
     tool = build_run_agent_workflow_tool(handle)
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {
             "mode": "deep_research",
             "payload": "bad-payload",
@@ -124,7 +128,9 @@ async def test_run_agent_workflow_tool_formats_deep_research_payload_errors() ->
 
 def _minimal_payload() -> dict[str, object]:
     """构造最小 deep_research payload，输入为空，输出为 topic-only 字典。"""
-    return {"topic": "Kongming Deep Research workflow"}
+    return {
+        "topic": "Kongming Deep Research workflow",
+    }
 
 
 class _CapturingManager:
@@ -144,8 +150,10 @@ class _CapturingManager:
         mode: str,
         parent_session_id: str,
         payload: dict[str, Any],
+        parent_agent: dict[str, object] | None = None,
     ) -> AgentWorkflowResult:
         """记录 workflow payload 调用，输入为 mode/session/payload，输出为 fake 结果。"""
+        del parent_agent
         self.mode = mode
         self.parent_session_id = parent_session_id
         self.payload = payload

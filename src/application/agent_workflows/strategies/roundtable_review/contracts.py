@@ -47,6 +47,12 @@ class ReviewerSpec:
     focus: str
     # reviewer 提示中的职责说明。
     instructions: str
+    # role 指定的模型名；None 表示读取主 agent fallback。
+    model: str | None = None
+    # role 指定的推理强度；None 表示读取主 agent fallback。
+    reasoning_effort: str | None = None
+    # role 指定的最大 turn 数；None 表示读取主 agent fallback。
+    max_turns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -247,7 +253,9 @@ def _parse_participants(
     selected = participants.get("select")
     if not isinstance(selected, Sequence) or isinstance(selected, str):
         raise RoundtableReviewContractError("participants.select must be an array")
-    role_ids = [item for item in selected if isinstance(item, str)]
+    role_ids = [
+        item for item in selected if isinstance(item, (str, int)) and not isinstance(item, bool)
+    ]
     if len(role_ids) != len(selected):
         raise RoundtableReviewContractError("participants.select must contain role ids")
     try:
@@ -264,6 +272,9 @@ def _reviewer_from_role(role: AgentRolePreset) -> ReviewerSpec:
         title=role.title,
         focus=role.role,
         instructions=role.role,
+        model=_optional_str(role.model),
+        reasoning_effort=_optional_str(role.reasoning_effort),
+        max_turns=_optional_positive_int(role.max_turns),
     )
 
 
@@ -348,6 +359,17 @@ def _positive_int(value: object, default: int) -> int:
         if parsed > 0:
             return parsed
     return default
+
+
+def _optional_positive_int(value: object) -> int | None:
+    """读取可选正整数，输入为任意值，输出正整数或 None。"""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        parsed = int(value.strip())
+        if parsed > 0:
+            return parsed
+    return None
 
 
 __all__ = [

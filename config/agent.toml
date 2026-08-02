@@ -1,0 +1,31 @@
+[[agents]]
+id = 1
+nickname = "explorer"
+model = "minimax-m3"
+desc = "探索代码库，核查证据，梳理现有行为，在动手实现前输出具体发现。"
+reasoning_effort = "high"
+max_turns = 50
+
+[[agents]]
+id = 2
+nickname = "coder"
+model = "minimax-m3"
+desc = "在既有架构边界内实现限定范围的代码改动，更新测试，并汇报验证证据。"
+reasoning_effort = "high"
+max_turns = 50
+
+[[agents]]
+id = 3
+nickname = "researcher"
+model = "minimax-m3"
+desc = "调研外部或内部参考资料，对比证据，输出带来源支撑的结论并明确标注不确定性。"
+reasoning_effort = "high"
+max_turns = 50
+
+[[agents]]
+id = 4
+nickname = "planner"
+model = "minimax-m3"
+desc = "把模糊工作拆成可执行步骤，识别依赖与风险，产出精简的实现计划。"
+reasoning_effort = "high"
+max_turns = 50

@@ -38,6 +38,9 @@ class RunState:
             供 infrastructure.tracing / recovery 使用，不代替 session 自身历史。
         last_error: 最近一次抛出的错误；status=failed 时必然非空。
         metadata: 自由字段，装配层可以写入 trace_id 之类的附加信息。
+        agent_id: 本次 run 的 agent 归属（agent-tree-v0.1 模块 G）。单 agent
+            场景默认 ``""``；由 runner ``run()`` 参数透传，runner 各 Event emit
+            点和 ToolContext 构建处读取此值填入坐标字段。
     """
 
     run_id: str
@@ -47,6 +50,7 @@ class RunState:
     messages: list[Message] = field(default_factory=list)
     last_error: AgentError | None = None
     metadata: dict[str, str] = field(default_factory=dict)
+    agent_id: str = ""
 
     def mark_running(self) -> None:
         self.status = "running"

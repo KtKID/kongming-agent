@@ -29,13 +29,13 @@ import asyncio
 import select
 import sys
 import termios
-import time
 import tty
 from dataclasses import dataclass
 from typing import Any
 
 import click
 
+from core.clock import now_epoch_ms
 from core.contracts import ApprovalAction, ApprovalRequest
 from tools.runtime.approval import PromptActionFn, mark_action_aware
 
@@ -113,7 +113,7 @@ async def _read_cli_manager_choice(*, timeout: _CliManagerTimeout) -> str | None
 
 async def _wait_until_deadline(deadline_ms: int) -> None:
     """非 TTY 路径等待默认动作 deadline。"""
-    now_ms = int(time.time() * 1000)
+    now_ms = now_epoch_ms()
     delay_seconds = max(0.0, (deadline_ms - now_ms) / 1000.0)
     await asyncio.sleep(delay_seconds)
 
@@ -137,7 +137,7 @@ def _blocking_cli_manager_readline_with_live_buffer(
     try:
         tty.setcbreak(fd)
         while True:
-            now_ms = int(time.time() * 1000)
+            now_ms = now_epoch_ms()
             remaining_ms = timeout.deadline_ms - now_ms
             if remaining_ms <= 0:
                 final_text = (
@@ -195,7 +195,7 @@ def _blocking_cli_manager_readline_without_terminal_control(
     timeout: _CliManagerTimeout,
 ) -> str | None:
     """终端控制不可用时保留 deadline 语义，读取完整行。"""
-    now_ms = int(time.time() * 1000)
+    now_ms = now_epoch_ms()
     remaining_ms = timeout.deadline_ms - now_ms
     if remaining_ms > 0:
         prompt_text = _format_cli_manager_prompt(
@@ -205,7 +205,7 @@ def _blocking_cli_manager_readline_without_terminal_control(
         sys.stdout.write(prompt_text)
         sys.stdout.flush()
     while True:
-        now_ms = int(time.time() * 1000)
+        now_ms = now_epoch_ms()
         remaining_ms = timeout.deadline_ms - now_ms
         if remaining_ms <= 0:
             final_text = (
@@ -283,7 +283,7 @@ def _metadata_is_elevated(metadata: dict[str, Any]) -> bool:
 
 def _resolve_cli_manager_timeout(metadata: dict[str, Any]) -> _CliManagerTimeout:
     """解析 CLI 等待截止时间与默认动作。"""
-    now_ms = int(time.time() * 1000)
+    now_ms = now_epoch_ms()
     candidates = [now_ms + _CLI_MANAGER_MAX_WAIT_MS]
     auto_reject_at_ms = _first_int_metadata(
         metadata,

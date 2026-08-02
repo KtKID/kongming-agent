@@ -15,6 +15,7 @@ import pytest
 
 from application.agent_roles import AgentRoleManager
 from core.contracts import ToolContext
+from tests.support.tool_calls import execute_prepared_tool
 from tools.agent_role_tool import CreateAgentRoleTool, ListAgentRolesTool
 
 
@@ -28,7 +29,7 @@ async def test_list_agent_roles_tool_returns_empty_hint(tmp_path: Path) -> None:
     """验证空角色库列表工具，输入为空目录，输出创建提示。"""
     tool = ListAgentRolesTool(AgentRoleManager(role_dir=tmp_path / "roles"))
 
-    result = await tool.execute({}, _ctx())
+    result = await execute_prepared_tool(tool, {}, _ctx())
 
     assert result.ok is True
     assert result.data == {
@@ -45,20 +46,26 @@ async def test_create_agent_role_tool_saves_and_returns_roster(tmp_path: Path) -
     manager = AgentRoleManager(role_dir=tmp_path / "roles")
     tool = CreateAgentRoleTool(manager)
 
-    result = await tool.execute(
-        {"id": "risk_skeptic", "title": "风险质询者", "role": "寻找隐藏风险"},
+    payload = {"id": "risk_skeptic", "title": "Risk skeptic", "role": "Find hidden risks"}
+    result = await execute_prepared_tool(
+        tool,
+        payload,
         _ctx("s1"),
     )
-
     assert result.ok is True
     assert result.data is not None
     assert result.data["status"] == "created"
-    assert result.data["role"] == {
-        "id": "risk_skeptic",
-        "title": "风险质询者",
-        "role": "寻找隐藏风险",
-    }
-    assert result.data["current_roundtable_agents"] == [result.data["role"]]
+    role = result.data["role"]
+    assert role["id"] == "risk_skeptic"
+    assert role["nickname"] == payload["title"]
+    assert role["model"] == ""
+    assert role["role_desc"] == payload["role"]
+    assert role["reasoning_effort"] is None
+    assert role["max_turns"] == 3
+    assert role["source"] == "runtime"
+    assert role["editable"] is True
+    assert str(role["path"]).endswith("roles/runtime/risk_skeptic.toml")
+    assert result.data["current_roundtable_agents"] == [role]
     assert "agent role saved: risk_skeptic" in result.content
 
 
@@ -69,10 +76,10 @@ async def test_create_agent_role_tool_passes_session_id_to_manager(tmp_path: Pat
     create = CreateAgentRoleTool(manager)
     list_tool = ListAgentRolesTool(manager)
 
-    await create.execute({"id": "a", "title": "A", "role": "角色 A"}, _ctx("s1"))
-    await create.execute({"id": "b", "title": "B", "role": "角色 B"}, _ctx("s2"))
-    s1 = await list_tool.execute({}, _ctx("s1"))
-    s2 = await list_tool.execute({}, _ctx("s2"))
+    await execute_prepared_tool(create, {"id": "a", "title": "A", "role": "角色 A"}, _ctx("s1"))
+    await execute_prepared_tool(create, {"id": "b", "title": "B", "role": "角色 B"}, _ctx("s2"))
+    s1 = await execute_prepared_tool(list_tool, {}, _ctx("s1"))
+    s2 = await execute_prepared_tool(list_tool, {}, _ctx("s2"))
 
     assert s1.data is not None
     assert s2.data is not None
@@ -85,7 +92,8 @@ async def test_create_agent_role_tool_rejects_non_string_fields(tmp_path: Path) 
     """验证工具不改写非字符串参数，输入为数字 id，输出 manager 校验错误。"""
     tool = CreateAgentRoleTool(AgentRoleManager(role_dir=tmp_path / "roles"))
 
-    result = await tool.execute(
+    result = await execute_prepared_tool(
+        tool,
         {"id": 123, "title": "风险质询者", "role": "寻找隐藏风险"},
         _ctx("s1"),
     )

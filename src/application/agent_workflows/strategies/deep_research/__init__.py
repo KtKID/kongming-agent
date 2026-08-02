@@ -18,6 +18,8 @@ from application.agent_workflows.strategies.deep_research.contracts import (
     ResearchSourceProvider,
     ResearchSourceQuery,
     ResearchSourceRecord,
+    SourceStatus,
+    SourceTier,
     parse_deep_research_spec,
 )
 from application.agent_workflows.strategies.deep_research.dedupe import (
@@ -62,6 +64,8 @@ __all__ = [
     "ResearchSourceProvider",
     "ResearchSourceQuery",
     "ResearchSourceRecord",
+    "SourceStatus",
+    "SourceTier",
     "SourceDedupeResult",
     "SourceDeduper",
     "build_fallback_votes",

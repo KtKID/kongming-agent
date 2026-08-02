@@ -43,7 +43,7 @@ from application.agent_workflows.strategies.roundtable_review.prompts import (
     build_independent_prompt,
     build_rebuttal_prompt,
 )
-from application.subagents.manager import SubAgentRun, SubAgentTask
+from application.agent_workflows.task_models import SubAgentRun, SubAgentTask
 from application.subagents.permissions import SubAgentPermissionSpec
 
 
@@ -201,10 +201,13 @@ class RoundtableReviewStrategy:
         comments: tuple[ReviewCommentRecord, ...] = ()
         used_budget = 0
 
-        independent_tasks = self._build_independent_tasks(spec)
+        independent_tasks = self._build_independent_tasks(
+            spec,
+        )
         independent_tasks = self._manager.prepare_subagent_tasks(
             workflow_dir=context.workflow_dir,
             tasks=independent_tasks,
+            parent_agent=context.parent_agent,
         )
         self._materialize_tasks(
             tasks=independent_tasks,
@@ -262,6 +265,7 @@ class RoundtableReviewStrategy:
             rebuttal_tasks = self._manager.prepare_subagent_tasks(
                 workflow_dir=context.workflow_dir,
                 tasks=rebuttal_tasks,
+                parent_agent=context.parent_agent,
             )
             self._materialize_tasks(
                 tasks=rebuttal_tasks,
@@ -386,7 +390,7 @@ class RoundtableReviewStrategy:
             }
         )
 
-        from application.agent_workflows.manager import AgentWorkflowResult
+        from application.agent_workflows.models import AgentWorkflowResult
 
         return AgentWorkflowResult(
             workflow_id=context.workflow_id,
@@ -403,7 +407,10 @@ class RoundtableReviewStrategy:
             completed_override=completed,
         )
 
-    def _build_independent_tasks(self, spec: RoundtableReviewSpec) -> list[SubAgentTask]:
+    def _build_independent_tasks(
+        self,
+        spec: RoundtableReviewSpec,
+    ) -> list[SubAgentTask]:
         """构造首轮 reviewer 任务，输入为 spec，输出为子任务列表。"""
         per_agent_budget = _per_agent_budget(spec, agent_count=len(spec.reviewers) + 1)
         return [
@@ -416,11 +423,12 @@ class RoundtableReviewStrategy:
                     per_agent_token_budget=per_agent_budget,
                 ),
                 tool_names=("read_file", "list_dir"),
+                agent_role_id=reviewer.agent_id,
                 permission=SubAgentPermissionSpec(mode="scoped_workdir"),
                 metadata={
                     "roundtable_stage": "independent",
                     "roundtable_agent": reviewer.agent_id,
-                    "max_turns": spec.limits.reviewer_max_turns,
+                    **_reviewer_max_turns_metadata(reviewer),
                 },
             )
             for reviewer in spec.reviewers
@@ -446,12 +454,13 @@ class RoundtableReviewStrategy:
                     per_agent_token_budget=per_agent_budget,
                 ),
                 tool_names=("read_file", "list_dir"),
+                agent_role_id=reviewer.agent_id,
                 permission=SubAgentPermissionSpec(mode="scoped_workdir"),
                 metadata={
                     "roundtable_stage": "rebuttal",
                     "roundtable_round": round_index,
                     "roundtable_agent": reviewer.agent_id,
-                    "max_turns": spec.limits.reviewer_max_turns,
+                    **_reviewer_max_turns_metadata(reviewer),
                 },
             )
             for reviewer in spec.reviewers
@@ -506,6 +515,7 @@ class RoundtableReviewStrategy:
         assigned = self._manager.prepare_subagent_tasks(
             workflow_dir=context.workflow_dir,
             tasks=[task],
+            parent_agent=context.parent_agent,
         )
         self._materialize_tasks(
             tasks=assigned,
@@ -675,6 +685,13 @@ class RoundtableReviewStrategy:
                     )
                 )
         return tuple(comments)
+
+
+def _reviewer_max_turns_metadata(reviewer: ReviewerSpec) -> dict[str, object]:
+    """生成 reviewer 调度 turn metadata，输入为 reviewer，输出可合并 metadata。"""
+    if reviewer.max_turns is None:
+        return {}
+    return {"max_turns": reviewer.max_turns}
 
 
 def _per_agent_budget(spec: RoundtableReviewSpec, *, agent_count: int) -> int:

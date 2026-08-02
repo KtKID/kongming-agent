@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.config import get_kongming_home, resolve_kongming_path
+from infrastructure.config import (
+    builtin_agent_config_template_path,
+    find_existing_kongming_home_agent_config,
+    get_kongming_home,
+    kongming_home_agent_config_candidates,
+    materialize_kongming_home_agent_config,
+    resolve_kongming_path,
+)
 
 
 def _patch_user_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
@@ -184,3 +191,38 @@ def test_returned_path_is_absolute(
 
     monkeypatch.setenv("KONGMING_HOME", "~/km-abs-check")
     assert get_kongming_home().is_absolute()
+
+
+@pytest.mark.unit
+def test_agent_config_lookup_uses_home_root_agent_toml(tmp_path: Path) -> None:
+    """agent role 运行配置只读取 kongming_home 根部 agent.toml。"""
+    home = tmp_path / "kongming-home"
+    home.mkdir()
+    legacy_config = home / "config" / "agent.toml"
+    legacy_config.parent.mkdir()
+    legacy_config.write_text('[[agents]]\nid = 1\nnickname = "legacy"\n', encoding="utf-8")
+
+    assert kongming_home_agent_config_candidates(home) == ((home / "agent.toml").resolve(),)
+    assert find_existing_kongming_home_agent_config(home) is None
+
+    root_config = home / "agent.toml"
+    root_config.write_text('[[agents]]\nid = 1\nnickname = "root"\n', encoding="utf-8")
+
+    assert find_existing_kongming_home_agent_config(home) == root_config.resolve()
+
+
+def test_materialize_agent_config_copies_builtin_template_once(tmp_path: Path) -> None:
+    """agent.toml 缺失时复制内置模板，已有文件保持原样。"""
+    home = tmp_path / "kongming-home"
+
+    target = materialize_kongming_home_agent_config(home)
+
+    assert target == (home / "agent.toml").resolve()
+    assert target is not None
+    assert "[[agents]]" in target.read_text(encoding="utf-8")
+    assert builtin_agent_config_template_path() is not None
+
+    target.write_text("custom = true\n", encoding="utf-8")
+
+    assert materialize_kongming_home_agent_config(home) == target
+    assert target.read_text(encoding="utf-8") == "custom = true\n"

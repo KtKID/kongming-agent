@@ -175,9 +175,10 @@ class DeepResearchTaskLogWriter:
 
     def _append(self, path: Path, payload: Mapping[str, object]) -> None:
         """追加 JSONL 事件，输入为路径和 payload，输出为写入一行 JSON。"""
+        normalized = _with_runtime_payload(payload, self._audit_writer)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+            handle.write(json.dumps(normalized, ensure_ascii=False, default=str) + "\n")
 
     def _update_subagent_json(
         self,
@@ -196,6 +197,9 @@ class DeepResearchTaskLogWriter:
         payload["task_log_path"] = str(task_log_path)
         payload["deep_research_phase"] = phase
         payload["deep_research_role"] = role
+        runtime = _runtime_payload_from_audit_writer(self._audit_writer)
+        if runtime is not None:
+            payload["resolved_runtime"] = runtime
         if child_session_log_path:
             payload["child_session_log_path"] = child_session_log_path
         if completed_status:
@@ -229,6 +233,30 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _with_runtime_payload(
+    payload: Mapping[str, object],
+    audit_writer: Any | None,
+) -> dict[str, object]:
+    """补齐 runtime 字段，输入为日志 payload 和 audit writer，输出为可落盘 payload。"""
+    normalized = dict(payload)
+    if "resolved_runtime" in normalized:
+        return normalized
+    runtime = _runtime_payload_from_audit_writer(audit_writer)
+    if runtime is not None:
+        normalized["resolved_runtime"] = runtime
+    return normalized
+
+
+def _runtime_payload_from_audit_writer(audit_writer: Any | None) -> dict[str, object] | None:
+    """从 audit writer 读取 runtime，输入为任意 writer，输出为 runtime payload 或 None。"""
+    if audit_writer is None:
+        return None
+    raw = getattr(audit_writer, "resolved_runtime_payload", None)
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    return None
 
 
 def _now_iso() -> str:

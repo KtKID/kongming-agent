@@ -2,17 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import hosts.cli.main as cli_main
-from core.message import Message
+from commands.models import CommandResult
+from core.contracts import (
+    ApprovalDecision,
+    ApprovalRequest,
+    LLMRequest,
+    LLMResponse,
+    PreparedToolCall,
+    ToolContext,
+    ToolResult,
+)
+from core.message import Message, ToolCall
+from hosts.cli.interactive_loop import CLIInteractiveLoop, SendDelivery
 from infrastructure.config.models import (
     ApprovalConfig,
     Config,
-    ModelConfig,
+    ModelSelectionConfig,
     RunnerConfig,
     SchedulerConfig,
     SessionConfig,
@@ -20,7 +33,7 @@ from infrastructure.config.models import (
 )
 from infrastructure.tracing import JsonlTraceSink, PromptDebugDumpSink
 from prompting import InstructionLoader
-from runtime_assembly.native_runtime import NativeRuntime
+from runtime_assembly.session_engine import SessionEngine
 from sessions import build_session
 from sessions.session_bootstrap import SessionBootstrap
 
@@ -28,6 +41,31 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 # 测试 dump 与 CLI ``--debug`` 生产落盘 (.kongming/debug/prompt-debug-*.json)
 # 物理分开，避免人工查看 debug 时被测试垃圾干扰。
 _DUMP_DIR = _REPO_ROOT / ".kongming/debug/tests"
+
+
+def _cli_loop(dispatcher):
+    """构造绑定 HostDispatcher 的 CLI loop。
+
+    host-dispatch-consolidation：bridge_factory 现发放 HostDispatcher。
+    CLIInteractiveLoop 直接持有 dispatcher。
+    """
+    return CLIInteractiveLoop(host_dispatcher=dispatcher)
+
+
+class _DummyMainCLIInteractiveLoop:
+    """CLI main 装配测试用 loop 替身。"""
+
+    def __init__(self, *, host_dispatcher, command_service=None, adapter=None) -> None:
+        self.host_dispatcher = host_dispatcher
+        self.command_service = command_service
+        self.adapter = adapter
+
+    async def run_loop(self) -> None:
+        # _DummyHostDispatcher 把"写一条消息到 session"的行为挂在 run_loop 上，
+        # 这里转发调用，模拟真实 CLIInteractiveLoop.run_loop 驱动交互。
+        run_loop = getattr(self.host_dispatcher, "run_loop", None)
+        if callable(run_loop):
+            await run_loop()
 
 
 def _build_cfg(
@@ -39,12 +77,7 @@ def _build_cfg(
 ) -> Config:
     """Build a config shaped like the CLI path, with storage under tmp_path."""
     return Config(
-        model=ModelConfig(
-            provider="openai_compatible",
-            name="stub-model",
-            base_url="http://127.0.0.1:1234",
-            api_key="",
-        ),
+        model=ModelSelectionConfig(preset_id="local-gemma-4-e4b-it"),
         runner=RunnerConfig(max_turns=3),
         session=SessionConfig(
             backend=backend,
@@ -100,7 +133,7 @@ async def test_cli_assembly_with_file_backend_persists_across_runtime_instances(
     bootstrap = _bootstrap(tmp_path)
 
     stub_llm.script(content="ok-first")
-    runtime1 = NativeRuntime.build(
+    runtime1 = SessionEngine.build(
         cfg,
         approval=recording_approval,
         tools={},
@@ -117,7 +150,7 @@ async def test_cli_assembly_with_file_backend_persists_across_runtime_instances(
     assert session_path.stat().st_size > 0
 
     stub_llm.script(content="ok-second")
-    runtime2 = NativeRuntime.build(
+    runtime2 = SessionEngine.build(
         cfg,
         approval=recording_approval,
         tools={},
@@ -143,7 +176,7 @@ async def test_cli_assembly_with_memory_backend_does_not_write_db(
     cfg = _build_cfg(tmp_path, backend="memory")
 
     stub_llm.script(content="ok")
-    runtime = NativeRuntime.build(
+    runtime = SessionEngine.build(
         cfg,
         approval=recording_approval,
         tools={},
@@ -166,7 +199,7 @@ async def test_cli_assembly_with_jsonl_trace_sink_writes_jsonl_per_run(
     trace_path = tmp_path / "trace-cli.jsonl"
 
     stub_llm.script(content="done")
-    runtime = NativeRuntime.build(
+    runtime = SessionEngine.build(
         cfg,
         event_sinks=[JsonlTraceSink(str(trace_path))],
         approval=recording_approval,
@@ -215,7 +248,7 @@ async def test_cli_assembly_injects_instructions_from_loader_into_session(
     cfg = _build_cfg(tmp_path)
 
     stub_llm.script(content="roger")
-    runtime = NativeRuntime.build(
+    runtime = SessionEngine.build(
         cfg,
         approval=recording_approval,
         tools={},
@@ -235,11 +268,11 @@ async def test_cli_assembly_injects_instructions_from_loader_into_session(
 async def test_native_runtime_build_honors_explicit_instructions_param(
     stub_llm, recording_approval, tmp_path
 ):
-    """NativeRuntime.build(instructions=...) should override the default system text."""
+    """SessionEngine.build(instructions=...) should override the default system text."""
     cfg = _build_cfg(tmp_path)
 
     stub_llm.script(content="ok")
-    runtime = NativeRuntime.build(
+    runtime = SessionEngine.build(
         cfg,
         approval=recording_approval,
         tools={},
@@ -262,7 +295,7 @@ async def test_native_runtime_build_empty_instructions_falls_back_to_default(
     cfg = _build_cfg(tmp_path)
 
     stub_llm.script(content="ok")
-    runtime = NativeRuntime.build(
+    runtime = SessionEngine.build(
         cfg,
         approval=recording_approval,
         tools={},
@@ -301,12 +334,14 @@ async def test_prompt_complete_flow_uses_production_assembly_and_dumps_json(
     # 让 LLM 知道自己跑在哪。不可关闭。
     assert origins == [
         "runtime",
+        "workflow_catalog",
         "agent_spec",
         "file:rules.md",
         "env:KONGMING_EXTRA_INSTRUCTIONS",
         "memory",
     ]
     assert "# runtime" in rendered_prompt
+    assert "# workflow_catalog" in rendered_prompt
     assert "# agent_spec" in rendered_prompt
     assert "# file:rules.md" in rendered_prompt
     assert "# env:KONGMING_EXTRA_INSTRUCTIONS" in rendered_prompt
@@ -316,7 +351,7 @@ async def test_prompt_complete_flow_uses_production_assembly_and_dumps_json(
     assert "MEMORY-RULE: remember project prompt flow." in rendered_prompt
 
     cfg = _build_cfg(tmp_path, backend="memory")
-    runtime = NativeRuntime.build(
+    runtime = SessionEngine.build(
         cfg,
         approval=recording_approval,
         tools={},
@@ -365,10 +400,10 @@ async def test_prompt_complete_flow_uses_production_assembly_and_dumps_json(
 async def test_prompt_debug_mode_dumps_runtime_prompt_snapshot(
     stub_llm, recording_approval, tmp_path
 ):
-    """NativeRuntime debug sink 应保存真实 Runner turn 的 prompt 快照。"""
+    """SessionEngine debug sink 应保存真实 Runner turn 的 prompt 快照。"""
     debug_dir = tmp_path / "debug"
     cfg = _build_cfg(tmp_path, backend="memory")
-    runtime = NativeRuntime.build(
+    runtime = SessionEngine.build(
         cfg,
         approval=recording_approval,
         tools={},
@@ -449,19 +484,19 @@ async def test_cli_run_persists_instruction_metadata_to_file_manifest(
             self._session_factory = session_factory
 
         async def aclose(self) -> None:
-            # 与真实 NativeRuntime.aclose 签名保持一致：CLI 退出路径 await 该方法。
+            # 与真实 SessionEngine.aclose 签名保持一致：CLI 退出路径 await 该方法。
             return None
 
-    class _DummyBridge:
+    class _DummyHostDispatcher:
         def __init__(
             self,
             *,
             runtime,
-            adapter,
             session_id: str,
-            echo_final_content: bool = True,
+            queued_result_handler=None,
+            agent_tree_runtime_router=None,
         ) -> None:
-            del adapter, echo_final_content
+            del queued_result_handler, agent_tree_runtime_router
             self._runtime = runtime
             self.session_id = session_id
 
@@ -481,8 +516,14 @@ async def test_cli_run_persists_instruction_metadata_to_file_manifest(
         return []
 
     monkeypatch.setattr(cli_main, "load_skill_specs", _no_skill_specs)
-    monkeypatch.setattr(cli_main.NativeRuntime, "build", staticmethod(_fake_build))
-    monkeypatch.setattr(cli_main, "SessionBridge", _DummyBridge)
+    monkeypatch.setattr(cli_main.SessionEngine, "build", staticmethod(_fake_build))
+    monkeypatch.setattr(cli_main, "HostDispatcher", _DummyHostDispatcher)
+    # host-dispatch-consolidation：_run 改走 build_default_command_service 装配命令面，
+    # 替身为最小对象避免触达真实命令注册。
+    monkeypatch.setattr(
+        cli_main, "build_default_command_service", lambda *, adapter, runtime_delegate: object()
+    )
+    monkeypatch.setattr(cli_main, "CLIInteractiveLoop", _DummyMainCLIInteractiveLoop)
     monkeypatch.setattr(cli_main, "_generate_cli_session_id", lambda: "cli-meta")
     monkeypatch.setattr(cli_main, "_print_banner", lambda *_, **__: None)
 
@@ -545,7 +586,7 @@ async def test_cli_run_lists_existing_file_sessions_before_runtime_start(
     def _unexpected_build(*_args, **_kwargs):
         raise AssertionError("runtime should not build for --list-sessions")
 
-    monkeypatch.setattr(cli_main.NativeRuntime, "build", staticmethod(_unexpected_build))
+    monkeypatch.setattr(cli_main.SessionEngine, "build", staticmethod(_unexpected_build))
 
     await cli_main._run(
         config_path=None,
@@ -602,16 +643,16 @@ async def test_cli_run_resume_last_selects_latest_file_session(tmp_path, monkeyp
         async def aclose(self) -> None:
             return None
 
-    class _DummyBridge:
+    class _DummyHostDispatcher:
         def __init__(
             self,
             *,
             runtime,
-            adapter,
             session_id: str,
-            echo_final_content: bool = True,
+            queued_result_handler=None,
+            agent_tree_runtime_router=None,
         ) -> None:
-            del runtime, adapter, echo_final_content
+            del runtime, queued_result_handler, agent_tree_runtime_router
             captured["session_id"] = session_id
             self.session_id = session_id
 
@@ -627,11 +668,15 @@ async def test_cli_run_resume_last_selects_latest_file_session(tmp_path, monkeyp
     monkeypatch.setattr(cli_main, "build_default_registry", lambda **_: _DummyRegistry())
     monkeypatch.setattr(cli_main, "build_default_approval", lambda *_, **__: object())
     monkeypatch.setattr(
-        cli_main.NativeRuntime,
+        cli_main.SessionEngine,
         "build",
         staticmethod(lambda *_, **kwargs: _FakeRuntime(session_factory=kwargs["session_factory"])),
     )
-    monkeypatch.setattr(cli_main, "SessionBridge", _DummyBridge)
+    monkeypatch.setattr(cli_main, "HostDispatcher", _DummyHostDispatcher)
+    monkeypatch.setattr(
+        cli_main, "build_default_command_service", lambda *, adapter, runtime_delegate: object()
+    )
+    monkeypatch.setattr(cli_main, "CLIInteractiveLoop", _DummyMainCLIInteractiveLoop)
     monkeypatch.setattr(cli_main, "_print_banner", lambda *_, **__: None)
 
     await cli_main._run(
@@ -674,3 +719,383 @@ def _write_file_session_record(
         json.dumps(record, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+
+
+# ===========================================================================
+# 发送链路（mailbox）e2e —— cli-mailbox-steer-send #5
+#
+# 全部经真实 SessionEngine + Runner + agent_tree mailbox（只 stub LLM），入口只走
+# 公开接口 ``bridge.run_once`` / ``bridge.send``；bridge 生命周期由 conftest 的
+# ``bridge_factory`` fixture 统一 teardown（用例体内不出现任何关闭调用）。
+# ===========================================================================
+
+
+def _build_mailbox_cfg(tmp_path: Path) -> Config:
+    """构造发送链路用例专用 Config（memory backend，approval=auto_allow）。
+
+    与 ``_build_cfg`` 同款但显式命名，突出这批用例走 mailbox 全链路。max_turns 给足
+    以容纳 tool_call → 下一 turn。输入 tmp_path 仅用于 session store 占位路径（memory
+    backend 不落盘）；输出一份可直接喂 SessionEngine.build 的 Config。
+    """
+    return _build_cfg(tmp_path, backend="memory")
+
+
+class _GatedLLM:
+    """门控 stub LLM（发送链路用例专用，从公开 ``runtime._llm`` 注入点进入）。
+
+    职责：让测试能在"一次 run 正跑到某个 turn"的确定时机介入（steer / send）。
+    第一次 ``complete`` 挂在 ``gate`` event 上等测试放行；之后每次 complete 弹出
+    预置响应列表 ``responses`` 的队首，用完返回终止 stop。每次 complete 都把收到的
+    ``request.messages`` 记进 ``requests``，供断言注入文本是否出现在后续请求里。
+
+    关键输入：``responses``（(content, tool_calls) 序列）+ ``gate``（第一次挂起的门）。
+    关键输出：``complete`` 返回 LLMResponse；副作用是累计 ``complete_called`` /
+    ``requests``。结构上满足 core.contracts.LLMProvider（单 async complete）。
+    """
+
+    def __init__(
+        self,
+        responses: list[tuple[str | None, list[ToolCall] | None]],
+        *,
+        gate: asyncio.Event,
+    ) -> None:
+        self._responses = list(responses)
+        self._gate = gate
+        self.complete_called = 0
+        self.requests: list[tuple[Message, ...]] = []
+
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        self.complete_called += 1
+        self.requests.append(tuple(request.messages))
+        if self.complete_called == 1:
+            # 第一次挂起，给测试代码在 run 进行中 send/steer 的时间窗口。
+            await self._gate.wait()
+        if self._responses:
+            content, tool_calls = self._responses.pop(0)
+        else:
+            content, tool_calls = ("done", None)
+        calls_tuple = tuple(tool_calls) if tool_calls else None
+        msg = Message(role="assistant", content=content, tool_calls=calls_tuple)
+        finish = "tool_calls" if calls_tuple else "stop"
+        return LLMResponse(message=msg, finish_reason=finish)
+
+
+class _QuickTool:
+    """Tool stub：立即返回成功。
+
+    用于让门控 LLM 第一轮发一个 tool_call、从而产生第二个 turn（steer 有 drain 时机）。
+    execute 输入 (args, ctx) 忽略内容，输出恒定成功 ToolResult。
+    """
+
+    name = "quick"
+    description = "returns immediately"
+    input_schema: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
+
+    async def execute(self, prepared: PreparedToolCall, ctx: ToolContext) -> ToolResult:
+        del prepared, ctx
+        return ToolResult(ok=True, content="quick ok")
+
+
+class _AllowApproval:
+    """恒批准 approval：tool_call 一律放行（发送链路用例不测审批分支）。"""
+
+    async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        return ApprovalDecision(outcome="approved")
+
+
+async def _wait_until(predicate: Any, *, timeout: float = 5.0) -> None:
+    """轮询等到 predicate() 为真或超时（公开可观察面，不摸 bridge/runtime 内脏）。
+
+    输入 predicate（无参可调用返回 bool）+ 总超时秒数；到期未满足抛 AssertionError。
+    用小步 sleep 轮询而非固定 sleep，避免时序赌博也不依赖内部事件。
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_event_loop().time() > deadline:
+            raise AssertionError("predicate did not become true within timeout")
+        await asyncio.sleep(0.01)
+
+
+def _user_texts(messages: tuple[Message, ...]) -> list[str]:
+    """从一次请求的 messages 里抽出所有 user 文本，供断言注入是否命中。"""
+    return [m.content for m in messages if m.role == "user" and m.content]
+
+
+def _build_stub_runtime(
+    tmp_path: Path,
+    llm: Any,
+    *,
+    recording_approval: Any,
+) -> SessionEngine:
+    """按 CLI 装配形态 build 一个 SessionEngine 并注入给定 stub llm（memory backend）。
+
+    输入 tmp_path（store 占位）+ 任意满足 LLMProvider 的 llm + approval；输出装好的
+    SessionEngine（``_llm`` 已替换为 stub，不发真实 HTTP）。tools 空、无白名单，用于
+    纯文本 run 用例。
+    """
+    cfg = _build_mailbox_cfg(tmp_path)
+    runtime = SessionEngine.build(
+        cfg,
+        approval=recording_approval,
+        tools={},
+        enabled_tool_names=[],
+        session_factory=lambda sid: build_session(cfg, sid),
+    )
+    runtime._llm = llm  # type: ignore[attr-defined]
+    return runtime
+
+
+# ---------------------------------------------------------------------------
+# 1. 单轮 run_once → completed Result
+# ---------------------------------------------------------------------------
+
+
+async def test_mailbox_single_run_once_returns_completed(
+    stub_llm, recording_approval, tmp_path, bridge_factory
+):
+    """经 mailbox 全链路的一次 run_once 返回 completed Result，final content 对，LLM 一次。"""
+    stub_llm.script(content="hello from stub")
+    runtime = _build_stub_runtime(tmp_path, stub_llm, recording_approval=recording_approval)
+    bridge = await bridge_factory(runtime=runtime, session_id="mbx-single")
+
+    result = await bridge.run_once("hi")
+
+    assert not isinstance(result, CommandResult)
+    assert result.status == "completed"
+    assert result.final_message is not None
+    assert result.final_message.content == "hello from stub"
+    assert len(stub_llm.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# 2. 多轮同 session：第二轮 LLM 请求看得到第一轮 history
+# ---------------------------------------------------------------------------
+
+
+async def test_mailbox_multi_run_once_history_continuity(
+    stub_llm, recording_approval, tmp_path, bridge_factory
+):
+    """同一 bridge 连续两轮 run_once，第二轮 LLM 请求 messages 含第一轮 user + assistant。"""
+    stub_llm.script(content="answer-1")
+    stub_llm.script(content="answer-2")
+    runtime = _build_stub_runtime(tmp_path, stub_llm, recording_approval=recording_approval)
+    bridge = await bridge_factory(runtime=runtime, session_id="mbx-multi")
+
+    result1 = await bridge.run_once("first user")
+    result2 = await bridge.run_once("second user")
+
+    assert not isinstance(result1, CommandResult)
+    assert not isinstance(result2, CommandResult)
+    assert result1.status == "completed"
+    assert result2.status == "completed"
+    assert len(stub_llm.calls) == 2
+
+    second_contents = [m.content for m in stub_llm.calls[1].messages if m.content]
+    assert "first user" in second_contents
+    assert "answer-1" in second_contents
+    assert "second user" in second_contents
+
+
+# ---------------------------------------------------------------------------
+# 3. "/斜杠命令"不进 mailbox：返回 CommandResult 且 LLM 零调用
+# ---------------------------------------------------------------------------
+
+
+async def test_mailbox_slash_command_bypasses_mailbox(
+    stub_llm, recording_approval, tmp_path, bridge_factory
+):
+    """未知 /命令走命令控制面（不投 mailbox）：返回 CommandResult，stub LLM 零调用。"""
+    runtime = _build_stub_runtime(tmp_path, stub_llm, recording_approval=recording_approval)
+    bridge = await bridge_factory(runtime=runtime, session_id="mbx-cmd")
+
+    result = await bridge.run_once("/nonexistent-command")
+
+    assert isinstance(result, CommandResult)
+    assert len(stub_llm.calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# 4. send_now 立即发送（核心）：显式插入当前 run，不新建 run
+# ---------------------------------------------------------------------------
+
+
+async def test_mailbox_send_now_injects_into_active_run(
+    recording_approval, tmp_path, bridge_factory
+):
+    """run 进行中 send_now("msg2") → delivery=="send_now"，msg2 注入当前 run（不新建）。
+
+    多轮构造（见报告）：门控 LLM 第一轮返回一个 ``quick`` 的 tool_call（非终止形态，
+    runner 只看 tool_calls 判终止），从而产生第二个 turn；第二个 turn 开头 runner drain
+    steer buffer，把 send 进来的 msg2 注入成 user 消息，第二次 LLM 请求即可见。第二轮
+    返回 content stop 终止。因此：run 只有一个（同一次 run_once），turn_count==2。
+
+    流程：create_task 跑 run_once("msg1") → 等第一次 complete 挂在 gate（run 已开始）→
+    send_now("msg2") 断言 send_now → 放行 gate → await run 完成断言 completed / turn_count==2 /
+    第二次请求 messages 含 msg2。整体套 asyncio.wait_for 防挂死。
+    """
+    gate = asyncio.Event()
+    llm = _GatedLLM(
+        [
+            # 第一轮：发 quick 的 tool_call（非终止）→ 制造第二个 turn 供 drain。
+            (None, [ToolCall(call_id="c1", tool_name="quick", arguments={})]),
+            # 第二轮：普通 content，stop 终止。
+            ("done", None),
+        ],
+        gate=gate,
+    )
+    cfg = _build_mailbox_cfg(tmp_path)
+    runtime = SessionEngine.build(
+        cfg,
+        approval=_AllowApproval(),
+        tools={"quick": _QuickTool()},
+        enabled_tool_names=["quick"],
+        session_factory=lambda sid: build_session(cfg, sid),
+    )
+    runtime._llm = llm  # type: ignore[attr-defined]
+    bridge = await bridge_factory(runtime=runtime, session_id="mbx-steer")
+
+    async def _scenario() -> Any:
+        task: asyncio.Task[Any] = asyncio.create_task(bridge.run_once("msg1"))
+        # 等 run 走进第一次 complete（run 已开始、buffer 已注册、挂在 gate 上）。
+        await _wait_until(lambda: llm.complete_called >= 1)
+        # run 进行中 send_now：命中活跃 run → send_now。
+        receipt = await _cli_loop(bridge).send_now("msg2")
+        assert receipt.delivery == SendDelivery.SEND_NOW
+        gate.set()  # 放行第一次 complete，run 继续到第二个 turn（drain msg2）。
+        return await task
+
+    result = await asyncio.wait_for(_scenario(), timeout=10.0)
+
+    assert not isinstance(result, CommandResult)
+    assert result.status == "completed"
+    # 只有一个 run：turn1(tool_call) + turn2(stop) == 2 turns。
+    assert result.turn_count == 2
+    # 第二次 complete 的请求 messages 含注入的 msg2（drain 发生在 turn2 开头）。
+    assert llm.complete_called >= 2
+    assert "msg2" in _user_texts(llm.requests[1])
+
+
+async def test_mailbox_send_defaults_to_queue_during_active_run(
+    recording_approval, tmp_path, bridge_factory
+):
+    """run 进行中 send("msg2") → delivery=="queued"，msg2 作为下一轮独立 run。
+
+    CLI 普通回车对应 Web user.input 普通排队语义；即使当前 run 有可 drain 的第二个
+    turn，普通 send 也不插入当前 run。
+    """
+    gate = asyncio.Event()
+    llm = _GatedLLM(
+        [
+            (None, [ToolCall(call_id="c1", tool_name="quick", arguments={})]),
+            ("done-first", None),
+            ("done-second", None),
+        ],
+        gate=gate,
+    )
+    cfg = _build_mailbox_cfg(tmp_path)
+    runtime = SessionEngine.build(
+        cfg,
+        approval=_AllowApproval(),
+        tools={"quick": _QuickTool()},
+        enabled_tool_names=["quick"],
+        session_factory=lambda sid: build_session(cfg, sid),
+    )
+    runtime._llm = llm  # type: ignore[attr-defined]
+    bridge = await bridge_factory(runtime=runtime, session_id="mbx-default-queue")
+
+    async def _scenario() -> Any:
+        task: asyncio.Task[Any] = asyncio.create_task(bridge.run_once("msg1"))
+        await _wait_until(lambda: llm.complete_called >= 1)
+        receipt = await _cli_loop(bridge).send("msg2")
+        assert receipt.delivery == SendDelivery.QUEUED
+        gate.set()
+        return await task
+
+    result = await asyncio.wait_for(_scenario(), timeout=10.0)
+
+    assert not isinstance(result, CommandResult)
+    assert result.status == "completed"
+    assert result.turn_count == 2
+    assert llm.complete_called >= 2
+    assert "msg2" not in _user_texts(llm.requests[1])
+    await _wait_until(lambda: llm.complete_called >= 3, timeout=5.0)
+    assert "msg2" in _user_texts(llm.requests[2])
+
+
+# ---------------------------------------------------------------------------
+# 5. 普通 send 默认排队 → delivery=="queued"
+# ---------------------------------------------------------------------------
+
+
+async def test_mailbox_idle_send_falls_back_to_queued(
+    stub_llm, recording_approval, tmp_path, bridge_factory
+):
+    """空闲时 send("solo") → delivery=="queued"，排队的独立新 run 最终确实跑起来。
+
+    等待取舍（见报告）：用例体内不能出现关闭调用，而排队 run 是异步 task 跑的。因此不
+    调 aclose(drain=True)（那算关闭调用，违反约束），改为轮询**公开可观察面**——
+    stub_llm.calls 在超时内变为 1（run 已被 agent_loop 消费执行）。这仍是公开接口观察，
+    不摸 bridge 内部；剩余收尾交给 fixture 的 aclose(drain=True) teardown。
+    """
+    stub_llm.script(content="solo-answer")
+    runtime = _build_stub_runtime(tmp_path, stub_llm, recording_approval=recording_approval)
+    bridge = await bridge_factory(runtime=runtime, session_id="mbx-queued")
+
+    receipt = await _cli_loop(bridge).send("solo")
+    assert receipt.delivery == SendDelivery.QUEUED
+
+    # 排队 run 是异步 task，轮询等它被 agent_loop 消费并调用 LLM（公开可观察面）。
+    await _wait_until(lambda: len(stub_llm.calls) == 1, timeout=5.0)
+    assert "solo" in _user_texts(tuple(stub_llm.calls[0].messages))
+
+
+# ---------------------------------------------------------------------------
+# 6. send_now 残留回投：run 收尾期插入未命中 drain → 残留回投成新 run
+# ---------------------------------------------------------------------------
+
+
+async def test_mailbox_send_leftover_reback_or_queued(recording_approval, tmp_path, bridge_factory):
+    """run 收尾期 send_now("late-msg")：两种合法结局都接住（竞态天然二分）。
+
+    构造：门控 LLM 第一轮即终止（stop，无 tool_call），且 complete 挂在 gate 上。等第一次
+    complete 已开始（run 即将在这一 turn 结束、无第二个 turn 可 drain）→ send_now("late-msg")：
+
+    - 若 steer 命中（buffer 尚未 close）：delivery=="send_now"，但这是终止 turn 注不进去，
+      runner 把 late-msg 写进 result.metadata["steer_undelivered"]，bridge 收尾后按 queued
+      路径回投成一条**新 run**（消息不丢）。
+    - 若竞态落在 run 已收尾之后（buffer 已 close）：steer 返回 False，delivery=="queued"，
+      直接排队成新 run。
+
+    两种结局都要求：late-msg 最终获得独立新 run —— stub 被再次调起（总调用数≥2）且某次
+    请求 messages 含 late-msg。整体套 asyncio.wait_for 防挂死。
+    """
+    gate = asyncio.Event()
+    # 第一轮直接 stop（无 tool_call）→ 只有一个 turn，无第二 turn 可 drain。
+    llm = _GatedLLM([("done", None)], gate=gate)
+    cfg = _build_mailbox_cfg(tmp_path)
+    runtime = SessionEngine.build(
+        cfg,
+        approval=_AllowApproval(),
+        tools={},
+        enabled_tool_names=[],
+        session_factory=lambda sid: build_session(cfg, sid),
+    )
+    runtime._llm = llm  # type: ignore[attr-defined]
+    bridge = await bridge_factory(runtime=runtime, session_id="mbx-leftover")
+
+    async def _scenario() -> SendDelivery:
+        task: asyncio.Task[Any] = asyncio.create_task(bridge.run_once("run1"))
+        # 等第一次 complete 已开始（run 走进终止 turn，即将结束）。
+        await _wait_until(lambda: llm.complete_called >= 1)
+        receipt = await _cli_loop(bridge).send_now("late-msg")
+        gate.set()  # 放行，run1 收尾（若 send_now → 残留回投；若 queued → 已排队）。
+        await task
+        return receipt.delivery
+
+    delivery = await asyncio.wait_for(_scenario(), timeout=10.0)
+
+    # 两种合法结局：send_now（残留回投）或 queued（直接排队）。
+    assert delivery in (SendDelivery.SEND_NOW, SendDelivery.QUEUED)
+    # 无论哪种，late-msg 最终都获得独立新 run：stub 被再次调起且某次请求含 late-msg。
+    await _wait_until(lambda: llm.complete_called >= 2, timeout=5.0)
+    assert any("late-msg" in _user_texts(req) for req in llm.requests)

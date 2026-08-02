@@ -2,15 +2,15 @@
 
 这里**不**承载跨模块协议真源（跨模块协议真源只在 :mod:`core.contracts`）。
 本文件定义 :class:`HostAdapter`：所有宿主适配器（CLI、未来的 HTTP /
-macOS / 游戏宿主）共用的最小抽象骨架，给 :class:`host.session_bridge.SessionBridge`
-一个稳定调用面。
+macOS / 游戏宿主）共用的最小抽象骨架，给 CLIInteractiveLoop、ThreadManager
+和 HostDispatcher 一个稳定 UI 调用面。
 
 设计约束：
 
 - 不定义第二份 ``EventSink`` / ``ApprovalProvider`` / ``Session`` 抽象。
   adapter 只负责 **翻译** 宿主与 runtime 之间的事件，不持有状态机。
 - ``notify_event`` 是可选渲染点，默认实现直接丢弃。真正把事件落盘或写日志
-  请走 :class:`core.contracts.EventSink` 实现并通过 ``NativeRuntime.build
+  请走 :class:`core.contracts.EventSink` 实现并通过 ``SessionEngine.build
   (event_sinks=[...])`` 注入，而不是把渲染逻辑往这里塞。
 - ``prompt_approval`` 返回 ``bool``，由 :func:`tools.build_default_approval`
   的 ``interactive`` 模式消费；它负责把布尔值翻成
@@ -19,10 +19,16 @@ macOS / 游戏宿主）共用的最小抽象骨架，给 :class:`host.session_br
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
+
 from core.contracts import ApprovalRequest, Event
 
+if TYPE_CHECKING:  # pragma: no cover - 仅类型注解用,运行时用字符串注解规避循环 import
+    from core.result import Result
 
-class HostAdapter:
+
+class HostAdapter(ABC):
     """宿主适配器基类。
 
     所有具体宿主（CLI、HTTP、macOS、游戏等）通过子类化这个基类，把自己
@@ -38,6 +44,15 @@ class HostAdapter:
       :class:`tools.InteractiveApproval` 翻成
       :class:`core.contracts.ApprovalDecision`。
     - ``close`` 用来释放宿主资源（例如 PromptSession），多次调用应保持幂等。
+
+    **强制覆盖机制(render_result)**:本类用 :class:`abc.ABC` + ``@abstractmethod``
+    强制子类必须覆盖 :meth:`render_result`——继承 ``HostAdapter`` 的子类若忘了覆盖,
+    实例化时直接 ``TypeError: Can't instantiate abstract class ... without an
+    override for abstract method 'render_result'``。这避免了"子类忘了写 render_result
+    导致用错渲染逻辑"的隐患(运行时就炸,不靠自觉)。
+
+    基类仍提供默认实现(拆 content 走 write_output),子类可用 ``super().render_result(result)``
+    一行覆盖复用默认行为(测试 fake 常这么用)。
     """
 
     async def read_input(self) -> str | None:
@@ -51,6 +66,29 @@ class HostAdapter:
     async def write_output(self, text: str) -> None:
         """把 assistant 最终文本输出给用户。"""
         raise NotImplementedError
+
+    @abstractmethod
+    async def render_result(self, result: Result) -> None:
+        """把一次 run 的最终结果渲染给用户(**子类必须覆盖**)。
+
+        ``@abstractmethod`` 强制:继承 :class:`HostAdapter` 的子类若不覆盖本方法,
+        实例化时直接 ``TypeError``。覆盖后接管全部 :class:`Result` 渲染——拆 content
+        / 拼 error 行 / 格式化 token 用量都是宿主特化逻辑,不该下沉到 bridge。
+
+        基类提供默认实现(拆 ``result.final_message.content`` 走 :meth:`write_output`),
+        子类可用 ``super().render_result(result)`` 一行复用默认行为(测试 fake 常用)。
+
+        覆盖契约:
+
+        - ``CLIAdapter``:流式路径(streaming=True)下 CLIStreamSink 已实时打字
+          过 content,跳过 final.content;``[error]`` 行和 ``[tokens ↑↓=]`` 汇总行
+          仍打。非流式路径完整打 content + error + tokens。
+        - ``WebHostAdapter``:无 error 时 no-op(内容/用量/interrupt 全走
+          ``WSEventSink`` 实时帧);有 error 时推 ``AssistantFinalFrame`` 兜底。
+        """
+        final = result.final_message
+        if final is not None and final.content:
+            await self.write_output(final.content)
 
     async def notify_event(self, event: Event) -> None:
         """把一个 runtime 事件翻译给宿主（默认 no-op）。

@@ -3,24 +3,32 @@
 本脚本负责多 agent 编排的 facade、并行子任务执行、子 agent 审计文件写入和结果收口。
 作用是把父 agent 选择的 workflow strategy 转换为可执行的子 agent 任务，并把运行结果物化为 workflow.json、audit.jsonl、result.json 和 reports/index.json。
 关键执行流程：注册 workflow strategy，接收 mode 和 task_specs，创建 workflow 目录，分配子 agent 工作目录，并发运行子任务，写入审计与报告后返回 AgentWorkflowResult。
-关键函数：run_workflow 负责策略注册表分发，run_parallel 执行并行编排，run_parallel_specs 把公开 task_specs 转成 SubAgentTask，_run_one 收口单个子 agent 结果。
+关键函数：run_workflow 负责策略注册表分发，run_workflow_specs 把公开 task_specs 转成策略 payload，_run_one 收口单个子 agent 结果。
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import time
 import uuid
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 from application.agent_roles import AgentRoleManager
-from application.agent_workflows.context import WorkflowExecutionContext
+from application.agent_workflows.context import WorkflowExecutionContext, WorkflowRuntime
+from application.agent_workflows.models import (
+    ActiveWorkflowHandle,
+    AgentWorkflowResult,
+    SubAgentReportProjection,
+    WorkflowMode,
+)
 from application.agent_workflows.strategies.base import WorkflowRunRequest
 from application.agent_workflows.strategies.deep_research.strategy import (
     DeepResearchStrategy,
@@ -38,20 +46,60 @@ from application.agent_workflows.strategies.roundtable_review.strategy import (
     RoundtableReviewStrategy,
 )
 from application.agent_workflows.strategies.task_flow.strategy import TaskFlowStrategy
-from application.subagents.manager import SubAgentManager, SubAgentRun, SubAgentTask
+from application.agent_workflows.task_models import SubAgentRun, SubAgentTask
+from application.agents.subagent_tools import (
+    build_spawn_request_from_workflow_task,
+    parent_agent_id_from_snapshot,
+)
 from application.subagents.permissions import (
+    ALLOWED_SCOPED_FILE_TOOLS,
     SubAgentCreationRecord,
+    SubAgentGrant,
+    SubAgentToolAuditHook,
     WorkflowAuditWriter,
-    parse_permission_spec,
     to_jsonable,
     validate_scoped_tool_names,
+    wrap_scoped_file_tools,
 )
+from application.subagents.runtime_resolver import (
+    ResolvedSubAgentRuntime,
+    SubAgentRuntimeResolver,
+    resolved_runtime_payload,
+)
+from application.tool_scope import clip_child_tool_snapshot
+from core.contracts import ProviderUsageSnapshot, Tool, ToolLookup
+from core.lifecycle import LifecycleHook
+from infrastructure.config.model_catalog_manager import ModelCatalogManager
 from infrastructure.config.models import Config
 from infrastructure.config.paths import resolve_kongming_path
-from sessions import SessionTaskProgressManager, WorkflowTaskProgressInput
+from sessions import (
+    RuntimeTaskProgressStatus,
+    SessionTaskProgressManager,
+    TaskProgressControlMode,
+    TaskProgressTaskDefinition,
+)
 
-WorkflowMode = str
 _WORKFLOW_DESC_MAX_CHARS = 120
+_WORKFLOW_ID_CONTEXT: ContextVar[str | None] = ContextVar(
+    "agent_workflow_id",
+    default=None,
+)
+
+
+class WorkflowRuntimeResources(Protocol):
+    """workflow spawn 解析工具和审计路径所需的父 runtime 最小合同。"""
+
+    @property
+    def config(self) -> Config:
+        """返回 runtime 配置快照。"""
+
+    @property
+    def tools(self) -> ToolLookup:
+        """返回 runtime 工具查询门户。"""
+
+    @property
+    def enabled_tools_snapshot(self) -> tuple[Tool, ...] | None:
+        """返回父 run 工具快照；动态工具尚未解析时返回空值。"""
 
 
 @dataclass(frozen=True)
@@ -69,50 +117,8 @@ class SubAgentReportDetail:
     working_dir: str | None
     content_digest: str
     reported_at: str
+    resolved_runtime: dict[str, object]
     usage: dict[str, int] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class SubAgentReportProjection:
-    """返回给父 agent 和 Web 视图使用的子 agent 报告摘要。"""
-
-    display_order: int
-    task_id: str
-    task_name: str
-    status: str
-    summary: str
-    error_message: str | None
-    report_path: str
-    working_dir: str | None
-    session_id: str
-    run_id: str
-    reported_at: str
-    usage: dict[str, int] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class AgentWorkflowResult:
-    """返回给调用方的 workflow 最终结果。"""
-
-    workflow_id: str
-    mode: WorkflowMode
-    parent_session_id: str
-    workflow_dir: Path
-    started_at: str
-    finished_at: str
-    runs: tuple[SubAgentRun, ...]
-    reports: tuple[SubAgentReportProjection, ...]
-    report_index_path: Path
-    desc: str | None = None
-    data: Mapping[str, object] | None = None
-    completed_override: bool | None = None
-
-    @property
-    def completed(self) -> bool:
-        """判断 workflow 是否全部完成，输入为当前 runs，输出为布尔完成状态。"""
-        if self.completed_override is not None:
-            return self.completed_override
-        return all(run.status == "completed" for run in self.runs)
 
 
 @dataclass(frozen=True)
@@ -123,17 +129,36 @@ class _RunOutcome:
     report: SubAgentReportProjection
 
 
+@dataclass(frozen=True)
 class AgentWorkflowAuditWriter:
     """写入 AgentWorkflowManager 管辖的 workflow 审计文件。"""
 
-    def __init__(self, workflow_dir: Path) -> None:
+    _workflow_dir: Path
+    _resolved_runtime: dict[str, object] | None
+
+    def __init__(
+        self,
+        workflow_dir: Path,
+        *,
+        resolved_runtime: Mapping[str, object] | None = None,
+    ) -> None:
         """初始化审计写入器，输入为 workflow 目录，输出为绑定目录的 writer。"""
-        self._workflow_dir = workflow_dir
+        object.__setattr__(self, "_workflow_dir", workflow_dir)
+        object.__setattr__(
+            self,
+            "_resolved_runtime",
+            dict(resolved_runtime) if resolved_runtime is not None else None,
+        )
 
     @property
     def audit_log_path(self) -> Path:
         """返回审计日志路径，输入为 workflow 目录，输出为 audit.jsonl 路径。"""
         return self._workflow_dir / "audit.jsonl"
+
+    @property
+    def resolved_runtime_payload(self) -> dict[str, object] | None:
+        """返回 workflow runtime 摘要，输入为 writer 状态，输出为审计可写入 payload。"""
+        return dict(self._resolved_runtime) if self._resolved_runtime is not None else None
 
     def write_event(self, event: Mapping[str, Any]) -> None:
         """写入审计事件，输入为事件映射，输出为追加到 audit.jsonl 的一行 JSON。"""
@@ -142,6 +167,7 @@ class AgentWorkflowAuditWriter:
             raise ValueError("workflow audit event requires non-empty action")
         payload_raw = event.get("payload", {})
         payload = payload_raw if isinstance(payload_raw, dict) else {"value": payload_raw}
+        payload = _audit_payload_with_runtime(payload, self._resolved_runtime)
         record = {
             "ts": event.get("ts") if isinstance(event.get("ts"), str) else _now_iso(),
             "action": action,
@@ -165,6 +191,7 @@ class AgentWorkflowAuditWriter:
                     "session_id": record.session_id,
                     "working_dir": str(record.working_dir),
                     "subagent_json_path": str(record.task_run_dir / "subagent.json"),
+                    "resolved_runtime": record.resolved_runtime,
                 },
             }
         )
@@ -203,14 +230,77 @@ def _catalog_only_workflow_context(request: WorkflowRunRequest) -> WorkflowExecu
 
 def _register_default_workflow_strategies(
     strategy_manager: AgentWorkflowStrategyManager,
-    workflow_facade: object,
+    workflow_facade: WorkflowRuntime,
 ) -> None:
     """注册默认 workflow 策略，输入为策略管理器和 facade，输出为已写入注册表。"""
-    strategy_manager.register(ParallelWorkflowStrategy(workflow_facade))
+    strategy_manager.register(ParallelWorkflowStrategy())
     strategy_manager.register(DeepResearchStrategy(workflow_facade))
     strategy_manager.register(MapReduceStrategy(workflow_facade))
     strategy_manager.register(RoundtableReviewStrategy(workflow_facade))
     strategy_manager.register(TaskFlowStrategy(workflow_facade))
+
+
+class _ChildResultMailboxDemux:
+    """workflow child_result 分发器，输入为父 mailbox，输出按 task_id 等待的 Mail。"""
+
+    def __init__(self, mailbox: asyncio.Queue[Any]) -> None:
+        """初始化 demux，输入为父 mailbox，输出后台 pump 任务。"""
+        self._mailbox = mailbox
+        self._waiters: dict[str, asyncio.Future[Any]] = {}
+        self._cached: dict[str, Any] = {}
+        self._ignored_task_ids: set[str] = set()
+        self._requeue: list[Any] = []
+        self._closed = False
+        self._task = asyncio.create_task(self._pump(), name="workflow-child-result-demux")
+
+    async def wait(self, *, task_id: str, timeout_seconds: float) -> Any:
+        """等待指定 task_id 的 child_result，输入为 task_id/超时，输出匹配 Mail。"""
+        if task_id in self._cached:
+            return self._cached.pop(task_id)
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future[Any] = loop.create_future()
+        self._waiters[task_id] = future
+        try:
+            return await asyncio.wait_for(future, timeout=timeout_seconds)
+        finally:
+            self._waiters.pop(task_id, None)
+
+    def ignore(self, task_id: str) -> None:
+        """忽略迟到 child_result，输入为 task_id，输出为 demux 状态更新。"""
+        self._ignored_task_ids.add(task_id)
+        self._cached.pop(task_id, None)
+
+    async def close(self) -> None:
+        """关闭 demux，输入为空，输出为未消费消息回放到父 mailbox。"""
+        if self._closed:
+            return
+        self._closed = True
+        self._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._task
+        for mail in [*self._cached.values(), *self._requeue]:
+            self._mailbox.put_nowait(mail)
+        self._cached.clear()
+        self._requeue.clear()
+
+    async def _pump(self) -> None:
+        """后台读取父 mailbox，输入为空，输出为 waiter/cache/requeue 状态更新。"""
+        while True:
+            mail = await self._mailbox.get()
+            if getattr(mail, "kind", None) != "child_result":
+                self._requeue.append(mail)
+                continue
+            task_id = getattr(mail, "task_id", None)
+            if not isinstance(task_id, str) or not task_id:
+                self._requeue.append(mail)
+                continue
+            if task_id in self._ignored_task_ids:
+                continue
+            waiter = self._waiters.get(task_id)
+            if waiter is not None and not waiter.done():
+                waiter.set_result(mail)
+            else:
+                self._cached[task_id] = mail
 
 
 class AgentWorkflowManager:
@@ -219,18 +309,28 @@ class AgentWorkflowManager:
     def __init__(
         self,
         *,
-        subagents: SubAgentManager,
         config: Config,
         workspace_root: Path,
         role_manager: AgentRoleManager,
+        runtime: WorkflowRuntimeResources | None = None,
+        model_catalog_manager: ModelCatalogManager | None = None,
+        agent_manager: Any | None = None,
+        agent_manager_getter: Callable[[], Any | None] | None = None,
         deep_research_source_provider: Any | None = None,
         deep_research_source_diagnostics: Any | None = None,
     ) -> None:
-        """初始化管理器，输入为子 agent 管理器、配置和工作区，输出为带默认策略注册的 workflow facade。"""
-        self._subagents = subagents
+        """初始化管理器，输入为父 runtime/AgentManager 和工作区，输出为 workflow facade。"""
+        self._runtime = runtime
+        self._agent_manager = agent_manager
+        self._agent_manager_getter = agent_manager_getter
         self._config = config
         self._workspace_root = workspace_root.resolve()
         self._role_manager = role_manager
+        self._runtime_resolver = SubAgentRuntimeResolver(
+            config,
+            role_manager,
+            model_catalog_manager=model_catalog_manager,
+        )
         self._deep_research_source_provider = deep_research_source_provider
         self._deep_research_source_diagnostics = deep_research_source_diagnostics
         self._strategy_manager = AgentWorkflowStrategyManager(
@@ -238,7 +338,17 @@ class AgentWorkflowManager:
         )
         _register_default_workflow_strategies(self._strategy_manager, self)
         self._task_progress_manager = _build_task_progress_manager(config)
-        self._task_progress_state: dict[tuple[str, str], dict[str, dict[str, object]]] = {}
+        # 运行中 workflow 的注册表：workflow_id → 句柄，供 list_active_workflows / cancel_workflow 使用。
+        self._active_workflows: dict[str, ActiveWorkflowHandle] = {}
+        self._child_result_demuxes: dict[str, _ChildResultMailboxDemux] = {}
+
+    def _current_agent_manager(self) -> Any | None:
+        """读取当前 AgentManager，输入为空，输出为直接注入或延迟解析的 manager。"""
+        if self._agent_manager is not None:
+            return self._agent_manager
+        if self._agent_manager_getter is None:
+            return None
+        return self._agent_manager_getter()
 
     @classmethod
     def list_default_workflow_strategies(cls) -> tuple[WorkflowStrategyCatalogEntry, ...]:
@@ -246,7 +356,10 @@ class AgentWorkflowManager:
         strategy_manager = AgentWorkflowStrategyManager(
             context_factory=_catalog_only_workflow_context
         )
-        _register_default_workflow_strategies(strategy_manager, _CatalogOnlyWorkflowFacade())
+        _register_default_workflow_strategies(
+            strategy_manager,
+            cast(WorkflowRuntime, _CatalogOnlyWorkflowFacade()),
+        )
         return strategy_manager.list_strategies()
 
     @classmethod
@@ -257,7 +370,10 @@ class AgentWorkflowManager:
         strategy_manager = AgentWorkflowStrategyManager(
             context_factory=_catalog_only_workflow_context
         )
-        _register_default_workflow_strategies(strategy_manager, _CatalogOnlyWorkflowFacade())
+        _register_default_workflow_strategies(
+            strategy_manager,
+            cast(WorkflowRuntime, _CatalogOnlyWorkflowFacade()),
+        )
         return tuple(
             strategy_manager.describe_strategy(entry.mode)
             for entry in strategy_manager.list_strategies()
@@ -309,217 +425,228 @@ class AgentWorkflowManager:
         return self._strategy_manager.describe_strategy(mode)
 
     async def run_workflow(self, request: WorkflowRunRequest) -> AgentWorkflowResult:
-        """通过策略注册表执行 workflow，输入为运行请求，输出为 AgentWorkflowResult。"""
-        result = await self._strategy_manager.run_strategy(request)
+        """执行 workflow 并维护运行时注册表，输入为运行请求，输出为 AgentWorkflowResult。
+
+        workflow_id 在 task 发起前生成并登记到 _active_workflows，使外部能在运行期间
+        通过 list_active_workflows 查询、通过 cancel_workflow(id) 单独停止某个 workflow。
+        cancel 时统一 finalize manifest/result/report/progress 和 workflow_cancelled 审计，
+        根治各 strategy 自行收口遗漏 cancel 的结构缺陷。
+        """
+        self._require_parent_agent_manager(request.parent_agent)
+        workflow_id = self._generate_workflow_id()
+        started_at = _now_iso()
+        # create_task 会复制当前 ContextVar，上下文工厂稍后运行时仍能读取同一个 workflow_id。
+        token = _WORKFLOW_ID_CONTEXT.set(workflow_id)
+        try:
+            result_task = asyncio.create_task(self._strategy_manager.run_strategy(request))
+        finally:
+            _WORKFLOW_ID_CONTEXT.reset(token)
+
+        handle = ActiveWorkflowHandle(
+            workflow_id=workflow_id,
+            parent_session_id=request.parent_session_id,
+            mode=request.mode.strip(),
+            started_at=started_at,
+            task=result_task,
+        )
+        self._active_workflows[workflow_id] = handle
+
+        try:
+            result = await result_task
+        except asyncio.CancelledError:
+            await self._finalize_cancelled_workflow(workflow_id, request, started_at)
+            raise
+        finally:
+            self._active_workflows.pop(workflow_id, None)
+            demux = self._child_result_demuxes.pop(workflow_id, None)
+            if demux is not None:
+                await demux.close()
+
         if not isinstance(result, AgentWorkflowResult):
             raise TypeError("agent workflow strategy returned an invalid result")
         return result
 
-    async def run_parallel(
+    def _require_parent_agent_manager(
         self,
-        *,
-        parent_session_id: str,
-        tasks: list[SubAgentTask],
-        desc: str | None = None,
-    ) -> AgentWorkflowResult:
-        """并发执行子 agent 任务，输入为父会话和任务列表，输出为完整 workflow 结果。"""
-        if not tasks:
-            raise ValueError("parallel workflow requires at least one task")
-        normalized_desc = _normalize_workflow_desc(desc)
+        parent_agent: Mapping[str, object] | None,
+    ) -> Any:
+        """校验 workflow spawn owner，输入为父快照，输出为已 boot 且含父 cell 的 Manager。"""
+        agent_manager = self._current_agent_manager()
+        parent_agent_id = parent_agent_id_from_snapshot(parent_agent)
+        if (
+            agent_manager is None
+            or parent_agent_id is None
+            or agent_manager.get_agent(parent_agent_id) is None
+        ):
+            raise RuntimeError(
+                "workflow requires a booted parent AgentManager and parent agent identity"
+            )
+        return agent_manager
 
-        workflow_id = f"wf-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
-        started_at = _now_iso()
+    def _generate_workflow_id(self) -> str:
+        """生成 workflow 唯一 ID，输入为空，输出为时间戳+随机后缀的稳定 ID。"""
+        return f"wf-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+
+    async def _finalize_cancelled_workflow(
+        self,
+        workflow_id: str,
+        request: WorkflowRunRequest,
+        started_at: str,
+    ) -> None:
+        """cancel 收口：把 workflow 产物改为 cancelled 并写审计事件，输入为被取消的 workflow 信息。
+
+        manifest/result/report_index 的 finished_at 与审计的 cancelled_at 共用同一时间戳，
+        保证各处产物时刻一致。
+        """
         workflow_dir = self._workflow_dir(
-            parent_session_id=parent_session_id, workflow_id=workflow_id
-        )
-        agents_dir = workflow_dir / "agents"
-        agents_dir.mkdir(parents=True, exist_ok=True)
-        audit_writer = AgentWorkflowAuditWriter(workflow_dir)
-
-        assigned_tasks = [
-            self._with_agent_workdir(
-                task,
-                agents_dir / _task_run_id(index, task.task_id),
-                task_run_id=_task_run_id(index, task.task_id),
-            )
-            for index, task in enumerate(tasks, 1)
-        ]
-        self._write_workflow_manifest(
-            workflow_dir,
+            parent_session_id=request.parent_session_id,
             workflow_id=workflow_id,
-            mode="parallel",
-            parent_session_id=parent_session_id,
-            started_at=started_at,
-            desc=normalized_desc,
-            tasks=assigned_tasks,
-            status="running",
         )
-        self._append_audit(
-            workflow_dir,
-            action="workflow_started",
-            payload={
-                "workflow_id": workflow_id,
-                "mode": "parallel",
-                "parent_session_id": parent_session_id,
-                "desc": normalized_desc,
-                "task_count": len(assigned_tasks),
-            },
-        )
-        self._record_assigned_task_progress(
-            parent_session_id=parent_session_id,
+        cancelled_at = _now_iso()
+        existing_manifest = _read_json_dict(workflow_dir / "workflow.json")
+        tasks = _tasks_from_workflow_manifest(existing_manifest)
+        runs, reports = self._cancelled_workflow_runs(
+            workflow_dir=workflow_dir,
             workflow_id=workflow_id,
-            tasks=assigned_tasks,
+            parent_session_id=request.parent_session_id,
+            tasks=tasks,
         )
-        for task in assigned_tasks:
-            self._append_audit(
-                workflow_dir,
-                action="agent_assigned",
-                payload=_task_payload(task),
-            )
-            self._record_single_task_progress(
-                parent_session_id=parent_session_id,
-                workflow_id=workflow_id,
-                task=task,
-                source_status="assigned",
-                display_order=_task_progress_display_order(task, fallback=0),
-            )
-
-        outcomes = await asyncio.gather(
-            *[
-                self._run_one(
-                    workflow_id=workflow_id,
-                    parent_session_id=parent_session_id,
-                    workflow_dir=workflow_dir,
-                    task=task,
-                    display_order=index,
-                    audit_writer=audit_writer,
-                )
-                for index, task in enumerate(assigned_tasks, 1)
-            ]
-        )
-        runs = tuple(outcome.run for outcome in outcomes)
-        reports = tuple(outcome.report for outcome in outcomes)
-        finished_at = _now_iso()
-        completed = all(run.status == "completed" for run in runs)
         report_index_path = self._write_report_index(
             workflow_dir,
             workflow_id=workflow_id,
-            mode="parallel",
-            parent_session_id=parent_session_id,
-            status="completed" if completed else "failed",
+            mode=request.mode.strip(),
+            parent_session_id=request.parent_session_id,
+            status="cancelled",
             reports=reports,
-            desc=normalized_desc,
+            desc=_normalize_workflow_desc(request.desc),
         )
-        result = AgentWorkflowResult(
-            workflow_id=workflow_id,
-            mode="parallel",
-            parent_session_id=parent_session_id,
+        self._write_cancelled_workflow_result(
             workflow_dir=workflow_dir,
+            workflow_id=workflow_id,
+            mode=request.mode.strip(),
+            parent_session_id=request.parent_session_id,
             started_at=started_at,
-            finished_at=finished_at,
-            runs=runs,
-            reports=reports,
+            finished_at=cancelled_at,
+            desc=_normalize_workflow_desc(request.desc),
             report_index_path=report_index_path,
-            desc=normalized_desc,
-        )
-        self._append_audit(
-            workflow_dir,
-            action="workflow_completed",
-            payload={
-                "workflow_id": workflow_id,
-                "completed": result.completed,
-                "finished_at": finished_at,
-                "run_count": len(runs),
-                "report_index_path": str(report_index_path),
-            },
+            reports=reports,
+            runs=runs,
         )
         self._record_completed_workflow_progress(
-            parent_session_id=parent_session_id,
+            parent_session_id=request.parent_session_id,
             workflow_id=workflow_id,
             runs=runs,
         )
+        # 若 strategy 已写过 manifest（running），覆写为 cancelled；否则补写一份 cancelled manifest。
         self._write_workflow_manifest(
             workflow_dir,
             workflow_id=workflow_id,
-            mode="parallel",
-            parent_session_id=parent_session_id,
+            mode=request.mode.strip(),
+            parent_session_id=request.parent_session_id,
             started_at=started_at,
-            desc=normalized_desc,
-            tasks=assigned_tasks,
-            status="completed" if result.completed else "failed",
-            finished_at=finished_at,
+            desc=_normalize_workflow_desc(request.desc),
+            tasks=tasks,
+            status="cancelled",
+            finished_at=cancelled_at,
+            resolved_runtime=_workflow_runtime_payload(tasks)
+            or _mapping_or_none(existing_manifest.get("resolved_runtime")),
         )
+        self._append_audit(
+            workflow_dir,
+            action="workflow_cancelled",
+            payload={
+                "workflow_id": workflow_id,
+                "mode": request.mode.strip(),
+                "parent_session_id": request.parent_session_id,
+                "cancelled_at": cancelled_at,
+            },
+        )
+
+    def _cancelled_workflow_runs(
+        self,
+        *,
+        workflow_dir: Path,
+        workflow_id: str,
+        parent_session_id: str,
+        tasks: list[SubAgentTask],
+    ) -> tuple[tuple[SubAgentRun, ...], tuple[SubAgentReportProjection, ...]]:
+        """汇总取消时的子任务结果，输入为任务列表，输出 runs/reports。"""
+        runs: list[SubAgentRun] = []
+        reports: list[SubAgentReportProjection] = []
+        for display_order, task in enumerate(tasks, 1):
+            result_path = _agent_result_path(workflow_dir, task)
+            result_payload = _read_json_dict(result_path)
+            run = (
+                _subagent_run_from_result_payload(task, result_payload)
+                if result_payload
+                else _cancelled_run(
+                    workflow_id=workflow_id,
+                    parent_session_id=parent_session_id,
+                    task=task,
+                )
+            )
+            if not result_payload:
+                self._write_json(result_path, _run_payload(run))
+            runs.append(run)
+            reports.append(
+                self._write_subagent_report(
+                    workflow_dir,
+                    workflow_id=workflow_id,
+                    run=run,
+                    display_order=display_order,
+                )
+            )
+        return tuple(runs), tuple(reports)
+
+    def _write_cancelled_workflow_result(
+        self,
+        *,
+        workflow_dir: Path,
+        workflow_id: str,
+        mode: str,
+        parent_session_id: str,
+        started_at: str,
+        finished_at: str,
+        desc: str | None,
+        report_index_path: Path,
+        reports: tuple[SubAgentReportProjection, ...],
+        runs: tuple[SubAgentRun, ...],
+    ) -> None:
+        """写入 cancelled root result，输入为取消收口产物，输出 result.json。"""
         self._write_json(
             workflow_dir / "result.json",
             {
                 "workflow_id": workflow_id,
-                "mode": "parallel",
+                "mode": mode,
                 "parent_session_id": parent_session_id,
                 "workflow_dir": str(workflow_dir),
                 "started_at": started_at,
                 "finished_at": finished_at,
-                "desc": normalized_desc,
-                "completed": result.completed,
+                "desc": desc,
+                "status": "cancelled",
+                "completed": False,
                 "report_index_path": str(report_index_path),
+                "resolved_runtime": _workflow_runtime_payload([run.task for run in runs]),
                 "reports": [_report_projection_payload(report) for report in reports],
                 "runs": [_run_payload(run) for run in runs],
             },
         )
-        return result
 
-    async def run_parallel_specs(
-        self,
-        *,
-        parent_session_id: str,
-        task_specs: list[dict[str, object]],
-        desc: str | None = None,
-    ) -> AgentWorkflowResult:
-        """解析公开 task_specs，输入为父会话和任务规格，输出为并行 workflow 结果。"""
-        if not task_specs:
-            raise ValueError("parallel workflow requires at least one task spec")
-        if len(task_specs) > 8:
-            raise ValueError("parallel workflow supports at most 8 task specs")
-        tasks: list[SubAgentTask] = []
-        for index, spec in enumerate(task_specs, 1):
-            if not isinstance(spec, dict):
-                raise ValueError(f"task_specs[{index}] must be an object")
-            task_name = spec.get("task_name")
-            if not isinstance(task_name, str) or not task_name.strip():
-                raise ValueError(f"task_specs[{index}].task_name must be a non-empty string")
-            prompt = spec.get("prompt")
-            if not isinstance(prompt, str) or not prompt.strip():
-                raise ValueError(f"task_specs[{index}].prompt must be a non-empty string")
-            context = spec.get("context", "")
-            if context is None:
-                context = ""
-            if not isinstance(context, str):
-                raise ValueError(f"task_specs[{index}].context must be a string")
-            raw_tool_names = spec.get("tool_names", [])
-            if not isinstance(raw_tool_names, list | tuple):
-                raw_tool_names = []
-            raw_skill_names = spec.get("skill_names", [])
-            if not isinstance(raw_skill_names, list | tuple):
-                raw_skill_names = []
-            permission = None
-            if "permission" in spec:
-                permission = parse_permission_spec(spec["permission"])
-                validate_scoped_tool_names(tuple(str(name) for name in raw_tool_names))
-            tasks.append(
-                SubAgentTask(
-                    task_id=f"agent-{index}",
-                    task_name=task_name.strip(),
-                    prompt=prompt.strip(),
-                    context=context.strip(),
-                    tool_names=tuple(str(name) for name in raw_tool_names),
-                    skill_names=tuple(str(name) for name in raw_skill_names),
-                    permission=permission,
-                )
-            )
-        return await self.run_parallel(
-            parent_session_id=parent_session_id,
-            tasks=tasks,
-            desc=desc,
-        )
+    def list_active_workflows(self) -> tuple[ActiveWorkflowHandle, ...]:
+        """返回当前运行中的 workflow 句柄快照，输入为空，输出为不可变句柄元组。"""
+        return tuple(self._active_workflows.values())
+
+    async def cancel_workflow(self, workflow_id: str) -> bool:
+        """单独取消一个运行中 workflow，输入为 workflow ID，输出为是否命中。
+
+        与取消整个父 run 不同，本方法只取消指定 workflow 的 task，不连带父 run。
+        命中返回 True，未知 id 返回 False。
+        """
+        handle = self._active_workflows.get(workflow_id)
+        if handle is None:
+            return False
+        handle.task.cancel()
+        return True
 
     async def run_workflow_specs(
         self,
@@ -527,6 +654,7 @@ class AgentWorkflowManager:
         mode: str,
         parent_session_id: str,
         task_specs: list[dict[str, object]],
+        parent_agent: Mapping[str, object] | None = None,
         desc: str | None = None,
     ) -> AgentWorkflowResult:
         """按 mode 执行 workflow，输入为策略 ID、父会话和任务规格，输出为 workflow 结果。"""
@@ -537,6 +665,7 @@ class AgentWorkflowManager:
                 payload={"task_specs": task_specs},
                 source="run_workflow_specs",
                 desc=desc,
+                parent_agent=parent_agent,
             )
         )
 
@@ -546,6 +675,7 @@ class AgentWorkflowManager:
         mode: str,
         parent_session_id: str,
         payload: Mapping[str, object],
+        parent_agent: Mapping[str, object] | None = None,
         desc: str | None = None,
     ) -> AgentWorkflowResult:
         """按 mode 执行通用 workflow payload，输入为完整策略 payload，输出为 workflow 结果。"""
@@ -556,6 +686,7 @@ class AgentWorkflowManager:
                 payload=payload,
                 source="run_workflow_payload",
                 desc=desc,
+                parent_agent=parent_agent,
             )
         )
 
@@ -564,15 +695,19 @@ class AgentWorkflowManager:
         *,
         workflow_dir: Path,
         tasks: list[SubAgentTask],
+        parent_agent: Mapping[str, object] | None = None,
     ) -> list[SubAgentTask]:
         """为策略任务绑定运行目录，输入为 workflow 目录和任务，输出为带 metadata 的任务列表。"""
         agents_dir = workflow_dir / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
         return [
-            self._with_agent_workdir(
-                task,
-                agents_dir / _task_run_id(index, task.task_id),
-                task_run_id=_task_run_id(index, task.task_id),
+            self._resolve_task_runtime(
+                self._with_agent_workdir(
+                    task,
+                    agents_dir / _task_run_id(index, task.task_id),
+                    task_run_id=_task_run_id(index, task.task_id),
+                ),
+                parent_agent=parent_agent,
             )
             for index, task in enumerate(tasks, 1)
         ]
@@ -589,9 +724,10 @@ class AgentWorkflowManager:
             workflow_id=context.workflow_id,
             parent_session_id=context.parent_session_id,
             workflow_dir=context.workflow_dir,
-            task=task,
+            task=self._resolve_task_runtime(task, parent_agent=context.parent_agent),
             display_order=display_order,
             audit_writer=context.audit_writer,
+            parent_agent=context.parent_agent,
         )
 
     def record_subagent_failure(
@@ -616,8 +752,7 @@ class AgentWorkflowManager:
             parent_session_id=context.parent_session_id,
             workflow_id=context.workflow_id,
             task=task,
-            source_status="failed",
-            display_order=display_order - 1,
+            runtime_status=RuntimeTaskProgressStatus.FAILED,
             error_message=run.error_message,
         )
         self._write_json(_agent_result_path(context.workflow_dir, task), payload)
@@ -638,6 +773,11 @@ class AgentWorkflowManager:
         finished_at: str | None = None,
     ) -> None:
         """写入 workflow 清单，输入为策略上下文和任务，输出为 workflow.json。"""
+        previous_manifest = _read_json_dict(context.workflow_dir / "workflow.json")
+        already_initialized_runtime_progress = (
+            previous_manifest.get("workflow_id") == context.workflow_id
+            and previous_manifest.get("status") == "running"
+        )
         self._write_workflow_manifest(
             context.workflow_dir,
             workflow_id=context.workflow_id,
@@ -648,13 +788,16 @@ class AgentWorkflowManager:
             tasks=tasks,
             status=status,
             finished_at=finished_at,
+            resolved_runtime=(
+                _workflow_runtime_payload(tasks) or context.audit_writer.resolved_runtime_payload
+            ),
         )
-        if status == "running":
-            self._record_assigned_task_progress(
-                parent_session_id=context.parent_session_id,
-                workflow_id=context.workflow_id,
-                tasks=tasks,
-            )
+        if (
+            status == "running"
+            and context.mode != "task_flow"
+            and not already_initialized_runtime_progress
+        ):
+            self._open_runtime_task_progress(context=context, tasks=tasks)
 
     def write_report_index(
         self,
@@ -696,6 +839,10 @@ class AgentWorkflowManager:
             "desc": context.desc,
             "completed": completed,
             "report_index_path": str(report_index_path),
+            "resolved_runtime": (
+                _workflow_runtime_payload([run.task for run in runs])
+                or context.audit_writer.resolved_runtime_payload
+            ),
             "reports": [_report_projection_payload(report) for report in reports],
             "runs": [_run_payload(run) for run in runs],
         }
@@ -710,7 +857,8 @@ class AgentWorkflowManager:
 
     def _build_workflow_context(self, request: WorkflowRunRequest) -> WorkflowExecutionContext:
         """创建策略执行上下文，输入为运行请求，输出为 workflow ID、目录和审计 writer。"""
-        workflow_id = f"wf-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+        # 优先使用 run_workflow 注入到当前 task context 的 id；catalog-only 等路径回退到自行生成。
+        workflow_id = _WORKFLOW_ID_CONTEXT.get() or self._generate_workflow_id()
         started_at = _now_iso()
         workflow_dir = self._workflow_dir(
             parent_session_id=request.parent_session_id,
@@ -719,6 +867,7 @@ class AgentWorkflowManager:
         desc = _normalize_workflow_desc(
             request.desc if request.desc is not None else request.payload.get("desc")
         )
+        default_runtime = self._resolve_default_runtime(parent_agent=request.parent_agent)
         return WorkflowExecutionContext(
             workflow_id=workflow_id,
             parent_session_id=request.parent_session_id,
@@ -726,7 +875,12 @@ class AgentWorkflowManager:
             workflow_dir=workflow_dir,
             started_at=started_at,
             desc=desc,
-            audit_writer=AgentWorkflowAuditWriter(workflow_dir),
+            audit_writer=AgentWorkflowAuditWriter(
+                workflow_dir,
+                resolved_runtime=resolved_runtime_payload(default_runtime),
+            ),
+            runtime=self,
+            parent_agent=request.parent_agent,
             max_concurrency=None,
             workflow_timeout_seconds=None,
         )
@@ -740,6 +894,7 @@ class AgentWorkflowManager:
         task: SubAgentTask,
         display_order: int,
         audit_writer: WorkflowAuditWriter,
+        parent_agent: Mapping[str, object] | None = None,
     ) -> _RunOutcome:
         """运行单个子 agent，输入为任务和审计上下文，输出为子任务运行结果和报告摘要。"""
         started = time.perf_counter()
@@ -747,14 +902,15 @@ class AgentWorkflowManager:
             parent_session_id=parent_session_id,
             workflow_id=workflow_id,
             task=task,
-            source_status="running",
-            display_order=display_order - 1,
+            runtime_status=RuntimeTaskProgressStatus.RUNNING,
         )
         try:
-            run = await self._subagents.run_task(
+            run = await self._spawn_and_wait_workflow_task(
                 workflow_id=workflow_id,
                 parent_session_id=parent_session_id,
+                workflow_dir=workflow_dir,
                 task=task,
+                parent_agent=parent_agent,
                 audit_writer=audit_writer,
             )
         except Exception as exc:
@@ -772,8 +928,11 @@ class AgentWorkflowManager:
             parent_session_id=parent_session_id,
             workflow_id=workflow_id,
             task=task,
-            source_status="completed" if run.status == "completed" else "failed",
-            display_order=display_order - 1,
+            runtime_status=(
+                RuntimeTaskProgressStatus.COMPLETED
+                if run.status == "completed"
+                else RuntimeTaskProgressStatus.FAILED
+            ),
             error_message=run.error_message,
         )
         self._update_subagent_record_with_usage(task, run)
@@ -785,6 +944,194 @@ class AgentWorkflowManager:
             display_order=display_order,
         )
         return _RunOutcome(run=run, report=report)
+
+    async def _spawn_and_wait_workflow_task(
+        self,
+        *,
+        workflow_id: str,
+        parent_session_id: str,
+        workflow_dir: Path,
+        task: SubAgentTask,
+        parent_agent: Mapping[str, object] | None,
+        audit_writer: WorkflowAuditWriter,
+    ) -> SubAgentRun:
+        """通过 AgentManager 派生 workflow 子 agent，输入为任务，输出兼容旧报告链路的 run。"""
+        agent_manager = self._current_agent_manager()
+        if agent_manager is None:
+            raise RuntimeError("agent manager is not bound")
+        parent_agent_id = parent_agent_id_from_snapshot(parent_agent)
+        if parent_agent_id is None:
+            raise RuntimeError("parent agent_id is required for workflow spawn")
+        parent_cell = agent_manager.get_agent(parent_agent_id)
+        if parent_cell is None:
+            raise RuntimeError(f"parent agent not found for agent_id={parent_agent_id!r}")
+        child_session_id = _build_child_session_id(
+            workflow_id=workflow_id,
+            parent_session_id=parent_session_id,
+            task_id=_metadata_task_run_id(task),
+        )
+        run_overrides = self._workflow_spawn_run_overrides(
+            workflow_id=workflow_id,
+            parent_session_id=parent_session_id,
+            child_session_id=child_session_id,
+            task=task,
+            audit_writer=audit_writer,
+        )
+        request = build_spawn_request_from_workflow_task(
+            parent_agent_id=parent_agent_id,
+            workflow_task=task,
+            cwd=_workflow_task_cwd(task, fallback=self._workspace_root),
+            child_session_id=child_session_id,
+            parent_task_id=_parent_task_id_from_snapshot(parent_agent),
+            metadata={
+                "workflow_id": workflow_id,
+                "parent_session_id": parent_session_id,
+                "workflow_dir": str(workflow_dir),
+                "task_run_id": _metadata_task_run_id(task),
+            },
+            **run_overrides,
+        )
+        spawn_result = agent_manager.spawn(request)
+        timeout_seconds = _workflow_task_timeout_seconds(
+            task,
+            fallback=self._runtime_resolver.default_model_config.timeout,
+        )
+        demux = self._child_result_demuxes.get(workflow_id)
+        if demux is None:
+            demux = _ChildResultMailboxDemux(parent_cell.mailbox)
+            self._child_result_demuxes[workflow_id] = demux
+        try:
+            mail = await demux.wait(
+                task_id=spawn_result.task_id,
+                timeout_seconds=timeout_seconds,
+            )
+        except asyncio.CancelledError:
+            demux.ignore(spawn_result.task_id)
+            cancel_agent_run = getattr(agent_manager, "cancel_agent_run", None)
+            if callable(cancel_agent_run):
+                await cancel_agent_run(spawn_result.child_id)
+            raise
+        except TimeoutError:
+            demux.ignore(spawn_result.task_id)
+            cancel_agent_run = getattr(agent_manager, "cancel_agent_run", None)
+            if callable(cancel_agent_run):
+                await cancel_agent_run(spawn_result.child_id)
+            if workflow_id not in self._active_workflows:
+                direct_demux = self._child_result_demuxes.pop(workflow_id, None)
+                if direct_demux is not None:
+                    await direct_demux.close()
+            raise
+        child_cell = agent_manager.get_agent(spawn_result.child_id)
+        child_session_id = (
+            child_cell.session_id
+            if child_cell is not None
+            else f"{parent_session_id}-{spawn_result.child_id}"
+        )
+        if workflow_id not in self._active_workflows:
+            demux = self._child_result_demuxes.pop(workflow_id, None)
+            if demux is not None:
+                await demux.close()
+        return _subagent_run_from_child_mail(
+            task=task,
+            session_id=child_session_id,
+            run_id=f"spawn-{spawn_result.task_id}",
+            mail=mail,
+        )
+
+    def _workflow_spawn_run_overrides(
+        self,
+        *,
+        workflow_id: str,
+        parent_session_id: str,
+        child_session_id: str,
+        task: SubAgentTask,
+        audit_writer: WorkflowAuditWriter,
+    ) -> dict[str, Any]:
+        """构造 workflow child run 覆盖项，输入为任务上下文，输出 request 可展开参数。"""
+        runtime = task.runtime
+        if runtime is None:
+            raise ValueError(f"subagent task {task.task_id!r} has no resolved runtime")
+        parent_runtime = self._runtime
+        enabled_tools: tuple[Tool, ...] = ()
+        if task.requested_tool_names is not None:
+            if parent_runtime is None:
+                raise RuntimeError("subagent runtime is required to resolve workflow tools")
+            enabled_tools = tuple(_resolve_enabled_tools(parent_runtime.tools, task))
+        lifecycle_hooks: tuple[LifecycleHook, ...] = ()
+        scope_allowed_tool_names: tuple[str, ...] | None = None
+        if task.permission is not None:
+            if parent_runtime is None:
+                raise RuntimeError("subagent runtime is required for scoped workflow task")
+            validate_scoped_tool_names(task.requested_tool_names or ())
+            if task.requested_tool_names is None:
+                parent_tools = parent_runtime.enabled_tools_snapshot
+                if parent_tools is None:
+                    raise RuntimeError(
+                        "parent runtime enabled tool snapshot is unavailable "
+                        "for scoped workflow task"
+                    )
+                enabled_tools = tuple(
+                    clip_child_tool_snapshot(
+                        parent_tools=parent_tools,
+                        requested_tool_names=None,
+                        scope_allowed_tool_names=ALLOWED_SCOPED_FILE_TOOLS,
+                    )
+                )
+            grant = _create_workflow_spawn_grant(
+                workflow_id=workflow_id,
+                parent_session_id=parent_session_id,
+                child_session_id=child_session_id,
+                task=task,
+                enabled_tools=enabled_tools,
+            )
+            creation_record = _create_workflow_spawn_creation_record(
+                grant=grant,
+                task=task,
+                enabled_tools=enabled_tools,
+                audit_writer=audit_writer,
+                child_session_log_path=_child_session_log_path(parent_runtime, child_session_id),
+            )
+            audit_writer.write_subagent_creation(creation_record)
+            enabled_tools = tuple(wrap_scoped_file_tools(list(enabled_tools), grant))
+            scope_allowed_tool_names = tuple(sorted(ALLOWED_SCOPED_FILE_TOOLS))
+            lifecycle_hooks = (SubAgentToolAuditHook(grant=grant, audit_writer=audit_writer),)
+        return {
+            "enabled_tools": enabled_tools,
+            "scope_allowed_tool_names": scope_allowed_tool_names,
+            "lifecycle_hooks": lifecycle_hooks,
+            "max_tokens": runtime.max_tokens,
+            "temperature": runtime.temperature,
+            "timeout_seconds": runtime.timeout_seconds,
+            "llm_request_metadata": {"resolved_runtime": runtime.to_payload()},
+        }
+
+    def _resolve_default_runtime(
+        self,
+        *,
+        parent_agent: Mapping[str, object] | None,
+    ) -> ResolvedSubAgentRuntime:
+        """解析默认子 agent runtime，输入为父 agent 快照，输出无 role 的运行参数。"""
+        return self._runtime_resolver.resolve(
+            agent_role_id=None,
+            task_metadata={},
+            parent_agent=parent_agent,
+        )
+
+    def _resolve_task_runtime(
+        self,
+        task: SubAgentTask,
+        *,
+        parent_agent: Mapping[str, object] | None,
+    ) -> SubAgentTask:
+        """给任务绑定已解析 runtime，输入为任务和父 agent 快照，输出任务副本。"""
+        if task.runtime is not None:
+            return task
+        runtime = self._runtime_resolver.resolve(
+            agent_role_id=task.agent_role_id,
+            task_metadata=task.metadata,
+            parent_agent=parent_agent,
+        )
+        return replace(task, runtime=runtime)
 
     def _update_subagent_record_with_usage(self, task: SubAgentTask, run: SubAgentRun) -> None:
         """回写子 agent 创建记录，输入为任务和运行结果，输出为 subagent.json usage 更新。"""
@@ -827,8 +1174,11 @@ class AgentWorkflowManager:
             prompt=task.prompt,
             context=task.context,
             tool_names=task.tool_names,
+            requested_tool_names=task.requested_tool_names,
             skill_names=task.skill_names,
+            agent_role_id=task.agent_role_id,
             permission=task.permission,
+            runtime=task.runtime,
             metadata=metadata,
         )
 
@@ -857,6 +1207,7 @@ class AgentWorkflowManager:
         tasks: list[SubAgentTask],
         status: str,
         finished_at: str | None = None,
+        resolved_runtime: dict[str, object] | None = None,
     ) -> None:
         """写入 workflow 清单，输入为任务和状态，输出为 workflow.json。"""
         payload: dict[str, object] = {
@@ -867,6 +1218,7 @@ class AgentWorkflowManager:
             "finished_at": finished_at,
             "desc": desc,
             "status": status,
+            "resolved_runtime": resolved_runtime or _workflow_runtime_payload(tasks),
             "assigned_agents": [_task_payload(task) for task in tasks],
         }
         self._write_json(workflow_dir / "workflow.json", payload)
@@ -896,6 +1248,7 @@ class AgentWorkflowManager:
             working_dir=working_dir,
             content_digest=digest,
             reported_at=reported_at,
+            resolved_runtime=resolved_runtime_payload(run.task.runtime) or {},
             usage=dict(run.usage),
         )
         task_run_id = _task_run_id(display_order, run.task.task_id)
@@ -929,6 +1282,7 @@ class AgentWorkflowManager:
                 "report_path": str(report_path),
                 "content_digest": detail.content_digest,
                 "error_message": detail.error_message,
+                "resolved_runtime": detail.resolved_runtime,
                 "usage": dict(detail.usage),
             },
         )
@@ -964,6 +1318,7 @@ class AgentWorkflowManager:
 
     def _append_audit(self, workflow_dir: Path, *, action: str, payload: dict[str, object]) -> None:
         """追加 workflow 审计事件，输入为 action 和 payload，输出为 audit.jsonl 新记录。"""
+        payload = _audit_payload_with_runtime(payload)
         record = {
             "ts": _now_iso(),
             "action": action,
@@ -973,32 +1328,100 @@ class AgentWorkflowManager:
         with open(workflow_dir / "audit.jsonl", "a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
-    def _record_assigned_task_progress(
+    def append_audit(
         self,
         *,
-        parent_session_id: str,
-        workflow_id: str,
+        context: WorkflowExecutionContext,
+        action: str,
+        payload: Mapping[str, object],
+    ) -> None:
+        """公开 workflow 审计入口（WorkflowRuntime 协议），引擎层自动补齐 resolved_runtime。
+
+        strategy 不需要关心运行时配置快照，resolved_runtime 由本方法从
+        context.audit_writer 持有的快照统一注入，保持与历史审计 payload 一致。
+        """
+        runtime_payload = getattr(context.audit_writer, "resolved_runtime_payload", None)
+        self._append_audit(
+            context.workflow_dir,
+            action=action,
+            payload=_audit_payload_with_runtime(dict(payload), resolved_runtime=runtime_payload),
+        )
+
+    def record_assigned_task_progress(
+        self,
+        *,
+        context: WorkflowExecutionContext,
         tasks: list[SubAgentTask],
     ) -> None:
-        """记录已分配任务进度，输入为任务列表，输出为 workflow 来源快照同步。"""
-        state = self._task_progress_state.setdefault((parent_session_id, workflow_id), {})
-        changed = False
-        for index, task in enumerate(tasks):
-            task_run_id = _metadata_task_run_id(task)
-            if task_run_id in state:
-                continue
-            state[task_run_id] = _workflow_task_progress_payload(
-                workflow_id=workflow_id,
-                task=task,
-                source_status="assigned",
+        """保留协议入口，任务骨架已由 running manifest 阶段一次性创建。"""
+        del context, tasks
+
+    def initialize_task_flow_progress(
+        self,
+        *,
+        context: WorkflowExecutionContext,
+        tasks: list[SubAgentTask],
+        title: str,
+    ) -> None:
+        """初始化 task-flow 的 LLM 步骤快照，输入为计划任务和标题，输出为前台状态替换。"""
+        self._open_task_progress(
+            context=context,
+            tasks=tasks,
+            title=title,
+            control_mode=TaskProgressControlMode.LLM_STEPS,
+            use_task_flow_dependencies=True,
+        )
+
+    def _open_runtime_task_progress(
+        self,
+        *,
+        context: WorkflowExecutionContext,
+        tasks: list[SubAgentTask],
+    ) -> None:
+        """初始化 runtime workflow 快照，输入为上下文和已分配任务，输出为前台状态替换。"""
+        self._open_task_progress(
+            context=context,
+            tasks=tasks,
+            title=context.desc or f"{context.mode} 工作流",
+            control_mode=TaskProgressControlMode.RUNTIME_LIFECYCLE,
+            use_task_flow_dependencies=False,
+        )
+
+    def _open_task_progress(
+        self,
+        *,
+        context: WorkflowExecutionContext,
+        tasks: list[SubAgentTask],
+        title: str,
+        control_mode: TaskProgressControlMode,
+        use_task_flow_dependencies: bool,
+    ) -> None:
+        """一次性创建 workflow 任务骨架，输入为上下文与控制模式，输出为 Manager 落盘结果。"""
+        if not tasks:
+            return
+        definitions = [
+            TaskProgressTaskDefinition(
+                task_id=task.task_id,
+                task_run_id=_metadata_task_run_id(task),
+                desc=task.task_name,
+                depends_on=(_task_flow_dependencies(task) if use_task_flow_dependencies else ()),
                 display_order=index,
-                error_message=None,
             )
-            changed = True
-        if changed:
-            self._sync_task_progress_state(
-                parent_session_id=parent_session_id,
-                workflow_id=workflow_id,
+            for index, task in enumerate(tasks)
+        ]
+        try:
+            self._task_progress_manager.open_workflow(
+                session_id=context.parent_session_id,
+                workflow_id=context.workflow_id,
+                title=title,
+                control_mode=control_mode,
+                tasks=definitions,
+            )
+        except Exception as exc:
+            self._record_task_progress_failure(
+                parent_session_id=context.parent_session_id,
+                workflow_id=context.workflow_id,
+                error=exc,
             )
 
     def _record_single_task_progress(
@@ -1007,23 +1430,24 @@ class AgentWorkflowManager:
         parent_session_id: str,
         workflow_id: str,
         task: SubAgentTask,
-        source_status: str,
-        display_order: int,
+        runtime_status: RuntimeTaskProgressStatus,
         error_message: str | None = None,
     ) -> None:
-        """记录单个任务进度，输入为任务和源状态，输出为 workflow 来源快照同步。"""
-        state = self._task_progress_state.setdefault((parent_session_id, workflow_id), {})
-        state[_metadata_task_run_id(task)] = _workflow_task_progress_payload(
-            workflow_id=workflow_id,
-            task=task,
-            source_status=source_status,
-            display_order=max(0, display_order),
-            error_message=error_message,
-        )
-        self._sync_task_progress_state(
-            parent_session_id=parent_session_id,
-            workflow_id=workflow_id,
-        )
+        """记录单个 runtime 生命周期事实，输入为任务与枚举状态，输出为状态机迁移。"""
+        try:
+            self._task_progress_manager.record_runtime_transition(
+                session_id=parent_session_id,
+                workflow_id=workflow_id,
+                task_id=task.task_id,
+                runtime_status=runtime_status,
+                error_message=error_message,
+            )
+        except Exception as exc:
+            self._record_task_progress_failure(
+                parent_session_id=parent_session_id,
+                workflow_id=workflow_id,
+                error=exc,
+            )
 
     def _record_completed_workflow_progress(
         self,
@@ -1033,60 +1457,46 @@ class AgentWorkflowManager:
         runs: tuple[SubAgentRun, ...],
     ) -> None:
         """记录 workflow 最终进度，输入为子运行结果，输出为最终快照同步。"""
-        for index, run in enumerate(runs):
-            self._task_progress_state.setdefault((parent_session_id, workflow_id), {})[
-                _metadata_task_run_id(run.task)
-            ] = _workflow_task_progress_payload(
+        for run in runs:
+            runtime_status = (
+                RuntimeTaskProgressStatus.COMPLETED
+                if run.status == "completed"
+                else RuntimeTaskProgressStatus.CANCELLED
+                if run.status == "cancelled"
+                else RuntimeTaskProgressStatus.FAILED
+            )
+            self._record_single_task_progress(
+                parent_session_id=parent_session_id,
                 workflow_id=workflow_id,
                 task=run.task,
-                source_status="completed" if run.status == "completed" else "failed",
-                display_order=index,
+                runtime_status=runtime_status,
                 error_message=run.error_message,
             )
-        self._sync_task_progress_state(
-            parent_session_id=parent_session_id,
-            workflow_id=workflow_id,
-        )
 
-    def _sync_task_progress_state(self, *, parent_session_id: str, workflow_id: str) -> None:
-        """同步 workflow 进度快照，输入为父 session 和 workflow，输出为 SessionTaskProgressManager 写入。"""
-        state = self._task_progress_state.get((parent_session_id, workflow_id), {})
-
-        def _progress_sort_key(item: dict[str, object]) -> tuple[int, str]:
-            raw_order = item.get("display_order", 0)
-            order = raw_order if isinstance(raw_order, int) else 0
-            return order, str(item.get("task_run_id", ""))
-
-        tasks = [
-            _build_workflow_task_progress_input(payload)
-            for payload in sorted(
-                state.values(),
-                key=_progress_sort_key,
-            )
-        ]
+    def _record_task_progress_failure(
+        self,
+        *,
+        parent_session_id: str,
+        workflow_id: str,
+        error: Exception,
+    ) -> None:
+        """写入进度同步失败审计，输入为 workflow 坐标和异常，输出为审计记录。"""
         try:
-            self._task_progress_manager.sync_workflow_tasks(
-                session_id=parent_session_id,
-                workflow_id=workflow_id,
-                tasks=tasks,
+            self._append_audit(
+                self._workflow_dir(
+                    parent_session_id=parent_session_id,
+                    workflow_id=workflow_id,
+                ),
+                action="task_progress_sync_failed",
+                payload={
+                    "workflow_id": workflow_id,
+                    "parent_session_id": parent_session_id,
+                    "error_type": type(error).__name__,
+                    "error_message": str(error),
+                },
             )
-        except Exception as exc:
-            try:
-                self._append_audit(
-                    self._workflow_dir(
-                        parent_session_id=parent_session_id,
-                        workflow_id=workflow_id,
-                    ),
-                    action="task_progress_sync_failed",
-                    payload={
-                        "workflow_id": workflow_id,
-                        "parent_session_id": parent_session_id,
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                    },
-                )
-            except Exception:
-                return
+        except Exception:
+            return
 
     def _write_json(self, path: Path, payload: dict[str, object]) -> None:
         """原子写入 JSON 文件，输入为目标路径和 payload，输出为目标文件更新。"""
@@ -1101,16 +1511,115 @@ class AgentWorkflowManager:
 
 def _task_payload(task: SubAgentTask) -> dict[str, object]:
     """序列化任务信息，输入为 SubAgentTask，输出为审计和 manifest 可写入的字典。"""
-    return {
+    payload: dict[str, object] = {
         "task_id": task.task_id,
         "task_name": task.task_name,
         "tool_names": list(task.tool_names),
+        "requested_tool_names": (
+            list(task.requested_tool_names) if task.requested_tool_names is not None else None
+        ),
         "skill_names": list(task.skill_names),
+        "agent_role_id": task.agent_role_id,
         "permission": to_jsonable(task.permission) if task.permission is not None else None,
         "task_run_id": task.metadata.get("task_run_id"),
         "task_run_dir": task.metadata.get("task_run_dir"),
         "working_dir": task.metadata.get("working_dir"),
     }
+    runtime = resolved_runtime_payload(task.runtime)
+    if runtime is not None:
+        payload["resolved_runtime"] = runtime
+    return payload
+
+
+def _read_json_dict(path: Path) -> dict[str, object]:
+    """读取 JSON 对象，输入为路径，输出为 dict；文件缺失或非对象时返回空字典。"""
+    if not path.is_file():
+        return {}
+    raw: object = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): value for key, value in raw.items()}
+
+
+def _tasks_from_workflow_manifest(manifest: Mapping[str, object]) -> list[SubAgentTask]:
+    """从 workflow manifest 恢复任务，输入为 manifest，输出可用于取消收口的任务列表。"""
+    raw_agents = manifest.get("assigned_agents")
+    if not isinstance(raw_agents, list):
+        return []
+    tasks: list[SubAgentTask] = []
+    for index, raw in enumerate(raw_agents, 1):
+        if not isinstance(raw, Mapping):
+            continue
+        task_id = _optional_string(raw.get("task_id")) or f"agent-{index}"
+        task_name = _optional_string(raw.get("task_name")) or task_id
+        metadata: dict[str, object] = {}
+        for key in ("task_run_id", "task_run_dir", "working_dir"):
+            value = _optional_string(raw.get(key))
+            if value is not None:
+                metadata[key] = value
+        tasks.append(
+            SubAgentTask(
+                task_id=task_id,
+                task_name=task_name,
+                prompt="",
+                tool_names=_string_tuple(raw.get("tool_names")),
+                requested_tool_names=(
+                    _string_tuple(raw.get("requested_tool_names"))
+                    if "requested_tool_names" in raw and raw.get("requested_tool_names") is not None
+                    else None
+                ),
+                skill_names=_string_tuple(raw.get("skill_names")),
+                agent_role_id=_optional_string(raw.get("agent_role_id")),
+                metadata=metadata,
+            )
+        )
+    return tasks
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    """读取字符串列表，输入为任意值，输出去空白后的字符串元组。"""
+    if not isinstance(value, list | tuple):
+        return ()
+    return tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
+
+
+def _mapping_or_none(value: object) -> dict[str, object] | None:
+    """读取映射值，输入为任意值，输出 dict 或 None。"""
+    if not isinstance(value, Mapping):
+        return None
+    return {str(key): item for key, item in value.items()}
+
+
+def _workflow_runtime_payload(tasks: list[SubAgentTask]) -> dict[str, object] | None:
+    """提取 workflow runtime 摘要，输入为任务列表，输出为首个任务的 runtime payload。"""
+    if not tasks:
+        return None
+    return resolved_runtime_payload(tasks[0].runtime)
+
+
+def _audit_payload_with_runtime(
+    payload: Mapping[str, object],
+    resolved_runtime: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """补齐审计 runtime 字段，输入为原始 payload 和可选 runtime，输出为审计 payload。"""
+    normalized = dict(payload)
+    if "resolved_runtime" in normalized:
+        return normalized
+    runtime = resolved_runtime or _runtime_payload_from_audit_payload(normalized)
+    if runtime is not None:
+        normalized["resolved_runtime"] = dict(runtime)
+    return normalized
+
+
+def _runtime_payload_from_audit_payload(
+    payload: Mapping[str, object],
+) -> dict[str, object] | None:
+    """从审计 payload 推断 runtime，输入为 payload，输出为 runtime 摘要或 None。"""
+    for key in ("resolved_runtime",):
+        raw = payload.get(key)
+        if isinstance(raw, Mapping):
+            return dict(raw)
+    return None
 
 
 def _normalize_workflow_desc(value: object) -> str | None:
@@ -1135,9 +1644,225 @@ def _run_payload(run: SubAgentRun) -> dict[str, object]:
         "error_message": run.error_message,
         "turn_count": run.turn_count,
         "usage": dict(run.usage),
+        "resolved_runtime": resolved_runtime_payload(run.task.runtime),
         "task_run_id": run.task.metadata.get("task_run_id"),
         "task_run_dir": run.task.metadata.get("task_run_dir"),
         "working_dir": run.task.metadata.get("working_dir"),
+    }
+
+
+async def _wait_for_child_result_mail(
+    mailbox: asyncio.Queue[Any],
+    *,
+    task_id: str,
+    timeout_seconds: float,
+) -> Any:
+    """等待匹配子 agent 结果，输入为父 mailbox 和 spawn task_id，输出匹配 Mail。"""
+    buffered: list[Any] = []
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"timed out waiting for child_result task_id={task_id}")
+            mail = await asyncio.wait_for(mailbox.get(), timeout=remaining)
+            if (
+                getattr(mail, "kind", None) == "child_result"
+                and getattr(mail, "task_id", None) == task_id
+            ):
+                return mail
+            buffered.append(mail)
+    finally:
+        for mail in buffered:
+            mailbox.put_nowait(mail)
+
+
+def _subagent_run_from_child_mail(
+    *,
+    task: SubAgentTask,
+    session_id: str,
+    run_id: str,
+    mail: Any,
+) -> SubAgentRun:
+    """把 child_result Mail 转成旧 SubAgentRun，输入为 Mail，输出 workflow 报告结构。"""
+    payload = getattr(mail, "payload", None)
+    content = getattr(payload, "content", None)
+    metadata = getattr(payload, "metadata", {})
+    text = content if isinstance(content, str) else ""
+    child_error = _optional_metadata_string(metadata, "child_error_reason")
+    child_cancel = _optional_metadata_string(metadata, "child_cancel_reason")
+    if child_error is not None:
+        status = "failed"
+        error_message = child_error
+    elif child_cancel is not None:
+        status = "cancelled"
+        error_message = child_cancel
+    else:
+        status = "completed"
+        error_message = None
+    return SubAgentRun(
+        task=task,
+        session_id=session_id,
+        run_id=run_id,
+        status=status,
+        content=text,
+        error_message=error_message,
+        turn_count=_metadata_non_negative_int(metadata, "turn_count"),
+        usage=_usage_from_message_metadata(metadata),
+    )
+
+
+def _workflow_task_cwd(task: SubAgentTask, *, fallback: Path) -> str:
+    """解析 workflow 子 agent cwd，输入为任务和兜底目录，输出可传入 spawn request 的路径。"""
+    for key in ("working_dir", "task_run_dir"):
+        value = task.metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return str(fallback)
+
+
+def _workflow_task_timeout_seconds(task: SubAgentTask, *, fallback: float) -> float:
+    """解析 workflow 子 agent 超时，输入为任务 runtime 和兜底秒数，输出正数秒。"""
+    if task.runtime is not None and task.runtime.timeout_seconds > 0:
+        return float(task.runtime.timeout_seconds)
+    if fallback > 0:
+        return float(fallback)
+    return 60.0
+
+
+def _resolve_enabled_tools(tool_lookup: Any, task: SubAgentTask) -> list[Any]:
+    """解析 workflow 子 agent 工具，输入为工具查找面和任务，输出工具实例列表。"""
+    resolved: list[Any] = []
+    for name in task.requested_tool_names or ():
+        if name not in tool_lookup:
+            raise ValueError(f"subagent task {task.task_id!r} requested unknown tool {name!r}")
+        resolved.append(tool_lookup[name])
+    return resolved
+
+
+def _create_workflow_spawn_grant(
+    *,
+    workflow_id: str,
+    parent_session_id: str,
+    child_session_id: str,
+    task: SubAgentTask,
+    enabled_tools: tuple[Tool, ...],
+) -> SubAgentGrant:
+    """创建 workflow spawn 授权单，输入为任务上下文，输出 SubAgentGrant。"""
+    task_run_id = _metadata_task_run_id(task)
+    task_run_dir = _metadata_path(task, "task_run_dir")
+    working_dir = _metadata_path(task, "working_dir")
+    if task_run_dir is None or working_dir is None:
+        raise ValueError("scoped subagent task requires task_run_dir and working_dir")
+    created_at = _now_iso()
+    return SubAgentGrant(
+        grant_id=f"grant-{workflow_id}-{task_run_id}",
+        workflow_id=workflow_id,
+        parent_session_id=parent_session_id,
+        task_id=task.task_id,
+        task_run_id=task_run_id,
+        task_name=task.task_name,
+        session_id=child_session_id,
+        task_run_dir=task_run_dir,
+        working_dir=working_dir,
+        workflow_dir=task_run_dir.parent.parent,
+        allowed_tools=frozenset(tool.name for tool in enabled_tools),
+        allowed_skills=frozenset(task.skill_names),
+        created_at=created_at,
+    )
+
+
+def _create_workflow_spawn_creation_record(
+    *,
+    grant: SubAgentGrant,
+    task: SubAgentTask,
+    enabled_tools: tuple[Tool, ...],
+    audit_writer: WorkflowAuditWriter,
+    child_session_log_path: Path,
+) -> SubAgentCreationRecord:
+    """创建子 agent 审计记录，输入为 grant/task，输出 SubAgentCreationRecord。"""
+    if task.permission is None:
+        raise ValueError("scoped subagent task requires permission")
+    return SubAgentCreationRecord(
+        version=1,
+        workflow_id=grant.workflow_id,
+        task_run_id=grant.task_run_id,
+        session_id=grant.session_id,
+        task_id=task.task_id,
+        task_name=task.task_name,
+        prompt=task.prompt,
+        context=task.context,
+        tool_names=tuple(tool.name for tool in enabled_tools),
+        skill_names=task.skill_names,
+        resolved_runtime=resolved_runtime_payload(task.runtime) or {},
+        permission=task.permission,
+        grant=grant,
+        task_run_dir=grant.task_run_dir,
+        working_dir=grant.working_dir,
+        child_session_log_path=child_session_log_path,
+        workflow_audit_log_path=audit_writer.audit_log_path,
+        created_at=grant.created_at,
+    )
+
+
+def _child_session_log_path(runtime: Any, session_id: str) -> Path:
+    """生成子 session 日志路径，输入为 runtime 和 session_id，输出 jsonl 路径。"""
+    root = resolve_kongming_path(runtime.config.session.file_store_path)
+    return root / session_id / f"{session_id}.jsonl"
+
+
+def _metadata_path(task: SubAgentTask, key: str) -> Path | None:
+    """读取任务 metadata 路径，输入为任务和 key，输出 Path 或 None。"""
+    value = task.metadata.get(key)
+    if isinstance(value, str) and value.strip():
+        return Path(value).resolve()
+    return None
+
+
+def _parent_task_id_from_snapshot(parent_agent: Mapping[str, object] | None) -> str | None:
+    """读取父 TaskRegistry task id，输入为父 agent 快照，输出可选 task id。"""
+    if parent_agent is None:
+        return None
+    for key in ("task_id", "mail_task_id", "parent_task_id"):
+        value = parent_agent.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _optional_metadata_string(metadata: object, key: str) -> str | None:
+    """读取 metadata 字符串，输入为任意 metadata 和 key，输出字符串或 None。"""
+    if isinstance(metadata, Mapping):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _metadata_non_negative_int(metadata: object, key: str) -> int:
+    """读取 metadata 非负整数，输入为任意 metadata 和 key，缺失时输出 0。"""
+    if isinstance(metadata, Mapping):
+        value = metadata.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return 0
+
+
+def _usage_from_message_metadata(metadata: object) -> dict[str, int]:
+    """读取 canonical message usage，输入为任意 metadata，输出已知指标。"""
+    if not isinstance(metadata, Mapping):
+        return {}
+    usage = metadata.get("usage")
+    if not isinstance(usage, Mapping):
+        return {}
+    try:
+        snapshot = ProviderUsageSnapshot.from_payload(usage)
+    except ValueError:
+        return {}
+    return {
+        metric_name.value: metric.value
+        for metric_name, metric in snapshot.metric_items()
+        if metric.value is not None
     }
 
 
@@ -1155,6 +1880,7 @@ def _report_detail_payload(report: SubAgentReportDetail) -> dict[str, object]:
         "working_dir": report.working_dir,
         "content_digest": report.content_digest,
         "reported_at": report.reported_at,
+        "resolved_runtime": dict(report.resolved_runtime),
         "usage": dict(report.usage),
     }
 
@@ -1182,42 +1908,6 @@ def _build_task_progress_manager(config: Config) -> SessionTaskProgressManager:
     return SessionTaskProgressManager.from_config(config)
 
 
-def _build_workflow_task_progress_input(
-    payload: dict[str, object],
-) -> WorkflowTaskProgressInput:
-    """构造 workflow 进度输入，输入为字典 payload，输出为合同对象。"""
-    return WorkflowTaskProgressInput.model_validate(payload)
-
-
-def _workflow_task_progress_payload(
-    *,
-    workflow_id: str,
-    task: SubAgentTask,
-    source_status: str,
-    display_order: int,
-    error_message: str | None,
-) -> dict[str, object]:
-    """生成 workflow 进度任务项，输入为编排任务和状态，输出为同步 payload。"""
-    task_run_id = _metadata_task_run_id(task)
-    return {
-        "task_id": task.task_id,
-        "task_run_id": task_run_id,
-        "desc": task.task_name,
-        "status": source_status,
-        "error_message": error_message,
-        "display_order": display_order,
-    }
-
-
-def _task_progress_display_order(task: SubAgentTask, *, fallback: int) -> int:
-    """读取任务展示顺序，输入为任务和兜底值，输出为零基 display_order。"""
-    task_run_id = _metadata_task_run_id(task)
-    prefix = task_run_id.split("-", 1)[0]
-    if prefix.isdigit():
-        return max(0, int(prefix) - 1)
-    return fallback
-
-
 def _failed_run(
     *,
     workflow_id: str,
@@ -1239,6 +1929,50 @@ def _failed_run(
         content="",
         error_message=str(error),
         turn_count=0,
+    )
+
+
+def _cancelled_run(
+    *,
+    workflow_id: str,
+    parent_session_id: str,
+    task: SubAgentTask,
+) -> SubAgentRun:
+    """构造取消运行记录，输入为任务和 workflow 上下文，输出 cancelled 状态的 SubAgentRun。"""
+    session_id = _build_child_session_id(
+        workflow_id=workflow_id,
+        parent_session_id=parent_session_id,
+        task_id=_metadata_task_run_id(task),
+    )
+    return SubAgentRun(
+        task=task,
+        session_id=session_id,
+        run_id=f"run-{session_id}-cancelled",
+        status="cancelled",
+        content="",
+        error_message="user_interrupt",
+        turn_count=0,
+    )
+
+
+def _subagent_run_from_result_payload(
+    task: SubAgentTask,
+    payload: Mapping[str, object],
+) -> SubAgentRun:
+    """从 agent result.json 恢复运行记录，输入为任务和 payload，输出 SubAgentRun。"""
+    status = _optional_string(payload.get("status")) or "cancelled"
+    if status not in {"completed", "failed", "cancelled"}:
+        status = "cancelled"
+    turn_count = payload.get("turn_count")
+    return SubAgentRun(
+        task=task,
+        session_id=_optional_string(payload.get("session_id")) or "unknown-session",
+        run_id=_optional_string(payload.get("run_id")) or f"run-{_metadata_task_run_id(task)}",
+        status=status,
+        content=_optional_string(payload.get("content")) or "",
+        error_message=_optional_string(payload.get("error_message")),
+        turn_count=turn_count if isinstance(turn_count, int) and turn_count >= 0 else 0,
+        usage=_usage_from_message_metadata(payload),
     )
 
 
@@ -1296,6 +2030,21 @@ def _metadata_task_run_id(task: SubAgentTask) -> str:
     if isinstance(raw, str) and raw.strip():
         return raw
     return _slug(task.task_id)
+
+
+def _task_flow_dependencies(task: SubAgentTask) -> tuple[str, ...]:
+    """读取 task-flow 依赖，输入为计划任务 metadata，输出为去重后的步骤 ID 元组。"""
+    raw = task.metadata.get("task_flow_depends_on")
+    if not isinstance(raw, list):
+        return ()
+    dependencies: list[str] = []
+    for value in raw:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        dependency = value.strip()
+        if dependency not in dependencies:
+            dependencies.append(dependency)
+    return tuple(dependencies)
 
 
 def _build_child_session_id(
