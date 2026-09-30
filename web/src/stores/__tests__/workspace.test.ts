@@ -22,7 +22,14 @@ describe("stores/workspace", () => {
   });
 
   it("WORKSPACE_TABS 包含 Dock 支持的全部页签", () => {
-    expect(WORKSPACE_TABS).toEqual(["chat", "files", "git", "shell", "whiteboard"]);
+    expect(WORKSPACE_TABS).toEqual([
+      "chat",
+      "files",
+      "git",
+      "shell",
+      "whiteboard",
+      "trajectory",
+    ]);
   });
 
   it("fetchContext 拉取 thread 的 workspace context", async () => {

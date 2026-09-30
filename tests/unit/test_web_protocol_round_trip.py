@@ -40,6 +40,13 @@ from hosts.web.protocol.rest_models import (
     ThreadPermissionsDTO,
     ThreadSubAgentItemDTO,
     ThreadSubAgentListDTO,
+    TrajectoryRecordDTO,
+    TrajectoryRecordKind,
+    TrajectoryResponseDTO,
+    TrajectoryRunDTO,
+    TrajectoryRunStatus,
+    TrajectorySummaryDTO,
+    TrajectoryTokensDTO,
     UpdateCronTaskRequest,
     UpdateThreadPermissionsRequest,
 )
@@ -638,6 +645,93 @@ def _make_update_thread_permissions() -> UpdateThreadPermissionsRequest:
     )
 
 
+def _make_trajectory_response() -> TrajectoryResponseDTO:
+    """构造轨迹响应 DTO（track-timeline-v0.1）。
+
+    覆盖 system / user_input / llm / tool 四种 kind + running 状态 +
+    token 明细，与 ``web/src/protocol.trajectory.contract.test.ts`` 的
+    TS fixture 结构逐字段对齐（约束 17 双侧漂移证据）。
+    """
+    return TrajectoryResponseDTO(
+        thread_id="thread-abcdef012345",
+        summary=TrajectorySummaryDTO(
+            status=TrajectoryRunStatus.RUNNING,
+            total_duration_ms=1_500,
+            turn_count=1,
+            tool_call_count=1,
+            corrupted_count=0,
+            tokens=TrajectoryTokensDTO(
+                input_total=100,
+                output_total=20,
+                reasoning=5,
+                cache_read=None,
+                cache_write=None,
+            ),
+        ),
+        runs=[
+            TrajectoryRunDTO(
+                run_index=1,
+                run_id="thread-abcdef012345-1",
+                status=TrajectoryRunStatus.RUNNING,
+                started_at_ms=1_700_000_000_000,
+                ended_at_ms=None,
+                duration_ms=None,
+                turn_count=1,
+                tokens=TrajectoryTokensDTO(input_total=100, output_total=20),
+            ),
+        ],
+        records=[
+            TrajectoryRecordDTO(
+                seq=-1,
+                kind=TrajectoryRecordKind.SYSTEM,
+                summary="系统提示词 · 1200 字",
+                started_at_ms=1_699_999_999_000,
+                input_detail="# 孔明系统提示词",
+            ),
+            TrajectoryRecordDTO(
+                seq=-2,
+                kind=TrajectoryRecordKind.USER_INPUT,
+                run_index=1,
+                run_id="thread-abcdef012345-1",
+                turn=1,
+                summary="帮我读一下配置文件",
+                started_at_ms=1_700_000_000_000,
+                input_detail="帮我读一下配置文件",
+            ),
+            TrajectoryRecordDTO(
+                seq=4,
+                kind=TrajectoryRecordKind.LLM,
+                run_index=1,
+                run_id="thread-abcdef012345-1",
+                turn=1,
+                summary="我来读取配置文件",
+                started_at_ms=1_700_000_000_100,
+                duration_ms=800,
+                ttft_ms=120,
+                finish_reason="tool_calls",
+                tokens=TrajectoryTokensDTO(input_total=100, output_total=20, reasoning=5),
+                output_detail="我来读取配置文件",
+                reasoning_detail="用户要读配置",
+            ),
+            TrajectoryRecordDTO(
+                seq=6,
+                kind=TrajectoryRecordKind.TOOL,
+                run_index=1,
+                run_id="thread-abcdef012345-1",
+                turn=1,
+                summary="read_file",
+                started_at_ms=1_700_000_000_950,
+                duration_ms=150,
+                ok=True,
+                tool_name="read_file",
+                call_id="call_1",
+                input_detail='{"path": "setting.yaml"}',
+                output_detail="debug: true",
+            ),
+        ],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Round-trip 参数化：WS 帧
 # ---------------------------------------------------------------------------
@@ -720,6 +814,7 @@ REST_DTO_FACTORIES = [
         _make_update_thread_permissions,
         id="update_thread_permissions_request",
     ),
+    pytest.param(_make_trajectory_response, id="trajectory_response_dto"),
 ]
 
 

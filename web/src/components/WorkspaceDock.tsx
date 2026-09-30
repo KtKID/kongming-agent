@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX, type ReactNode } from "react";
-import { FileCode2, GitBranch, MessageSquare, Monitor, PanelsTopLeft } from "lucide-react";
+import { FileCode2, GitBranch, MessageSquare, Monitor, PanelsTopLeft, Route } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
 // WorkspaceDock 负责右侧工作区页签、当前面板渲染和桌面端宽度拖拽持久化。
 // Chat.tsx 集成时只需持有 activeTab 状态并传入各页 ReactNode，中间主对话保持常驻。
 
-export type WorkspaceDockTab = "chat" | "files" | "git" | "shell" | "whiteboard";
+export type WorkspaceDockTab =
+  | "chat"
+  | "files"
+  | "git"
+  | "shell"
+  | "whiteboard"
+  | "trajectory";
 
 export interface WorkspaceDockThreadMeta {
   id?: string;
@@ -24,6 +30,7 @@ export interface WorkspaceDockProps {
   gitContent?: ReactNode;
   shellContent?: ReactNode;
   whiteboardContent?: ReactNode;
+  trajectoryContent?: ReactNode;
   mobile?: boolean;
   compact?: boolean;
   className?: string;
@@ -44,6 +51,7 @@ const TABS: Array<{
   { value: "git", label: "Git", icon: GitBranch },
   { value: "shell", label: "Shell", icon: Monitor },
   { value: "whiteboard", label: "Whiteboard", icon: PanelsTopLeft },
+  { value: "trajectory", label: "轨迹", icon: Route },
 ];
 
 // 读取持久化宽度；localStorage 缺失、不可读或值越界时统一回退默认宽度。
@@ -125,6 +133,7 @@ export function WorkspaceDock({
   gitContent,
   shellContent,
   whiteboardContent,
+  trajectoryContent,
   mobile = false,
   compact = false,
   className,
@@ -145,6 +154,7 @@ export function WorkspaceDock({
       git: gitContent ?? null,
       shell: shellContent ?? null,
       whiteboard: whiteboardContent ?? null,
+      trajectory: trajectoryContent ?? null,
     }),
     [
       chatContent,
@@ -153,6 +163,7 @@ export function WorkspaceDock({
       shellContent,
       thread,
       whiteboardContent,
+      trajectoryContent,
       workspaceRoot,
     ],
   );
@@ -234,7 +245,7 @@ export function WorkspaceDock({
         className="flex min-h-0 flex-1 flex-col"
       >
         <div className="border-b border-border/70 px-3 py-2">
-          <TabsList className="grid h-9 w-full grid-cols-5">
+          <TabsList className="grid h-9 w-full grid-cols-6">
             {TABS.map((tab) => {
               const Icon = tab.icon;
               return (

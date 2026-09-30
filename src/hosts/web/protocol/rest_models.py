@@ -1052,6 +1052,121 @@ class UpdateWhiteboardLayoutRequest(_FrameBase):
     cards: list[WhiteboardCardLayoutDTO] = Field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# 轨迹时间线 DTO（track-timeline-v0.1）
+#
+# ``GET /api/threads/{thread_id}/trajectory`` 的响应体。真源是每个 thread 的
+# ``trace.jsonl`` 事件日志（append-only；``seq`` = 行号，0 起），由
+# ``hosts.web.trajectory`` 的只读投影产出。TS 侧 1:1 复刻见
+# ``web/src/protocol.ts``「轨迹时间线」段（约束 17 双侧真源同步）。
+# ---------------------------------------------------------------------------
+
+
+class TrajectoryRecordKind(StrEnum):
+    """轨迹记录类型（有限封闭集合）。
+
+    - ``system``：系统提示词快照（全文来自 ``system_prompt.json`` 真源；
+      trace 事件不落正文；seq=-1 表示非 trace 行号来源）
+    - ``user_input``：一次运行的用户输入（全文来自 session jsonl 真源；
+      trace 事件不落正文；seq=-1 同上）
+    - ``llm``：一次模型调用（request → response 区间；时序/token/TTFT 来自
+      trace，回复与思考全文由 session 真源回填）
+    - ``tool``：一次工具调用（call.start → call.end 配对）
+    - ``corrupted``：trace.jsonl 中无法解析的行，占位保序（保留 seq）
+    """
+
+    SYSTEM = "system"
+    USER_INPUT = "user_input"
+    LLM = "llm"
+    TOOL = "tool"
+    CORRUPTED = "corrupted"
+
+
+class TrajectoryRunStatus(StrEnum):
+    """轨迹运行状态（与 ``run.end`` payload status + 进行中判定对齐）。"""
+
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class TrajectoryTokensDTO(_FrameBase):
+    """token 用量明细（各指标缺测为 ``None``，不猜 0）。"""
+
+    input_total: int | None = None
+    output_total: int | None = None
+    reasoning: int | None = None
+    cache_read: int | None = None
+    cache_write: int | None = None
+
+
+class TrajectoryRecordDTO(_FrameBase):
+    """轨迹账本中的一条记录（用户输入 / 模型调用 / 工具调用 / 损坏占位）。
+
+    ``summary`` 是截断后的单行摘要（列表行展示）；``*_detail`` 字段承载
+    详情面板全文（超长截断由前端展示层负责，wire 层保留全文）。
+    """
+
+    seq: int
+    kind: TrajectoryRecordKind
+    run_index: int = 0
+    run_id: str = ""
+    turn: int | None = None
+    summary: str = ""
+    started_at_ms: int | None = None
+    duration_ms: int | None = None
+    ok: bool | None = None
+    tool_name: str | None = None
+    call_id: str | None = None
+    # llm 专属
+    ttft_ms: int | None = None
+    finish_reason: str | None = None
+    tokens: TrajectoryTokensDTO | None = None
+    # 详情面板内容（user_input / llm / tool / corrupted 各取所需）
+    input_detail: str | None = None
+    output_detail: str | None = None
+    reasoning_detail: str | None = None
+    error_message: str | None = None
+
+
+class TrajectoryRunDTO(_FrameBase):
+    """一次运行（run.start → run.end / run.cancelled）的分段统计。"""
+
+    run_index: int
+    run_id: str
+    status: TrajectoryRunStatus
+    started_at_ms: int | None = None
+    ended_at_ms: int | None = None
+    duration_ms: int | None = None
+    turn_count: int = 0
+    tokens: TrajectoryTokensDTO | None = None
+
+
+class TrajectorySummaryDTO(_FrameBase):
+    """整条会话轨迹的总览统计。"""
+
+    status: TrajectoryRunStatus
+    total_duration_ms: int = 0
+    turn_count: int = 0
+    tool_call_count: int = 0
+    corrupted_count: int = 0
+    tokens: TrajectoryTokensDTO = Field(default_factory=TrajectoryTokensDTO)
+
+
+class TrajectoryResponseDTO(_FrameBase):
+    """``GET /api/threads/{thread_id}/trajectory`` 响应体。
+
+    thread 存在但从未产生轨迹（无 trace.jsonl）时返回 ``runs=[] /
+    records=[]`` 的空轨迹；thread 不存在由路由层 404，不进本 DTO。
+    """
+
+    thread_id: str
+    summary: TrajectorySummaryDTO
+    runs: list[TrajectoryRunDTO] = Field(default_factory=list)
+    records: list[TrajectoryRecordDTO] = Field(default_factory=list)
+
+
 __all__: list[str] = [
     "AddProjectRequest",
     "CellSummaryDTO",
@@ -1089,6 +1204,13 @@ __all__: list[str] = [
     "ThreadPermissionsDTO",
     "ThreadSubAgentItemDTO",
     "ThreadSubAgentListDTO",
+    "TrajectoryRecordDTO",
+    "TrajectoryRecordKind",
+    "TrajectoryResponseDTO",
+    "TrajectoryRunDTO",
+    "TrajectoryRunStatus",
+    "TrajectorySummaryDTO",
+    "TrajectoryTokensDTO",
     "UpdateCronTaskRequest",
     "UpdateThreadPermissionsRequest",
     "UpdateThreadPresetRequest",

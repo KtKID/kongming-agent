@@ -2,7 +2,14 @@ import { create } from "zustand";
 import { apiGet } from "@/lib/api";
 import type { WorkspaceContextDTO } from "@/protocol";
 
-export const WORKSPACE_TABS = ["chat", "files", "git", "shell", "whiteboard"] as const;
+export const WORKSPACE_TABS = [
+  "chat",
+  "files",
+  "git",
+  "shell",
+  "whiteboard",
+  "trajectory",
+] as const;
 
 export type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 

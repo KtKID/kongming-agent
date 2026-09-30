@@ -523,6 +523,10 @@ def create_app(
     app.state.thread_manager = thread_manager
     app.state.task_progress_manager = task_progress_manager
     app.state.kongming_home = home
+    # track-timeline-v0.1：轨迹时间线只读投影门户（读 <session_root>/<tid>/trace.jsonl）
+    from hosts.web.trajectory import TrajectoryManager
+
+    app.state.trajectory_manager = TrajectoryManager(home, cfg)
     app.state.claude_home = Path.home() / ".claude"
     app.state.workspace_root = home
     app.state.slash_catalog_manager = build_default_slash_catalog_manager()
@@ -707,6 +711,7 @@ def create_app(
     from hosts.web.routers.thread_artifacts import router as thread_artifacts_router
     from hosts.web.routers.thread_subagents import router as thread_subagents_router
     from hosts.web.routers.thread_task_progress import router as thread_task_progress_router
+    from hosts.web.routers.thread_trajectory import router as thread_trajectory_router
     from hosts.web.routers.threads import router as threads_router
     from hosts.web.routers.uploads import router as uploads_router
     from hosts.web.routers.whiteboard import router as whiteboard_router
@@ -721,6 +726,8 @@ def create_app(
     app.include_router(thread_task_progress_router)
     app.include_router(thread_artifacts_router)
     app.include_router(thread_subagents_router)
+    # track-timeline-v0.1：轨迹时间线只读投影端点
+    app.include_router(thread_trajectory_router)
     app.include_router(agent_workflows_router)
     app.include_router(presets_router)
     app.include_router(model_providers_router)

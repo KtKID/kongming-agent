@@ -1703,6 +1703,9 @@ class Runner:
                 payload={
                     "call_id": call.call_id,
                     "tool_name": call.tool_name,
+                    # track-timeline-v0.1：携带真实入参，聊天工具卡片与轨迹
+                    # 详情的入参展示依赖此字段（此前缺失导致下游恒为空 dict）。
+                    "arguments": call.arguments,
                 },
             )
         )

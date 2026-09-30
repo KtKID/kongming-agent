@@ -445,6 +445,87 @@ export interface ThreadTaskProgressSnapshot {
   counts: ThreadTaskProgressCounts;
 }
 
+// ---------------------------------------------------------------------------
+// 轨迹时间线（track-timeline-v0.1）
+// `GET /api/threads/{thread_id}/trajectory` 响应体；Python 真源
+// `src/hosts/web/protocol/rest_models.py`「轨迹时间线 DTO」段（约束 17 双侧同步）。
+// `seq` = trace.jsonl 行号（0 起）；`v0.2` 实时轨迹以此为断点续传坐标。
+// ---------------------------------------------------------------------------
+
+export type TrajectoryRecordKind =
+  | "system"
+  | "user_input"
+  | "llm"
+  | "tool"
+  | "corrupted";
+
+export type TrajectoryRunStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+/** token 用量明细；各指标缺测为 null（不猜 0）。 */
+export interface TrajectoryTokens {
+  input_total?: number | null;
+  output_total?: number | null;
+  reasoning?: number | null;
+  cache_read?: number | null;
+  cache_write?: number | null;
+}
+
+/** 轨迹账本中的一条记录（summary 供列表行；*_detail 供详情面板全文）。 */
+export interface TrajectoryRecord {
+  seq: number;
+  kind: TrajectoryRecordKind;
+  run_index: number;
+  run_id: string;
+  turn: number | null;
+  summary: string;
+  started_at_ms: number | null;
+  duration_ms: number | null;
+  ok: boolean | null;
+  tool_name: string | null;
+  call_id: string | null;
+  ttft_ms: number | null;
+  finish_reason: string | null;
+  tokens: TrajectoryTokens | null;
+  input_detail: string | null;
+  output_detail: string | null;
+  reasoning_detail: string | null;
+  error_message: string | null;
+}
+
+/** 一次运行（run.start → run.end / run.cancelled）的分段统计。 */
+export interface TrajectoryRun {
+  run_index: number;
+  run_id: string;
+  status: TrajectoryRunStatus;
+  started_at_ms?: number | null;
+  ended_at_ms?: number | null;
+  duration_ms?: number | null;
+  turn_count: number;
+  tokens: TrajectoryTokens | null;
+}
+
+/** 整条会话轨迹的总览统计。 */
+export interface TrajectorySummary {
+  status: TrajectoryRunStatus;
+  total_duration_ms: number;
+  turn_count: number;
+  tool_call_count: number;
+  corrupted_count: number;
+  tokens: TrajectoryTokens;
+}
+
+/** thread 存在但无轨迹时 runs/records 为空数组（thread 不存在走 404）。 */
+export interface TrajectoryResponse {
+  thread_id: string;
+  summary: TrajectorySummary;
+  runs: TrajectoryRun[];
+  records: TrajectoryRecord[];
+}
+
 export type ThreadTaskProgressIconVariant =
   | "check_circle"
   | "ring"

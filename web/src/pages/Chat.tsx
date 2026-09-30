@@ -17,6 +17,7 @@ import { WorkspaceDock, type WorkspaceDockTab } from "@/components/WorkspaceDock
 import { WorkspaceFilesPanel } from "@/components/WorkspaceFilesPanel";
 import { WorkspaceGitPanel } from "@/components/WorkspaceGitPanel";
 import { WorkspaceShellPanel } from "@/components/WorkspaceShellPanel";
+import { TrajectoryPanel } from "@/modules/trajectory";
 import {
   useRegisterWebShellRailItems,
   type WebShellRailItem,
@@ -800,6 +801,11 @@ export function ChatPage() {
   const showWhiteboardPanel =
     Boolean(threadId) &&
     Boolean(activeWorkspaceTab === "whiteboard" || mountedWorkspaceTabs.whiteboard);
+  // track-timeline-v0.1：轨迹页签惰性挂载（首次切到才加载，此后保持挂载）
+  const showTrajectoryPanel =
+    Boolean(threadId) &&
+    backendKind === "generic_chat" &&
+    Boolean(activeWorkspaceTab === "trajectory" || mountedWorkspaceTabs.trajectory);
   const showChatPanel =
     backendKind === "generic_chat" &&
     (Boolean(threadId) || pendingNewSession == null);
@@ -1170,6 +1176,11 @@ export function ChatPage() {
                     emptyTitle="No whiteboard cards yet"
                     emptyDescription="Use the Dock whiteboard to organize cards for the current thread."
                   />
+                ) : null
+              }
+              trajectoryContent={
+                showTrajectoryPanel && threadId ? (
+                  <TrajectoryPanel threadId={threadId} />
                 ) : null
               }
             />
