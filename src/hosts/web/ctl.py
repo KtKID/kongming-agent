@@ -17,6 +17,7 @@
     `_resolve_home`：解析运行时 home，并写入 `KONGMING_HOME`。
     `_read_server_info`：读取 `<home>/web/server.json`。
     `_sync_repo_dotenv_to_home`：把仓库 `.env` 中的运行时变量合并进 home `.env`。
+    `_web_process_env`：构造不含 HTTP(S) 代理变量的 Web sidecar 子进程环境。
     `_read_configured_port` / `_read_configured_host`：解析 start 使用的配置态端口和 host。
     `_read_port` / `_read_host`：解析 stop/status 使用的运行态端口和 host。
     `main`：console script 入口。
@@ -47,6 +48,16 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 logger = logging.getLogger(__name__)
 _ENTRYPOINT_ENV_KEYS = ("KONGMING_HOME", "KONGMING_CONFIG")
 _RUNTIME_ENV_EXCLUDED_KEYS = frozenset(_ENTRYPOINT_ENV_KEYS)
+_WEB_PROXY_ENV_KEYS = frozenset(
+    {
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    }
+)
 
 
 def _dotenv_skip_enabled() -> bool:
@@ -211,6 +222,11 @@ def _sync_repo_dotenv_to_home(home: Path) -> list[str]:
         ", ".join(result.updated_keys),
     )
     return result.updated_keys
+
+
+def _web_process_env() -> dict[str, str]:
+    """构造 Web sidecar 的无代理环境，保留非代理运行时配置。"""
+    return {key: value for key, value in os.environ.items() if key not in _WEB_PROXY_ENV_KEYS}
 
 
 def _read_server_info(home: Path) -> dict[str, Any] | None:
@@ -577,7 +593,7 @@ def start(rebuild: bool, home: Path | None) -> None:
             "stdout": log_handle,
             "stderr": subprocess.STDOUT,
             "stdin": subprocess.DEVNULL,
-            "env": os.environ.copy(),
+            "env": _web_process_env(),
         }
         if sys.platform == "win32":
             popen_kwargs["creationflags"] = _spawn_creationflags()
