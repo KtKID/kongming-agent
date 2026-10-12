@@ -450,7 +450,7 @@ def test_m16_update_layout_project_first_write_creates_meta_json(
     """
     import json
 
-    cwd = "/Users/kid/proj/layout-first"
+    cwd = "/Users/tester/proj/layout-first"
     encoded = encode_project_dir(cwd)
     project_root = tmp_path / "projects" / encoded
     meta_path = project_root / "meta.json"
@@ -480,7 +480,7 @@ def test_m16_update_layout_project_first_write_creates_meta_json(
 def test_e1_same_cwd_two_creates_share_workspace(
     manager: WhiteboardManager, tmp_path: Path
 ) -> None:
-    cwd = "/Users/kid/proj/a"
+    cwd = "/Users/tester/proj/a"
     manager.create_card(cwd=cwd, scope="project", title="C1", content="c1")
     manager.create_card(cwd=cwd, scope="project", title="C2", content="c2")
 
@@ -505,8 +505,8 @@ def test_e1_same_cwd_two_creates_share_workspace(
 
 
 def test_e2_different_cwds_isolated(manager: WhiteboardManager, tmp_path: Path) -> None:
-    cwd_a = "/Users/kid/proj/a"
-    cwd_b = "/Users/kid/proj/b"
+    cwd_a = "/Users/tester/proj/a"
+    cwd_b = "/Users/tester/proj/b"
 
     card_a = manager.create_card(cwd=cwd_a, scope="project", title="A1", content="a")
     card_b = manager.create_card(cwd=cwd_b, scope="project", title="B1", content="b")
@@ -550,12 +550,12 @@ def test_e3_encode_project_dir_format() -> None:
     import hashlib
 
     # 1. 普通路径：basename 保留
-    cwd_a = "/Users/kid/proj/kongming-agent"
+    cwd_a = "/Users/tester/proj/kongming-agent"
     expected_hash_a = hashlib.sha256(cwd_a.encode("utf-8")).hexdigest()[:8]
     assert encode_project_dir(cwd_a) == f"kongming-agent-{expected_hash_a}"
 
     # 2. 同 basename 不同路径 → hash 区分
-    cwd_b = "/Users/kid/work/kongming-agent"
+    cwd_b = "/Users/tester/work/kongming-agent"
     expected_hash_b = hashlib.sha256(cwd_b.encode("utf-8")).hexdigest()[:8]
     encoded_a = encode_project_dir(cwd_a)
     encoded_b = encode_project_dir(cwd_b)
@@ -563,7 +563,7 @@ def test_e3_encode_project_dir_format() -> None:
     assert encoded_b == f"kongming-agent-{expected_hash_b}"
 
     # 3. 非 ASCII basename → 退化为 "project"
-    cwd_unicode = "/Users/kid/项目/喵🐱"
+    cwd_unicode = "/Users/tester/项目/喵🐱"
     encoded_unicode = encode_project_dir(cwd_unicode)
     assert encoded_unicode.startswith("project-")
     expected_hash_unicode = hashlib.sha256(cwd_unicode.encode("utf-8")).hexdigest()[:8]

@@ -137,8 +137,8 @@ sequenceDiagram
 当前 XSpace 的实际运行态目录是用户 home 下的 `.kongming`：
 
 ```text
---home /Users/kid/.kongming
---config /Users/kid/.kongming/setting.yaml
+--home /Users/tester/.kongming
+--config /Users/tester/.kongming/setting.yaml
 ```
 
 当前 XSpace 的端口策略是先由 XSpace native 预留端口，再把具体端口传给 Kongming sidecar。移动配对可用时，XSpace 同时传入同端口的 `--server-origin`：
@@ -147,8 +147,8 @@ sequenceDiagram
 kongming-web-backend
   --host 0.0.0.0
   --port 54340
-  --home /Users/kid/.kongming
-  --config /Users/kid/.kongming/setting.yaml
+  --home /Users/tester/.kongming
+  --config /Users/tester/.kongming/setting.yaml
   --dist-dir /Volumes/machub_app/proj/XSpace/client/src-tauri/resources/kongming/web/dist
   --print-ready-json
   --server-origin http://10.1.10.55:54340

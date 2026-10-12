@@ -16,7 +16,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 from hosts.web.integrations.claude_code.jsonl_history import jsonl_path_for, parse_jsonl_history
 
@@ -473,20 +476,21 @@ def test_max_messages_keeps_recent_tail(tmp_path: Path) -> None:
 def test_real_fixture_smoke() -> None:
     """真实 fixture 端到端 smoke。
 
+    通过 ``KONGMING_TEST_JSONL_FIXTURE`` 环境变量指定一份 Claude Code 会话
+    jsonl 的路径；未设置或文件不存在时跳过（CI / 其他开发者环境默认不跑）。
+
     阈值历史：旧值 ``>= 4`` 时，fixture 里 2 条 ``<task-notification>`` 伪装
     UserMessage 被错误透传成 user-role text；2026-05-17 引入 ``_content_filter``
     后这 2 条被正确丢弃，预期输出降到 ``>= 2``（至少 1 个真实用户文本 + 1 个
     assistant 回复）。
     """
-    fixture = Path(
-        "/Users/kid/.claude/projects/"
-        "-Volumes-machub-app-proj-test/"
-        "2c3c0aeb-f154-4f28-88a9-cd0fc20e6a14.jsonl"
-    )
+    fixture_str = os.environ.get("KONGMING_TEST_JSONL_FIXTURE", "").strip()
+    if not fixture_str:
+        pytest.skip("KONGMING_TEST_JSONL_FIXTURE not set")
+    fixture = Path(fixture_str).expanduser()
     if not fixture.exists():
-        # 跳过：fixture 文件可能不在所有环境
-        return
-    sid = "2c3c0aeb-f154-4f28-88a9-cd0fc20e6a14"
+        pytest.skip(f"fixture not found: {fixture}")
+    sid = fixture.stem
     out = parse_jsonl_history(fixture, sid)
     assert len(out) >= 2
     for r in out:

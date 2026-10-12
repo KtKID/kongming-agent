@@ -262,7 +262,7 @@ def test_build_test_env_strips_real_kongming_settings(tmp_path: Path) -> None:
     env = pre_push.build_test_env(
         tmp_path,
         {
-            "HOME": "/Users/kid",
+            "HOME": "/Users/tester",
             "PATH": "/bin",
             "PYTHONPATH": "/tmp/neighbor",
             "KONGMING_MODEL_NAME": "MiniMax-M3",

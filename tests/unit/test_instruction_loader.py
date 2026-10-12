@@ -594,7 +594,7 @@ async def test_assemble_sitian_real_directory(
 ) -> None:
     """用真实 sitian 产物目录验证多频道注入效果。
 
-    通过 SITIAN_TEST_ROOT 环境变量指定频道父目录（如 /Users/kid/.SiTian）。
+    通过 SITIAN_TEST_ROOT 环境变量指定频道父目录（如 /Users/tester/.SiTian）。
     未设置时跳过。只做结构性断言，不写死具体项目名。
     """
     import os

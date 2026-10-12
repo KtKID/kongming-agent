@@ -62,8 +62,8 @@ def encode_project_dir(cwd: str) -> str:
 
     示例：
 
-    - ``/Users/kid/proj/kongming-agent`` → ``kongming-agent-<8hex>``
-    - ``/Users/kid/项目/喵🐱`` → ``project-<8hex>``（非 ASCII basename 退化）
+    - ``/Users/tester/proj/kongming-agent`` → ``kongming-agent-<8hex>``
+    - ``/Users/tester/项目/喵🐱`` → ``project-<8hex>``（非 ASCII basename 退化）
     """
     basename = Path(cwd).name.lower()
     slug = _SLUG_RE.sub("-", basename).strip("-") or "project"

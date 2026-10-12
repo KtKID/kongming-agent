@@ -891,7 +891,7 @@ def _resolve_sitian_prompt_root(cfg: Config) -> Path | None:
     """解析 sitian prompt 注入所需的根目录。
 
     优先读 ``SITIAN_PROMPT_ROOT`` 环境变量；未设置时返回 None（不注入）。
-    返回的是频道父目录（如 ``/Users/kid/.SiTian``），
+    返回的是频道父目录（如 ``/Users/tester/.SiTian``），
     ``build_sitian_context_text`` 会遍历子目录按频道聚合。
     """
     import os
