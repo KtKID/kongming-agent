@@ -100,8 +100,10 @@ web-protocol-check:
 # web：启动 uvicorn web 后端（v0.1.5 web-app-shell）。
 # 前置：
 #   - export KONGMING_WEB_PASSWORD=<your-pwd>（首次必填）
-#   - 配置文件 cfg.web.enabled=true / dev_mode 视情况
-#   - 前端可选：先 make web-build 让 web/dist 存在
-# 默认 host=0.0.0.0 port=8080；按 cfg.web 实际值覆盖
+#   - 配置文件 cfg.web.enabled=true
+#   - 前端：dev_mode=false（仓库默认）必须先 make web-build 生成 web/dist，
+#     否则启动报 RuntimeError；仅 dev_mode=true 时空缺走占位
+# 端口/host 读 config/setting.yaml 的 web.*（当前 port=60000；代码默认 8080），
+# 可用 KONGMING_WEB_PORT / KONGMING_WEB_HOST 覆盖
 web:
 	bash scripts/web.sh
