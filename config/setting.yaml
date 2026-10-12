@@ -228,8 +228,10 @@ web:
 
   # 跳过登录鉴权（仅本地开发！）；上线必须 false 并设强密码
   dev_mode: false
-  # 首次部署时使用的明文初始密码；长期登录凭据会落到 password store。
-  initial_password:
+  # 首次部署时使用的明文初始密码；仅在 ~/.kongming/web/password.hash 缺失时生效，
+  # 首次启动会 bcrypt 落盘，之后以文件为准（改这里不再影响已有部署）。
+  # 仓库默认 admin123 是公开的弱密码：仅适合本机/内网首次启动，登录后请立即修改。
+  initial_password: "admin123"
 
   # 浏览器 Origin 白名单；空列表 = 拒绝所有跨域；本机调试可填 ["http://localhost:5173"]
   cors_origins: []

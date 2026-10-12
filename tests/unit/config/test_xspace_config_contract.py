@@ -103,14 +103,17 @@ def test_setting_yaml_declares_every_config_leaf_field() -> None:
 
 
 def test_xspace_runtime_config_profile_policy_template_lists_pending_decisions() -> None:
-    """空 policy 模板必须让 review 列出待决策字段。"""
+    """review 列出待决策字段；已记录决策的字段不再进待决策列表。"""
     review = ConfigProfileManager(
         source_path=SETTING_CONFIG,
         target_path=XSPACE_CONFIG,
         policy_path=XSPACE_POLICY,
     ).review()
 
-    assert review.decision_count == 0
+    # web.initial_password：主配置带公开默认初始密码 admin123（首次部署登录），
+    # xspace 产品保持无默认密码契约，已记录 xspace-keep 决策。
+    assert review.decision_count == 1
+    assert not any(issue.path == "web.initial_password" for issue in review.issues)
     assert any(
         issue.path == "web.host" and issue.code == "xspace-keep-decision-required"
         for issue in review.issues

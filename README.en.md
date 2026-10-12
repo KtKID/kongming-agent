@@ -80,6 +80,29 @@ Common flags:
 ./start.sh cli --resume-last              # resume the most recent active session
 ```
 
+### 4. Start the Web host (recommended for long-term use)
+
+The Web host is the main path for production / long-term use (multi-thread chat + global approval inbox):
+
+```bash
+make web-build    # build the frontend into web/dist (required when dev_mode=false; needs Docker)
+make web          # start the FastAPI + uvicorn backend (default 0.0.0.0:60000)
+```
+
+**Login password**: the default password on first start is **`admin123`** (from `web.initial_password` in `config/setting.yaml`). On first start it is bcrypt-hashed into `<kongming_home>/web/password.hash` (default `~/.kongming/web/password.hash`); from then on that file is the single source of truth and config changes no longer take effect.
+
+```bash
+# To change the initial password BEFORE first start (pick one; first-boot only):
+#   1) edit web.initial_password in config/setting.yaml
+#   2) export KONGMING_WEB_PASSWORD=<your-password> (popped from env after hashing)
+```
+
+Change the password right after first login: use "Forgot password" on the login page (`POST /api/auth/reset-password`). To start over, delete `~/.kongming/web/password.hash` and restart — it re-bootstraps from `web.initial_password`.
+
+> ⚠️ **Security note**: `admin123` is a weak password shipped in a public repo — only suitable for first boot on localhost / LAN. The default `host: "0.0.0.0"` listens on all interfaces: change the password and set up a firewall / reverse proxy before exposing it to the public internet, or switch to `host: "127.0.0.1"` for local-only use.
+
+Running service management: `./start.sh web start|stop|restart|status|log` (background mode, delegates to `scripts/web-ctl.sh`).
+
 ### Switch models
 
 Switching models = switching presets (endpoint and key are declared in the catalog):

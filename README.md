@@ -94,6 +94,29 @@ make smoke                                # 冒烟验证全链路
 ./start.sh cli --resume-last              # 恢复最近活跃 session
 ```
 
+### 4. 启动 Web 宿主（推荐长期使用）
+
+Web 宿主是生产 / 长期使用的主路径（多 thread 聊天 + 全局审批 inbox）：
+
+```bash
+make web-build    # 构建前端到 web/dist（dev_mode=false 时必做，需 Docker）
+make web          # 启动 FastAPI + uvicorn 后端（默认 0.0.0.0:60000）
+```
+
+**登录密码**：首次启动默认密码 **`admin123`**（来自 `config/setting.yaml` 的 `web.initial_password`）。首次启动时会把密码 bcrypt 落盘到 `<kongming_home>/web/password.hash`（默认 `~/.kongming/web/password.hash`），之后长期以该文件为准，改配置不再生效。
+
+```bash
+# 首次启动前想换初始密码（二选一，均只首次生效）：
+#   1) 改 config/setting.yaml 的 web.initial_password
+#   2) export KONGMING_WEB_PASSWORD=<你的密码>（落盘后自动从 env 清掉）
+```
+
+首次登录后请立即改密码：登录页点「忘记密码」走重置（`POST /api/auth/reset-password`）；彻底重来则删除 `~/.kongming/web/password.hash` 后重启，会按 `web.initial_password` 重新引导。
+
+> ⚠️ **安全提醒**：`admin123` 是随仓库公开的弱密码，只适合本机 / 内网首次启动。默认 `host: "0.0.0.0"` 会监听所有网卡——部署到公网或不可信网络前，务必先改密码并配置防火墙 / 反代；仅本机使用可改 `host: "127.0.0.1"`。
+
+已有部署的运行管理：`./start.sh web start|stop|restart|status|log`（后台方式，透传 `scripts/web-ctl.sh`）。
+
 ### 切换模型
 
 切换模型 = 切 preset（endpoint 与 key 已在 catalog 声明）：

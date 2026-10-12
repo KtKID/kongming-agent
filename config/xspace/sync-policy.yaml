@@ -32,4 +32,9 @@
 version: 1
 source: config/setting.yaml
 target: config/xspace/setting.yaml
-decisions: []
+decisions:
+- path: web.initial_password
+  action: xspace-keep
+  reason: 主配置提供公开默认初始密码 admin123 供首次部署登录；XSpace 
+    桌面产品保持无默认密码契约（initial_password=None，由运行态 init 流程管理），不跟随主配置。
+  source_hash: sha256:0fbc1fec7f450758

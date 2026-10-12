@@ -43,7 +43,7 @@ Commands:
     Web 服务管理（透传给 scripts/web-ctl.sh）。
     Example: ./start.sh web build       # 仅编译前端
     Example: ./start.sh web start --build  # 编译前端 + 启动 web server
-    Example: ./start.sh web start       # 启动 web server（首次需设 PASSWORD）
+    Example: ./start.sh web start       # 启动 web server（默认密码 admin123，见 README）
     Example: ./start.sh web stop        # 关闭
     Example: ./start.sh web restart     # 重启
     Example: ./start.sh web status      # 查看运行状态

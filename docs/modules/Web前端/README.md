@@ -548,6 +548,7 @@ Python Pydantic 真源发起。
 | `web.host` | str | "0.0.0.0" | bind IP |
 | `web.port` | int | 60000 | 端口 |
 | `web.dev_mode` | bool | false | 跳过登录鉴权 |
+| `web.initial_password` | str | "admin123"（仓库 setting.yaml） | 首次启动引导密码；bcrypt 落盘到 `<kongming_home>/web/password.hash` 后以文件为准，此字段不再生效 |
 | `web.idle_timeout_seconds` | int | 1800 | cell 空闲超时 |
 | `web.idle_check_interval_seconds` | int | 60 | 后台扫描周期 |
 | `evolution.learning.enabled` | bool | false | 进化模块、公开 Tool 与 lifecycle 总开关 |

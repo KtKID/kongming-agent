@@ -4,7 +4,9 @@
 # 启动 v0.1.5 web 后端（FastAPI + uvicorn）。
 #
 # 前置：
-#   - export KONGMING_WEB_PASSWORD=<你的密码>  （首次启动必填，落盘后会自动清掉）
+#   - 登录密码：仓库默认 config/setting.yaml 的 web.initial_password=admin123，
+#     首次启动自动 bcrypt 落盘到 <kongming_home>/web/password.hash；也可用
+#     KONGMING_WEB_PASSWORD 覆盖（同样只首次生效，落盘后自动从 env 清掉）
 #   - 配置文件 config/setting.yaml 里 web.enabled=true
 #   - dev_mode=false（仓库默认）时必须先 make web-build 生成 web/dist，否则启动报
 #     RuntimeError；仅 dev_mode=true 时空缺 dist 走占位响应
